@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { Check, Copy, Download } from '@lucide/svelte';
 
-	const repo = 'https://github.com/paulhovey/quack/releases';
+	const repo = 'https://github.com/ClackStack/quack/releases';
 	const base = `${repo}/latest/download`;
 	type Way = 'sh' | 'ps' | 'src';
 	const ways: { id: Way; label: string }[] = [

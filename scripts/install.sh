@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install quack on Linux or macOS.
 #
-#   curl -fsSL https://github.com/paulhovey/quack/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/ClackStack/quack/releases/latest/download/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --plucked
 #
 # By default this installs the binary and the defaults bundle (provider, model profile,
@@ -10,7 +10,7 @@
 # --binary-only updates the binary and leaves the installed defaults alone.
 set -eu
 
-repo=paulhovey/quack
+repo=ClackStack/quack
 prefix=${QUACK_INSTALL_PREFIX:-$HOME/.local}
 version=latest
 plucked=0

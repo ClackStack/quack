@@ -83,7 +83,7 @@
 <Plate id="field-marks" color="var(--color-leaf)">
 		<PlateHeading title="Field marks">
 			Everything else it does today, one line each. The full list is in the
-			<a href="https://github.com/paulhovey/quack#features" class="text-sky-ink font-semibold" rel="noreferrer">README</a>.
+			<a href="https://github.com/ClackStack/quack#features" class="text-sky-ink font-semibold" rel="noreferrer">README</a>.
 		</PlateHeading>
 
 		<div class="columns-1 md:columns-2 xl:columns-3 gap-x-12">

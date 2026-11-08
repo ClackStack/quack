@@ -70,7 +70,7 @@
 				<span class="font-display text-lg font-extrabold">quack</span>
 			</a>
 			<div class="flex items-center gap-5">
-				<a href="https://github.com/paulhovey/quack" class="flex items-center gap-1 no-underline text-ink hover:text-sky-ink" rel="noreferrer">
+				<a href="https://github.com/ClackStack/quack" class="flex items-center gap-1 no-underline text-ink hover:text-sky-ink" rel="noreferrer">
 					GitHub <ArrowUpRight class="w-4 h-4" aria-hidden="true" />
 				</a>
 				<!-- Icons switch on the html class so the right one shows before hydration -->

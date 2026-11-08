@@ -29,7 +29,7 @@ out=$(cd "$out" && pwd)
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
-repo=https://github.com/paulhovey/quack
+repo=https://github.com/ClackStack/quack
 summary="Terminal coding agent for open-weight models"
 describe() {
   case $1 in

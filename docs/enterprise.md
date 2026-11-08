@@ -113,7 +113,7 @@ your targets) installed on the build machine beforehand.
 On a machine with network access:
 
 ```sh
-git clone https://github.com/paulhovey/quack && cd quack
+git clone https://github.com/ClackStack/quack && cd quack
 mkdir -p .cargo
 cargo vendor --locked > .cargo/config.toml   # about 600 MB in vendor/
 ```

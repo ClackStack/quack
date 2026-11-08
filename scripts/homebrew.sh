@@ -13,7 +13,7 @@ version=${1:?usage: homebrew.sh <version> <SHA256SUMS> [out-dir]}
 version=${version#v}
 sums=${2:?usage: homebrew.sh <version> <SHA256SUMS> [out-dir]}
 out=${3:-dist}
-repo=https://github.com/paulhovey/quack
+repo=https://github.com/ClackStack/quack
 mkdir -p "$out"
 
 sha() {
@@ -22,6 +22,14 @@ sha() {
   [ -n "$sum" ] || { echo "homebrew.sh: $1 is not in $sums" >&2; exit 1; }
   echo "$sum"
 }
+
+# Command substitution would swallow a failure from sha(), so check the sums up front.
+for flavour in quack quack-plucked; do
+  for t in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
+    awk -v f="$flavour-$t.tar.gz" '$2 == f || $2 == "*" f { found = 1 } END { exit !found }' "$sums" \
+      || { echo "homebrew.sh: $flavour-$t.tar.gz is not in $sums" >&2; exit 1; }
+  done
+done
 
 formula() {
   local flavour=$1 class=$2 conflicts=$3 desc=$4 share=$5

@@ -60,7 +60,6 @@ A fast, context-efficient coding agent for **self-hosted and open-weight models*
 Each document ends with its own open questions. The cross-cutting ones are:
 
 - **Product name.** Affects the config directory, binary name and crate prefix.
-- **Repository URL.** `Cargo.toml` assumes `github.com/paulhovey/quack`; confirm before CI and the docs reference it publicly.
 
 ## Reference projects
 

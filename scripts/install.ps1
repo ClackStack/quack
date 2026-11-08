@@ -1,6 +1,6 @@
 # Install quack on Windows.
 #
-#   irm https://github.com/paulhovey/quack/releases/latest/download/install.ps1 | iex
+#   irm https://github.com/ClackStack/quack/releases/latest/download/install.ps1 | iex
 #   & ([scriptblock]::Create((irm .../install.ps1))) -Plucked
 #
 # By default this installs the binary and the defaults bundle (provider, model profile,
@@ -29,7 +29,7 @@ param(
     [switch]$Uninstall
 )
 $ErrorActionPreference = 'Stop'
-$repo = 'paulhovey/quack'
+$repo = 'ClackStack/quack'
 function Say($m) { Write-Host "quack: $m" }
 
 $exe = Join-Path $Prefix 'quack.exe'
@@ -94,7 +94,7 @@ try {
             $ProgressPreference = 'SilentlyContinue'
             Invoke-WebRequest -UseBasicParsing "$base/$name" -OutFile (Join-Path $tmp $name)
             Invoke-WebRequest -UseBasicParsing "$base/SHA256SUMS" -OutFile (Join-Path $tmp 'SHA256SUMS')
-            $line = Get-Content (Join-Path $tmp 'SHA256SUMS') | Where-Object { $_ -match "^([0-9a-f]{64}) \*?$([regex]::Escape($name))$" } | Select-Object -First 1
+            $line = Get-Content (Join-Path $tmp 'SHA256SUMS') | Where-Object { $_ -match "^([0-9a-f]{64}) +\*?$([regex]::Escape($name))$" } | Select-Object -First 1
             if (-not $line) { throw "$name is not listed in SHA256SUMS" }
             $want = ($line -split ' ')[0]
             $got = (Get-FileHash -Algorithm SHA256 (Join-Path $tmp $name)).Hash.ToLower()

@@ -149,7 +149,7 @@
 	<p class="mt-4 text-lg text-ink-2 leading-relaxed max-w-[65ch]">
 		Any subset works; everything left out keeps its default. <code class="text-ink">quack config check</code> validates
 		every file against its JSON schema, <code class="text-ink">/config</code> edits settings in the UI, and the
-		<a href="https://github.com/paulhovey/quack#configuration-reference" class="text-sky-ink font-semibold" rel="noreferrer">README</a>
+		<a href="https://github.com/ClackStack/quack#configuration-reference" class="text-sky-ink font-semibold" rel="noreferrer">README</a>
 		has the full list.
 	</p>
 	<div class="mt-8 lg:columns-2 gap-10">

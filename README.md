@@ -20,15 +20,15 @@ intelligence.
 
 **Linux and macOS:**
 ```sh
-curl -fsSL https://github.com/paulhovey/quack/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/ClackStack/quack/releases/latest/download/install.sh | sh
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://github.com/paulhovey/quack/releases/latest/download/install.ps1 | iex
+irm https://github.com/ClackStack/quack/releases/latest/download/install.ps1 | iex
 ```
 
-*Prebuilt `.deb`, `.rpm`, Homebrew tap formulas, and platform archives are available on the [releases page](https://github.com/paulhovey/quack/releases).*
+*Prebuilt `.deb`, `.rpm`, Homebrew tap formulas, and platform archives are available on the [releases page](https://github.com/ClackStack/quack/releases).*
 
 ### 2. Run
 
@@ -171,7 +171,7 @@ The editor panel receives streaming replies, reasoning steps, tool diffs, permis
 
 ### Prebuilt Packages
 
-Prebuilt archives for all supported targets are published on the [Releases](https://github.com/paulhovey/quack/releases) page:
+Prebuilt archives for all supported targets are published on the [Releases](https://github.com/ClackStack/quack/releases) page:
 - **Linux**: Static binaries (musl) for x64 and ARM64, `.deb` and `.rpm` packages.
 - **macOS**: Universal archives (x64 and Apple Silicon) and Homebrew tap formulas.
 - **Windows**: x64 and ARM64 zip archives and PowerShell installer.
@@ -181,7 +181,7 @@ Prebuilt archives for all supported targets are published on the [Releases](http
 For air-gapped environments or private clusters, `quack-plucked` provides the complete agent (profiles, sub-agents, MCP, ACP, language servers, hooks, local model support) without any hosted service configurations:
 
 ```sh
-curl -fsSL https://github.com/paulhovey/quack/releases/latest/download/install.sh | sh -s -- --plucked
+curl -fsSL https://github.com/ClackStack/quack/releases/latest/download/install.sh | sh -s -- --plucked
 ```
 
 See [docs/enterprise.md](docs/enterprise.md) for enterprise deployment policies and packaging guides.

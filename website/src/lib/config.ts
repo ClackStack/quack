@@ -40,7 +40,7 @@ hosts = ["llm.internal.example"]
 [policy.mcp]
 hosts = ["*.internal.example"]`;
 
-export const installCmd = `curl -fsSL https://github.com/paulhovey/quack/releases/latest/download/install.sh \\
+export const installCmd = `curl -fsSL https://github.com/ClackStack/quack/releases/latest/download/install.sh \\
   | sh -s -- --plucked`;
 
 export const doctorOutput = `$ quack doctor

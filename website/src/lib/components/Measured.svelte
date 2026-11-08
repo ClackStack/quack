@@ -78,7 +78,7 @@
 			</table>
 		</div>
 		<p class="mt-3 text-sm text-ink-2">
-			From <a href="https://github.com/paulhovey/quack/blob/main/docs/plan/roadmap.md" class="text-sky-ink font-semibold" rel="noreferrer">the roadmap</a>. Results files are in <code>evals/results/</code>.
+			From <a href="https://github.com/ClackStack/quack/blob/main/docs/plan/roadmap.md" class="text-sky-ink font-semibold" rel="noreferrer">the roadmap</a>. Results files are in <code>evals/results/</code>.
 		</p>
 
 		<div class="mt-20 grid lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
