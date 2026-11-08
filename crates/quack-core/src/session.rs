@@ -51,6 +51,15 @@ pub fn list_sessions(config: &Loaded) -> (PathBuf, Vec<IndexEntry>) {
     (ps.dir, list)
 }
 
+/// Path to this workspace's prompt history file (`<sessions>/<project-key>/history.jsonl`).
+pub fn history_path(config: &Loaded) -> PathBuf {
+    project_sessions(config).history_path()
+}
+
+pub use quack_store::session::{
+    append_history_file as append_history, load_history_file as load_history,
+};
+
 pub(crate) fn find(config: &Loaded, resume: &Resume) -> Result<Option<IndexEntry>, String> {
     let ps = project_sessions(config);
     match resume {

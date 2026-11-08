@@ -202,7 +202,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         "Memory notes: read them, delete with ^s",
         None,
     ),
-    c("hooks", &[], "", "Hooks and their last results", Some("M3")),
+    c("hooks", &[], "", "Hooks and their recent runs", None),
     c(
         "instructions",
         &[],
@@ -234,11 +234,11 @@ pub(crate) const COMMANDS: &[Command] = &[
     c(
         "theme",
         &[],
-        "",
-        "Theme picker with live preview",
-        Some("M3"),
+        "[dark|light|auto]",
+        "Switch the color theme (`dark`, `light`, or `auto`)",
+        None,
     ),
-    c("keys", &[], "", "Keybinding viewer and editor", Some("M3")),
+    c("keys", &[], "", "Key bindings", None),
     c(
         "doctor",
         &[],
@@ -266,13 +266,6 @@ pub(crate) const COMMANDS: &[Command] = &[
         "[trusted|settings-only|ignored]",
         "Decide whether this repo's .quack/ loads",
         None,
-    ),
-    c(
-        "cd",
-        &[],
-        "<path>",
-        "Change the workspace directory",
-        Some("M3"),
     ),
     c(
         "thinking",
@@ -311,7 +304,8 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ),
     ("Ctrl-T", "Show or hide the model's thinking"),
     ("/", "Slash commands; Tab completes"),
-    ("Ctrl-P", "Command palette (opens help for now)"),
+    ("@", "Mention a file in the workspace; Tab completes"),
+    ("Ctrl-P", "Command palette (/help)"),
     ("Shift-Tab", "Cycle mode: ask → auto-edit → plan"),
     ("Tab (in modal)", "Switch tab"),
     (

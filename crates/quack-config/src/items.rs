@@ -13,7 +13,7 @@ use crate::diagnostic::{FileDiagnostic, read_text};
 use crate::paths::LayerKind;
 use crate::settings::AllowList;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Item<T> {
     pub id: String,
     pub path: PathBuf,
@@ -21,7 +21,7 @@ pub struct Item<T> {
     pub state: ItemState<T>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ItemState<T> {
     Loaded(T),
     Disabled(String),

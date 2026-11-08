@@ -14,6 +14,7 @@
 <sessions path>/                       # default <user data>/sessions, configurable
 └── <project-key>/                     # sanitized repo path + short hash
     ├── index.jsonl                    # one line per session: id, title, started, updated, model, turns
+    ├── history.jsonl                  # last 100 submitted prompts for this project (JSON strings)
     └── 2026-10-17T21-14-03_<uuidv7>/
         ├── events.jsonl               # append-only event log (source of truth)
         ├── outputs/<call-id>.log      # full tool outputs referenced from events

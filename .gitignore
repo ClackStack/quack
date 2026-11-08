@@ -75,6 +75,7 @@ $RECYCLE.BIN/
 /.quack/sessions/
 /.quack/checkpoints/
 /.quack/*.local.toml
+/.crush/
 
 # Model downloads for the local-server CI jobs (scripts/local-server-ci.sh)
 .ci-models/

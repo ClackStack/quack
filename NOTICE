@@ -3,18 +3,23 @@ Copyright 2026 Paul Hovey
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
-Code ported or adapted from other projects is listed below with its origin and
-licence, as each port lands:
+Code, formats or tool surfaces adapted from other projects are listed below with
+their origin and licence:
 
-  - (none yet)
+  - crates/quack-tools/src/hashline.rs: the `[path#tag]` line-number edit format
+    follows oh-my-pi's hashline mode (MIT).
+  - crates/quack-tools/src/patch.rs and defaults/profiles.d/codex/: the
+    `apply_patch` patch grammar and Codex tool names/argument shapes follow
+    openai/codex (Apache-2.0).
+  - defaults/profiles.d/{dsh,kimi-code,qwen-code,zcode}/: tool names and
+    parameter shapes follow deepseek-ai/deepseek-harness (MIT),
+    MoonshotAI/kimi-cli (Apache-2.0), QwenLM/qwen-code (Apache-2.0) and
+    zai-org/ZCode (Apache-2.0); all prompt text is original to quack.
 
 Data:
 
   - defaults/catalog.json is derived from models.dev (https://models.dev). Its
     licence follows at the end of this file.
-
-Planned sources, per docs/plan/README.md: openai/codex (Apache-2.0),
-aaif-goose/goose (Apache-2.0), maki (MIT).
 
 --- models.dev ---
 

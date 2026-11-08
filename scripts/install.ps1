@@ -55,6 +55,7 @@ if ($Uninstall) {
 # as scripts/copy-defaults.sh --plucked builds it for the release archives.
 function Copy-PluckedDefaults([string]$from, [string]$to) {
     Copy-Item -Recurse $from $to
+    Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $to 'config.toml')
     foreach ($f in Get-ChildItem (Join-Path $to 'providers.d') -Filter *.toml -ErrorAction SilentlyContinue) {
         $m = Select-String -Path $f.FullName -Pattern '^base_url *= *"[a-z]*://([^/:"]*)' | Select-Object -First 1
         $host_ = if ($m) { $m.Matches[0].Groups[1].Value } else { '' }

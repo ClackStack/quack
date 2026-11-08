@@ -32,6 +32,7 @@ pub use permissions::{Decision, Permissions};
 pub use registry::{
     ReadTracker, Registry, SandboxState, Subject, Tool, ToolCtx, ToolKind, ToolOutput,
 };
+pub use search::workspace_files;
 pub use skill::expand as expand_skill;
 pub use task::{AgentInfo, SpawnRequest, Spawner, TaskReport, TaskRequest};
 pub use todo::Plan;

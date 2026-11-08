@@ -28,6 +28,31 @@ pub(crate) fn walker(root: &Path, max_depth: Option<usize>) -> ignore::Walk {
         .build()
 }
 
+/// Relative file paths in `root`, sorted, respecting `.gitignore` and skipping `.git`,
+/// with `/` separators on every OS (for `@file` completion).
+pub fn workspace_files(root: &Path, limit: usize) -> Vec<String> {
+    let mut files = Vec::new();
+    for entry in walker(root, Some(8)).flatten() {
+        if files.len() >= limit {
+            break;
+        }
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        if let Ok(rel) = entry.path().strip_prefix(root) {
+            let shown = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            if !shown.is_empty() {
+                files.push(shown);
+            }
+        }
+    }
+    files
+}
+
 fn base(args: &Value, ctx: &ToolCtx) -> PathBuf {
     opt_str(args, PATH).map_or_else(|| ctx.root.clone(), |p| paths::resolve(&ctx.root, p))
 }

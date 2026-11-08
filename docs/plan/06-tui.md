@@ -111,18 +111,17 @@ All configuration UIs share one modal widget, so they look and behave the same:
 | `/skills` | | Skill list by layer; view SKILL.md; enable/disable; invoke |
 | `/commands` | | Custom commands from each layer's `commands/` folder: name, arguments, description, file (built 2026-10-18). Typing `/<name> args` runs one |
 | `/memory` | | Memory browser: global/project tabs, view, edit, delete, open folder |
-| `/hooks` | | Hooks list (read-only for system layer), last run results |
+| `/hooks` | | Hooks from `hooks.d`: event, matcher, command, layer, recent runs and durations (`Event::HookRan`); Enter toggles non-system hooks on or off via `[hooks] disabled` (built 2026-11-08) |
 | `/instructions` | | The AGENTS.md files in the system prompt, then those attached to tool results so far, each with its size and text (built 2026-10-18). Opening in an editor is still to do; `/init` generates one |
 | `/init` | | Generate AGENTS.md for this repo |
 | `/todo` | | Expand the plan line above the input into the whole checklist, and back (built 2026-10-18; above the input rather than a side pane, so it works at any width) |
 | `/tasks` | | Sub-agent runs of this session, newest first: model, state, each call and the report (built 2026-10-19). Under a running `task` line the transcript shows the agent's last steps |
-| `/theme` | | Theme picker with live preview |
-| `/keys` | | Keybinding viewer/editor |
+| `/theme` | | Theme picker (`auto`, `dark`, `light`) or `/theme <name>`, saved to `[ui] theme` and applied live (built 2026-11-08) |
+| `/keys` | | Opens `/help` on the `Keys` tab (built 2026-11-08) |
 | `/doctor` | | Runs `quack doctor` checks, shown as a modal report |
 | `/stats` | | Session usage: tokens sent and received, cache hits, cost (when priced), where the time went (model, tools, approvals, between turns), latency and speed, per-tool calls and failures. Drawn with ratatui charts: figure tiles, bars, meters, per-request sparklines (the engine keeps the last 200 requests) and a line of the running cost |
 | `/reload` | | Read config, providers, MCP servers, instructions and skills again, keeping the conversation ([01](01-configuration.md#hot-reload)) |
 | `/trust` | `[trusted\|settings-only\|ignored]` | Decide whether this repo's `.quack/` loads; opens on its own when a decision is needed ([01](01-configuration.md#as-implemented-2026-10-18)) |
-| `/cd <path>` | | Change the workspace directory (updates roots, LSP, instructions) |
 | `/copy` | | Copy the last response (or pick a code block) to the clipboard. Implemented as `/copy [code]` through OSC 52: no clipboard library is needed, and it works over SSH. Inside tmux it needs `set -g set-clipboard on` |
 | `/help` | `?` | Commands and keys |
 | `/quit` | `/exit` | Quit |
@@ -136,8 +135,8 @@ The **approval dialog** shows a diff view for edits (side-by-side at 160 columns
 ## Input editor
 
 - Multi-line with Shift-Enter / Alt-Enter for newlines. Ctrl-J also works, for terminals that can't distinguish Shift-Enter. The kitty keyboard protocol is enabled when supported.
-- History (↑/↓, Ctrl-R search), persisted per project.
-- `@` fuzzy file completion (via `ignore` walker + `nucleo` matcher), `/` command completion (built-in + custom commands + skills), `!` shell escape.
+- History (↑/↓), persisted per project in `<sessions>/<project-key>/history.jsonl` (up to 100 entries, JSON-encoded per line so multi-line prompts round-trip cleanly; written only when a prompt is submitted so starting and quitting leaves nothing behind; built 2026-11-08).
+- `@` fuzzy file completion (via `ignore` walker on `spawn_blocking` after the first frame + `nucleo` matcher, completed in-place with Tab or Enter; built 2026-11-08), `/` command completion (built-in + custom commands + MCP prompts + skills).
 - Bracketed paste. Large pastes collapse into a `[pasted 340 lines]` chip that expands on demand. Image paste and drag-drop paths attach images when the model supports vision. As implemented (2026-10-24): a paste whose every path is an existing image file attaches them — the drag-drop case — while anything else inserts as text. Paths split like a shell reads them (quotes group, a backslash escapes outside Windows), a whole paste with bare spaces is tried as one path, and `file://` URLs are percent-decoded. Only the headers are read when attaching (files over 3 MB are refused then); the engine encodes them when the turn is sent. Commands that send a turn (skills, custom commands, `/plan <task>`) take the attachments; other commands leave them waiting. Attachments show as a chips line above the input (`[image] name 1024x768 · …`, Backspace on empty input removes the last), and Enter with attachments but no text sends them alone.
 - An external editor (Ctrl-G opens `$EDITOR` / `%EDITOR%` / `notepad`) for long prompts.
 

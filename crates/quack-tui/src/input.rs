@@ -1,5 +1,4 @@
-//! Multi-line input buffer with a char-indexed cursor and in-memory history.
-//! Persisted per-project history, `@` file completion and paste chips land in M1.
+//! Multi-line input buffer with a char-indexed cursor, `@file` mention spans and history.
 
 use unicode_width::UnicodeWidthChar;
 
@@ -13,8 +12,57 @@ pub(crate) struct Input {
 }
 
 impl Input {
+    pub fn with_history(history: Vec<String>) -> Self {
+        Self {
+            history,
+            ..Self::default()
+        }
+    }
+
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// When the cursor is inside or at the end of an `@<query>` token (at the start of the
+    /// input or preceded by whitespace), returns `(start_byte, end_byte, query)`.
+    pub fn at_mention(&self) -> Option<(usize, usize, &str)> {
+        let cursor_byte = self.byte_at(self.cursor);
+        let before = &self.text[..cursor_byte];
+        let start = before.rfind(char::is_whitespace).map_or(0, |b| {
+            b + before[b..].chars().next().map_or(0, char::len_utf8)
+        });
+        let token_before = &self.text[start..cursor_byte];
+        let query = token_before.strip_prefix('@')?;
+        let after = &self.text[cursor_byte..];
+        let end = after
+            .find(char::is_whitespace)
+            .map_or(self.text.len(), |b| cursor_byte + b);
+        Some((start, end, query))
+    }
+
+    /// Replace the `@<query>` token at the cursor with `@<path> ` (or `@<path>` when
+    /// already followed by whitespace, moving past it).
+    pub fn complete_at(&mut self, path: &str) {
+        let Some((start, end, _)) = self.at_mention() else {
+            return;
+        };
+        let trail = if self.text[end..].starts_with(char::is_whitespace) {
+            ""
+        } else {
+            " "
+        };
+        let replacement = format!("@{path}{trail}");
+        self.text.replace_range(start..end, &replacement);
+        let step_ws = if trail.is_empty() {
+            self.text[start + replacement.len()..]
+                .chars()
+                .next()
+                .map_or(0, char::len_utf8)
+        } else {
+            0
+        };
+        let new_byte = (start + replacement.len() + step_ws).min(self.text.len());
+        self.cursor = self.text[..new_byte].chars().count();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -378,5 +426,31 @@ mod tests {
         assert_eq!(i.slice(&l, (1, 6), (3, 40)), "new world\ntwo");
         i.set("a日b");
         assert_eq!(i.slice(&i.layout(10), (0, 2), (0, 2)), "日");
+    }
+
+    #[test]
+    fn at_mention_detects_token_and_completes_in_place() {
+        let mut i = Input::default();
+        i.insert_str("read @src/ma");
+        assert_eq!(i.at_mention(), Some((5, 12, "src/ma")));
+        // Email-like token not preceded by whitespace does not trigger `@` completion.
+        let mut email = Input::default();
+        email.insert_str("user@example.com");
+        assert_eq!(email.at_mention(), None);
+
+        i.complete_at("src/main.rs");
+        assert_eq!(i.text(), "read @src/main.rs ");
+        assert_eq!(i.at_mention(), None);
+
+        // Completing a token in the middle of the line keeps the rest of the text.
+        let mut mid = Input::default();
+        mid.insert_str("compare @ma and @lib");
+        for _ in 0.." and @lib".len() {
+            mid.left();
+        }
+        assert_eq!(mid.at_mention(), Some((8, 11, "ma")));
+        mid.complete_at("src/main.rs");
+        assert_eq!(mid.text(), "compare @src/main.rs and @lib");
+        assert_eq!(mid.at_mention(), None);
     }
 }

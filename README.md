@@ -318,6 +318,8 @@ info  network       llm.internal.example · policy allows only llm.internal.exam
 |---|---|---|
 | `offline` | `false` | When true, restricts network access to local interfaces or `egress_allow` hosts |
 | `egress_allow` | `[]` | Allowed remote host globs when `offline = true` |
+| `proxy` | `""` | HTTP/HTTPS proxy URL |
+| `ca_bundle` | `""` | Path to custom PEM certificate bundle |
 
 **`[catalog]`**
 | Key | Default | Description |
@@ -330,8 +332,6 @@ info  network       llm.internal.example · policy allows only llm.internal.exam
 |---|---|---|
 | `check` | `false` | Look for a new version at most once a day and say so in the TUI. quack never updates itself |
 | `url` | this repository's latest release (from the defaults bundle) | Answers with a redirect ending in the version, or the version as text. Empty: nowhere |
-| `proxy` | `""` | HTTP/HTTPS proxy URL |
-| `ca_bundle` | `""` | Path to custom PEM certificate bundle |
 
 **`[policy]`** *(System administrative layer only)*
 | Key | Default | Description |

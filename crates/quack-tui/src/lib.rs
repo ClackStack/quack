@@ -99,6 +99,11 @@ async fn event_loop(
         return t.write();
     }
 
+    let root = engine.config().dirs.workspace_root.clone();
+    let mut files_task = Some(tokio::task::spawn_blocking(move || {
+        quack_core::workspace_files(&root, 10_000)
+    }));
+
     while !app.should_quit() {
         tokio::select! {
             ev = input.next() => match ev {
@@ -109,7 +114,12 @@ async fn event_loop(
             ev = engine.events.recv() => match ev {
                 Ok(ev) => {
                     if matches!(ev, quack_protocol::Event::ConfigReloaded) {
-                        app.reconfigure(AppInfo::from_config(&engine.config()));
+                        let cfg = engine.config();
+                        let root = cfg.dirs.workspace_root.clone();
+                        app.reconfigure(AppInfo::from_config(&cfg));
+                        files_task = Some(tokio::task::spawn_blocking(move || {
+                            quack_core::workspace_files(&root, 10_000)
+                        }));
                     }
                     app.on_engine(ev);
                 }
@@ -122,6 +132,15 @@ async fn event_loop(
                     None => std::future::pending().await,
                 }
             } => app.on_highlighted(done),
+            Ok(files) = async {
+                match files_task.as_mut() {
+                    Some(task) => task.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                files_task = None;
+                app.set_files(files);
+            },
             _ = tick.tick() => {
                 app.on_tick();
                 if app.take_dirty() {

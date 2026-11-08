@@ -124,6 +124,61 @@ impl ProjectSessions {
     pub fn read(&self, entry: &IndexEntry) -> std::io::Result<Vec<Record>> {
         read_events(&self.dir.join(&entry.dir).join("events.jsonl"))
     }
+
+    pub fn history_path(&self) -> PathBuf {
+        self.dir.join("history.jsonl")
+    }
+
+    pub fn load_history(&self) -> Vec<String> {
+        load_history_file(&self.history_path())
+    }
+
+    pub fn append_history(&self, text: &str) -> std::io::Result<()> {
+        append_history_file(&self.history_path(), text)
+    }
+}
+
+const MAX_HISTORY: usize = 100;
+
+/// Load prompt history from a `history.jsonl` file, oldest first.
+pub fn load_history_file(path: &Path) -> Vec<String> {
+    let Ok(f) = File::open(path) else {
+        return Vec::new();
+    };
+    let mut all: Vec<String> = BufReader::new(f)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<String>(&line).ok())
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    if all.len() > MAX_HISTORY {
+        all.drain(..all.len() - MAX_HISTORY);
+    }
+    all
+}
+
+/// Append a prompt to a `history.jsonl` file, keeping at most [`MAX_HISTORY`] entries
+/// and skipping consecutive duplicates.
+pub fn append_history_file(path: &Path, text: &str) -> std::io::Result<()> {
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let mut all = load_history_file(path);
+    if all.last().map(String::as_str) == Some(text) {
+        return Ok(());
+    }
+    all.push(text.to_owned());
+    if all.len() > MAX_HISTORY {
+        all.drain(..all.len() - MAX_HISTORY);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = File::create(path)?;
+    for entry in &all {
+        writeln!(f, "{}", serde_json::to_string(entry).unwrap_or_default())?;
+    }
+    Ok(())
 }
 
 /// A parsed log line.
@@ -327,5 +382,20 @@ mod tests {
                 .file_name()
                 .is_some_and(|n| n.to_string_lossy().starts_with("src-proj-"))
         }
+    }
+
+    #[test]
+    fn prompt_history_persists_multiline_dedupes_and_caps() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ps = ProjectSessions::new(tmp.path(), Path::new("/home/u/src/proj"));
+        // Reading before anything is written creates no directory.
+        assert!(ps.load_history().is_empty());
+        assert!(!ps.dir.exists());
+
+        ps.append_history("first\nsecond line").expect("append");
+        ps.append_history("first\nsecond line").expect("dedupe");
+        ps.append_history("   ").expect("skip blank");
+        ps.append_history("third").expect("append");
+        assert_eq!(ps.load_history(), vec!["first\nsecond line", "third"]);
     }
 }

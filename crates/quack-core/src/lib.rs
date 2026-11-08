@@ -26,8 +26,10 @@ mod turn;
 mod watch;
 
 pub use engine::{Engine, EngineHandle};
-pub use session::{Resume, list_sessions};
+pub use session::{Resume, append_history, history_path, list_sessions, load_history};
 
 pub use quack_protocol as protocol;
 /// Grammars and syntax highlighting, for clients that show code.
 pub use quack_tools::grammar;
+/// Workspace file listing for `@file` completion.
+pub use quack_tools::workspace_files;

@@ -835,12 +835,18 @@ fn draw_popup(f: &mut Frame<'_>, app: &App, above: Rect) {
     }
     let t = &app.theme;
     let g = &app.glyphs;
-    let query = app.input.text().get(1..).unwrap_or_default().to_owned();
+    let is_files = matches.first().is_some_and(|i| i.prefix == '@');
+    let query = app.popup_query().to_owned();
     let width = above.width;
     let inner_w = usize::from(width.saturating_sub(2));
     let selected = app.popup_selected.min(matches.len() - 1);
 
-    let label = |i: &PopupItem| format!("/{}", i.name);
+    let label = |i: &PopupItem| format!("{}{}", i.prefix, i.name);
+    let max_col = if is_files {
+        inner_w.saturating_sub(4).max(10)
+    } else {
+        30
+    };
     let col = matches
         .iter()
         .map(|i| {
@@ -853,10 +859,11 @@ fn draw_popup(f: &mut Frame<'_>, app: &App, above: Rect) {
         })
         .max()
         .unwrap_or(0)
-        .clamp(10, 30);
-    let tag = |i: &PopupItem| match (i.command, i.hint) {
-        (None, _) => "skill",
-        (Some(_), Some(_)) => "soon",
+        .clamp(10, max_col);
+    let tag = |i: &PopupItem| match (i.prefix, i.command, i.hint) {
+        ('@', _, _) => "",
+        (_, None, _) => "skill",
+        (_, Some(_), Some(_)) => "soon",
         _ => "",
     };
     let room = |i: &PopupItem| {
@@ -993,15 +1000,16 @@ fn draw_popup(f: &mut Frame<'_>, app: &App, above: Rect) {
         &[
             ("↑↓", "move"),
             ("tab", "complete"),
-            ("⏎", "run"),
+            ("⏎", if is_files { "insert" } else { "run" }),
             ("esc", "close"),
         ],
     );
+    let title = if is_files { " files " } else { " commands " };
     f.render_widget(Clear, area);
     let block = Block::bordered()
         .border_set(g.border)
         .border_style(t.border)
-        .title_top(Line::from(Span::styled(" commands ", t.pill(t.accent))))
+        .title_top(Line::from(Span::styled(title, t.pill(t.accent))))
         .title_top(Line::styled(count, t.dim).right_aligned())
         .title_bottom(keys.right_aligned());
     f.render_widget(Paragraph::new(lines).block(block), area);

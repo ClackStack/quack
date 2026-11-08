@@ -59,6 +59,14 @@ pub struct AppInfo {
     pub bundles: Vec<quack_config::Bundle>,
     /// `[bundles] disabled` as configured, including names not installed.
     pub bundles_disabled: Vec<String>,
+    /// Configured hooks from `hooks.d`, for `/hooks`.
+    pub hooks: Vec<quack_config::Item<quack_config::HookFile>>,
+    /// `[hooks] disabled` as configured, including names not installed.
+    pub hooks_disabled: Vec<String>,
+    /// Prompt history loaded for this project at startup.
+    pub history: Vec<String>,
+    /// Where new prompt history entries for this project are appended.
+    pub history_path: Option<std::path::PathBuf>,
 }
 
 impl AppInfo {
@@ -70,6 +78,8 @@ impl AppInfo {
             Some(rest) if !home.is_empty() => format!("~{rest}"),
             _ => root,
         };
+        let history_path = quack_core::history_path(config);
+        let history = quack_core::load_history(&history_path);
         Self {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             branch: git_branch(&config.dirs.workspace_root),
@@ -87,6 +97,10 @@ impl AppInfo {
                 .collect(),
             bundles: config.bundles.clone(),
             bundles_disabled: config.settings.bundles.disabled.clone(),
+            hooks: quack_config::load_hooks(config),
+            hooks_disabled: config.settings.hooks.disabled.clone(),
+            history,
+            history_path: Some(history_path),
             rules: {
                 let p = &config.settings.permissions;
                 [("deny", &p.deny), ("ask", &p.ask), ("allow", &p.allow)]
@@ -152,21 +166,23 @@ fn git_branch(dir: &std::path::Path) -> Option<String> {
     })
 }
 
-/// A row of the slash popup: a built-in command or a skill.
+/// A row of the popup: a built-in command, custom command, MCP prompt, skill, or `@file`.
 #[derive(Debug, Clone)]
 pub(crate) struct PopupItem {
+    pub prefix: char,
     pub name: String,
     pub args: String,
     pub description: String,
-    /// Shown after the description, e.g. a milestone or `skill`.
+    /// Shown after the description, e.g. a milestone, `skill`, or `file`.
     pub hint: Option<&'static str>,
-    /// `None` for skills and custom commands.
+    /// `None` for skills, custom commands, MCP prompts, and `@file` items.
     pub command: Option<&'static Command>,
 }
 
 impl PopupItem {
     fn command(c: &'static Command) -> Self {
         Self {
+            prefix: '/',
             name: c.name.to_owned(),
             args: c.args.to_owned(),
             description: c.description.to_owned(),
@@ -174,6 +190,17 @@ impl PopupItem {
             command: Some(c),
         }
     }
+}
+
+/// A hook execution reported during this session (`Event::HookRan`), for `/hooks`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HookRun {
+    pub id: String,
+    pub on: String,
+    pub outcome: String,
+    pub ms: u64,
+    pub message: Option<String>,
+    pub context_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -580,6 +607,10 @@ pub struct App {
     custom: Vec<quack_protocol::CommandInfo>,
     /// Prompts of the ready MCP servers, runnable as `/<server>:<prompt>`.
     mcp_prompts: Vec<quack_protocol::CommandInfo>,
+    /// Workspace relative file paths for `@file` completion.
+    files: Vec<String>,
+    /// Hook runs recorded this session (`/hooks`).
+    pub(crate) hook_runs: Vec<HookRun>,
     /// What `/setup` has found so far.
     setup: modal::SetupView,
     /// A question from `/setup`, drawn over everything else.
@@ -605,6 +636,7 @@ pub struct App {
 
 impl App {
     pub fn new(info: AppInfo) -> Self {
+        let input = Input::with_history(info.history.clone());
         Self {
             theme: Theme::resolve(&info.ui.theme, info.no_color),
             glyphs: Glyphs::new(info.ui.ascii),
@@ -617,7 +649,7 @@ impl App {
             highlights: crate::highlight::Highlights::new(std::sync::Arc::new(
                 quack_core::grammar::Grammars::new(info.grammar_dirs.clone()),
             )),
-            input: Input::default(),
+            input,
             attachments: Vec::new(),
             modal: None,
             scroll: Cell::new(0),
@@ -655,6 +687,8 @@ impl App {
             skills: Vec::new(),
             custom: Vec::new(),
             mcp_prompts: Vec::new(),
+            files: Vec::new(),
+            hook_runs: Vec::new(),
             setup: modal::SetupView::default(),
             prompt: None,
             setup_adding: false,
@@ -752,15 +786,45 @@ impl App {
         }
     }
 
-    /// Commands matching the input while it is a bare `/word`.
+    /// Workspace relative file paths for `@file` completion, loaded off-thread.
+    pub fn set_files(&mut self, files: Vec<String>) {
+        self.files = files;
+        if self.input.at_mention().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    pub(crate) fn popup_query(&self) -> &str {
+        let text = self.input.text();
+        if text.starts_with('/') && !text.contains(char::is_whitespace) {
+            return text.get(1..).unwrap_or_default();
+        }
+        self.input.at_mention().map_or("", |(_, _, q)| q)
+    }
+
+    /// Commands matching the input while it is a bare `/word`, or workspace files matching
+    /// an `@file` token at the cursor.
     pub(crate) fn popup_matches(&self) -> Vec<PopupItem> {
         let text = self.input.text();
-        if self.modal.is_some()
-            || self.popup_dismissed
-            || !text.starts_with('/')
-            || text.contains(char::is_whitespace)
-        {
+        if self.modal.is_some() || self.popup_dismissed {
             return Vec::new();
+        }
+        if !text.starts_with('/') || text.contains(char::is_whitespace) {
+            let Some((_, _, query)) = self.input.at_mention() else {
+                return Vec::new();
+            };
+            return fuzzy::filter(query, self.files.iter().map(String::as_str))
+                .into_iter()
+                .take(50)
+                .map(|i| PopupItem {
+                    prefix: '@',
+                    name: self.files[i].clone(),
+                    args: String::new(),
+                    description: String::new(),
+                    hint: Some("file"),
+                    command: None,
+                })
+                .collect();
         }
         let query = &text[1..];
         let mut hits: Vec<&Command> = fuzzy::filter(query, COMMANDS.iter().map(|c| c.name))
@@ -776,6 +840,7 @@ impl App {
             fuzzy::filter(query, self.custom.iter().map(|c| c.name.as_str()))
                 .into_iter()
                 .map(|i| PopupItem {
+                    prefix: '/',
                     name: self.custom[i].name.clone(),
                     args: self.custom[i].args.clone(),
                     description: self.custom[i].description.clone(),
@@ -787,6 +852,7 @@ impl App {
             fuzzy::filter(query, self.mcp_prompts.iter().map(|c| c.name.as_str()))
                 .into_iter()
                 .map(|i| PopupItem {
+                    prefix: '/',
                     name: self.mcp_prompts[i].name.clone(),
                     args: self.mcp_prompts[i].args.clone(),
                     description: self.mcp_prompts[i].description.clone(),
@@ -798,6 +864,7 @@ impl App {
             fuzzy::filter(query, self.skills.iter().map(|s| s.name.as_str()))
                 .into_iter()
                 .map(|i| PopupItem {
+                    prefix: '/',
                     name: self.skills[i].name.clone(),
                     args: "[request]".into(),
                     description: self.skills[i].description.clone(),
@@ -1371,6 +1438,20 @@ impl App {
                 message,
                 context_tokens,
             } => {
+                self.hook_runs.push(HookRun {
+                    id: id.clone(),
+                    on: on.clone(),
+                    outcome: outcome.clone(),
+                    ms,
+                    message: message.clone(),
+                    context_tokens,
+                });
+                if self.modal.as_ref().is_some_and(|m| m.title == "Hooks") {
+                    self.modal = Some(
+                        modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme)
+                            .keep_place(self.modal.as_ref()),
+                    );
+                }
                 // Quiet unless the hook changed something; failures arrive as warnings.
                 let did = match outcome.as_str() {
                     "context" => format!(
@@ -1383,7 +1464,9 @@ impl App {
                     "updated" => "changed the arguments".to_owned(),
                     _ if message.is_some() => "said".to_owned(),
                     _ => {
-                        self.dirty = false;
+                        if !self.modal.as_ref().is_some_and(|m| m.title == "Hooks") {
+                            self.dirty = false;
+                        }
                         return;
                     }
                 };
@@ -1626,11 +1709,20 @@ impl App {
                 self.input.insert('\n');
             }
             KeyCode::Char('j') if ctrl => self.input.insert('\n'),
-            KeyCode::Enter => self.submit(popup.get(self.popup_selected).cloned()),
+            KeyCode::Enter => {
+                let idx = self.popup_selected.min(popup.len().saturating_sub(1));
+                self.submit(popup.get(idx).cloned());
+            }
             KeyCode::BackTab => self.cycle_mode(),
             KeyCode::Tab => {
-                if let Some(cmd) = popup.get(self.popup_selected) {
-                    self.input.set(&format!("/{} ", cmd.name));
+                let idx = self.popup_selected.min(popup.len().saturating_sub(1));
+                if let Some(item) = popup.get(idx) {
+                    if item.prefix == '@' {
+                        self.input.complete_at(&item.name);
+                        self.popup_selected = 0;
+                    } else {
+                        self.input.set(&format!("/{} ", item.name));
+                    }
                 }
             }
             _ if self.scroll_key(key) => {}
@@ -2042,6 +2134,11 @@ impl App {
 
     fn submit(&mut self, popup_choice: Option<PopupItem>) {
         match popup_choice {
+            Some(item) if item.prefix == '@' => {
+                self.input.complete_at(&item.name);
+                self.popup_selected = 0;
+                return;
+            }
             Some(PopupItem {
                 command: Some(cmd), ..
             }) => {
@@ -2060,6 +2157,11 @@ impl App {
         let attachments = std::mem::take(&mut self.attachments);
         if text.trim().is_empty() && attachments.is_empty() {
             return;
+        }
+        if !text.trim().is_empty()
+            && let Some(path) = &self.info.history_path
+        {
+            let _ = quack_core::append_history(path, &text);
         }
         self.scroll.set(0);
         if text.starts_with('/') {
@@ -2594,6 +2696,53 @@ impl App {
                 }
                 _ => self.note("usage: /trust [trusted|settings-only|ignored]".into()),
             },
+            "hooks" if args.is_empty() => {
+                self.modal = Some(modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme));
+            }
+            "hooks" => match args.strip_prefix("toggle ").map(str::trim) {
+                Some(id)
+                    if self
+                        .info
+                        .hooks
+                        .iter()
+                        .any(|h| h.id == id && h.layer != quack_config::LayerKind::System) =>
+                {
+                    let mut disabled = self.info.hooks_disabled.clone();
+                    let off = !disabled.iter().any(|d| d == id);
+                    if off {
+                        disabled.push(id.to_owned());
+                    } else {
+                        disabled.retain(|d| d != id);
+                    }
+                    let list = disabled
+                        .iter()
+                        .map(|d| toml_string(d))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.modal = None;
+                    self.ops.push(Op::SaveSetting {
+                        key: "hooks.disabled".into(),
+                        value: format!("[{list}]"),
+                        scope: WriteScope::User,
+                    });
+                    self.ops.push(Op::ReloadConfig);
+                    self.note(format!(
+                        "hook `{id}` turned {}; reloading",
+                        if off { "off" } else { "on" }
+                    ));
+                }
+                _ => self.note("usage: /hooks, or /hooks toggle <name>".into()),
+            },
+            "theme" if args.is_empty() => {
+                self.modal = Some(modal::theme(&self.info.ui.theme, &self.theme));
+            }
+            "theme" => match args {
+                "dark" | "light" | "auto" => {
+                    self.save_setting("ui.theme", &toml_string(args));
+                }
+                _ => self.note("usage: /theme [dark|light|auto]".into()),
+            },
+            "keys" => self.modal = Some(modal::help(&self.theme).with_tab(1)),
             "help" => self.modal = Some(modal::help(&self.theme)),
             "quit" => self.quit = true,
             name => self.note(format!(
@@ -2830,6 +2979,10 @@ mod tests {
             grammar_dirs: Vec::new(),
             bundles: Vec::new(),
             bundles_disabled: Vec::new(),
+            hooks: Vec::new(),
+            hooks_disabled: Vec::new(),
+            history: Vec::new(),
+            history_path: None,
         }
     }
 
@@ -3511,5 +3664,85 @@ mod tests {
         assert!(!app.attach_pasted(&format!("look at {shown}")));
         assert_eq!(app.attachments.len(), 2);
         std::fs::remove_file(&spaced).ok();
+    }
+
+    #[test]
+    fn at_file_popup_filters_and_completes_on_tab_or_enter() {
+        let mut app = App::new(info());
+        app.set_files(vec![
+            "Cargo.toml".into(),
+            "src/lib.rs".into(),
+            "src/main.rs".into(),
+        ]);
+        type_str(&mut app, "inspect @ma");
+        let popup = app.popup_matches();
+        assert_eq!(popup.len(), 1);
+        assert_eq!(popup[0].prefix, '@');
+        assert_eq!(popup[0].name, "src/main.rs");
+
+        // Enter completes the `@` mention without submitting the turn.
+        press(&mut app, KeyCode::Enter);
+        assert!(app.take_ops().is_empty());
+        assert_eq!(app.input.text(), "inspect @src/main.rs ");
+        assert!(app.popup_matches().is_empty());
+
+        // Tab completes a second `@` mention in the same prompt.
+        type_str(&mut app, "and @lib");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.input.text(), "inspect @src/main.rs and @src/lib.rs ");
+    }
+
+    #[test]
+    fn persistent_history_saves_and_reloads_across_sessions() {
+        let path =
+            std::env::temp_dir().join(format!("quack-tui-history-{}.jsonl", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        let mut i1 = info();
+        i1.history_path = Some(path.clone());
+        let mut app1 = App::new(i1);
+        type_str(&mut app1, "fix the parser");
+        press(&mut app1, KeyCode::Enter);
+        assert_eq!(app1.take_ops().len(), 1);
+
+        let mut i2 = info();
+        i2.history = quack_core::load_history(&path);
+        i2.history_path = Some(path.clone());
+        let mut app2 = App::new(i2);
+        press(&mut app2, KeyCode::Up);
+        assert_eq!(app2.input.text(), "fix the parser");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn theme_keys_and_hooks_commands_open_modals_and_save() {
+        let mut app = App::new(info());
+        type_str(&mut app, "/keys");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.modal.as_ref().map(|m| m.title.as_str()), Some("Help"));
+        press(&mut app, KeyCode::Esc);
+
+        type_str(&mut app, "/theme light");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SaveSetting {
+                key: "ui.theme".into(),
+                value: "\"light\"".into(),
+                scope: WriteScope::User,
+            }]
+        );
+
+        app.on_engine(Event::HookRan {
+            id: "lint".into(),
+            on: "post_tool".into(),
+            outcome: "ok".into(),
+            ms: 12,
+            message: None,
+            context_tokens: 0,
+        });
+        assert_eq!(app.hook_runs.len(), 1);
+        type_str(&mut app, "/hooks");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.modal.as_ref().map(|m| m.title.as_str()), Some("Hooks"));
     }
 }

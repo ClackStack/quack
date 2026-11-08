@@ -113,6 +113,13 @@ impl Modal {
         self
     }
 
+    /// Open on `tab`.
+    pub fn with_tab(mut self, tab: usize) -> Self {
+        self.tab = tab.min(self.tabs.len().saturating_sub(1));
+        self.refilter();
+        self
+    }
+
     fn items(&self) -> &[ModalItem] {
         self.tabs.get(self.tab).map_or(&[], |t| t.items.as_slice())
     }
@@ -2110,6 +2117,185 @@ pub(crate) fn bundles(bundles: &[quack_config::Bundle], theme: &Theme) -> Modal 
         "Bundles",
         vec![ModalTab {
             title: "Bundles".into(),
+            items,
+        }],
+    )
+}
+
+/// The `/theme` modal: switch between `auto`, `dark` and `light`.
+pub(crate) fn theme(current: &str, theme: &Theme) -> Modal {
+    const THEMES: [(&str, &str); 3] = [
+        (
+            "auto",
+            "Follows the terminal's background (`COLORFGBG` when set, otherwise dark).",
+        ),
+        (
+            "dark",
+            "High-contrast palette for dark terminal backgrounds.",
+        ),
+        (
+            "light",
+            "High-contrast palette for light terminal backgrounds.",
+        ),
+    ];
+    let items = THEMES
+        .iter()
+        .map(|(id, about)| {
+            let active = *id == current;
+            ModalItem {
+                label: (*id).to_owned(),
+                hint: if active {
+                    "in use".into()
+                } else {
+                    String::new()
+                },
+                detail: vec![
+                    Line::styled(*id, theme.accent),
+                    Line::raw(""),
+                    Line::raw(*about),
+                    Line::raw(""),
+                    Line::styled(
+                        if active {
+                            "in use"
+                        } else {
+                            "⏎ use this theme (saved to [ui] theme in your config.toml)"
+                        },
+                        if active { theme.ok } else { theme.dim },
+                    ),
+                ],
+                action: Some(format!("/theme {id}")),
+                run: true,
+                alt: None,
+                charts: Vec::new(),
+            }
+        })
+        .collect();
+    Modal::new(
+        "Theme",
+        vec![ModalTab {
+            title: "Themes".into(),
+            items,
+        }],
+    )
+}
+
+/// The `/hooks` modal: configured hooks from `hooks.d` and their recent runs.
+pub(crate) fn hooks(
+    hooks: &[quack_config::Item<quack_config::HookFile>],
+    runs: &[crate::app::HookRun],
+    theme: &Theme,
+) -> Modal {
+    use quack_config::{ItemState, LayerKind};
+    let items = if hooks.is_empty() {
+        vec![placeholder(
+            "no hooks",
+            "Add a TOML file to hooks.d in your config folder (`quack config paths` shows \
+             where) or a trusted project's .quack/hooks.d, for example\n\n\
+             event = \"pre_tool\"\nmatch = { tool = \"shell\" }\ncommand = [\"python3\", \"check.py\"]",
+            theme,
+        )]
+    } else {
+        hooks
+            .iter()
+            .map(|h| {
+                let hook_runs: Vec<&crate::app::HookRun> =
+                    runs.iter().filter(|r| r.id == h.id).collect();
+                let last = hook_runs.last().copied();
+                let mut detail = Vec::new();
+                let (hint, can_toggle, enabled) = match &h.state {
+                    ItemState::Loaded(f) if f.enabled => {
+                        detail.push(Line::styled(h.id.clone(), theme.ok));
+                        detail.push(Line::raw(""));
+                        if !f.description.is_empty() {
+                            detail.push(Line::raw(f.description.clone()));
+                            detail.push(Line::raw(""));
+                        }
+                        detail.push(field(theme, "state", "on".into()));
+                        detail.push(field(theme, "event", f.event.label().into()));
+                        detail.push(field(theme, "command", f.command.join(" ")));
+                        if !f.matcher.tool.is_empty() {
+                            detail.push(field(theme, "tool", f.matcher.tool.clone()));
+                        }
+                        if !f.matcher.pattern.is_empty() {
+                            detail.push(field(theme, "pattern", f.matcher.pattern.clone()));
+                        }
+                        if !f.matcher.prompt.is_empty() {
+                            detail.push(field(theme, "prompt", f.matcher.prompt.clone()));
+                        }
+                        let hint = match last {
+                            Some(r) => format!("{} · {} ms", f.event.label(), r.ms),
+                            None => format!("{} · {}", f.event.label(), h.layer.label()),
+                        };
+                        (hint, h.layer != LayerKind::System, true)
+                    }
+                    ItemState::Loaded(f) => {
+                        detail.push(Line::styled(h.id.clone(), theme.dim));
+                        detail.push(Line::raw(""));
+                        detail.push(field(theme, "state", "disabled in file".into()));
+                        detail.push(field(theme, "event", f.event.label().into()));
+                        detail.push(field(theme, "command", f.command.join(" ")));
+                        ("off".into(), false, false)
+                    }
+                    ItemState::Disabled(why) => {
+                        detail.push(Line::styled(h.id.clone(), theme.dim));
+                        detail.push(Line::raw(""));
+                        detail.push(field(theme, "state", format!("off ({why})")));
+                        ("off".into(), h.layer != LayerKind::System, false)
+                    }
+                    ItemState::Failed(d) => {
+                        detail.push(Line::styled(h.id.clone(), theme.error));
+                        detail.push(Line::raw(""));
+                        detail.push(Line::styled(d.one_line(), theme.error));
+                        ("failed".into(), false, false)
+                    }
+                };
+                detail.push(field(theme, "layer", h.layer.label().into()));
+                detail.push(field(theme, "file", h.path.display().to_string()));
+                if !hook_runs.is_empty() {
+                    detail.push(Line::raw(""));
+                    detail.push(Line::styled("recent runs", theme.dim));
+                    let skip = hook_runs.len().saturating_sub(10);
+                    for r in hook_runs.into_iter().skip(skip) {
+                        let msg = r
+                            .message
+                            .as_deref()
+                            .map(|m| format!(" · {m}"))
+                            .unwrap_or_default();
+                        detail.push(Line::raw(format!(
+                            "  {} → {} ({} ms){msg}",
+                            r.on, r.outcome, r.ms
+                        )));
+                    }
+                }
+                if can_toggle {
+                    detail.push(Line::raw(""));
+                    detail.push(Line::styled(
+                        format!(
+                            "⏎ turn it {} (saved to [hooks] disabled in your config.toml)",
+                            if enabled { "off" } else { "on" }
+                        ),
+                        theme.dim,
+                    ));
+                } else if h.layer == LayerKind::System {
+                    detail.push(Line::raw(""));
+                    detail.push(Line::styled("Enforced by the system layer.", theme.dim));
+                }
+                ModalItem {
+                    label: h.id.clone(),
+                    hint,
+                    detail,
+                    action: can_toggle.then(|| format!("/hooks toggle {}", h.id)),
+                    run: can_toggle,
+                    alt: None,
+                    charts: Vec::new(),
+                }
+            })
+            .collect()
+    };
+    Modal::new(
+        "Hooks",
+        vec![ModalTab {
+            title: "Hooks".into(),
             items,
         }],
     )
