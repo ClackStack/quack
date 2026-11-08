@@ -1,14 +1,14 @@
 # 15 — Desktop client (Tauri + SvelteKit)
 
-Decision (2026-11-08): the desktop GUI is **Tauri 2 + SvelteKit (Svelte 5)**, and the app *is* the client: Tauri's own IPC carries the protocol, so there is no `quack serve`, no port, no token and no browser mode. Launching `quack-gui` opens the window and goes; `quack-cli` is untouched. The engine does not change: a GUI is a third client of the Op/Event protocol ([00](00-architecture.md#engine-protocol)), like the TUI, `exec` and ACP ([12](12-headless-and-acp.md)). **No new `Op` or `Event` is required** — turns and streaming deltas, approvals and questions, project trust, plan mode and plan accept, rewind, stats and context reports, sub-agents, and sessions (`Op::ListSessions` → `Event::SessionList`, resume replay through `Event::SessionResumed`) all exist.
+Decision (2026-11-08): the desktop GUI is **Tauri 2 + SvelteKit (Svelte 5)**, and the app *is* the client: Tauri's own IPC carries the protocol, so there is no `quack serve`, no port, no token and no browser mode. Launching `quack-gui` opens the window and goes; `quack-cli` is untouched. The engine does not change: a GUI is a fourth client of the Op/Event protocol ([00](00-architecture.md#engine-protocol)), alongside the TUI, `exec` and ACP ([12](12-headless-and-acp.md)). **No new `Op` or `Event` is required** — turns and streaming deltas, approvals and questions, first-run setup (`Op::DetectServers`, `Op::ListServices`, `Op::SetProviderKey`, `Op::AddServer`), project trust, plan mode and plan accept, rewind, stats and context reports, sub-agents, config writes (`Op::SaveSetting`) and sessions (`Op::ListSessions` → `Event::SessionList`, resume replay through `Event::SessionResumed`) all exist. Only [`ReplayItem`](../../crates/quack-protocol/src/lib.rs) grows optional `detail` (diffs/output) and `Reasoning` so resumed sessions keep collapsible tool output and thinking blocks.
 
 A browser target was considered first (a loopback `quack serve` hosting the same SPA, for headless servers over SSH) and dropped the same day: it added a server, an auth surface and the axum dependency tree for a path nobody asked for. The SPA keeps its transport behind one small module, so a browser client could be added later without moving the UI.
 
-Why this stack (investigated 2026-11-08): what a GUI must rebuild is the TUI's roughly 8,000 lines of rendering — markdown, diffs, highlighting, charts, 23 modals — and web tech replaces most of that with mature parts, while desktop integration (menus, tray, dialogs, notifications, clipboard, file associations) is Tauri plugins instead of per-platform code. The Rust side stays substantial: the bridge, engines and packaging. The webview holds only views.
+Why this stack (investigated 2026-11-08): what a GUI must rebuild is the TUI's roughly 8,000 lines of rendering — markdown, diffs, highlighting, charts, modals — and web tech replaces most of that with mature parts (using the same Svelte 5 + SvelteKit + Vite stack as `website/`), while desktop integration (menus, window state, dialogs, notifications, clipboard, file opener) is Tauri plugins instead of per-platform code. The Rust side stays substantial: the bridge, engines and packaging. The webview holds only views.
 
 | Stack | Verdict |
 |---|---|
-| Tauri 2 + SvelteKit | **chosen.** Healthiest upstream (2.12 stable, Apache-2.0/MIT, MSRV below quack's), the user knows Svelte, Windows/macOS/Linux via the OS webview |
+| Tauri 2 + SvelteKit | **chosen.** Healthiest upstream (2.12 stable, Apache-2.0/MIT, MSRV below quack's), matches `website/`'s Svelte 5 stack, Windows/macOS/Linux via the OS webview |
 | gpui (+ gpui-component) | viable but costlier: crates.io packaging still pin-a-git-rev, no musl GUI builds upstream, the rendering rewrite stays, and Zed's own `ui`/`markdown` crates are GPL-3.0 and must not be used |
 | egui, iced | weaker fallbacks if webviews are ever a hard no (immediate-mode ergonomics; one release in twelve months) |
 | Slint | disqualified: GPL-3.0 or a paid licence, fails the `cargo deny` Apache-only gate |
@@ -17,70 +17,88 @@ Why this stack (investigated 2026-11-08): what a GUI must rebuild is the TUI's r
 
 | Piece | Where | What |
 |---|---|---|
-| `quack-gui` (Rust side) | `crates/quack-gui` (workspace member, own binary) | The Tauri 2 app. An engine-per-tab registry; `#[tauri::command]` handlers (`open_folder`, `send_op`, `close_tab`, …); streams engine `Event`s to the webview over a per-tab `tauri::ipc::Channel`. Builds the engine-spawning closure itself, the way `quack-cli` builds ACP's (`quack_acp::Spawn`, `quack-acp/src/lib.rs:40`) |
+| `quack-gui` (library: pure-Rust bridge) | `crates/quack-gui/src/lib.rs` | Engine-per-tab registry, 16 ms delta coalescer, `AppInfo` snapshot builder, session-lock guard and recent-workspaces state. **No Tauri dependency by default**, so `cargo test --workspace`, `cargo clippy --workspace` and the MSRV check run on every OS without `webkit2gtk` or a built frontend |
+| `quack-gui` (binary: Tauri shell) | `crates/quack-gui/src/main.rs` (feature `desktop`) | The Tauri 2 app. Thin `#[tauri::command]` wrappers (`open_folder`, `send_op`, `close_tab`, `recent_folders`, …) over the bridge; streams coalesced `Event`s to the webview over a per-tab `tauri::ipc::Channel` |
 | the SPA | `crates/quack-gui/ui/` | SvelteKit 3 + Svelte 5 runes app, built as a static bundle (`@sveltejs/adapter-static`, SPA mode: `fallback: 'index.html'`, output `build/`), embedded via `frontendDist`. All engine traffic goes through one `Transport` module over Tauri IPC (`invoke` + channel listener) |
 
-No server component exists. `quack-gui` depends on `quack-core`/`quack-config` (it spawns engines) and never on another client crate: it mirrors the TUI, it does not import it. Since it depends on Tauri, the workspace-wide CI commands exclude it; nothing about the default `cargo build` or the `quack` binary changes.
+No server component exists. `quack-gui` depends on `quack-core`/`quack-config` (it spawns engines) and never on another client crate: it mirrors the TUI, it does not import it. Because the `tauri` dependency is gated behind `--features desktop`, nothing about the default `cargo build`, `cargo test --workspace` or the `quack` binary changes.
 
 ## The bridge
 
 One `Channel` per tab, created by the frontend and handed to `open_folder`; commands carry a tab id:
 
 ```
-invoke("open_folder", { cwd, options, events })  → tab id
-invoke("send_op",    { tab, op })                // op is the tagged JSON, parsed with serde_json into quack_protocol::Op
-events.listen(…)                                 // {"tab":…,"event":{"event":"assistant_delta",…}} or {"tab":…,"serve":{"type":"tab_closed",…}}
+invoke("open_folder", { cwd, resume, events })   → { tab, info }
+invoke("send_op",     { tab, op })               // op is the tagged JSON, parsed with serde_json into quack_protocol::Op
+invoke("close_tab",   { tab })                   // awaits engine.shutdown() so MCP/LSP and session_end hooks finish
+events.listen(…)                                 // {"tab":…,"event":{…}}, {"tab":…,"info":{…}} or {"tab":…,"closed":{…}}
 ```
 
-- `send_op` accepts the `Op`'s serde JSON as-is (`#[serde(tag = "op")]`, `snake_case`); the TS side holds hand-written discriminated unions of the same shape. No translation layer beyond the tab envelope.
-- Opening a tab names a folder; the Rust side loads that folder's config and spawns its engine (the ACP pattern). Tabs are independent engines; closing a tab drops the handle, and sessions are already crash-safe on disk. An engine that dies produces a `tab_closed` control message with the reason.
-- Backpressure is the client's job, as with every client: the engine's event channel is bounded, and a slow webview gets `AssistantDelta`s coalesced (a transcript only needs the final text). `Channel` delivery stays ordered.
-- Images come from native dialogs and drag-drop, so they carry real paths into `InputItem::Image` — no upload path is needed.
+- `send_op` accepts the `Op`'s serde JSON as-is (`#[serde(tag = "op")]`, `snake_case`); no translation layer beyond the tab envelope.
+- **TypeScript types are generated from `quack-protocol`:** `ts-rs` (behind a non-default feature/test on `quack-protocol`, adding zero crates to normal builds) exports `protocol.ts`, checked in CI with `git diff --exit-code` the same way `quack config schema --dir defaults/schemas` checks the config schemas.
+- **`AppInfo` snapshot:** at tab start and on `Event::ConfigReloaded`, the bridge reads `engine.config()` (`Arc<Loaded>`) and sends the same static facts the TUI's `AppInfo::from_config` gathers (`setting_rows()`, `layers`, permission `rules`, `bundles`, git `branch`, `ui` settings). All config and key mutations go through existing `Op`s (`Op::SaveSetting`, `Op::SetProviderKey`, `Op::AddServer`, `Op::AddProvider`, `ApprovalDecision::AlwaysAllow`) — the GUI never calls `toml_edit` directly.
+- **Independent engines & clean shutdown:** opening a tab loads that folder's config and spawns its engine (the ACP pattern). The registry refuses to open the same `SessionId` in two tabs at once (focusing the existing tab instead) so two engines never write to the same JSONL log. Closing a tab or quitting the app awaits `engine.shutdown()` so child processes, MCP/LSP servers and `session_end` hooks clean up.
+- **Always-on 16 ms delta coalescing:** `Channel::send` posts asynchronously to the webview queue and does not block when JS rendering lags. Each tab's bridge task buffers `AssistantDelta`, `ReasoningDelta` and `ToolCallOutputDelta` (including inside `Event::Agent`) and flushes them on a 16 ms (60 fps) tick — or immediately before any non-delta event (`ToolCallBegin`, `ApprovalRequest`, `TurnComplete`) — matching `quack-tui`'s frame loop and cutting IPC/DOM churn by 10–20× during fast streaming.
+- **Desktop environment parity:**
+  - **Login-shell `PATH` (macOS/Linux):** when launched from Finder/Dock or a desktop launcher rather than a terminal, `quack-gui` resolves the user's login-shell `PATH` once at startup before spawning engines, so `quack-shell`, `quack-mcp` (`npx`/`uvx`), `quack-lsp` and `secret-tool` find the same tools as the TUI.
+  - **Defaults bundle in `.app` bundles:** `default_bundle_candidates` in `quack-config` gains `<exe>/../Resources/defaults` alongside `../share/quack/defaults` and `./defaults` so macOS `.app` bundles find the defaults bundle out of the box.
+- **Files and images** come from native dialogs, `@`-mentions in the composer (`InputItem::File`) and drag-drop (`InputItem::Image`), carrying real local paths into `Op::UserTurn` — no upload path is needed.
 - Dev mode uses Tauri's `devUrl` against the vite dev server: hot reload, IPC working, standard workflow.
-- TypeScript types are kept honest by fixtures: a Rust test serializes at least one of every `Op`/`Event` variant to JSON; a vitest test parses each fixture into the TS types. If the fixture burden grates, ts-rs behind a feature flag is the fallback.
 
 ### Security
 
 - There is no socket: nothing listens, so no port, token, origin or DNS-rebinding story. Tauri IPC is reachable only from the app's own webviews.
-- CSP stays minimal (Tauri injects what its IPC needs; everything else is `'self'`), assets are bundled — the UI loads nothing from the network. `withGlobalTauri: false`, least-privilege capabilities (dialog, clipboard-manager, notification, opener for revealing files, single-instance), no arbitrary shell.
+- CSP stays minimal (Tauri injects what its IPC needs; everything else is `'self'`), assets are bundled — the UI loads nothing from the network. `withGlobalTauri: false`, least-privilege capabilities (dialog, clipboard-manager, notification, window-state, opener for revealing files, single-instance), no arbitrary shell plugin.
 - No egress change: the engines keep the egress gate, `network.offline` and `[policy.providers] hosts` exactly as every other client does.
 
 ## The UI
 
-- One window, tabs inside it (a tab is a folder + session). A command palette (Ctrl-K) over the command catalogue covers what has no dedicated control yet.
-- Transcript: markdown rendered client-side (Svelte component over the message text), code highlighted with Shiki (bundled locally, heavy highlighting in a worker), diffs rendered from the tool-call data the TUI renders. Themes: the defaults bundle's `themes/` files are data, so the SPA reads the active theme into CSS variables rather than growing a second theme system.
-- Approvals render the diff the engine already sends; questions are dialogs; trust is a full-screen gate before anything in the folder starts (the engine owns this; the UI only presents it).
-- Panels for `/context` and `/stats` draw SVG charts from the same data the TUI's `charts.rs` draws; no engine change. Sidebar lists sessions per folder (`Op::ListSessions`), the model picker rides `Op::ListModels`, and the profile picker rides `Op::ListProfiles`/`Op::SetProfile`.
-- Settings and commands that mutate config (`/config set`, key replacement, permissions rules) use the same config-writing paths the TUI uses client-side (`quack-config`, `toml_edit`); where the TUI does it client-side today, the GUI does the same, and an `Op` is added only if a write turns out to need engine state.
+Instead of cloning the TUI's 23 terminal modals one-for-one, the GUI groups everything into **four desktop-native surfaces** plus a command palette (`Ctrl-K` / `Cmd-K`):
+
+1. **Welcome / Recent Folders & First-Run Setup (when no folder or model is ready):**
+   - Launching from an icon reopens the last open workspace tabs (persisted in `user_data_dir`), or shows a Welcome view with *Open Folder…* and recent folders (`quack-gui [path]` opens that folder directly).
+   - When startup finishes with no model ready, the setup flow opens automatically (matching the TUI's `/setup`: local server detection via `Op::DetectServers`, hosted services via `Op::ListServices` + `Op::SetProviderKey`, or custom URL via `Op::AddServer`).
+2. **Header, Composer & Context Inspector:**
+   - **Header / composer bar:** model selector dropdown (`Op::ListModels` + inline provider status and key entry), permission mode pill (`Ask` · `Auto-edit` · `Plan` · `Yolo` + sandbox indicator), and a live context meter pill.
+   - **Composer:** multi-line editor, `@` workspace file autocomplete (`InputItem::File`), image/file drag-drop and picker (`InputItem::Image`), `/skill` and custom command autocomplete.
+   - **Context & Stats popover:** clicking the context pill opens the `/context` segment breakdown (`Op::GetContext`), `/stats` SVG charts (`Op::GetStats`, from the same data as the TUI's `charts.rs`) and a *Compact now* action (`Op::Compact`).
+3. **Sidebar (Workspaces, Sessions, Plan & Sub-agents):**
+   - Open folders and their saved sessions (`Op::ListSessions`, `Op::NewSession`, `Op::ForkSession`, inline rename via `Op::SetTitle`, export via `Op::Export`).
+   - Live `Event::Plan` checklist and `Event::AgentStarted`/`Agent`/`AgentFinished` sub-agent runs pinned cleanly without needing `/todo` or `/tasks` modals.
+4. **Transcript with Inline Actions & One Unified Settings Dialog:**
+   - **Transcript:** markdown rendered client-side, code highlighted either via `quack_core::grammar` (`tree-sitter-highlight`, preserving `grammars/<lang>/highlights.scm` overrides) or lean `shiki/core` (`shiki/engine/javascript`, `lang-common` grammars only, no WASM), collapsible tool cards with diffs/output, and built-in dark/light CSS themes matching `quack-tui/src/theme.rs` (ready for `defaults/themes/` when M3 lands).
+   - **Inline actions:** hover *Rewind / Edit from here* on any user message (`Op::ListRewindPoints` + `Op::Rewind`), *Undo* (`Op::Undo`) and *Open / Reveal* (`tauri-plugin-opener`) on file-edit tool cards, and the *Plan Review Bar* (`Op::AcceptPlan`) directly above the composer when a plan turn finishes.
+   - **Approvals, questions & trust:** approvals render the diff inline above the composer; `Event::Questions` renders interactive choice/text cards; `Event::ProjectTrust` gates the folder view until answered (`Op::TrustProject`).
+   - **Unified Settings & Workspace dialog (tabbed):** *Providers & Profiles* (`/setup`, `/providers`, `/key`, `/profiles`), *Workspace* (`/instructions`, `/memory`, `/skills`, `/bundles`), *MCP & LSP* (`/mcp` with restart + logs, `/lsp` with diagnostics, `/permissions` rules), and *Settings & Doctor* (`/config` table with inline edits via `Op::SaveSetting`, `/doctor` via `Op::RunDoctor`).
 
 ## CI and release
 
-- `ci.yml`: the workspace-wide steps gain `--exclude quack-gui` (clippy, test, and the MSRV `cargo check --workspace`, which otherwise needs the frontend dist present). `cargo deny` stays whole-lockfile on purpose: the Tauri tree is licence-gated from the day it enters `Cargo.lock`. A new `gui` job builds the SPA and runs `cargo clippy -p quack-gui` + its tests on all four OSes (Linux needs the webkit2gtk/gtk dev packages), with `svelte-check` and vitest on Linux only.
-- `release.yml` and [14](14-packaging-and-distribution.md): **no GUI artifacts for musl, ever** (no webview on static Linux). GUI bundles (NSIS, DMG, AppImage/deb — glibc, built on the normal runners) join the release with the shell milestone, unsigned at first, and are named `quack-gui-*` so they don't disturb the existing archives, `.deb`/`.rpm` and formulas. Signing and notarization follow the same plan as the CLI's pending MSI work ([14](14-packaging-and-distribution.md#still-to-do)).
+- `ci.yml` and `.forgejo/workflows/ci.yml`: because `tauri` is behind `--features desktop` on `quack-gui`, the existing `cargo clippy --workspace`, `cargo test --workspace` and MSRV `cargo check --workspace` steps stay as-is and test `quack-gui`'s bridge core on all four OSes without needing `webkit2gtk` or `ui/build/`. `cargo deny` stays whole-lockfile on purpose: the Tauri tree is licence-gated from the day it enters `Cargo.lock`. A new `gui` job builds the SPA, runs `svelte-check` and vitest, and runs `cargo clippy -p quack-gui --features desktop --all-targets --locked` + `cargo test -p quack-gui --features desktop --locked` on all four OSes (Linux installs the `webkit2gtk-4.1`/`gtk3` dev packages).
+- `release.yml` and [14](14-packaging-and-distribution.md): **no GUI artifacts for musl, ever** (no webview on static Linux). GUI bundles (NSIS, DMG, AppImage/deb — glibc, built on the normal runners) join the release with G3, unsigned at first, and are named `quack-gui-*` so they don't disturb the existing CLI archives, `.deb`/`.rpm` and formulas. Signing and notarization follow the same plan as the CLI's pending MSI work ([14](14-packaging-and-distribution.md#still-to-do)).
 - No self-updater in the GUI, matching [14](14-packaging-and-distribution.md). The CLI's first-frame budget and the TUI are untouched: `quack` builds and behaves exactly as before.
 
-Dependency budget, counted at the spike with `cargo tree -e normal` per the usual rule: tauri + the plugins above, roughly 120–180 crates, all MIT/Apache-2.0 dual-licensed (the spike confirms `cargo deny` passes), entering only the `gui` job's build. There is no server-side addition. npm dependencies stay inside `ui/` and lean (svelte, kit, vite, adapter-static, shiki, typescript).
+Dependency budget, counted at the spike with `cargo tree -e normal` per the usual rule: tauri + the plugins above, roughly 120–180 crates, all MIT/Apache-2.0 dual-licensed (the spike confirms `cargo deny` passes), compiled only when `--features desktop` is enabled. There is no server-side addition. npm dependencies stay inside `ui/` and lean (svelte, kit, vite, adapter-static, typescript, and optional `shiki/core`).
 
 ## Milestones
 
-- **G0 — spike.** Hello-world Tauri build and window on all four CI OSes (the unknown is `windows-11-arm`), `cargo deny` over the Tauri tree, crate counts, and the bridge core driven headless: the engine-per-tab registry against a mock webview sink and a wiremock model, including an approval round-trip, proving the command layer is testable without a window.
-- **G1 — desktop MVP.** `quack-gui` opens, one folder, one session: streamed turns with markdown and highlighting, approvals with diff, questions, interrupt, resume-in-folder and the model picker. Exit: bridge-core tests green, and a real turn run by hand on each OS.
-- **G2 — multi-folder and panels.** Tabs, trust gate, plan accept, `/context` and `/stats` panels, profile picker, images from dialogs and drag-drop, theme variables. Exit: a real task done against a local llama.cpp model.
-- **G3 — native integration and bundles.** Menus, tray, native dialogs, notifications when unfocused, clipboard, drag-drop polish, single instance; NSIS, DMG and AppImage/deb bundles, unsigned at first; the `gui` CI job green on all four OSes.
-- **G4 — parity and packaging.** The remaining commands become panels and palette entries (`/config`, `/permissions`, `/memory`, `/skills`, `/mcp`, `/lsp`, `/doctor`, `/export`, `/fork`, `/undo`, `/rewind`, `/key`, …), then signed bundles if the CLI's signing story lands first.
+- **G0 — spike.** Hello-world Tauri build and window (`quack-gui --features desktop`) on all four CI OSes (the unknown is `windows-11-arm`), `cargo deny` over the Tauri tree, crate counts, `ts-rs` export of `quack-protocol` into `protocol.ts`, and the pure-Rust bridge core driven headless: the engine-per-tab registry with 16 ms delta coalescing against a mock webview sink and a wiremock model, including an approval round-trip.
+- **G1 — desktop MVP.** `quack-gui` opens to the Welcome / Recent Folders view (or reopens the last folder), resolves the login-shell `PATH` on macOS/Linux, and finds `defaults/` across layouts (including macOS `.app` `Resources/`): first-run provider setup (`/setup`), streamed turns with markdown and highlighting, approvals with diff, questions, interrupt, session sidebar with resume (`ReplayItem` carrying `detail` and `Reasoning`), model picker and mode pill. Exit: bridge-core tests green, and a real turn run by hand on each OS.
+- **G2 — multi-folder, inline actions and inspector.** Multi-folder tabs (with duplicate-session guard and clean `engine.shutdown()`), project trust gate, plan checklist + review bar (`Op::AcceptPlan`) + sub-agent view, inline message rewind (`Op::Rewind`) and tool-card undo (`Op::Undo`), Context & Stats inspector popover, `@` file mentions and image drag-drop, dark/light themes. Exit: a real task done against a local llama.cpp model.
+- **G3 — Unified settings, native integration and bundles.** The tabbed Settings & Workspace dialog (*Providers & Profiles*, *Workspace*, *MCP & LSP*, *Settings & Doctor*) and `Ctrl-K`/`Cmd-K` command palette; native menus, window-state persistence, native dialogs, notifications when unfocused, clipboard, file reveal (`opener`), single instance (no system tray); NSIS, DMG and AppImage/deb bundles, unsigned at first; the `gui` CI job green on all four OSes.
+- **G4 — polish and signing.** Signed and notarized GUI bundles alongside the CLI's signing story ([14](14-packaging-and-distribution.md#still-to-do)), custom theme TOML files once M3 lands them, and any remaining UX polish from daily use.
 
-Estimated size: the MVP through G3 is of the order of 5–9k lines (about a quarter Rust, the rest TypeScript/Svelte); full parity is a quarter-sized tail, mostly panels.
+Estimated size: G1 through G3 is of the order of 4–7k lines (about a quarter Rust, the rest TypeScript/Svelte), kept small by generating `protocol.ts` and consolidating the 23 TUI modals into the four desktop surfaces above.
 
 ## Invariants checklist
 
 - **No built-ins:** nothing GUI-side names a provider, host or command; the GUI sees only the same bundle and layers.
 - **No implicit egress:** no listener, bundled assets, CSP; engines keep the egress gate.
-- **Prefix stability, defaults-as-data, MSRV:** untouched (clients only; `quack-gui` is excluded from the workspace-wide and MSRV jobs).
+- **Prefix stability, defaults-as-data, MSRV:** untouched (clients only; the `desktop` feature is only enabled in the `gui` job).
 - **Client independence:** `quack-gui` shares nothing with `quack-tui` or `quack-acp` except the protocol.
 
 ## Open questions
 
-- Hand-written TS types with fixtures versus ts-rs codegen; settle after the first schema pass.
-- Multi-window (one window per tab) versus tabs-only; sharing one session between the TUI and the GUI at once is out of scope.
+- Code highlighting in the transcript: `quack_core::grammar` (`tree-sitter-highlight` over IPC, reusing compiled-in grammars and user `highlights.scm` overrides with zero JS bundle weight) versus `shiki/core` (`shiki/engine/javascript` in a web worker); settle during G1.
+- Multi-window (one window per workspace) versus tabs-only; sharing one live session between the TUI and the GUI at once is out of scope.
 - A browser client over a loopback server was dropped on purpose; if it is ever wanted, it re-enters behind the SPA's `Transport` module as a small axum bridge, without moving the UI.
 - The daemon question in [12](12-headless-and-acp.md#open-questions) (TUI attaching to a headless engine) is unrelated to this client and stays deferred.
