@@ -98,6 +98,11 @@ version is the release tag. Unix archives are a prefix (`bin/quack`,
 `share/quack/defaults/`), Windows archives are flat (`quack.exe`, `defaults\`), matching
 where the binary looks for its bundle.
 
+The website also serves the installers as `https://quack.clackstack.dev/install.sh` and
+`install.ps1`, copied from `scripts/` when it builds (`website/vite.config.ts`), so the
+short URL the README and the site show is always the current script; the release asset
+stays pinned to its tag.
+
 The install scripts (`scripts/install.sh` for Linux and macOS, `scripts/install.ps1` for
 Windows) download the archive for this machine, check it against `SHA256SUMS`, and install
 the binary and the defaults:

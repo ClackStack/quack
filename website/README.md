@@ -19,6 +19,12 @@ It is laid out as plates in a field guide, with the TUI's own ASCII duck (`_(o)>
 
 Every claim should trace to the repo README, the roadmap or a test. Don't add figures that aren't there.
 
+## Install scripts
+
+The build copies `../scripts/install.sh` and `../scripts/install.ps1` into the output
+(`vite.config.ts`), so `https://quack.clackstack.dev/install.sh` and `/install.ps1` serve
+the same files the release publishes, and `scripts/` stays the single source.
+
 ## Development
 
 ```sh

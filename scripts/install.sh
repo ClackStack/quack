@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install quack on Linux or macOS.
 #
-#   curl -fsSL https://github.com/ClackStack/quack/releases/latest/download/install.sh | sh
+#   curl -fsSL https://quack.clackstack.dev/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --plucked
 #
 # By default this installs the binary and the defaults bundle (provider, model profile,

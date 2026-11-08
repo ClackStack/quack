@@ -254,6 +254,23 @@ Landings (2026-10-21):
   - Landed 2026-10-24: `quack acp` on stdio with its own wire types and JSON-RPC loop (no new crates); one engine per session in the session's folder, the editor's MCP servers added to `mcp.d`, `session/load` replaying saved sessions, approvals through `session/request_permission`, modes and the model as pickers, cancel ([12](12-headless-and-acp.md#as-implemented-2026-10-24)). Mock-server tests and a hand check over stdio; not yet run inside Zed or another editor. Still open: images, `fs`/`terminal` through the editor, slash commands, registry listing
 - Optional: code-execution sandbox tool (maki-style), repo map, OpenTelemetry export (opt-in), daemon/socket mode, quack-as-MCP-server
 
+## M7 — Desktop client: "the same engine in a window" (planned 2026-11-08)
+
+Tauri 2 + SvelteKit over Tauri IPC: the app is the client, with no server or socket (a browser-first `quack serve` was considered and dropped). A third client of the Op/Event protocol next to the TUI, `exec` and ACP; no new `Op` or `Event` needed ([15](15-desktop-client.md)). Spikes first:
+
+| Spike | Question to answer | Output |
+|---|---|---|
+| Tauri on the CI matrix | Does a hello-world `quack-gui` build and run on linux-x64 (webkit2gtk), macos-arm64, windows-x64 and windows-11-arm, and does the Tauri tree pass `cargo deny`? | Go/no-go, crate counts, notes in [15](15-desktop-client.md) |
+| IPC bridge core | The engine-per-tab registry driven headless (mock webview sink, wiremock model), including an approval round-trip | The G1 start |
+
+Milestones: G1 desktop MVP (window, streamed turns, approvals, resume, model picker) → G2 tabs, folders, trust, context/stats panels → G3 native integration and bundles (no musl artifacts, ever) → G4 command parity and signing. Details and exit criteria in [15](15-desktop-client.md#milestones).
+
+**Exit criteria**
+- [ ] G0 go/no-go recorded with crate counts and the `cargo deny` result
+- [ ] A scripted approval round-trip runs through the IPC bridge core (`quack-gui` tests against the wiremock engine)
+- [ ] `quack-gui` completes a real task against a local model on Linux, macOS and Windows x64 + ARM64
+- [ ] Workspace clippy/test/MSRV stay green with `quack-gui` excluded; no GUI artifacts change the existing release targets
+
 ## Cross-cutting, every milestone
 
 - Windows checklist items from each doc

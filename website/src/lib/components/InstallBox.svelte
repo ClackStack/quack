@@ -3,17 +3,19 @@
 
 	const repo = 'https://github.com/ClackStack/quack/releases';
 	const base = `${repo}/latest/download`;
+	const site = 'https://quack.clackstack.dev';
 	type Way = 'sh' | 'ps' | 'src';
 	const ways: { id: Way; label: string }[] = [
 		{ id: 'sh', label: 'Linux & macOS' },
 		{ id: 'ps', label: 'Windows' },
 		{ id: 'src', label: 'From source' }
 	];
-	// The commands from the installers' own headers; plucked leaves out the hosted services.
+	// The commands from the installers' own headers, served from the site; plucked leaves out
+	// the hosted services.
 	const command = (way: Way, plucked: boolean) =>
 		({
-			sh: plucked ? `curl -fsSL ${base}/install.sh | sh -s -- --plucked` : `curl -fsSL ${base}/install.sh | sh`,
-			ps: plucked ? `& ([scriptblock]::Create((irm ${base}/install.ps1))) -Plucked` : `irm ${base}/install.ps1 | iex`,
+			sh: plucked ? `curl -fsSL ${site}/install.sh | sh -s -- --plucked` : `curl -fsSL ${site}/install.sh | sh`,
+			ps: plucked ? `& ([scriptblock]::Create((irm ${site}/install.ps1))) -Plucked` : `irm ${site}/install.ps1 | iex`,
 			src: plucked ? 'scripts/install.sh --from-source --plucked' : 'scripts/install.sh --from-source'
 		})[way];
 

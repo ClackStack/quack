@@ -31,6 +31,7 @@ A fast, context-efficient coding agent for **self-hosted and open-weight models*
 | 12 | [Headless & ACP](12-headless-and-acp.md) | `exec` mode, stream-json output, Agent Client Protocol |
 | 13 | [Testing & evals](13-testing-and-evals.md) | Unit/snapshot/fixture tests, invariants, model compatibility matrix, perf budgets |
 | 14 | [Packaging & distribution](14-packaging-and-distribution.md) | Defaults bundle, release artifacts, enterprise and air-gapped builds |
+| 15 | [Desktop client](15-desktop-client.md) | Tauri + SvelteKit GUI client over Tauri IPC |
 | — | [Roadmap](roadmap.md) | Milestones M0–M6 with exit criteria |
 
 ## Decisions log
@@ -54,6 +55,7 @@ A fast, context-efficient coding agent for **self-hosted and open-weight models*
 | 2026-10-17 | Model profiles (prompt + tool surface per model family) are data, not code | Inspired by Open Interpreter's per-model harnesses, which are compiled in |
 | 2026-10-17 | Edition 2024; toolchain pinned to 1.99.1; MSRV = pinned minus two releases (1.97) | `rust-toolchain.toml`; CI runs a separate MSRV check |
 | 2026-10-17 | Scaffold landed | Workspace compiles on Linux, macOS and Windows targets; see [roadmap](roadmap.md#scaffold-m1-kickoff) |
+| 2026-11-08 | Desktop client: Tauri 2 + SvelteKit over Tauri IPC, no server and no browser mode; gpui evaluated and passed over | [15](15-desktop-client.md) |
 
 ## Open decisions
 

@@ -1,6 +1,6 @@
 # Install quack on Windows.
 #
-#   irm https://github.com/ClackStack/quack/releases/latest/download/install.ps1 | iex
+#   irm https://quack.clackstack.dev/install.ps1 | iex
 #   & ([scriptblock]::Create((irm .../install.ps1))) -Plucked
 #
 # By default this installs the binary and the defaults bundle (provider, model profile,
