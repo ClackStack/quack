@@ -1,0 +1,171 @@
+# 14 — Packaging & Distribution
+
+## Principle
+
+The **binary** and the **defaults** stay separate on disk (nothing is compiled in), but the
+normal install ships both. Most people install `quack` and get everything; organisations
+that run their own model server install `quack-plucked`, the same bundle without the
+provider files for hosted services (2026-10-26). The core prompt (`generic`) and the
+`explore` and `general` sub-agents are compiled into the binary from the bundle's own
+files, so the binary alone is a complete agent.
+
+| Part | Contains | Who removes what |
+|---|---|---|
+| binary | Engine, adapters (per features), grammars (per features), two themes, the `generic` profile and `explore`/`general` agents (from the bundle's files, `include_str!`), empty fallback profile, minimal deny-list floor | Recompile with fewer features; `enabled = false` files turn the compiled-in items off |
+| defaults bundle | `providers.d/`, `profiles.d/`, `agents.d/`, `mcp.d/` (examples, disabled), `lsp.d/`, `hooks.d/` (example, disabled), `themes/`, `grammars/` queries, `schemas/`, `compat.toml` (other-harness detection list) | Delete files; `--plucked` leaves out the hosted-service providers |
+
+| Release flavour | Contains |
+|---|---|
+| `quack` (default) | binary + defaults bundle |
+| `quack-plucked` (`--plucked`) | binary + defaults bundle without the provider files whose `base_url` is off the machine (`scripts/copy-defaults.sh`) |
+
+## Where defaults live after install
+
+Defaults are installed into a **read-only shared data directory**, which is loaded as an extra layer *beneath* the system layer:
+
+| OS | Defaults dir |
+|---|---|
+| Linux (package) | `/usr/share/quack/defaults/` |
+| Linux/macOS (tarball / install script) | `<prefix>/share/quack/defaults/` beside `<prefix>/bin/quack` (default prefix `~/.local`) |
+| macOS (Homebrew) | `$(brew --prefix)/share/quack/defaults/` |
+| Windows (MSI) | `%ProgramFiles%\quack\defaults\` |
+| Windows (zip / install script) | `defaults\` beside `quack.exe` (default `%LOCALAPPDATA%\Programs\quack\`) |
+| Fallback | `<user data>/defaults/` |
+| Override | `QUACK_DEFAULTS_DIR`, or `[defaults] dir = ""` in system config, or `dir = "none"` to disable |
+
+So the full precedence becomes: **compiled settings defaults → defaults bundle → system → user → project → env → CLI**.
+
+Users or companies remove a capability in one of three ways:
+1. Delete the file from the defaults directory (or don't install the bundle at all).
+2. Override it with `enabled = false` in user/system `providers.d/<id>.toml`.
+3. Set `[defaults] dir = "none"` and ship only their own files in the system layer.
+
+`quack defaults list` shows which defaults are active and which are overridden or disabled, and where each comes from.
+
+## First-run experience
+
+When no provider is configured:
+- The startup panel shows **"No providers configured"** with the paths that were searched.
+- `quack setup` (also reachable from the panel) is an interactive wizard:
+  1. Lists provider files found in the defaults dir, and lets the user enable one by copying it to the user layer (`toml_edit`, comments preserved).
+  2. Offers **local server detection**, but only when the user explicitly picks it: it probes `localhost:11434` (Ollama), `:8080` (llama.cpp), `:8000` (vLLM), `:1234` (LM Studio), `:30000` (SGLang). These are loopback only.
+  3. Asks for the API key, using the secret form of the user's choice (env / keyring / cmd).
+  4. Runs model discovery and picks a default model.
+- No wizard step needs internet access.
+- Goal: from install to a first working turn **in under a minute** on a machine already running a local server. Detection is also offered from the startup panel's "No providers configured" state, so users don't need to know about `quack setup`. Detected servers are written as minimal provider files (just `base_url`, plus `api = "ollama"` for Ollama), following [01](01-configuration.md).
+
+### As implemented (2026-10-18)
+
+- `quack setup` asks one question at a time and reads plain lines, so it can also be scripted through stdin. It offers three choices:
+  1. **Look for servers on this machine.** It probes 127.0.0.1 on ports 11434, 8080, 8000, 1234 and 30000, waiting 1.5 s on each. A server counts only when it answers with a model list.
+  2. **Use a hosted service** from the configured ones (out of the box, the bundle's open-model services and model makers' APIs and coding plans), grouped by each file's `group`. A service whose key is set is used as is. Otherwise the key goes into the OS credential store and the file is copied to the user layer with `api_key = { keyring = "<id>" }`, or the wizard says which variable to set.
+  3. **Add a server by URL.** An optional key is stored in the credential store.
+
+  It then lists the provider's models and saves the chosen one as `model.default`.
+- `/setup` in the TUI runs the same local detection and shows one row per server and model. Enter writes the provider file and switches to that model, which becomes `model.default` only if none is set. A server that a configured provider already points at is reused rather than written again.
+- Files written are minimal: a comment and `base_url`, plus `api_key` when a key was given. If the id is already taken, a number is added (`server-2`). A server that a configured provider already points at is reused. A provider the system policy would disable is refused.
+- The wizard and `/setup` only offer the loaded providers; the binary contains no server addresses ([02](02-providers.md#servers-not-engines-2026-10-18)). Option 1 probes the loopback ones; option 3 takes any URL.
+- The "no providers configured" startup message names `/setup` and `quack setup`.
+- Code: `quack-core/src/setup.rs` (shared), `quack-cli/src/setup.rs` (wizard), `Op::DetectServers` / `Op::AddProvider`.
+
+### Setup in the TUI (2026-10-20)
+
+Someone who installs `quack-plucked` and runs `quack` should not have to know about `quack setup`. So the TUI now covers all three of the wizard's choices:
+- **It opens on its own.** When startup ends with no model ready and no `[model] default` configured, `/setup` opens once, unless a trust prompt is waiting. That offer does not probe anything: "find servers on this machine" waits for Enter, so detection still runs only when asked. Typing `/setup` yourself probes at once, as before.
+- **Three tabs:** *This machine* (detection, as before), *Hosted services* (the configured services that take a key, from `Op::ListServices`; with no defaults bundle this tab says so and points to the next one), and *Any server* (by URL, plus how to write a provider file by hand).
+- **Keys are typed into a prompt box** that shows them as dots. Entering a key was earlier left to `quack setup` so that keys never went through the TUI. It is allowed now with these limits: the key never enters the input, its history or the transcript. It travels in `Op::SetProviderKey` / `Op::AddServer` as a `SecretText`, whose `Debug` output is redacted. The engine stores it in the OS credential store under the provider id (on `spawn_blocking`, because Linux shells out to `secret-tool`) and writes only `api_key = { keyring = "<id>" }`. If the credential store is unavailable, the error says so, and the service's row explains how to use its variable instead.
+- **A URL** is checked for `http(s)://`, and the id comes from the host (`setup::id_from_url`, shared with the wizard). It asks no name question.
+- **Then the model:** once the engine replies with `Event::ProviderAdded`, it sends `Event::ModelCatalog` for that provider alone, and the TUI opens `/models` on it. A model picked there is remembered as the last used one, so the next start uses it. A ready hosted service goes straight to `/models`, filtered to its id.
+- Tests: `core/tests/setup.rs` (adding a server by URL, listing services, refusals), and the TUI tests `first_run_offers_setup_and_adds_a_server_by_url` (the key is never drawn, never in `Debug`, never in the input) and `setup_is_not_offered_when_a_model_is_ready_and_esc_backs_out_of_a_prompt`.
+
+## Release artifacts
+
+### As implemented (2026-10-18)
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds each target, packs it with
+`scripts/package.sh`, and publishes a GitHub release. cargo-dist was dropped: it has no
+notion of two flavours of one binary, and the hand-written workflow is about 60 lines.
+
+| Target | Archives |
+|---|---|
+| `x86_64`/`aarch64-unknown-linux-musl` (static) | `quack-<target>.tar.gz`, `quack-plucked-<target>.tar.gz` |
+| `x86_64`/`aarch64-apple-darwin` | same |
+| `x86_64`/`aarch64-pc-windows-msvc` | `quack-<target>.zip`, `quack-plucked-<target>.zip` |
+| All | `install.sh`, `install.ps1`, `SHA256SUMS` |
+
+Asset names carry no version, so `releases/latest/download/<name>` always works; the
+version is the release tag. Unix archives are a prefix (`bin/quack`,
+`share/quack/defaults/`), Windows archives are flat (`quack.exe`, `defaults\`), matching
+where the binary looks for its bundle.
+
+The install scripts (`scripts/install.sh` for Linux and macOS, `scripts/install.ps1` for
+Windows) download the archive for this machine, check it against `SHA256SUMS`, and install
+the binary and the defaults:
+
+- `--plucked` (`-Plucked`): the plucked archive, whose bundle has no hosted-service
+  providers. With `--from-source`, the checkout's bundle is filtered the same way.
+- `--binary-only` (`-BinaryOnly`): the binary only. An existing defaults folder is left
+  alone; a fresh install this way has none, and runs on the compiled-in core.
+- `--prefix`, `--version`, `--archive FILE` (offline installs), `--from-source [DIR]` (build
+  a checkout with cargo), `--uninstall` (keeps config, sessions and memory).
+- The binary is replaced by renaming, so a running quack is never left with a half-written
+  file (Windows renames the running exe out of the way).
+- A full install replaces the defaults folder as a whole, so files removed upstream go away
+  and files the user deleted come back. Turning a default off for good is done in the user
+  layer (`enabled = false`), or by updating with `--binary-only`.
+- Windows adds the install folder to the user `PATH`; Unix prints a hint if `bin` is not on it.
+
+### Packages, formulas and SBOM (2026-10-25)
+
+- `scripts/package-linux.sh <target> <version>` builds `quack_<v>_<arch>.deb` and `quack-plucked_<v>_<arch>.deb`. They conflict with and replace each other, install `/usr/bin/quack` and `/usr/share/quack/defaults` (the plucked bundle for `quack-plucked`), and depend on nothing, since the binaries are static. It uses `dpkg-deb` alone, with no cargo plugin. Where `rpmbuild` is installed, the same layout also becomes `.rpm`s. The release's musl jobs install `rpm` and run it on tags. The `.deb` was checked locally (`dpkg-deb --info/--contents`, and an unpacked binary found its bundle). The `.rpm` path runs first in CI.
+- `scripts/homebrew.sh <version> SHA256SUMS` writes `quack.rb` and `quack-plucked.rb` (macOS and Linux, ARM and Intel, `conflicts_with` each other) into the release for a tap repository. Publishing the tap is left to the maintainer.
+- The publish job runs `cargo cyclonedx` (0.5.9, pinned) on `quack-cli` for all targets and attaches `quack.cdx.json` (CycloneDX 1.5; 430 components on 2026-10-25).
+- `docs/enterprise.md` is written: packages, the system policy with a checked example, a company defaults bundle, the air-gapped build (run with vendored sources, an empty `CARGO_HOME` and `--offline`), and checking egress.
+
+### Still to do
+
+| Platform | Artifacts |
+|---|---|
+| macOS | notarization |
+| Windows | **MSI** (per-machine and per-user), signed (Authenticode); needs WiX on a Windows runner |
+| All | signatures |
+
+**No self-updater** is built in. Updates come through package managers, the install scripts or the enterprise's own distribution.
+
+### Version checks (2026-11-04)
+
+- `quack update` asks `updates.url` for the latest version, then prints the command for this install, going by where the binary lives: `brew upgrade <formula>` under a `Cellar`, the package manager under `/usr/bin`, "build again" for `target/` and `.cargo/`, otherwise the install script. It changes nothing. Replacing the binary waits for signatures and notarization: `SHA256SUMS` comes from the same place as the binary, package-managed installs shouldn't be overwritten, Windows can't overwrite a running exe, and the bundle must move with the binary.
+- `updates.check = true` does the same check at most once a day in the background and sends `Event::UpdateAvailable`, which only the TUI shows. The last answer is kept in `checks.json` in the cache directory, so the notice returns on each start without another request. A failed check counts as a check and stays quiet.
+- The default `updates.url` is GitHub's `releases/latest`. quack reads the redirect's last path segment and doesn't follow it, so only `github.com` is contacted, with no API rate limit. A mirror can answer with the version as text instead. The URL is in `defaults/config.toml`, which `quack-plucked` leaves out, so plucked names no outside host: `quack update` there says to set `updates.url`.
+- `quack setup` asks once, naming the hosts, whether to turn on both checks (default no; the answer is saved, so it isn't asked again). `/setup` has a Checks tab, unless there are no URLs or `network.offline` is on, and `/config` and TOML work too. `network.offline` and policy hosts block the checks ([11](11-security.md#network-egress-policy)); an administrator can also lock `updates` or `catalog`.
+
+## Enterprise builds
+
+Documented in [`docs/enterprise.md`](../enterprise.md) (2026-10-25). The original sketch:
+
+```bash
+git clone https://github.com/<org>/quack && cd quack
+rm -rf defaults/providers.d/* defaults/mcp.d/*
+cp ~/corp/providers/corp-vllm.toml defaults/providers.d/
+cargo vendor > .cargo/config.toml           # air-gapped builds
+cargo build --release --locked --offline \
+  --no-default-features --features proto-openai-chat,lang-common,tokenizers-hf
+```
+
+- A system `config.toml` with `[policy]` locks (offline, allowed providers and provider hosts, max permission mode, audit path), distributed through MDM/GPO/Ansible. `[policy.providers] hosts = ["llm.corp.example"]` guarantees no other model server is contacted, even if the bundle's files are left in place.
+- Windows: an MSI with transforms (MST) can drop the system config into `%ProgramData%\quack\`. Group Policy is not supported natively; the config file is the policy surface.
+- Reproducible builds: `--locked`, pinned toolchain via `rust-toolchain.toml`, `SOURCE_DATE_EPOCH`.
+
+## Licensing hygiene
+
+- `LICENSE` (Apache-2.0) and a `NOTICE` that lists ported code: codex (Apache-2.0) for apply_patch, sandbox and execpolicy pieces; maki (MIT) for whatever we port; goose (Apache-2.0).
+- Ported files keep their original copyright header and add ours.
+- `cargo-deny` allowlist: Apache-2.0, MIT, BSD-2/3, ISC, Zlib, Unicode-3.0, MPL-2.0 (file-level, review case by case). **No** GPL/AGPL in the dependency graph, so enterprises can redistribute.
+- Default profiles: provenance field required, permissive sources only ([03](03-model-profiles.md)).
+- Tokenizer files bundled in defaults: each one keeps its model's licence file alongside it. If redistribution isn't allowed, it is not bundled and `quack tokenizer fetch` is documented instead.
+
+## Open questions
+
+- Should we publish to crates.io (`cargo install quack`)? That gives a plucked binary. Defaults
+  would then come from `install.sh` or `quack setup --download-defaults` (opt-in, blocked
+  offline).

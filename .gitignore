@@ -1,0 +1,89 @@
+# --- Rust build output ---
+/target/
+**/target/
+# Cargo.lock is committed on purpose: this workspace ships a binary.
+
+# Backup files left by rustfmt
+**/*.rs.bk
+
+# Profiling and coverage
+*.profraw
+*.profdata
+/coverage/
+lcov.info
+tarpaulin-report.html
+cobertura.xml
+flamegraph.svg
+perf.data*
+
+# cargo-fuzz (added in M2)
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+
+# cargo-dist / release staging
+/dist/
+
+# --- Test artifacts ---
+# insta writes these when a snapshot changes; accept with `cargo insta review`.
+*.snap.new
+*.pending-snap
+
+# --- Local secrets and environment ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!defaults/**/*.pem
+
+# --- Logs and scratch files ---
+*.log
+# An eval task fixture, not a log: the log-parser task's tests read it.
+!evals/hard/log-parser/repo/sample.log
+/tmp/
+/scratch/
+.impeccable
+PRODUCT.md
+
+# --- Editors and IDEs ---
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.fleet/
+.zed/
+*.swp
+*.swo
+*~
+\#*\#
+.\#*
+
+# --- OS files ---
+.DS_Store
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# --- Local agent state ---
+# Session logs, checkpoints and memory live in the user data directory by default.
+# If a developer points them inside the repo, keep them out of commits:
+/.quack/sessions/
+/.quack/checkpoints/
+/.quack/*.local.toml
+
+# Model downloads for the local-server CI jobs (scripts/local-server-ci.sh)
+.ci-models/
+
+# --- Skills ---
+.skills
+.agents/skills
+.claude/skills
+frontierharness-eval/
+
+# Python bytecode from running the eval tasks locally.
+__pycache__/

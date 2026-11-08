@@ -1,0 +1,10 @@
+#:schema schemas/config.json
+# Where quack can look, if you ask it to. Nothing here is contacted on its own: `catalog.refresh`
+# and `updates.check` are off until you turn them on, and `quack catalog refresh` and
+# `quack update` run only when you run them. quack-plucked installs leave this file out.
+
+[catalog]
+url = "https://models.dev/api.json"
+
+[updates]
+url = "https://github.com/paulhovey/quack/releases/latest"

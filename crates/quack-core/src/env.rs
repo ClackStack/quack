@@ -1,0 +1,276 @@
+//! Session-start facts for the system prompt: date, git branch, folder listing, AGENTS.md.
+//! Captured once so the rendered prompt stays byte-stable for the whole session.
+
+use std::path::Path;
+
+use quack_config::Loaded;
+use quack_config::settings::MemoryScope;
+use quack_instructions::compat::Compat;
+use quack_instructions::{agents_md, skills};
+use quack_store::memory::MemoryStore;
+use quack_store::session::project_key;
+
+const LISTING_MAX: usize = 40;
+
+/// `YYYY-MM-DD` (UTC) for today.
+pub(crate) fn today() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = i64::try_from(secs / 86_400).unwrap_or(0);
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Current branch from `.git/HEAD`, following a worktree's `gitdir:` file.
+pub(crate) fn git_branch(root: &Path) -> String {
+    let dot_git = root.join(".git");
+    let git_dir = if dot_git.is_file() {
+        std::fs::read_to_string(&dot_git)
+            .ok()
+            .and_then(|s| s.strip_prefix("gitdir:").map(|p| root.join(p.trim())))
+    } else {
+        Some(dot_git)
+    };
+    git_dir
+        .and_then(|d| std::fs::read_to_string(d.join("HEAD")).ok())
+        .map(|head| match head.trim().strip_prefix("ref: refs/heads/") {
+            Some(b) => b.to_owned(),
+            None => format!(
+                "detached at {}",
+                head.trim().chars().take(12).collect::<String>()
+            ),
+        })
+        .unwrap_or_default()
+}
+
+/// Top-level entries of the workspace, directories first, capped.
+pub(crate) fn folder_listing(root: &Path) -> String {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return String::new();
+    };
+    let mut items: Vec<(bool, String)> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name() != ".git")
+        .map(|e| {
+            let dir = e.file_type().is_ok_and(|t| t.is_dir());
+            (!dir, e.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    items.sort();
+    let total = items.len();
+    let mut out: Vec<String> = items
+        .into_iter()
+        .take(LISTING_MAX)
+        .map(|(file, name)| if file { name } else { format!("{name}/") })
+        .collect();
+    if total > LISTING_MAX {
+        out.push(format!("… {} more", total - LISTING_MAX));
+    }
+    out.join("\n")
+}
+
+/// AGENTS.md: the system and user layers, then the chain from the workspace root down to
+/// the cwd (docs/plan/08-instructions-skills-commands.md#discovery).
+pub(crate) fn instructions(config: &Loaded) -> agents_md::Loaded {
+    let d = &config.dirs;
+    let mut globals: Vec<(std::path::PathBuf, std::path::PathBuf)> =
+        vec![(d.system.join("AGENTS.md"), d.system.clone())];
+    // The user's own AGENTS.md, or else another agent's global file (~/.claude/CLAUDE.md…).
+    let own = d.user_config.join("AGENTS.md");
+    let get = |k: &str| std::env::var_os(k);
+    let user = std::iter::once(own.clone())
+        .chain(
+            other_agents(config)
+                .user
+                .iter()
+                .map(|f| quack_config::expand_home(f, &get)),
+        )
+        .find(|p| p.is_file())
+        .unwrap_or(own);
+    let scope = user
+        .parent()
+        .map_or_else(|| d.user_config.clone(), Path::to_path_buf);
+    globals.push((user, scope));
+    agents_md::load(&globals, &d.workspace_root, &d.cwd, &rules(config))
+}
+
+/// Other agents' instruction files (`compat.toml`), unless `[instructions] other_agents`
+/// is off.
+pub(crate) fn other_agents(config: &Loaded) -> Compat {
+    if !config.settings.instructions.other_agents {
+        return Compat::default();
+    }
+    let dirs: Vec<std::path::PathBuf> = config.item_layers().into_iter().map(|(_, d)| d).collect();
+    Compat::load(&dirs)
+}
+
+/// Other agents' files at the workspace root whose content is not in its AGENTS.md, for
+/// the offer to merge them (`/init`).
+pub(crate) fn unmerged(config: &Loaded) -> Vec<String> {
+    let root = &config.dirs.workspace_root;
+    let agents = config
+        .settings
+        .instructions
+        .files
+        .first()
+        .map_or_else(|| root.join("AGENTS.md"), |f| root.join(f));
+    other_agents(config).found(root, &agents)
+}
+
+pub(crate) fn rules(config: &Loaded) -> agents_md::Rules {
+    let s = &config.settings.instructions;
+    let mut names = s.files.clone();
+    names.extend(other_agents(config).project);
+    agents_md::Rules {
+        names,
+        max_bytes: usize::try_from(s.max_bytes).unwrap_or(usize::MAX),
+    }
+}
+
+/// Memory notes: `[memory] path` (default `<user data>/memory`) for global notes; project
+/// notes under it in `projects/<key>/`, or in the repository with `project_scope = "repo"`.
+pub(crate) fn memory_store(config: &Loaded) -> MemoryStore {
+    let m = &config.settings.memory;
+    let global = if m.path.is_empty() {
+        config.dirs.user_data.join("memory")
+    } else {
+        quack_config::expand_home(&m.path, &|k| std::env::var_os(k))
+    };
+    let project = match m.project_scope {
+        MemoryScope::Repo => config.dirs.project.join("memory"),
+        MemoryScope::DataDir => global
+            .join("projects")
+            .join(project_key(&config.dirs.workspace_root)),
+    };
+    // About 3.5 bytes per token.
+    MemoryStore::new(global, project).with_index_cap(m.index_max_tokens as usize * 7 / 2)
+}
+
+/// Skill folders, lowest precedence first: system, user, `~/.agents/skills`, the project
+/// (`.quack/skills` when trusted, `.agents/skills`), then `[skills] compat_paths`.
+/// Custom slash commands from each layer's `commands/` folder (the project's only when
+/// trusted).
+pub(crate) fn commands(
+    config: &Loaded,
+) -> (
+    Vec<quack_instructions::commands::CustomCommand>,
+    Vec<String>,
+) {
+    let roots: Vec<(String, std::path::PathBuf)> = config
+        .item_layers()
+        .into_iter()
+        .map(|(kind, dir)| (kind.to_string(), dir.join("commands")))
+        .collect();
+    quack_instructions::commands::discover(&roots)
+}
+
+pub(crate) fn skills(config: &Loaded) -> skills::Found {
+    let d = &config.dirs;
+    // A layer's enabled bundles come just before the layer, which wins over them.
+    let bundles = |layer: quack_config::LayerKind| {
+        config
+            .bundles
+            .iter()
+            .filter(move |b| b.enabled && b.layer == layer)
+            .map(move |b| (format!("{layer} bundle {}", b.id), b.dir.join("skills")))
+    };
+    let mut roots: Vec<(String, std::path::PathBuf)> = Vec::new();
+    roots.extend(bundles(quack_config::LayerKind::System));
+    roots.push(("system".into(), d.system.join("skills")));
+    roots.extend(bundles(quack_config::LayerKind::User));
+    roots.push(("user".into(), d.user_config.join("skills")));
+    if let Some(h) = &d.home {
+        roots.push((
+            "user (~/.agents/skills)".into(),
+            h.join(".agents").join("skills"),
+        ));
+    }
+    let project_trusted = config
+        .item_layers()
+        .iter()
+        .any(|(k, _)| *k == quack_config::LayerKind::Project);
+    if project_trusted {
+        roots.extend(bundles(quack_config::LayerKind::Project));
+        roots.push(("project".into(), d.project.join("skills")));
+    }
+    roots.push((
+        "project (.agents/skills)".into(),
+        d.workspace_root.join(".agents").join("skills"),
+    ));
+    for p in &config.settings.skills.compat_paths {
+        let path = quack_config::expand_home(p, &|k| std::env::var_os(k));
+        roots.push((format!("compat ({p})"), d.workspace_root.join(path)));
+    }
+    skills::discover(&roots, &config.settings.skills.disabled)
+}
+
+/// The defaults bundle's sub-agents, compiled in so the `task` tool works without the
+/// bundle. A file with the same id in any layer replaces one; `enabled = false` turns it off.
+const BUILTIN_AGENTS: [(&str, &str); 2] = [
+    (
+        "explore",
+        include_str!("../../../defaults/agents.d/explore.toml"),
+    ),
+    (
+        "general",
+        include_str!("../../../defaults/agents.d/general.toml"),
+    ),
+];
+
+/// `agents.d`, plus the built-in agents no layer replaces: the enabled agents by id, and a
+/// warning for each file that failed.
+pub(crate) fn agents(config: &Loaded) -> (Vec<(String, quack_config::AgentFile)>, Vec<String>) {
+    let mut out = Vec::new();
+    let mut warnings = Vec::new();
+    let items = quack_config::load_agents(config);
+    for (id, text) in BUILTIN_AGENTS {
+        if items.iter().all(|i| i.id != id) {
+            let agent = toml::from_str(text).expect("the bundled agent files parse");
+            out.push((id.to_owned(), agent));
+        }
+    }
+    for item in items {
+        match item.state {
+            quack_config::ItemState::Loaded(a) => out.push((item.id, a)),
+            quack_config::ItemState::Failed(d) => {
+                warnings.push(format!("agent skipped: {}", d.one_line()));
+            }
+            quack_config::ItemState::Disabled(_) => {}
+        }
+    }
+    // In id order, as the bundle's files load, so the task tool's description is the same
+    // with or without the bundle.
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    (out, warnings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_agents_parse() {
+        for (id, text) in BUILTIN_AGENTS {
+            let a: quack_config::AgentFile = toml::from_str(text).expect(id);
+            assert!(!a.description.is_empty(), "{id}");
+        }
+    }
+
+    #[test]
+    fn date_shape() {
+        let d = today();
+        assert_eq!(d.len(), 10);
+        assert!(d.starts_with("20"), "{d}");
+    }
+}

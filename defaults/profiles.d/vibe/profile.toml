@@ -1,0 +1,63 @@
+#:schema ../../schemas/profile.json
+description = "Mistral Vibe-shaped tools (read_file, write_file, edit, bash, grep, todo) for Mistral coding models"
+source = "Original prompt text (quack project, Apache-2.0). Only the tool names and parameter shapes follow mistralai/mistral-vibe (Apache-2.0); no Vibe text is used"
+
+# Measured once (2026-10-21, openrouter/mistralai/mistral-large-4-0, hard suite,
+# single pass): 14/14 like `generic`, but 172 vs 236 steps, $0.94 vs $1.70, parse
+# failures 0 vs 12, edit failures 1 vs 23; eval-compare calls steps, cost and prompt
+# tokens clearly lower. [match] stays empty until --repeat 3 confirms it (about $8
+# at 2026-10-21 prices). Proposed:
+#   model = ["*mistral-large-4*", "*mistral-codestral*"]
+#   priority = 50
+# Use it now with `profile = "vibe"` on a model.
+[match]
+model = []
+
+[defaults]
+edit_format = "str_replace"
+
+[[tools]]
+name = "read_file"
+maps_to = "read"
+description = "Reads a file, line-numbered. `offset` is the 1-based line to start from and `limit` caps the lines returned; long reads are clipped, so locate what you need with `grep` first and read that range."
+
+[[tools]]
+name = "write_file"
+maps_to = "write"
+description = "Creates a file, or replaces one entirely, with the given content."
+
+[[tools]]
+name = "edit"
+maps_to = "edit"
+description = "Replaces an exact string in a file. Whitespace matters: copy `old_string` exactly from what you read, and include enough surrounding lines to make it unique. Set `replace_all` only when every occurrence should change."
+
+[[tools]]
+name = "bash"
+maps_to = "shell"
+description = "Runs a shell command and returns its output with the exit status. Prefer the dedicated file and search tools over shell utilities when one fits (`read_file` over cat, `grep` over grep/sed/awk, `edit`/`write_file` over sed and redirects); fall back to the shell only when a dedicated tool cannot do it."
+
+[[tools]]
+name = "grep"
+maps_to = "grep"
+
+[[tools]]
+name = "todo"
+maps_to = "todo"
+description = "Writes the whole todo list, replacing the previous one. Use it for multi-step work: pending, in_progress for what is being worked on now, and completed items kept in place."
+[tools.params]
+todos = { to = "items" }
+
+[[tools]]
+name = "task"
+maps_to = "task"
+description = "Delegates a self-contained job to a specialized subagent with its own context window and returns its report. Give it the task in full; it cannot ask you questions."
+[tools.params]
+task = { to = "prompt" }
+
+[[tools]]
+name = "ask_user_question"
+maps_to = "ask_user"
+
+[[tools]]
+name = "skill"
+maps_to = "skill"

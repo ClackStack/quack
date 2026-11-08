@@ -1,0 +1,47 @@
+[package]
+name = "quack-providers"
+description = "Wire-protocol adapters, streaming, tool-call normalization and tokenizers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+quack-protocol.workspace = true
+quack-config.workspace = true
+futures.workspace = true
+regex.workspace = true
+# rustls-no-provider: reqwest builds no TLS backend in; the rustls dependency below
+# selects ring for the whole process (the runner cross-builds four targets, and
+# aws-lc-sys would spend a cmake C build on each for no FIPS requirement we have).
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "stream", "json", "http2", "system-proxy"] }
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tracing.workspace = true
+# Already built for the TLS stack; the ChatGPT sign-in uses its SHA-256, RSA and random.
+ring = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+wiremock.workspace = true
+tempfile.workspace = true
+ring = { workspace = true }
+
+[features]
+proto-openai-chat = []
+proto-openai-responses = []
+proto-anthropic = []
+proto-ollama = []
+auth-chatgpt = ["proto-openai-responses", "dep:ring"]
+tokenizers = []
+
+[lints]
+workspace = true

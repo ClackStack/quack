@@ -1,0 +1,3515 @@
+use std::cell::Cell;
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+use crossterm::event::{
+    Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
+use quack_config::settings::{ShowReasoning, StartupPanel, UiSettings};
+use quack_config::{LayerStatus, Loaded, SettingRow};
+use quack_protocol::{
+    Answer, ApprovalDecision, ApprovalRequest, CallId, Event, ExportFormat, InputItem, KeySource,
+    LoadState, ModelId, Op, ProviderId, Question, ReplayItem, SecretText, SessionId, Subsystem,
+    TurnOverrides, WriteScope,
+};
+use ratatui::layout::Rect;
+
+use crate::commands::{self, COMMANDS, Command};
+use crate::fuzzy;
+use crate::input::Input;
+use crate::modal::{self, Modal, ModalOutcome};
+use crate::select::{self, Pane, Selection};
+use crate::theme::{Glyphs, Theme};
+
+const DOUBLE_CTRL_C: Duration = Duration::from_millis(1500);
+const DOUBLE_ESC: Duration = Duration::from_millis(600);
+/// Spinner advances every N frames (16 ms each).
+const SPIN_EVERY: u64 = 5;
+/// Welcome duck advances animation every N frames (16 ms each).
+const DUCK_ANIM_EVERY: u64 = 8;
+/// `startup_panel = "auto"`: frames (16 ms each) a clean startup gets before the panel
+/// shows, so a fast start never flashes it. Problems show it at once.
+const PANEL_GRACE: u64 = 30;
+/// Transcript rows one mouse-wheel notch scrolls.
+const WHEEL_ROWS: usize = 3;
+/// Frames (16 ms each) the status bar says a selection was copied.
+const COPIED_FRAMES: u64 = 125;
+
+/// Static facts the UI shows, captured once at startup.
+#[derive(Debug, Clone)]
+pub struct AppInfo {
+    pub version: String,
+    pub cwd: String,
+    /// The checked-out git branch, or a short commit when detached.
+    pub branch: Option<String>,
+    pub model: Option<String>,
+    pub profile: String,
+    pub permission_mode: String,
+    pub ui: UiSettings,
+    pub no_color: bool,
+    /// Effective settings for `/config`.
+    pub settings: Vec<SettingRow>,
+    /// `(layer, status and file)` rows for `/config`.
+    pub layers: Vec<(String, String)>,
+    /// `(list, rule)` from `[permissions]`, e.g. `("allow", "shell:git status*")`.
+    pub rules: Vec<(String, String)>,
+    /// `grammars/` folders of the active layers, lowest first, for highlighting.
+    pub grammar_dirs: Vec<std::path::PathBuf>,
+    /// Installed bundles, for `/bundles`.
+    pub bundles: Vec<quack_config::Bundle>,
+    /// `[bundles] disabled` as configured, including names not installed.
+    pub bundles_disabled: Vec<String>,
+}
+
+impl AppInfo {
+    pub fn from_config(config: &Loaded) -> Self {
+        let root = config.dirs.workspace_root.display().to_string();
+        let home =
+            std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default();
+        let cwd = match root.strip_prefix(&home) {
+            Some(rest) if !home.is_empty() => format!("~{rest}"),
+            _ => root,
+        };
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            branch: git_branch(&config.dirs.workspace_root),
+            cwd,
+            model: Some(config.settings.model.default.clone()).filter(|m| !m.is_empty()),
+            profile: "empty".into(),
+            permission_mode: config.settings.permissions.mode.label().to_owned(),
+            ui: config.settings.ui.clone(),
+            no_color: std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
+            settings: config.setting_rows(),
+            grammar_dirs: config
+                .item_layers()
+                .into_iter()
+                .map(|(_, d)| d.join("grammars"))
+                .collect(),
+            bundles: config.bundles.clone(),
+            bundles_disabled: config.settings.bundles.disabled.clone(),
+            rules: {
+                let p = &config.settings.permissions;
+                [("deny", &p.deny), ("ask", &p.ask), ("allow", &p.allow)]
+                    .into_iter()
+                    .flat_map(|(k, list)| list.iter().map(move |r| (k.to_owned(), r.clone())))
+                    .collect()
+            },
+            layers: config
+                .layers
+                .iter()
+                .map(|l| {
+                    let status = match &l.status {
+                        LayerStatus::Loaded => "loaded".to_owned(),
+                        LayerStatus::Missing => "no config.toml".to_owned(),
+                        LayerStatus::Failed => "failed to parse (see config check)".to_owned(),
+                        LayerStatus::Skipped(why) => format!("skipped: {why}"),
+                    };
+                    let file = l.dir.as_ref().map_or_else(String::new, |d| {
+                        format!("\n{}", d.join("config.toml").display())
+                    });
+                    (l.kind.label().to_owned(), format!("{status}{file}"))
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Turns that fit in `room` at the typical growth of the last few turns. Compactions show
+/// up as shrinking turns and are left out.
+pub(crate) fn turns_left(growth: &[u32], room: u32) -> Option<u32> {
+    let mut steps: Vec<u32> = growth
+        .windows(2)
+        .rev()
+        .take(6)
+        .filter_map(|w| w[1].checked_sub(w[0]).filter(|d| *d > 0))
+        .collect();
+    if steps.is_empty() {
+        return None;
+    }
+    steps.sort_unstable();
+    Some(room / steps[steps.len() / 2])
+}
+
+/// The branch in `.git/HEAD` of `dir` or a parent; worktrees and submodules point at
+/// their git dir with a `gitdir:` file.
+fn git_branch(dir: &std::path::Path) -> Option<String> {
+    let git = dir
+        .ancestors()
+        .map(|d| d.join(".git"))
+        .find(|g| g.exists())?;
+    let git = if git.is_file() {
+        let link = std::fs::read_to_string(&git).ok()?;
+        let target = link.strip_prefix("gitdir:")?.trim();
+        git.parent()?.join(target)
+    } else {
+        git
+    };
+    let head = std::fs::read_to_string(git.join("HEAD")).ok()?;
+    let head = head.trim();
+    Some(match head.strip_prefix("ref: refs/heads/") {
+        Some(branch) => branch.to_owned(),
+        None => head.chars().take(7).collect(),
+    })
+}
+
+/// A row of the slash popup: a built-in command or a skill.
+#[derive(Debug, Clone)]
+pub(crate) struct PopupItem {
+    pub name: String,
+    pub args: String,
+    pub description: String,
+    /// Shown after the description, e.g. a milestone or `skill`.
+    pub hint: Option<&'static str>,
+    /// `None` for skills and custom commands.
+    pub command: Option<&'static Command>,
+}
+
+impl PopupItem {
+    fn command(c: &'static Command) -> Self {
+        Self {
+            name: c.name.to_owned(),
+            args: c.args.to_owned(),
+            description: c.description.to_owned(),
+            hint: c.pending,
+            command: Some(c),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Entry {
+    User(String),
+    Assistant(String),
+    Reasoning(String),
+    Tool(ToolEntry),
+    System(String),
+    Warning(String),
+    Error(String),
+    /// What a finished turn took, shown as a dim rule.
+    TurnSummary(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolEntry {
+    pub call_id: CallId,
+    pub name: String,
+    pub summary: String,
+    /// `None` while running.
+    pub ok: Option<bool>,
+    pub result: String,
+    /// Live output while running; the full diff or output once done.
+    pub detail: String,
+    pub started: Option<Instant>,
+    pub took: Option<Duration>,
+}
+
+/// A plan item's state, from the `todo` tool's `[x]`/`[~]`/`[ ]` marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanState {
+    Done,
+    Active,
+    Pending,
+}
+
+/// Plan items from the `todo` tool's rendered checklist.
+pub(crate) fn parse_plan(text: &str) -> Vec<(PlanState, String)> {
+    text.lines()
+        .filter_map(|l| {
+            let (mark, rest) = (l.get(..3)?, l.get(3..)?.trim());
+            let state = match mark {
+                "[x]" => PlanState::Done,
+                "[~]" => PlanState::Active,
+                "[ ]" => PlanState::Pending,
+                _ => return None,
+            };
+            Some((state, rest.to_owned()))
+        })
+        .collect()
+}
+
+/// Something a sub-agent did: text it wrote, or a tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentItem {
+    Text(String),
+    Tool(ToolEntry),
+}
+
+/// A sub-agent run (`task`), from its events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentRun {
+    /// The run, e.g. `explore-2`.
+    pub id: String,
+    pub agent: String,
+    pub description: String,
+    pub model: String,
+    /// The `task` call that started it.
+    pub call_id: CallId,
+    /// `None` while running.
+    pub ok: Option<bool>,
+    pub summary: String,
+    pub started: Instant,
+    pub took: Option<Duration>,
+    pub items: Vec<AgentItem>,
+}
+
+impl AgentRun {
+    fn on_event(&mut self, e: Event) {
+        match e {
+            Event::AssistantDelta { text } => match self.items.last_mut() {
+                Some(AgentItem::Text(t)) => t.push_str(&text),
+                _ => self.items.push(AgentItem::Text(text)),
+            },
+            Event::AssistantRewrite { text } => {
+                if let Some(AgentItem::Text(t)) = self.items.last_mut() {
+                    *t = text;
+                }
+            }
+            Event::ToolCallBegin { call } => self.items.push(AgentItem::Tool(ToolEntry {
+                call_id: call.call_id,
+                name: call.name,
+                summary: call.summary,
+                ok: None,
+                result: String::new(),
+                detail: String::new(),
+                started: Some(Instant::now()),
+                took: None,
+            })),
+            Event::ToolCallEnd { call_id, result } => {
+                if let Some(t) = self.items.iter_mut().rev().find_map(|i| match i {
+                    AgentItem::Tool(t) if t.call_id == call_id => Some(t),
+                    _ => None,
+                }) {
+                    t.ok = Some(result.ok);
+                    t.result = result.summary;
+                    t.detail = result.detail.unwrap_or_default();
+                    t.took = t.started.map(|s| s.elapsed());
+                }
+            }
+            Event::Warning { message } => self.items.push(AgentItem::Text(format!("! {message}"))),
+            Event::Error { error } => {
+                self.items
+                    .push(AgentItem::Text(format!("! {}", error.message)));
+            }
+            _ => {}
+        }
+    }
+
+    /// Its calls so far.
+    pub(crate) fn steps(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|i| matches!(i, AgentItem::Tool(_)))
+            .count()
+    }
+}
+
+/// An `ask_user` call's questions, answered one at a time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Asking {
+    pub call_id: CallId,
+    pub questions: Vec<Question>,
+    pub current: usize,
+    /// The highlighted row; the options' count is the "own answer" row.
+    pub selected: usize,
+    pub answers: Vec<Answer>,
+}
+
+impl Asking {
+    fn new(call_id: CallId, questions: Vec<Question>) -> Self {
+        let mut a = Self {
+            call_id,
+            answers: vec![Answer::Skipped; questions.len()],
+            questions,
+            current: 0,
+            selected: 0,
+        };
+        a.select_default();
+        a
+    }
+
+    pub(crate) fn question(&self) -> &Question {
+        &self.questions[self.current]
+    }
+
+    /// The recommended option, else the first (or the own-answer row when there are none).
+    fn select_default(&mut self) {
+        self.selected = self.question().recommended.unwrap_or(0);
+    }
+}
+
+/// What the plan review bar offers once a plan-mode turn ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewChoice {
+    Accept,
+    AcceptAutoEdit,
+    KeepPlanning,
+}
+
+/// A one-line question `/setup` asks: a server's URL or an API key.
+pub(crate) struct Prompt {
+    pub title: String,
+    pub label: String,
+    pub help: Vec<String>,
+    /// Draw the text as dots.
+    pub secret: bool,
+    pub text: String,
+    /// Why the last answer was not taken.
+    pub error: Option<String>,
+    then: PromptThen,
+}
+
+#[derive(Debug)]
+enum PromptThen {
+    ServerUrl,
+    ServerKey {
+        url: String,
+    },
+    ServiceKey {
+        id: String,
+    },
+    /// `/key`: replace the key of a provider that may be in use.
+    NewKey {
+        id: String,
+    },
+}
+
+/// Never shows the text: it may be a key.
+impl std::fmt::Debug for Prompt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Prompt")
+            .field("title", &self.title)
+            .field("then", &self.then)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Prompt {
+    /// What Enter does: send the answer, or ask the next question.
+    pub(crate) fn enter_does(&self) -> &'static str {
+        match self.then {
+            PromptThen::ServerUrl => "next",
+            PromptThen::NewKey { .. } => "replace",
+            _ => "add",
+        }
+    }
+
+    fn server_url() -> Self {
+        Self {
+            title: "Add a server · 1 of 2".into(),
+            label: "Base URL".into(),
+            help: vec![
+                "The address of any OpenAI-compatible server, usually ending in /v1, for \
+                 example http://gpu-box:8000/v1."
+                    .into(),
+            ],
+            secret: false,
+            text: String::new(),
+            error: None,
+            then: PromptThen::ServerUrl,
+        }
+    }
+
+    fn server_key(url: String) -> Self {
+        Self {
+            title: "Add a server · 2 of 2".into(),
+            label: "API key".into(),
+            help: vec![
+                format!(
+                    "The key for {url}, if it needs one. Leave it empty for a server on your own network that takes none."
+                ),
+                "It goes to the OS credential store, never into a file.".into(),
+            ],
+            secret: true,
+            text: String::new(),
+            error: None,
+            then: PromptThen::ServerKey { url },
+        }
+    }
+
+    fn new_key(id: &str, source: Option<&KeySource>) -> Self {
+        let mut help = vec![format!(
+            "Paste the new API key for `{id}`, for example after rotating it at the provider."
+        )];
+        help.push(match source {
+            Some(KeySource::Keyring { name }) => format!(
+                "It replaces the key stored in the OS credential store as `{name}`; the \
+                 provider file stays as it is."
+            ),
+            Some(source) => format!(
+                "Its key is read from {} now. The new one goes to the OS credential store \
+                 instead, and the provider file in your config folder is pointed at it.",
+                modal::key_source(source)
+            ),
+            None => "It goes to the OS credential store, and the provider file in your \
+                     config folder is pointed at it."
+                .into(),
+        });
+        if let Some(KeySource::Env { var }) = source {
+            help.push(format!(
+                "To keep using {var}, press esc, change it in your shell and start quack again."
+            ));
+        }
+        help.push("This session sends the new key from its next request.".into());
+        Self {
+            title: format!("New {id} key"),
+            label: "API key".into(),
+            help,
+            secret: true,
+            text: String::new(),
+            error: None,
+            then: PromptThen::NewKey { id: id.to_owned() },
+        }
+    }
+
+    fn service_key(service: Option<&quack_protocol::ServiceInfo>, id: &str) -> Self {
+        let name = service.map_or(id, |s| s.name.as_str());
+        let mut help = vec![format!(
+            "Paste your {name} API key. quack keeps it in the OS credential store under \
+             `{id}`; the provider file in your config folder only names it."
+        )];
+        if let Some(env) = service.and_then(|s| s.env.as_ref()) {
+            help.push(format!(
+                "To use the {env} environment variable instead, press esc, set it in your shell and start quack again."
+            ));
+        }
+        Self {
+            title: format!("{name} API key"),
+            label: "API key".into(),
+            help,
+            secret: true,
+            text: String::new(),
+            error: None,
+            then: PromptThen::ServiceKey { id: id.to_owned() },
+        }
+    }
+}
+
+/// A tool call waiting for the user's decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Approval {
+    pub call_id: CallId,
+    pub request: ApprovalRequest,
+    /// The rules `A` (always allow) saves; empty when it isn't offered.
+    pub always: Vec<String>,
+}
+
+/// An image attached to the next message: the path the engine loads, and the size its
+/// header gave, for the chip.
+#[derive(Debug, Clone)]
+pub(crate) struct Attachment {
+    pub path: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+#[derive(Debug)]
+pub struct App {
+    pub(crate) info: AppInfo,
+    pub(crate) theme: Theme,
+    pub(crate) glyphs: Glyphs,
+    pub(crate) startup: Vec<(Subsystem, LoadState)>,
+    pub(crate) startup_done: bool,
+    pub(crate) transcript: Vec<Entry>,
+    /// Highlighted code blocks, filled as assistant text arrives; drawing only reads it.
+    pub(crate) highlights: crate::highlight::Highlights,
+    pub(crate) input: Input,
+    /// Images attached to the next message (pasted or dropped paths), oldest first.
+    pub(crate) attachments: Vec<Attachment>,
+    pub(crate) modal: Option<Modal>,
+    /// Transcript rows scrolled up from the bottom. Drawing clamps it and keeps the view
+    /// still while new rows arrive below, so it lives in a `Cell`.
+    pub(crate) scroll: Cell<usize>,
+    /// `(rows, height)` of the transcript as last drawn.
+    pub(crate) view: Cell<(usize, usize)>,
+    /// The input box's text area and its first visible row, as last drawn.
+    pub(crate) input_view: Cell<(Rect, usize)>,
+    /// The transcript's area as last drawn, scrollbar column included.
+    pub(crate) transcript_area: Cell<Rect>,
+    /// Text being selected with the mouse, or selected and copied.
+    pub(crate) selection: Option<Selection>,
+    /// The frame a selection was copied on, and how many chars it had.
+    copied: Option<(u64, usize)>,
+    /// How reasoning shows right now: `ui.show_reasoning`, flipped by Ctrl-T.
+    pub(crate) show_reasoning: ShowReasoning,
+    pub(crate) popup_selected: usize,
+    popup_dismissed: bool,
+    pub(crate) turn_running: bool,
+    pub(crate) queued: bool,
+    pub(crate) approval: Option<Approval>,
+    /// Questions from the model waiting for answers.
+    pub(crate) asking: Option<Asking>,
+    /// The plan review bar, with its highlighted choice.
+    pub(crate) review: Option<usize>,
+    /// `(used, max)` tokens from the last response.
+    pub(crate) context: Option<(u32, u32)>,
+    /// Where compaction starts, in tokens.
+    pub(crate) compact_at: Option<u32>,
+    /// Context used at the end of each turn, oldest first: how fast it grows.
+    pub(crate) growth: Vec<u32>,
+    /// Generation speed of the last response, tokens per second.
+    pub(crate) speed: Option<f32>,
+    /// Errors and warnings the language servers report.
+    pub(crate) diagnostics: (u32, u32),
+    /// When the running turn started, and how many tools it has called.
+    pub(crate) turn_started: Option<Instant>,
+    turn_tools: u32,
+    /// The model's current plan, from its last `todo` call.
+    pub(crate) plan: Vec<(PlanState, String)>,
+    /// `/todo`: the whole plan above the input instead of its one-line summary.
+    pub(crate) plan_expanded: bool,
+    /// Sub-agent runs in this session, oldest first (`/tasks`).
+    pub(crate) agents: Vec<AgentRun>,
+    panel_collapsed: bool,
+    /// The frame startup (or the last `/reload`) began on, for `PANEL_GRACE`.
+    startup_frame: u64,
+    /// A `/resume` is in flight: clear the transcript when it lands.
+    resuming: bool,
+    /// The mode to go back to when plan mode ends.
+    mode_before_plan: String,
+    /// The mode `/yolo` turns back to.
+    mode_before_yolo: String,
+    /// `/sandbox off`: shell commands run without the OS sandbox this session.
+    pub(crate) sandbox_off: bool,
+    /// Text for the terminal's clipboard (OSC 52), written by the event loop.
+    clipboard: Option<String>,
+    /// The session title, for the terminal window's title.
+    session_title: Option<String>,
+    /// Installed skills, runnable as `/<name>`.
+    skills: Vec<quack_protocol::SkillInfo>,
+    /// Custom slash commands, minus any that a built-in command's name hides.
+    custom: Vec<quack_protocol::CommandInfo>,
+    /// Prompts of the ready MCP servers, runnable as `/<server>:<prompt>`.
+    mcp_prompts: Vec<quack_protocol::CommandInfo>,
+    /// What `/setup` has found so far.
+    setup: modal::SetupView,
+    /// A question from `/setup`, drawn over everything else.
+    pub(crate) prompt: Option<Prompt>,
+    /// `/setup` sent a key or URL and waits for the provider to be added.
+    setup_adding: bool,
+    /// `/key` sent a new key and waits for it to be stored.
+    rekeying: bool,
+    /// Where each provider's key is read from, as last listed.
+    key_sources: BTreeMap<String, KeySource>,
+    /// `/setup` opened on its own once this run, because no model was ready.
+    setup_offered: bool,
+    /// A `.quack/` waiting for a trust decision.
+    trust: Option<modal::TrustPrompt>,
+    frame: u64,
+    dirty: bool,
+    quit: bool,
+    ops: Vec<Op>,
+    last_ctrl_c: Option<Instant>,
+    /// For Esc Esc, which opens the rewind picker.
+    last_esc: Option<Instant>,
+}
+
+impl App {
+    pub fn new(info: AppInfo) -> Self {
+        Self {
+            theme: Theme::resolve(&info.ui.theme, info.no_color),
+            glyphs: Glyphs::new(info.ui.ascii),
+            startup: Subsystem::ALL
+                .iter()
+                .map(|s| (*s, LoadState::Pending))
+                .collect(),
+            startup_done: false,
+            transcript: Vec::new(),
+            highlights: crate::highlight::Highlights::new(std::sync::Arc::new(
+                quack_core::grammar::Grammars::new(info.grammar_dirs.clone()),
+            )),
+            input: Input::default(),
+            attachments: Vec::new(),
+            modal: None,
+            scroll: Cell::new(0),
+            view: Cell::new((0, 0)),
+            input_view: Cell::new((Rect::default(), 0)),
+            transcript_area: Cell::new(Rect::default()),
+            selection: None,
+            copied: None,
+            show_reasoning: info.ui.show_reasoning,
+            popup_selected: 0,
+            popup_dismissed: false,
+            turn_running: false,
+            queued: false,
+            approval: None,
+            asking: None,
+            review: None,
+            context: None,
+            compact_at: None,
+            growth: Vec::new(),
+            speed: None,
+            diagnostics: (0, 0),
+            turn_started: None,
+            turn_tools: 0,
+            plan: Vec::new(),
+            plan_expanded: false,
+            agents: Vec::new(),
+            panel_collapsed: false,
+            startup_frame: 0,
+            resuming: false,
+            mode_before_plan: String::new(),
+            mode_before_yolo: String::new(),
+            sandbox_off: false,
+            clipboard: None,
+            session_title: None,
+            skills: Vec::new(),
+            custom: Vec::new(),
+            mcp_prompts: Vec::new(),
+            setup: modal::SetupView::default(),
+            prompt: None,
+            setup_adding: false,
+            rekeying: false,
+            key_sources: BTreeMap::new(),
+            setup_offered: false,
+            trust: None,
+            frame: 0,
+            dirty: true,
+            quit: false,
+            ops: Vec::new(),
+            last_ctrl_c: None,
+            last_esc: None,
+            info,
+        }
+    }
+
+    pub fn should_quit(&self) -> bool {
+        self.quit
+    }
+
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+
+    pub fn take_clipboard(&mut self) -> Option<String> {
+        self.clipboard.take()
+    }
+
+    /// Chars in the selection just copied, while the status bar says so.
+    pub(crate) fn copied(&self) -> Option<usize> {
+        self.copied
+            .filter(|(at, _)| self.frame.wrapping_sub(*at) < COPIED_FRAMES)
+            .map(|(_, n)| n)
+    }
+
+    /// The terminal window's title: the duck from the reply marker, then the session title
+    /// (`quack` until there is one), marked while a turn runs and when something waits for
+    /// the user. None with `ui.terminal_title` off.
+    pub fn window_title(&self) -> Option<String> {
+        if !self.info.ui.terminal_title {
+            return None;
+        }
+        let g = &self.glyphs;
+        let state = if self.approval.is_some() || self.asking.is_some() {
+            format!("{} ", g.attention)
+        } else if self.turn_running {
+            format!("{} ", g.think)
+        } else {
+            String::new()
+        };
+        let title = self.session_title.as_deref().unwrap_or("quack");
+        Some(format!("{state}{} {title}", g.assistant))
+    }
+
+    pub fn take_ops(&mut self) -> Vec<Op> {
+        std::mem::take(&mut self.ops)
+    }
+
+    pub(crate) fn spinner(&self) -> &'static str {
+        if self.info.ui.reduced_motion {
+            return self.glyphs.pending;
+        }
+        let frames = self.glyphs.spinner;
+        frames[(self.frame / SPIN_EVERY) as usize % frames.len()]
+    }
+
+    pub(crate) fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    pub(crate) fn startup_issues(&self) -> usize {
+        self.startup
+            .iter()
+            .filter(|(_, s)| {
+                matches!(
+                    s,
+                    LoadState::Failed { .. } | LoadState::NeedsAttention { .. }
+                )
+            })
+            .count()
+    }
+
+    pub(crate) fn panel_visible(&self) -> bool {
+        match self.info.ui.startup_panel {
+            StartupPanel::Always => true,
+            StartupPanel::Never => false,
+            StartupPanel::Auto => {
+                // Show problems at once, a slow start after the grace period, and a fast
+                // clean start never.
+                let slow = !self.startup_done
+                    && self.frame.wrapping_sub(self.startup_frame) >= PANEL_GRACE;
+                !self.panel_collapsed && (self.startup_issues() > 0 || slow)
+            }
+        }
+    }
+
+    /// Commands matching the input while it is a bare `/word`.
+    pub(crate) fn popup_matches(&self) -> Vec<PopupItem> {
+        let text = self.input.text();
+        if self.modal.is_some()
+            || self.popup_dismissed
+            || !text.starts_with('/')
+            || text.contains(char::is_whitespace)
+        {
+            return Vec::new();
+        }
+        let query = &text[1..];
+        let mut hits: Vec<&Command> = fuzzy::filter(query, COMMANDS.iter().map(|c| c.name))
+            .into_iter()
+            .map(|i| &COMMANDS[i])
+            .collect();
+        if let Some(alias) = COMMANDS.iter().find(|c| c.aliases.contains(&query)) {
+            hits.retain(|c| c.name != alias.name);
+            hits.insert(0, alias);
+        }
+        let mut items: Vec<PopupItem> = hits.into_iter().map(PopupItem::command).collect();
+        items.extend(
+            fuzzy::filter(query, self.custom.iter().map(|c| c.name.as_str()))
+                .into_iter()
+                .map(|i| PopupItem {
+                    name: self.custom[i].name.clone(),
+                    args: self.custom[i].args.clone(),
+                    description: self.custom[i].description.clone(),
+                    hint: Some("custom"),
+                    command: None,
+                }),
+        );
+        items.extend(
+            fuzzy::filter(query, self.mcp_prompts.iter().map(|c| c.name.as_str()))
+                .into_iter()
+                .map(|i| PopupItem {
+                    name: self.mcp_prompts[i].name.clone(),
+                    args: self.mcp_prompts[i].args.clone(),
+                    description: self.mcp_prompts[i].description.clone(),
+                    hint: Some("mcp"),
+                    command: None,
+                }),
+        );
+        items.extend(
+            fuzzy::filter(query, self.skills.iter().map(|s| s.name.as_str()))
+                .into_iter()
+                .map(|i| PopupItem {
+                    name: self.skills[i].name.clone(),
+                    args: "[request]".into(),
+                    description: self.skills[i].description.clone(),
+                    hint: Some("skill"),
+                    command: None,
+                }),
+        );
+        items
+    }
+
+    pub fn on_tick(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+        let animating = self.turn_running
+            || self.queued
+            || self
+                .startup
+                .iter()
+                .any(|(_, s)| matches!(s, LoadState::Running { .. }));
+        if animating && !self.info.ui.reduced_motion && self.frame.is_multiple_of(SPIN_EVERY) {
+            self.dirty = true;
+        }
+        if self
+            .copied
+            .is_some_and(|(at, _)| self.frame.wrapping_sub(at) == COPIED_FRAMES)
+        {
+            self.dirty = true;
+        }
+        // A slow startup's panel appears once the grace period ends.
+        if !self.startup_done && self.frame.wrapping_sub(self.startup_frame) == PANEL_GRACE {
+            self.dirty = true;
+        }
+        // The welcome duck animates on startup while the transcript is empty.
+        if self.transcript.is_empty()
+            && !self.info.ui.reduced_motion
+            && self.frame.is_multiple_of(DUCK_ANIM_EVERY)
+        {
+            self.dirty = true;
+        }
+        // The elapsed-time clock in the status bar.
+        if self.turn_running && self.frame.is_multiple_of(60) {
+            self.dirty = true;
+        }
+    }
+
+    pub fn on_engine(&mut self, event: Event) {
+        self.dirty = true;
+        // Assistant text changed: the last entry, or any of them.
+        let code = match &event {
+            Event::AssistantDelta { .. } => Some(false),
+            Event::AssistantRewrite { .. } | Event::SessionResumed { .. } => Some(true),
+            _ => None,
+        };
+        if let Event::ModelCatalog { providers, .. } = &event {
+            for p in providers {
+                match &p.key {
+                    Some(key) => self.key_sources.insert(p.id.clone(), key.clone()),
+                    None => self.key_sources.remove(&p.id),
+                };
+            }
+        }
+        self.on_engine_event(event);
+        if let Some(all) = code {
+            self.highlight_code(all);
+        }
+    }
+
+    /// Highlight the closed code blocks of assistant messages: the last one, or all.
+    fn highlight_code(&mut self, all: bool) {
+        let skip = if all {
+            0
+        } else {
+            self.transcript.len().saturating_sub(1)
+        };
+        for entry in &self.transcript[skip..] {
+            if let Entry::Assistant(text) = entry {
+                self.highlights.scan(text);
+            }
+        }
+    }
+
+    /// A highlight finished on the blocking thread.
+    pub fn on_highlighted(&mut self, done: (u64, Option<crate::highlight::Runs>)) {
+        self.highlights.done(done);
+        self.dirty = true;
+    }
+
+    /// Where highlights done off-thread arrive; the event loop takes it once.
+    pub fn take_highlight_results(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<(u64, Option<crate::highlight::Runs>)>> {
+        self.highlights.take_results()
+    }
+
+    fn on_engine_event(&mut self, event: Event) {
+        match event {
+            Event::StartupProgress { subsystem, state } => {
+                if let Some(row) = self.startup.iter_mut().find(|(s, _)| *s == subsystem) {
+                    row.1 = state;
+                }
+            }
+            Event::StartupComplete => {
+                self.startup_done = true;
+                // A first run with nothing set up: show how to add a provider instead of
+                // waiting for the user to find /setup. `info.model` starts as `[model]
+                // default`, so a configured model whose server is down does not count.
+                if self.info.model.is_none()
+                    && !self.setup_offered
+                    && self.modal.is_none()
+                    && self.prompt.is_none()
+                    && self.trust.is_none()
+                {
+                    self.setup_offered = true;
+                    self.open_setup();
+                }
+            }
+            Event::ConfigReloaded => {
+                self.startup_done = false;
+                self.panel_collapsed = false;
+                self.startup_frame = self.frame;
+                self.trust = None;
+                self.note("config reloaded".into());
+            }
+            Event::ProjectTrust {
+                path,
+                summary,
+                changed,
+            } => {
+                let prompt = modal::TrustPrompt {
+                    path,
+                    summary,
+                    changed,
+                };
+                // Offer the choice once it arrives, unless the user is busy with something.
+                if self.modal.is_none() && self.approval.is_none() {
+                    self.modal = Some(modal::trust(Some(&prompt), &self.theme));
+                }
+                self.trust = Some(prompt);
+            }
+            Event::TurnQueued { waiting_for } => {
+                self.queued = true;
+                self.note(format!("queued, waiting for {waiting_for}"));
+            }
+            Event::SessionConfigured { session } => {
+                self.info.model = session.model;
+                self.info.profile = session.profile;
+            }
+            Event::SessionTitle { title } => {
+                self.session_title = title;
+                self.dirty = false;
+            }
+            Event::ModelCatalog { providers, current }
+                if self.modal.as_ref().is_some_and(|m| m.title == "Providers") =>
+            {
+                self.modal = Some(modal::providers(
+                    Some(&providers),
+                    current.as_deref(),
+                    &self.theme,
+                ));
+            }
+            Event::ModelCatalog { providers, current } => {
+                // Only refresh a /models modal that is still open.
+                if self.modal.as_ref().is_some_and(|m| m.title == "Models") {
+                    self.modal = Some(
+                        modal::models(
+                            Some(&providers),
+                            current.as_deref(),
+                            self.info.ui.ascii,
+                            &self.theme,
+                        )
+                        .keep_place(self.modal.as_ref()),
+                    );
+                }
+            }
+            Event::Instructions { files } => {
+                if self.modal.as_ref().is_some_and(|m| m.title == "Instructions") {
+                    self.modal = Some(modal::instructions(Some(&files), &self.theme));
+                }
+            }
+            Event::Profiles {
+                active,
+                forced,
+                profiles,
+            } => {
+                if self.modal.as_ref().is_some_and(|m| m.title == "Profiles") {
+                    self.modal = Some(modal::profiles(
+                        Some((&active, forced, &profiles)),
+                        &self.theme,
+                    ));
+                }
+            }
+            Event::Skills { skills } => self.skills = skills,
+            Event::Commands { commands } => {
+                let (hidden, kept): (Vec<_>, Vec<_>) = commands
+                    .into_iter()
+                    .partition(|c| commands::find(&c.name).is_some());
+                for c in hidden {
+                    self.transcript.push(Entry::Warning(format!(
+                        "/{} in {} is not used: a built-in command has that name",
+                        c.name, c.path
+                    )));
+                }
+                self.custom = kept;
+            }
+            Event::McpPrompts { prompts } => self.mcp_prompts = prompts,
+            Event::FilesRestored {
+                restored,
+                conflicts,
+            } => {
+                if !restored.is_empty() {
+                    self.note(format!(
+                        "undone: {} (the model is told at the start of your next message)",
+                        restored.join(", ")
+                    ));
+                }
+                if !conflicts.is_empty() {
+                    self.transcript.push(Entry::Warning(format!(
+                        "not undone, changed since the edit: {}. /undo --force overwrites them",
+                        conflicts.join(", ")
+                    )));
+                }
+            }
+            Event::RewindPoints { points } => {
+                if self.modal.as_ref().is_some_and(|m| m.title == "Rewind") {
+                    self.modal = Some(modal::rewind(Some(&points), &self.theme));
+                }
+            }
+            Event::Rewound { back, text } => {
+                // Cut the transcript at the same user message, counted from the end.
+                let at = self
+                    .transcript
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter(|(_, e)| matches!(e, Entry::User(_)))
+                    .nth(back.saturating_sub(1) as usize)
+                    .map(|(i, _)| i);
+                if let Some(i) = at {
+                    self.transcript.truncate(i);
+                }
+                self.context = None;
+                self.growth.clear();
+                if self.input.is_empty() {
+                    self.input.set(&text);
+                }
+                self.note("rewound; the message is back in the input to edit or send again".into());
+            }
+            Event::McpServers { servers } => {
+                if self.modal.as_ref().is_some_and(|m| m.title == "MCP") {
+                    self.modal = Some(modal::mcp(Some(&servers), &self.theme));
+                }
+            }
+            Event::LspServers { servers } => {
+                if self.modal.as_ref().is_some_and(|m| m.title == "LSP") {
+                    self.modal = Some(modal::lsp(Some(&servers), &self.theme));
+                }
+            }
+            Event::ServersDetected { servers } => {
+                self.setup.local = modal::Scan::Found(servers);
+                self.refresh_setup();
+            }
+            Event::Services { services } => {
+                self.key_sources.extend(
+                    services
+                        .iter()
+                        .filter_map(|s| Some((s.id.clone(), s.key.clone()?))),
+                );
+                self.setup.services = Some(services);
+                self.refresh_setup();
+            }
+            Event::ProviderAdded { id, path } if self.rekeying => {
+                self.rekeying = false;
+                self.note(match path {
+                    Some(path) => format!(
+                        "stored the new {id} key in the OS credential store; {path} now reads \
+                         it from there"
+                    ),
+                    None => format!("replaced the {id} key"),
+                });
+            }
+            Event::ProviderAdded { id, path } if self.setup_adding => {
+                // Its models follow; the user picks one.
+                self.setup_adding = false;
+                self.note(match path {
+                    Some(path) => format!("added provider {id} ({path}); pick a model"),
+                    None => format!("using the existing provider {id}; pick a model"),
+                });
+                self.prompt = None;
+                self.modal = Some(modal::models(
+                    None,
+                    self.info.model.as_deref(),
+                    self.info.ui.ascii,
+                    &self.theme,
+                ));
+            }
+            Event::ProviderAdded { id, path } => self.note(match path {
+                Some(path) => format!("added provider {id} ({path}); switching…"),
+                None => format!("using the existing provider {id}; switching…"),
+            }),
+            Event::DoctorReport { checks } => {
+                if self.modal.as_ref().is_some_and(|m| m.title == "Doctor") {
+                    self.modal = Some(modal::doctor(Some(&checks), &self.theme));
+                }
+            }
+            Event::MemoryNotes { notes, index_fill } => {
+                if self.modal.as_ref().is_some_and(|m| m.title == "Memory") {
+                    self.modal = Some(modal::memory(Some(&notes), index_fill, &self.theme));
+                }
+            }
+            Event::ContextReport { report } => {
+                if self.modal.as_ref().is_some_and(|m| m.title == "Context") {
+                    self.modal = Some(modal::context(
+                        Some(&report),
+                        &self.growth,
+                        self.info.ui.ascii,
+                        &self.theme,
+                    ));
+                }
+            }
+            Event::Stats { report } => {
+                if self.modal.as_ref().is_some_and(|m| m.title == "Stats") {
+                    self.modal = Some(modal::stats(Some(&report), self.info.ui.ascii, &self.theme));
+                }
+            }
+            Event::SessionList { sessions } => {
+                if self.modal.as_ref().is_some_and(|m| m.title == "Sessions") {
+                    self.modal = Some(modal::sessions(Some(&sessions), &self.theme));
+                }
+            }
+            Event::SettingSaved {
+                key,
+                value,
+                path,
+                note,
+            } => self.on_setting_saved(&key, &value, &path, note),
+            Event::SessionResumed { session, items } => {
+                if std::mem::take(&mut self.resuming) {
+                    self.transcript.clear();
+                    self.agents.clear();
+                    self.context = None;
+                    self.growth.clear();
+                }
+                self.panel_collapsed = true;
+                let short: String = session.id.0.chars().take(12).collect();
+                self.note(format!("resumed session {short} ({} entries)", items.len()));
+                for item in items {
+                    self.transcript.push(match item {
+                        ReplayItem::User { text } => Entry::User(text),
+                        ReplayItem::Assistant { text } => Entry::Assistant(text),
+                        ReplayItem::Tool {
+                            summary,
+                            ok,
+                            result,
+                        } => Entry::Tool(ToolEntry {
+                            call_id: CallId(String::new()),
+                            name: summary.split_whitespace().next().unwrap_or_default().to_owned(),
+                            summary,
+                            ok: Some(ok),
+                            result,
+                            detail: String::new(),
+                            started: None,
+                            took: None,
+                        }),
+                        ReplayItem::Compacted => {
+                            Entry::System("── earlier conversation summarized ──".into())
+                        }
+                    });
+                }
+            }
+            Event::TurnStarted { .. } => {
+                self.queued = false;
+                self.turn_running = true;
+                self.turn_started = Some(Instant::now());
+                self.turn_tools = 0;
+            }
+            Event::AssistantDelta { text } => match self.transcript.last_mut() {
+                Some(Entry::Assistant(buf)) => buf.push_str(&text),
+                _ => self
+                    .transcript
+                    .push(Entry::Assistant(text.trim_start().to_owned())),
+            },
+            Event::AssistantRewrite { text } => {
+                let last = self
+                    .transcript
+                    .iter()
+                    .rposition(|e| matches!(e, Entry::Assistant(_)));
+                if let Some(i) = last {
+                    self.transcript[i] = Entry::Assistant(text);
+                }
+            }
+            Event::ReasoningDelta { text } => match self.transcript.last_mut() {
+                Some(Entry::Reasoning(buf)) => buf.push_str(&text),
+                _ => self
+                    .transcript
+                    .push(Entry::Reasoning(text.trim_start().to_owned())),
+            },
+            Event::ToolCallBegin { call } => {
+                self.turn_tools += 1;
+                self.transcript.push(Entry::Tool(ToolEntry {
+                    call_id: call.call_id,
+                    name: call.name,
+                    summary: call.summary,
+                    ok: None,
+                    result: String::new(),
+                    detail: String::new(),
+                    started: Some(Instant::now()),
+                    took: None,
+                }));
+            }
+            Event::ToolCallOutputDelta { call_id, chunk } => {
+                if let Some(t) = self.tool_mut(&call_id) {
+                    t.detail.push_str(&chunk);
+                }
+            }
+            Event::ToolCallEnd { call_id, result } => {
+                let mut plan = None;
+                if let Some(t) = self.tool_mut(&call_id) {
+                    t.ok = Some(result.ok);
+                    t.result = result.summary;
+                    t.detail = result.detail.unwrap_or_default();
+                    t.took = t.started.map(|s| s.elapsed());
+                    if t.name == "todo" && result.ok {
+                        plan = Some(parse_plan(&t.detail));
+                    }
+                }
+                if let Some(plan) = plan {
+                    self.plan = plan;
+                }
+            }
+            Event::ApprovalRequest {
+                call_id,
+                request,
+                always,
+            } => {
+                self.approval = Some(Approval {
+                    call_id,
+                    request,
+                    always,
+                });
+            }
+            Event::Plan { checklist } => self.plan = parse_plan(&checklist),
+            Event::AgentStarted {
+                id,
+                agent,
+                description,
+                call_id,
+                model,
+            } => self.agents.push(AgentRun {
+                id,
+                agent,
+                description,
+                model,
+                call_id,
+                ok: None,
+                summary: String::new(),
+                started: Instant::now(),
+                took: None,
+                items: Vec::new(),
+            }),
+            Event::Agent { id, inner } => {
+                if let Some(a) = self.agents.iter_mut().rev().find(|a| a.id == id) {
+                    a.on_event(*inner);
+                }
+            }
+            Event::AgentFinished { id, ok, summary } => {
+                if let Some(a) = self.agents.iter_mut().rev().find(|a| a.id == id) {
+                    a.ok = Some(ok);
+                    a.summary = summary;
+                    a.took = Some(a.started.elapsed());
+                }
+            }
+            Event::Questions { call_id, questions } if !questions.is_empty() => {
+                self.asking = Some(Asking::new(call_id, questions));
+            }
+            Event::ContextUpdate {
+                used,
+                budget,
+                window,
+                threshold,
+                ..
+            } => {
+                let max = window.filter(|w| *w > 0).unwrap_or(budget);
+                self.context = Some((used, max));
+                self.compact_at = threshold;
+            }
+            Event::Speed { tokens_per_sec, .. } => {
+                if tokens_per_sec.is_some() {
+                    self.speed = tokens_per_sec;
+                }
+            }
+            Event::ContextPruned { report } => self.note(format!(
+                "pruned {} old tool result{} (~{} tokens)",
+                report.items.len(),
+                if report.items.len() == 1 { "" } else { "s" },
+                report.removed_tokens
+            )),
+            Event::Compacting { reason } => {
+                self.note(format!("summarizing earlier conversation ({reason})…"))
+            }
+            Event::Compacted {
+                summary_tokens,
+                replaced,
+            } => self.note(format!(
+                "── earlier conversation summarized: {replaced} messages → ~{summary_tokens} tokens ──"
+            )),
+            Event::TurnComplete { usage, .. } => {
+                self.turn_running = false;
+                if let Some((used, _)) = self.context {
+                    self.growth.push(used);
+                }
+                self.approval = None;
+                if let Some(started) = self.turn_started.take() {
+                    let mut parts = vec![crate::theme::elapsed(started.elapsed())];
+                    match self.turn_tools {
+                        0 => {}
+                        1 => parts.push("1 tool".into()),
+                        n => parts.push(format!("{n} tools")),
+                    }
+                    if usage.completion_tokens > 0 {
+                        parts.push(format!(
+                            "{} tokens out",
+                            crate::theme::tokens(usage.completion_tokens)
+                        ));
+                    }
+                    if let Some(tps) = self.speed {
+                        parts.push(format!("{tps:.0} t/s"));
+                    }
+                    self.transcript.push(Entry::TurnSummary(parts.join(" · ")));
+                }
+                self.asking = None;
+                if self.info.permission_mode == "plan" {
+                    self.review = Some(0);
+                }
+            }
+            Event::PermissionMode { mode } => {
+                if mode == "plan" && self.info.permission_mode != "plan" {
+                    self.note("plan mode: the model looks around, asks about big decisions and proposes a plan; nothing changes until you accept it (/plan off leaves)".into());
+                }
+                if mode == "yolo" && self.info.permission_mode != "yolo" {
+                    self.note("yolo: nothing asks and the sandbox is off; only the built-in deny list and your deny rules still apply · /yolo turns it off".into());
+                } else if mode != "yolo" && self.info.permission_mode == "yolo" {
+                    self.note(format!("yolo off · {mode} mode"));
+                }
+                if mode != "plan" {
+                    self.review = None;
+                }
+                self.info.permission_mode = mode;
+            }
+            Event::Sandbox { off } => {
+                if off && !self.sandbox_off {
+                    self.note(format!(
+                        "sandbox off: shell commands run without the OS sandbox; {} mode still decides what asks · /sandbox on turns it back on",
+                        self.info.permission_mode
+                    ));
+                } else if !off && self.sandbox_off {
+                    self.note("sandbox on".into());
+                }
+                self.sandbox_off = off;
+            }
+            Event::TurnAborted { reason, .. } => {
+                self.turn_running = false;
+                self.turn_started = None;
+                self.approval = None;
+                self.asking = None;
+                self.note(reason);
+            }
+            Event::HookRan {
+                id,
+                on,
+                outcome,
+                ms,
+                message,
+                context_tokens,
+            } => {
+                // Quiet unless the hook changed something; failures arrive as warnings.
+                let did = match outcome.as_str() {
+                    "context" => format!(
+                        "added ~{} tokens of context",
+                        crate::theme::tokens(context_tokens)
+                    ),
+                    "denied" => "denied".to_owned(),
+                    "asked" => "asked for approval".to_owned(),
+                    "allowed" => "allowed".to_owned(),
+                    "updated" => "changed the arguments".to_owned(),
+                    _ if message.is_some() => "said".to_owned(),
+                    _ => {
+                        self.dirty = false;
+                        return;
+                    }
+                };
+                let said = message.map(|m| format!(": {m}")).unwrap_or_default();
+                self.note(format!("hook {id} ({on}) {did}{said} · {ms} ms"));
+            }
+            Event::Diagnostics { errors, warnings } => self.diagnostics = (errors, warnings),
+            Event::Notice { message } => self.transcript.push(Entry::System(message)),
+            Event::UpdateAvailable { current, latest } => self.transcript.push(Entry::System(
+                format!("quack {latest} is out (you have {current}) · `quack update` says how"),
+            )),
+            Event::Warning { message } => self.transcript.push(Entry::Warning(message)),
+            Event::Error { error } => {
+                if std::mem::take(&mut self.setup_adding) {
+                    self.note("run /setup to try again".into());
+                }
+                self.rekeying = false;
+                self.transcript.push(Entry::Error(error.message));
+            }
+            _ => self.dirty = false,
+        }
+    }
+
+    pub fn on_terminal(&mut self, event: TermEvent) {
+        match event {
+            // Windows reports Release events too; act on Press and Repeat only.
+            TermEvent::Key(key) if key.kind != KeyEventKind::Release => self.on_key(key),
+            TermEvent::Paste(text) => {
+                self.selection = None;
+                if let Some(p) = &mut self.prompt {
+                    p.text
+                        .push_str(text.lines().next().unwrap_or_default().trim());
+                    p.error = None;
+                } else {
+                    match &mut self.modal {
+                        Some(m) => m.paste(&text),
+                        None => {
+                            // A dropped image file arrives as its path; attach it.
+                            if !self.attach_pasted(&text) {
+                                self.input.insert_str(&text);
+                            }
+                        }
+                    }
+                }
+                self.dirty = true;
+            }
+            TermEvent::Resize(..) => {
+                // Rows wrap differently now, so the selected cells hold other text.
+                self.selection = None;
+                self.dirty = true;
+            }
+            TermEvent::Mouse(m) if self.modal.is_none() => match m.kind {
+                MouseEventKind::ScrollUp => self.scroll_up(WHEEL_ROWS),
+                MouseEventKind::ScrollDown => self.scroll_down(WHEEL_ROWS),
+                MouseEventKind::Down(MouseButton::Left) => self.press(m.column, m.row),
+                MouseEventKind::Drag(MouseButton::Left) => self.drag(m.column, m.row),
+                MouseEventKind::Up(MouseButton::Left) => self.release(),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    /// Columns the input text wraps at: the box as last drawn, less the prompt.
+    fn input_width(&self) -> usize {
+        match self.input_view.get().0.width {
+            // Not drawn yet: nothing wraps.
+            0 => usize::MAX,
+            w => usize::from(w.saturating_sub(2)),
+        }
+    }
+
+    /// A click in the input box moves the cursor there.
+    fn click_input(&mut self, x: u16, y: u16) {
+        let (area, first) = self.input_view.get();
+        if !area.contains((x, y).into()) {
+            return;
+        }
+        let layout = self.input.layout(self.input_width());
+        let row = first + usize::from(y - area.y);
+        let col = usize::from((x - area.x).saturating_sub(2));
+        self.input.place(&layout, row, col);
+        self.dirty = true;
+    }
+
+    /// The button went down: a click in the input places the cursor, and either pane
+    /// starts a selection there.
+    fn press(&mut self, x: u16, y: u16) {
+        self.selection = None;
+        self.dirty = true;
+        let at = (x, y).into();
+        if self.input_view.get().0.contains(at) {
+            self.click_input(x, y);
+            self.selection = Some(Selection::new(Pane::Input, self.input_cell(x, y)));
+        } else if !self.transcript.is_empty() && self.transcript_area.get().contains(at) {
+            self.selection = Some(Selection::new(Pane::Transcript, self.transcript_cell(x, y)));
+        }
+    }
+
+    fn drag(&mut self, x: u16, y: u16) {
+        let Some(pane) = self.selection.map(|s| s.pane) else {
+            return;
+        };
+        let head = match pane {
+            Pane::Transcript => {
+                // Past the top or bottom edge, the view scrolls along.
+                let area = self.transcript_area.get();
+                if y < area.y {
+                    self.scroll_up(1);
+                } else if y >= area.bottom() {
+                    self.scroll_down(1);
+                }
+                self.transcript_cell(x, y)
+            }
+            Pane::Input => self.input_cell(x, y),
+        };
+        if let Some(s) = &mut self.selection {
+            s.head = head;
+            // A shaky click that stays in its cell is still a click.
+            s.dragged |= s.head != s.anchor;
+        }
+        self.dirty = true;
+    }
+
+    /// The button came up: a drag copies what it selected, which stays marked until the
+    /// next key or click.
+    fn release(&mut self) {
+        match self.selection {
+            Some(sel) if sel.dragged => self.copy_selection(&sel),
+            _ => self.selection = None,
+        }
+        self.dirty = true;
+    }
+
+    fn copy_selection(&mut self, sel: &Selection) {
+        let text = match sel.pane {
+            Pane::Transcript => {
+                let width = usize::from(self.transcript_area.get().width.saturating_sub(1));
+                let (lines, gutters) = crate::ui::transcript_rows_with_gutters(self, width);
+                let rows: Vec<(String, usize)> = lines
+                    .iter()
+                    .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                    .zip(gutters)
+                    .collect();
+                select::transcript_text(&rows, sel)
+            }
+            Pane::Input => {
+                let (from, to) = sel.bounds();
+                let layout = self.input.layout(self.input_width());
+                self.input.slice(&layout, from, to)
+            }
+        };
+        if !text.is_empty() {
+            self.copied = Some((self.frame, text.chars().count()));
+            self.clipboard = Some(text);
+        }
+    }
+
+    /// The transcript cell under `(x, y)`, held to the transcript's rows.
+    fn transcript_cell(&self, x: u16, y: u16) -> (usize, usize) {
+        let area = self.transcript_area.get();
+        let (total, height) = self.view.get();
+        // The first row on screen, as drawing worked it out.
+        let first = total
+            .saturating_sub(self.scroll.get())
+            .saturating_sub(height);
+        let y = y.clamp(area.y, area.bottom().saturating_sub(1));
+        let row = (first + usize::from(y - area.y)).min(total.saturating_sub(1));
+        (row, usize::from(x.saturating_sub(area.x)))
+    }
+
+    /// The input cell under `(x, y)`, held to the box; columns leave out the prompt.
+    fn input_cell(&self, x: u16, y: u16) -> (usize, usize) {
+        let (area, first) = self.input_view.get();
+        let y = y.clamp(area.y, area.bottom().saturating_sub(1));
+        let col = usize::from(x.saturating_sub(area.x)).saturating_sub(2);
+        (first + usize::from(y - area.y), col)
+    }
+
+    fn on_key(&mut self, key: KeyEvent) {
+        self.dirty = true;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Any key lets go of a selection. Ctrl-C, out of habit, copies it again rather than
+        // interrupting or quitting.
+        let selection = self.selection.take().filter(|s| s.dragged);
+        if ctrl && key.code == KeyCode::Char('c') {
+            if let Some(sel) = selection {
+                return self.copy_selection(&sel);
+            }
+            return self.ctrl_c();
+        }
+        if self.approval.is_some() {
+            return self.on_approval_key(key);
+        }
+        if self.asking.is_some() {
+            return self.on_asking_key(key);
+        }
+        if self.prompt.is_some() {
+            return self.on_prompt_key(key);
+        }
+        if let Some(modal) = &mut self.modal {
+            match modal.on_key(key) {
+                ModalOutcome::None => {}
+                ModalOutcome::Close => self.modal = None,
+                ModalOutcome::Insert(text) => {
+                    self.modal = None;
+                    self.input.set(&text);
+                    self.popup_dismissed = true;
+                }
+                ModalOutcome::Run(text) => {
+                    self.modal = None;
+                    self.execute(&text);
+                }
+            }
+            return;
+        }
+        if self.on_review_key(key) {
+            return;
+        }
+        let popup = self.popup_matches();
+        match key.code {
+            KeyCode::Esc if !popup.is_empty() => self.popup_dismissed = true,
+            KeyCode::Esc if self.turn_running || self.queued => self.ops.push(Op::Interrupt),
+            KeyCode::Esc => {
+                if self
+                    .last_esc
+                    .take()
+                    .is_some_and(|t| t.elapsed() < DOUBLE_ESC)
+                {
+                    self.open_rewind();
+                } else {
+                    self.last_esc = Some(Instant::now());
+                }
+            }
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+            {
+                self.input.insert('\n');
+            }
+            KeyCode::Char('j') if ctrl => self.input.insert('\n'),
+            KeyCode::Enter => self.submit(popup.get(self.popup_selected).cloned()),
+            KeyCode::BackTab => self.cycle_mode(),
+            KeyCode::Tab => {
+                if let Some(cmd) = popup.get(self.popup_selected) {
+                    self.input.set(&format!("/{} ", cmd.name));
+                }
+            }
+            _ if self.scroll_key(key) => {}
+            KeyCode::Char('t') if ctrl => self.toggle_reasoning(None),
+            KeyCode::Up if !popup.is_empty() => {
+                self.popup_selected = self.popup_selected.saturating_sub(1);
+            }
+            KeyCode::Down if !popup.is_empty() => {
+                self.popup_selected = (self.popup_selected + 1).min(popup.len() - 1);
+            }
+            KeyCode::Up => {
+                if !self.input.up(self.input_width()) {
+                    self.input.history_prev();
+                }
+            }
+            KeyCode::Down => {
+                if !self.input.down(self.input_width()) {
+                    self.input.history_next();
+                }
+            }
+            KeyCode::Left => self.input.left(),
+            KeyCode::Right => self.input.right(),
+            KeyCode::Home => self.input.home(),
+            KeyCode::End => self.input.end(),
+            KeyCode::Char('a') if ctrl => self.input.home(),
+            KeyCode::Char('e') if ctrl => self.input.end(),
+            KeyCode::Char('u') if ctrl => self.input.clear(),
+            KeyCode::Char('p') if ctrl => self.modal = Some(modal::help(&self.theme)),
+            KeyCode::Backspace => {
+                if self.input.is_empty() && self.attachments.pop().is_some() {
+                    self.dirty = true;
+                } else {
+                    self.edited(Input::backspace);
+                }
+            }
+            KeyCode::Delete => self.edited(Input::delete),
+            KeyCode::Char(c) if !ctrl => {
+                self.input.insert(c);
+                self.popup_dismissed = false;
+                self.popup_selected = 0;
+            }
+            _ => {}
+        }
+    }
+
+    /// Transcript scrolling keys, shared by the prompt and the approval bar. Returns
+    /// whether `key` was one.
+    fn scroll_key(&mut self, key: KeyEvent) -> bool {
+        let page = self.view.get().1.saturating_sub(2).max(1);
+        let jump = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::PageUp => self.scroll_up(page),
+            KeyCode::PageDown => self.scroll_down(page),
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => self.scroll_up(1),
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => self.scroll_down(1),
+            // Drawing clamps this to the first row.
+            KeyCode::Home if jump => self.scroll.set(usize::MAX),
+            KeyCode::End if jump => self.scroll.set(0),
+            _ => return false,
+        }
+        self.dirty = true;
+        true
+    }
+
+    fn scroll_up(&mut self, rows: usize) {
+        let (total, height) = self.view.get();
+        let max = total.saturating_sub(height);
+        self.scroll.set((self.scroll.get() + rows).min(max));
+        self.dirty = true;
+    }
+
+    fn scroll_down(&mut self, rows: usize) {
+        self.scroll.set(self.scroll.get().saturating_sub(rows));
+        self.dirty = true;
+    }
+
+    /// Show (`Some(true)`), hide (`Some(false)`) or flip the model's reasoning. Hiding goes
+    /// back to `ui.show_reasoning`, or to a one-line summary when that is `expanded`.
+    fn toggle_reasoning(&mut self, show: Option<bool>) {
+        let show = show.unwrap_or(self.show_reasoning != ShowReasoning::Expanded);
+        self.show_reasoning = match (show, self.info.ui.show_reasoning) {
+            (true, _) => ShowReasoning::Expanded,
+            (false, ShowReasoning::Expanded) => ShowReasoning::Collapsed,
+            (false, configured) => configured,
+        };
+        // Without any reasoning on screen the change is invisible; say what happened.
+        if !self
+            .transcript
+            .iter()
+            .any(|e| matches!(e, Entry::Reasoning(_)))
+        {
+            let state = if show { "shown" } else { "hidden" };
+            self.note(format!(
+                "thinking will be {state} (Ctrl-T); nothing to show yet, \
+                 and only some models send it"
+            ));
+        }
+        self.dirty = true;
+    }
+
+    /// Whether the terminal should capture the mouse (`ui.mouse`), for wheel scrolling and input clicks.
+    pub fn wants_mouse(&self) -> bool {
+        self.info.ui.mouse
+    }
+
+    fn tool_mut(&mut self, id: &CallId) -> Option<&mut ToolEntry> {
+        self.transcript.iter_mut().rev().find_map(|e| match e {
+            Entry::Tool(t) if &t.call_id == id => Some(t),
+            _ => None,
+        })
+    }
+
+    fn on_approval_key(&mut self, key: KeyEvent) {
+        let decision = match key.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => ApprovalDecision::AllowOnce,
+            KeyCode::Char('A') if self.approval.as_ref().is_some_and(|a| !a.always.is_empty()) => {
+                ApprovalDecision::AlwaysAllow {
+                    scope: WriteScope::Project,
+                }
+            }
+            KeyCode::Char('a' | 'A') => ApprovalDecision::AllowSession,
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => ApprovalDecision::Deny,
+            _ if self.scroll_key(key) => return,
+            _ => return,
+        };
+        if let Some(a) = self.approval.take() {
+            self.ops.push(Op::ApprovalResponse {
+                call_id: a.call_id,
+                decision,
+            });
+        }
+    }
+
+    /// Keys while the model's questions are showing. The input stays live for an answer in
+    /// the user's own words.
+    fn on_prompt_key(&mut self, key: KeyEvent) {
+        let Some(p) = &mut self.prompt else {
+            return;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {
+                let back = !matches!(p.then, PromptThen::NewKey { .. });
+                self.prompt = None;
+                if back {
+                    self.open_setup();
+                }
+            }
+            KeyCode::Enter => self.answer_prompt(),
+            KeyCode::Backspace => {
+                p.text.pop();
+            }
+            KeyCode::Char('u') if ctrl => p.text.clear(),
+            KeyCode::Char(c) if !ctrl => {
+                p.text.push(c);
+                p.error = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Enter in a `/setup` prompt: check the answer, then ask the next question or send it.
+    fn answer_prompt(&mut self) {
+        let Some(p) = self.prompt.take() else {
+            return;
+        };
+        let text = p.text.trim().to_owned();
+        let retry = |mut p: Prompt, error: &str| {
+            p.error = Some(error.to_owned());
+            Some(p)
+        };
+        self.prompt = match &p.then {
+            PromptThen::ServerUrl if text.is_empty() => {
+                retry(p, "type the server's URL, or press esc to go back")
+            }
+            PromptThen::ServerUrl
+                if !(text.starts_with("http://") || text.starts_with("https://")) =>
+            {
+                retry(p, "the URL must start with http:// or https://")
+            }
+            PromptThen::ServerUrl => Some(Prompt::server_key(text)),
+            PromptThen::ServerKey { url } => {
+                self.note(format!("adding {url}…"));
+                self.setup_adding = true;
+                self.ops.push(Op::AddServer {
+                    base_url: url.clone(),
+                    key: (!text.is_empty()).then_some(SecretText(text)),
+                });
+                None
+            }
+            PromptThen::ServiceKey { .. } if text.is_empty() => {
+                retry(p, "paste the key, or press esc to go back")
+            }
+            PromptThen::NewKey { .. } if text.is_empty() => {
+                retry(p, "paste the new key, or press esc to keep the old one")
+            }
+            PromptThen::NewKey { id } => {
+                self.note(format!("storing the new {id} key…"));
+                self.rekeying = true;
+                self.ops.push(Op::SetProviderKey {
+                    id: id.clone(),
+                    key: SecretText(text),
+                });
+                None
+            }
+            PromptThen::ServiceKey { id } => {
+                self.note(format!("storing the {id} key…"));
+                self.setup_adding = true;
+                self.ops.push(Op::SetProviderKey {
+                    id: id.clone(),
+                    key: SecretText(text),
+                });
+                None
+            }
+        };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn skip_setup_offer(&mut self) {
+        self.setup_offered = true;
+    }
+
+    /// Open `/setup` with what is known, and list the hosted services again.
+    fn open_setup(&mut self) {
+        self.setup.settings = self.info.settings.clone();
+        self.modal = Some(modal::setup(&self.setup, &self.theme));
+        self.ops.push(Op::ListServices);
+    }
+
+    /// Redraw an open `/setup` with new findings, keeping the user's place.
+    fn refresh_setup(&mut self) {
+        if self.modal.as_ref().is_some_and(|m| m.title == "Setup") {
+            self.modal =
+                Some(modal::setup(&self.setup, &self.theme).keep_place(self.modal.as_ref()));
+        }
+    }
+
+    fn on_asking_key(&mut self, key: KeyEvent) {
+        if self.scroll_key(key) {
+            return;
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let typing = !self.input.is_empty();
+        let Some(a) = &mut self.asking else { return };
+        let options = a.question().options.len();
+        match key.code {
+            KeyCode::Char('s') if ctrl => {
+                self.input.clear();
+                self.finish_asking(true);
+            }
+            KeyCode::Up => a.selected = a.selected.saturating_sub(1),
+            KeyCode::Down => a.selected = (a.selected + 1).min(options),
+            KeyCode::Char(c @ '1'..='9') if !typing && !ctrl => {
+                let i = usize::from(c as u8 - b'1');
+                if i < options {
+                    self.answer(Answer::Picked { index: i });
+                }
+            }
+            KeyCode::Enter if typing => {
+                let text = self.input.submit();
+                self.answer(Answer::Text {
+                    text: text.trim().to_owned(),
+                });
+            }
+            KeyCode::Enter if a.selected < options => {
+                let index = a.selected;
+                self.answer(Answer::Picked { index });
+            }
+            KeyCode::Esc => {
+                self.input.clear();
+                self.answer(Answer::Skipped);
+            }
+            KeyCode::Left if !typing && a.current > 0 => {
+                a.current -= 1;
+                a.select_default();
+            }
+            KeyCode::Char(c) if !ctrl => {
+                // Typing picks the own-answer row.
+                a.selected = options;
+                self.input.insert(c);
+            }
+            KeyCode::Backspace => self.input.backspace(),
+            KeyCode::Delete => self.input.delete(),
+            KeyCode::Left => self.input.left(),
+            KeyCode::Right => self.input.right(),
+            KeyCode::Home => self.input.home(),
+            KeyCode::End => self.input.end(),
+            _ => {}
+        }
+    }
+
+    /// Answer the current question and go on to the next, or send them all.
+    fn answer(&mut self, answer: Answer) {
+        let Some(a) = &mut self.asking else { return };
+        a.answers[a.current] = answer;
+        a.current += 1;
+        if a.current < a.questions.len() {
+            a.select_default();
+        } else {
+            self.finish_asking(false);
+        }
+    }
+
+    fn finish_asking(&mut self, stop_asking: bool) {
+        if let Some(a) = self.asking.take() {
+            self.ops.push(Op::AnswerQuestions {
+                call_id: a.call_id,
+                answers: a.answers,
+                stop_asking,
+            });
+        }
+    }
+
+    /// The choices the plan review bar offers. Auto-edit is offered only when it would
+    /// allow more than the mode plan mode started from.
+    pub(crate) fn review_choices(&self) -> Vec<(ReviewChoice, String)> {
+        let back = match self.mode_before_plan.as_str() {
+            "" | "plan" => "ask",
+            m => m,
+        };
+        let mut out = vec![(
+            ReviewChoice::Accept,
+            format!("Yes, carry it out ({back} mode)"),
+        )];
+        if matches!(back, "ask" | "read-only") {
+            out.push((
+                ReviewChoice::AcceptAutoEdit,
+                "Yes, and allow edits without asking (auto-edit)".into(),
+            ));
+        }
+        out.push((ReviewChoice::KeepPlanning, "Not yet, keep planning".into()));
+        out
+    }
+
+    /// Keys for the plan review bar. Returns whether it used the key; typing goes on to
+    /// the input, and Enter with text sends it as the revision.
+    fn on_review_key(&mut self, key: KeyEvent) -> bool {
+        let Some(selected) = self.review else {
+            return false;
+        };
+        let choices = self.review_choices();
+        let typing = !self.input.is_empty();
+        let pick = match key.code {
+            KeyCode::Up if key.modifiers.is_empty() => {
+                self.review = Some(selected.saturating_sub(1));
+                return true;
+            }
+            KeyCode::Down if key.modifiers.is_empty() => {
+                self.review = Some((selected + 1).min(choices.len() - 1));
+                return true;
+            }
+            KeyCode::Char(c @ '1'..='9') if !typing && key.modifiers.is_empty() => {
+                let i = usize::from(c as u8 - b'1');
+                if i >= choices.len() {
+                    return false;
+                }
+                i
+            }
+            KeyCode::Enter if !typing => selected,
+            KeyCode::Esc if !typing => choices.len() - 1,
+            _ => return false,
+        };
+        self.review = None;
+        match choices[pick].0 {
+            ReviewChoice::Accept => self.accept_plan(None),
+            ReviewChoice::AcceptAutoEdit => self.accept_plan(Some("auto-edit")),
+            ReviewChoice::KeepPlanning => {
+                self.note("still planning · say what to change, or /plan off to leave".into());
+            }
+        }
+        true
+    }
+
+    fn edited(&mut self, f: fn(&mut Input)) {
+        f(&mut self.input);
+        self.popup_dismissed = false;
+        self.popup_selected = 0;
+    }
+
+    fn ctrl_c(&mut self) {
+        if self.modal.take().is_some() {
+            return;
+        }
+        if self.approval.is_some() || self.asking.is_some() {
+            self.approval = None;
+            self.asking = None;
+            self.ops.push(Op::Interrupt);
+            return;
+        }
+        if self.review.take().is_some() {
+            return;
+        }
+        if !self.input.is_empty() {
+            self.input.clear();
+        } else if self.turn_running || self.queued {
+            self.ops.push(Op::Interrupt);
+        } else if self
+            .last_ctrl_c
+            .is_some_and(|t| t.elapsed() < DOUBLE_CTRL_C)
+        {
+            self.quit = true;
+        } else {
+            self.last_ctrl_c = Some(Instant::now());
+            self.note("press Ctrl-C again to quit".into());
+        }
+    }
+
+    fn submit(&mut self, popup_choice: Option<PopupItem>) {
+        match popup_choice {
+            Some(PopupItem {
+                command: Some(cmd), ..
+            }) => {
+                self.input.clear();
+                return self.run_command(cmd, "");
+            }
+            // A skill: let the user add a request first.
+            Some(item) => {
+                self.input.set(&format!("/{} ", item.name));
+                self.popup_dismissed = true;
+                return;
+            }
+            None => {}
+        }
+        let text = self.input.submit();
+        let attachments = std::mem::take(&mut self.attachments);
+        if text.trim().is_empty() && attachments.is_empty() {
+            return;
+        }
+        self.scroll.set(0);
+        if text.starts_with('/') {
+            // Commands that send a turn (skills, `/plan <task>`) take the attachments;
+            // the rest leave them waiting for the next message.
+            self.attachments = attachments;
+            return self.execute(&text);
+        }
+        self.send(text, attachments);
+    }
+
+    fn send(&mut self, text: String, attachments: Vec<Attachment>) {
+        self.review = None;
+        self.panel_collapsed = true;
+        let shown = if text.trim().is_empty() {
+            format!(
+                "attached: {}",
+                attachments
+                    .iter()
+                    .map(|a| a.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            text.clone()
+        };
+        self.transcript.push(Entry::User(shown));
+        let mut items: Vec<InputItem> = attachments
+            .into_iter()
+            .map(|a| InputItem::Image { path: a.path })
+            .collect();
+        if !text.trim().is_empty() {
+            items.push(InputItem::text(text));
+        }
+        self.ops.push(Op::UserTurn {
+            items,
+            overrides: TurnOverrides::default(),
+        });
+    }
+
+    /// A paste that is nothing but image file paths attaches them instead of inserting
+    /// text: that is what dropping a file on the terminal sends. Anything else is pasted.
+    /// Only the headers are read here; the engine encodes the files when the turn is sent.
+    fn attach_pasted(&mut self, text: &str) -> bool {
+        let Some(paths) = dropped_images(text) else {
+            return false;
+        };
+        for (attachment, len) in paths {
+            if len > quack_protocol::image::MAX_RAW_BYTES as u64 {
+                self.note(format!(
+                    "{}: the image is {} KB; the limit is {} KB, so downscale it first",
+                    attachment.path,
+                    len / 1024,
+                    quack_protocol::image::MAX_RAW_BYTES / 1024
+                ));
+                continue;
+            }
+            self.attachments.push(attachment);
+        }
+        true
+    }
+
+    fn set_mode(&mut self, mode: &str) {
+        if mode == "plan" && self.info.permission_mode != "plan" {
+            self.mode_before_plan = self.info.permission_mode.clone();
+        }
+        self.ops.push(Op::SetPermissionMode {
+            mode: mode.to_owned(),
+        });
+    }
+
+    /// `/yolo`: switch to yolo, or back to the mode it was turned on from.
+    fn toggle_yolo(&mut self, args: &str) {
+        let on = match args.trim() {
+            "on" => true,
+            "off" => false,
+            _ => self.info.permission_mode != "yolo",
+        };
+        if on {
+            if self.info.permission_mode != "yolo" {
+                self.mode_before_yolo = self.info.permission_mode.clone();
+            }
+            self.set_mode("yolo");
+        } else {
+            let back = match self.mode_before_yolo.as_str() {
+                "" | "yolo" => "ask".to_owned(),
+                m => m.to_owned(),
+            };
+            self.set_mode(&back);
+        }
+    }
+
+    /// `/sandbox`: turn the OS sandbox off for this session, or back on.
+    fn toggle_sandbox(&mut self, args: &str) {
+        let off = match args.trim() {
+            "off" => true,
+            "on" => false,
+            "" => !self.sandbox_off,
+            other => {
+                return self.note(format!(
+                    "unknown argument `{other}`; use /sandbox on or /sandbox off"
+                ));
+            }
+        };
+        self.ops.push(Op::SetSandbox { off });
+    }
+
+    /// Leave plan mode for the mode it was entered from.
+    fn end_plan(&mut self) {
+        let back = match self.mode_before_plan.as_str() {
+            "" | "plan" => "ask".to_owned(),
+            m => m.to_owned(),
+        };
+        self.set_mode(&back);
+    }
+
+    /// Carry out the plan in `mode`, or in the mode plan mode was entered from. The engine
+    /// leaves plan mode and sends the turn (with a planner model, as a handoff brief).
+    fn accept_plan(&mut self, mode: Option<&str>) {
+        let back = match (mode, self.mode_before_plan.as_str()) {
+            (Some(m), _) => m.to_owned(),
+            (None, "" | "plan") => "ask".to_owned(),
+            (None, m) => m.to_owned(),
+        };
+        self.mode_before_plan.clear();
+        self.review = None;
+        self.panel_collapsed = true;
+        self.transcript
+            .push(Entry::User("Carry out the plan above.".into()));
+        self.ops.push(Op::AcceptPlan { mode: back });
+    }
+
+    /// Shift-Tab: ask → auto-edit → plan → ask. Other modes join the cycle at `ask`.
+    fn cycle_mode(&mut self) {
+        let next = match self.info.permission_mode.as_str() {
+            "ask" => "auto-edit",
+            "auto-edit" => "plan",
+            "plan" => {
+                self.mode_before_plan.clear();
+                "ask"
+            }
+            _ => "ask",
+        };
+        self.set_mode(next);
+    }
+
+    /// Run a `/command args` line.
+    pub(crate) fn execute(&mut self, text: &str) {
+        let rest = text.trim().trim_start_matches('/');
+        let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        match commands::find(name) {
+            Some(cmd) => self.run_command(cmd, args.trim()),
+            // The engine expands `/<skill> args` into the skill's instructions, and fetches
+            // MCP prompts.
+            None if self.skills.iter().any(|s| s.name == name)
+                || self.custom.iter().any(|c| c.name == name)
+                || self.mcp_prompts.iter().any(|c| c.name == name) =>
+            {
+                let attachments = std::mem::take(&mut self.attachments);
+                self.send(text.trim().to_owned(), attachments);
+            }
+            None => self.note(format!("unknown command /{name}; /help lists commands")),
+        }
+    }
+
+    fn run_command(&mut self, cmd: &Command, args: &str) {
+        self.popup_selected = 0;
+        match cmd.name {
+            "models" if args.starts_with("default ") => {
+                let reference = args["default ".len()..].trim();
+                self.save_setting("model.default", &toml_string(reference));
+            }
+            "models" if !args.is_empty() => match args.split_once('/') {
+                Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
+                    self.note(format!("switching to {args}…"));
+                    self.ops.push(Op::SetModel {
+                        provider: ProviderId(provider.to_owned()),
+                        model: ModelId(model.to_owned()),
+                    });
+                }
+                _ => self.note("usage: /models <provider>/<model>".into()),
+            },
+            "instructions" => {
+                self.modal = Some(modal::instructions(None, &self.theme));
+                self.ops.push(Op::ListInstructions);
+            }
+            "profiles" if args.starts_with("default ") => {
+                let id = args["default ".len()..].trim();
+                self.save_setting("model.profile", &toml_string(id));
+            }
+            "profiles" if !args.is_empty() => {
+                self.note(format!("switching to the {args} profile…"));
+                self.ops.push(Op::SetProfile {
+                    id: args.to_owned(),
+                });
+            }
+            "profiles" => {
+                self.modal = Some(modal::profiles(None, &self.theme));
+                self.ops.push(Op::ListProfiles);
+            }
+            "models" => {
+                self.modal = Some(modal::models(
+                    None,
+                    self.info.model.as_deref(),
+                    self.info.ui.ascii,
+                    &self.theme,
+                ));
+                self.ops.push(Op::ListModels);
+            }
+            "resume" if !args.is_empty() => {
+                self.resuming = true;
+                self.ops.push(Op::ResumeSession {
+                    id: SessionId(args.to_owned()),
+                });
+            }
+            "resume" => {
+                self.modal = Some(modal::sessions(None, &self.theme));
+                self.ops.push(Op::ListSessions);
+            }
+            "new" => {
+                if self.turn_running {
+                    return self.note("wait for the current turn to finish first".into());
+                }
+                self.transcript.clear();
+                self.agents.clear();
+                self.context = None;
+                self.growth.clear();
+                self.ops.push(Op::NewSession);
+                self.note("new session; the previous one is saved (/resume)".into());
+            }
+            "fork" if args.starts_with("--worktree") => {
+                self.note("/fork --worktree is not built yet; /fork branches in this folder".into())
+            }
+            "fork" => self.ops.push(Op::ForkSession),
+            "export" => {
+                let (first, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+                let (format, path) = match first {
+                    "md" | "markdown" => (ExportFormat::Markdown, rest.trim()),
+                    "json" => (ExportFormat::Json, rest.trim()),
+                    // A path alone: its extension picks the format.
+                    path if path.to_ascii_lowercase().ends_with(".json") => {
+                        (ExportFormat::Json, args)
+                    }
+                    _ => (ExportFormat::Markdown, args),
+                };
+                self.ops.push(Op::Export {
+                    format,
+                    path: (!path.is_empty()).then(|| path.to_owned()),
+                });
+            }
+            "title" if args.is_empty() => self.note("usage: /title <text>".into()),
+            "title" => {
+                self.ops.push(Op::SetTitle {
+                    title: args.to_owned(),
+                });
+                self.note(format!("session renamed to “{args}”"));
+            }
+            "config" if args.is_empty() => {
+                self.modal = Some(modal::config(
+                    &self.info.settings,
+                    &self.info.layers,
+                    &self.theme,
+                ));
+            }
+            "config" => {
+                let rest = args.strip_prefix("set").map(str::trim_start);
+                match rest.and_then(|r| r.split_once(char::is_whitespace)) {
+                    Some((key, value)) if !value.trim().is_empty() => {
+                        self.save_setting(key, value.trim());
+                    }
+                    _ => self.note("usage: /config set <key> <value>".into()),
+                }
+            }
+            "memory" if args.is_empty() => {
+                self.modal = Some(modal::memory(None, 0, &self.theme));
+                self.ops.push(Op::ListMemory);
+            }
+            "memory" => match args
+                .strip_prefix("delete")
+                .map(str::trim)
+                .and_then(|r| r.split_once('/'))
+            {
+                Some((scope, name)) if !name.is_empty() => {
+                    self.ops.push(Op::DeleteMemory {
+                        scope: scope.to_owned(),
+                        name: name.to_owned(),
+                    });
+                    self.note(format!("deleted {scope} note {name}"));
+                }
+                _ => self.note("usage: /memory, or /memory delete <global|project>/<name>".into()),
+            },
+            "key" if !args.trim().is_empty() => {
+                let id = args.trim();
+                self.modal = None;
+                self.prompt = Some(Prompt::new_key(id, self.key_sources.get(id)));
+            }
+            "providers" | "key" => {
+                self.modal = Some(modal::providers(
+                    None,
+                    self.info.model.as_deref(),
+                    &self.theme,
+                ));
+                self.ops.push(Op::ListModels);
+            }
+            "mcp" if args.starts_with("restart ") => {
+                let id = args["restart ".len()..].trim().to_owned();
+                self.note(format!("restarting MCP server {id}…"));
+                self.ops.push(Op::RestartMcp { id });
+            }
+            "mcp" => {
+                self.modal = Some(modal::mcp(None, &self.theme));
+                self.ops.push(Op::ListMcp);
+            }
+            "lsp" => {
+                self.modal = Some(modal::lsp(None, &self.theme));
+                self.ops.push(Op::ListLsp);
+            }
+            "init" => {
+                self.note("asking the model to write AGENTS.md…".into());
+                self.ops.push(Op::InitInstructions);
+            }
+            "setup" if args.starts_with("use ") => {
+                let mut parts = args["use ".len()..].splitn(2, ' ');
+                let found = match &self.setup.local {
+                    modal::Scan::Found(list) => list.as_slice(),
+                    _ => &[],
+                };
+                let server = parts
+                    .next()
+                    .and_then(|i| i.parse::<usize>().ok())
+                    .and_then(|i| found.get(i));
+                match (server, parts.next()) {
+                    (Some(s), Some(model)) => self.ops.push(Op::AddProvider {
+                        id: s.id.clone(),
+                        base_url: s.base_url.clone(),
+                        api: s.api.clone(),
+                        model: model.to_owned(),
+                    }),
+                    _ => self.note("pick a server and model from /setup".into()),
+                }
+            }
+            "setup" if args == "url" => self.prompt = Some(Prompt::server_url()),
+            "setup" if args.starts_with("key ") => {
+                let id = args["key ".len()..].trim();
+                let service = self.setup.services.iter().flatten().find(|s| s.id == id);
+                self.prompt = Some(Prompt::service_key(service, id));
+            }
+            "setup" if args.starts_with("models ") => {
+                let id = args["models ".len()..].trim();
+                self.modal = Some(
+                    modal::models(
+                        None,
+                        self.info.model.as_deref(),
+                        self.info.ui.ascii,
+                        &self.theme,
+                    )
+                    .with_filter(&format!("{id}/")),
+                );
+                self.ops.push(Op::ListModels);
+            }
+            "setup" => {
+                // Asking for /setup is asking to look; the first-run offer waits for "scan".
+                self.setup.local = modal::Scan::Looking;
+                self.ops.push(Op::DetectServers);
+                self.open_setup();
+            }
+            "undo" => self.ops.push(Op::Undo {
+                checkpoint: None,
+                force: args == "--force",
+            }),
+            "skills" => self.modal = Some(modal::skills(&self.skills, &self.theme)),
+            "bundles" if args.is_empty() => {
+                self.modal = Some(modal::bundles(&self.info.bundles, &self.theme));
+            }
+            "bundles" => match args.strip_prefix("toggle ").map(str::trim) {
+                Some(id) if self.info.bundles.iter().any(|b| b.id == id) => {
+                    let mut disabled = self.info.bundles_disabled.clone();
+                    let off = !disabled.iter().any(|d| d == id);
+                    if off {
+                        disabled.push(id.to_owned());
+                    } else {
+                        disabled.retain(|d| d != id);
+                    }
+                    let list = disabled
+                        .iter()
+                        .map(|d| toml_string(d))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.modal = None;
+                    self.ops.push(Op::SaveSetting {
+                        key: "bundles.disabled".into(),
+                        value: format!("[{list}]"),
+                        scope: WriteScope::User,
+                    });
+                    self.ops.push(Op::ReloadConfig);
+                    self.note(format!(
+                        "bundle `{id}` turned {}; reloading",
+                        if off { "off" } else { "on" }
+                    ));
+                }
+                _ => self.note("usage: /bundles, or /bundles toggle <name>".into()),
+            },
+            "tasks" => self.modal = Some(modal::tasks(&self.agents, &self.theme)),
+            "todo" => {
+                self.plan_expanded = !self.plan_expanded;
+                if self.plan.is_empty() {
+                    self.note(
+                        "no plan yet; the model makes one with its `todo` tool for multi-step work"
+                            .into(),
+                    );
+                }
+            }
+            "commands" => {
+                let all: Vec<_> = self
+                    .custom
+                    .iter()
+                    .chain(&self.mcp_prompts)
+                    .cloned()
+                    .collect();
+                self.modal = Some(modal::custom_commands(&all, &self.theme));
+            }
+            "doctor" => {
+                self.modal = Some(modal::doctor(None, &self.theme));
+                self.ops.push(Op::RunDoctor);
+            }
+            "thinking" => match args {
+                "" => self.toggle_reasoning(None),
+                "show" | "on" => self.toggle_reasoning(Some(true)),
+                "hide" | "off" => self.toggle_reasoning(Some(false)),
+                _ => self.note("usage: /thinking [show|hide]".into()),
+            },
+            "copy" => {
+                let last = self.transcript.iter().rev().find_map(|e| match e {
+                    Entry::Assistant(t) if !t.trim().is_empty() => Some(t.clone()),
+                    _ => None,
+                });
+                let Some(text) = last else {
+                    return self.note("nothing to copy yet".into());
+                };
+                let (what, text) = match args {
+                    "code" => match last_code_block(&text) {
+                        Some(code) => ("the last code block", code),
+                        None => return self.note("the last response has no code block".into()),
+                    },
+                    _ => ("the last response", text),
+                };
+                self.note(format!(
+                    "copied {what} ({} characters) through the terminal",
+                    text.chars().count()
+                ));
+                self.clipboard = Some(text);
+            }
+            "permissions" if args.is_empty() => {
+                self.modal = Some(modal::permissions(
+                    &self.info.permission_mode,
+                    &self.info.rules,
+                    &self.theme,
+                ));
+            }
+            "permissions" => self.set_mode(args),
+            "yolo" => self.toggle_yolo(args),
+            "sandbox" => self.toggle_sandbox(args),
+            "plan" => match args {
+                "" => self.set_mode("plan"),
+                "accept" | "go" => {
+                    if self.info.permission_mode != "plan" {
+                        return self.note("not in plan mode; /plan starts it".into());
+                    }
+                    self.accept_plan(None);
+                }
+                "off" | "exit" => self.end_plan(),
+                task => {
+                    self.set_mode("plan");
+                    let attachments = std::mem::take(&mut self.attachments);
+                    self.send(task.to_owned(), attachments);
+                }
+            },
+            "context" => {
+                self.modal = Some(modal::context(
+                    None,
+                    &self.growth,
+                    self.info.ui.ascii,
+                    &self.theme,
+                ));
+                self.ops.push(Op::GetContext);
+            }
+            "stats" => {
+                self.modal = Some(modal::stats(None, self.info.ui.ascii, &self.theme));
+                self.ops.push(Op::GetStats);
+            }
+            "compact" => self.ops.push(Op::Compact {
+                focus: Some(args.to_owned()).filter(|a| !a.is_empty()),
+            }),
+            "rewind" if args.is_empty() => self.open_rewind(),
+            "rewind" => {
+                let mut words = args.split_whitespace();
+                let back = words.next().and_then(|n| n.parse::<u32>().ok());
+                let mut what = "both";
+                let mut force = false;
+                for w in words {
+                    match w {
+                        "--force" => force = true,
+                        w => what = w,
+                    }
+                }
+                match (back, what) {
+                    (Some(back), "both" | "conversation" | "files") if back > 0 => {
+                        self.ops.push(Op::Rewind {
+                            back,
+                            conversation: what != "files",
+                            files: what != "conversation",
+                            force,
+                        });
+                    }
+                    _ => self.note("usage: /rewind [n] [both|conversation|files] [--force]".into()),
+                }
+            }
+            "reload" => {
+                self.note("reloading config…".into());
+                self.ops.push(Op::ReloadConfig);
+            }
+            "trust" => match args {
+                "" => self.modal = Some(modal::trust(self.trust.as_ref(), &self.theme)),
+                "later" => {
+                    self.note("skipping the project config for now; /trust to decide".into())
+                }
+                decision @ ("trusted" | "settings-only" | "ignored") => {
+                    self.note(format!("project config: {decision}; reloading…"));
+                    self.ops.push(Op::TrustProject {
+                        decision: decision.to_owned(),
+                    });
+                }
+                _ => self.note("usage: /trust [trusted|settings-only|ignored]".into()),
+            },
+            "help" => self.modal = Some(modal::help(&self.theme)),
+            "quit" => self.quit = true,
+            name => self.note(format!(
+                "/{name} is planned for {}",
+                cmd.pending.unwrap_or("a later milestone")
+            )),
+        }
+    }
+
+    fn open_rewind(&mut self) {
+        if self.turn_running {
+            return self.note("wait for the current turn to finish before rewinding".into());
+        }
+        self.modal = Some(modal::rewind(None, &self.theme));
+        self.ops.push(Op::ListRewindPoints);
+    }
+
+    /// Settings from a reloaded config. What the engine reports (model, profile, mode)
+    /// stays as it is until the engine says otherwise.
+    pub fn reconfigure(&mut self, info: AppInfo) {
+        if info.ui.show_reasoning != self.info.ui.show_reasoning {
+            self.show_reasoning = info.ui.show_reasoning;
+        }
+        let keep = (
+            self.info.model.take(),
+            std::mem::take(&mut self.info.profile),
+            std::mem::take(&mut self.info.permission_mode),
+        );
+        self.info = info;
+        (
+            self.info.model,
+            self.info.profile,
+            self.info.permission_mode,
+        ) = keep;
+        self.theme = Theme::resolve(&self.info.ui.theme, self.info.no_color);
+        self.glyphs = Glyphs::new(self.info.ui.ascii);
+        // Query overrides may have changed.
+        self.highlights
+            .reset(std::sync::Arc::new(quack_core::grammar::Grammars::new(
+                self.info.grammar_dirs.clone(),
+            )));
+        self.highlight_code(true);
+        self.dirty = true;
+    }
+
+    fn note(&mut self, text: String) {
+        self.transcript.push(Entry::System(text));
+    }
+
+    fn save_setting(&mut self, key: &str, value: &str) {
+        self.ops.push(Op::SaveSetting {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            scope: WriteScope::User,
+        });
+    }
+
+    fn on_setting_saved(&mut self, key: &str, value: &str, path: &str, note: Option<String>) {
+        // Settings the UI owns apply now; the rest on the next start.
+        let live = match key {
+            "ui.ascii" => {
+                self.info.ui.ascii = value == "true";
+                self.glyphs = Glyphs::new(self.info.ui.ascii);
+                true
+            }
+            "ui.reduced_motion" => {
+                self.info.ui.reduced_motion = value == "true";
+                true
+            }
+            "ui.terminal_title" => {
+                self.info.ui.terminal_title = value == "true";
+                true
+            }
+            "ui.theme" => {
+                self.info.ui.theme = value.trim_matches('"').to_owned();
+                self.theme = Theme::resolve(&self.info.ui.theme, self.info.no_color);
+                true
+            }
+            _ => false,
+        };
+        if let Some(row) = self.info.settings.iter_mut().find(|r| r.key == key) {
+            row.value = value.to_owned();
+            row.origin = format!("user: {path}");
+        }
+        let when = if live {
+            ""
+        } else {
+            " (takes effect on the next start)"
+        };
+        let mut text = format!("saved {key} = {value} to {path}{when}");
+        if let Some(n) = note {
+            text.push_str("; ");
+            text.push_str(&n);
+        }
+        self.note(text);
+    }
+}
+
+/// A TOML string literal, so ids like `true` or `1.5` stay strings.
+fn toml_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(test)]
+pub(crate) use tests::info as test_info;
+
+/// The contents of the last fenced code block in `text`.
+fn last_code_block(text: &str) -> Option<String> {
+    let mut last = None;
+    let mut current: Option<Vec<&str>> = None;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            match current.take() {
+                Some(lines) => last = Some(lines.join("\n")),
+                None => current = Some(Vec::new()),
+            }
+        } else if let Some(lines) = &mut current {
+            lines.push(line);
+        }
+    }
+    last
+}
+
+/// The image files a paste names, as attachments with their byte lengths, when it names nothing
+/// else. Terminals send a dropped file as its path: quoted or backslash-escaped when it
+/// has spaces, or as a `file://` URL.
+fn dropped_images(text: &str) -> Option<Vec<(Attachment, u64)>> {
+    let image = |p: &str| {
+        let path = std::path::Path::new(p);
+        let (_, width, height, len) = quack_protocol::image::probe_file(path)?;
+        let attachment = Attachment {
+            path: p.to_owned(),
+            width,
+            height,
+        };
+        Some((attachment, len))
+    };
+    let whole = text.trim();
+    // One path with bare spaces, as some terminals paste it.
+    if let Some(one) = image(&file_url(whole)) {
+        return Some(vec![one]);
+    }
+    let words = split_paths(whole);
+    if words.is_empty() {
+        return None;
+    }
+    words.iter().map(|w| image(&file_url(w))).collect()
+}
+
+/// A `file://` URL as a path, with its percent escapes decoded; anything else as is.
+fn file_url(s: &str) -> String {
+    let Some(rest) = s.strip_prefix("file://") else {
+        return s.to_owned();
+    };
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Split a paste into paths the way a shell would read dropped files: whitespace
+/// separates, quotes group, and outside Windows a backslash escapes the next character.
+fn split_paths(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut started = false;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                started = true;
+            }
+            (None, '\\') if !cfg!(windows) => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+                started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            (None, c) => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    words
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub(crate) fn info() -> AppInfo {
+        AppInfo {
+            version: "0.1.0".into(),
+            cwd: "~/src/project".into(),
+            branch: Some("main".into()),
+            model: None,
+            profile: "empty".into(),
+            permission_mode: "ask".into(),
+            ui: UiSettings::default(),
+            no_color: false,
+            settings: Vec::new(),
+            layers: Vec::new(),
+            rules: Vec::new(),
+            grammar_dirs: Vec::new(),
+            bundles: Vec::new(),
+            bundles_disabled: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn window_title_is_the_duck_and_the_session_title() {
+        let mut app = App::new(info());
+        assert_eq!(app.window_title().as_deref(), Some("_(•)> quack"));
+        app.on_engine(Event::SessionTitle {
+            title: Some("fix the login bug".into()),
+        });
+        assert_eq!(
+            app.window_title().as_deref(),
+            Some("_(•)> fix the login bug")
+        );
+        app.turn_running = true;
+        assert_eq!(
+            app.window_title().as_deref(),
+            Some("✻ _(•)> fix the login bug")
+        );
+        app.on_engine(Event::SessionTitle { title: None });
+        app.turn_running = false;
+        assert_eq!(app.window_title().as_deref(), Some("_(•)> quack"));
+        app.info.ui.terminal_title = false;
+        assert_eq!(app.window_title(), None);
+    }
+
+    // Without a runtime (a plain `#[test]`), highlighting happens on the spot.
+    #[test]
+    fn code_blocks_are_highlighted_when_they_close() {
+        if !quack_core::grammar::Grammars::compiled_in() {
+            return;
+        }
+        let mut app = App::new(info());
+        app.on_engine(Event::AssistantDelta {
+            text: "Here:\n\n```rust\nfn a() {}\n".into(),
+        });
+        assert!(app.highlights.get("rust", "fn a() {}\n").is_none());
+        app.on_engine(Event::AssistantDelta {
+            text: "```\n".into(),
+        });
+        assert!(app.highlights.get("rust", "fn a() {}\n").is_some());
+    }
+
+    #[tokio::test]
+    async fn large_code_blocks_are_highlighted_off_thread() {
+        if !quack_core::grammar::Grammars::compiled_in() {
+            return;
+        }
+        let mut app = App::new(info());
+        let mut results = app.take_highlight_results().expect("receiver");
+        let code = "let x = 1;\n".repeat(2_000);
+        app.on_engine(Event::AssistantDelta {
+            text: format!("```rust\n{code}```\n"),
+        });
+        assert!(app.highlights.get("rust", &code).is_none());
+        let done = results.recv().await.expect("a result");
+        app.on_highlighted(done);
+        assert!(app.highlights.get("rust", &code).is_some());
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.on_terminal(TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    #[test]
+    fn custom_commands_in_the_popup_and_sent_as_turns() {
+        use quack_protocol::CommandInfo;
+        let mut app = App::new(info());
+        let cmd = |name: &str| CommandInfo {
+            name: name.into(),
+            description: format!("{name} things"),
+            args: "[focus]".into(),
+            source: "user".into(),
+            path: format!("/cfg/commands/{name}.md"),
+        };
+        app.on_engine(Event::Commands {
+            commands: vec![cmd("review"), cmd("models")],
+        });
+        // A built-in name wins, and the user is told.
+        assert!(app.transcript.iter().any(
+            |e| matches!(e, Entry::Warning(w) if w.contains("/models in /cfg/commands/models.md"))
+        ));
+        type_str(&mut app, "/revi");
+        let popup = app.popup_matches();
+        assert!(
+            popup
+                .iter()
+                .any(|p| p.name == "review" && p.hint == Some("custom")),
+            "{popup:?}"
+        );
+        app.input.clear();
+        type_str(&mut app, "/review the cache");
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            app.take_ops().as_slice(),
+            [Op::UserTurn { items, .. }] if items == &vec![InputItem::text("/review the cache")]
+        ));
+    }
+
+    #[test]
+    fn mcp_prompts_in_the_popup_and_sent_as_turns() {
+        let mut app = App::new(info());
+        app.on_engine(Event::McpPrompts {
+            prompts: vec![quack_protocol::CommandInfo {
+                name: "gh:review".into(),
+                description: "Review a pull request".into(),
+                args: "<pr>".into(),
+                source: "mcp: gh".into(),
+                path: String::new(),
+            }],
+        });
+        type_str(&mut app, "/gh:re");
+        let popup = app.popup_matches();
+        assert!(
+            popup
+                .iter()
+                .any(|p| p.name == "gh:review" && p.hint == Some("mcp")),
+            "{popup:?}"
+        );
+        app.input.clear();
+        type_str(&mut app, "/gh:review 12");
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            app.take_ops().as_slice(),
+            [Op::UserTurn { items, .. }] if items == &vec![InputItem::text("/gh:review 12")]
+        ));
+    }
+
+    #[test]
+    fn copy_last_response_or_code_block() {
+        let mut app = App::new(info());
+        type_str(&mut app, "/copy");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_clipboard(), None);
+        app.on_engine(Event::AssistantDelta {
+            text: "Run:\n```sh\ncargo test\n```\nthen\n```\nb\n```".into(),
+        });
+        type_str(&mut app, "/copy code");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_clipboard().as_deref(), Some("b"));
+        type_str(&mut app, "/copy");
+        press(&mut app, KeyCode::Enter);
+        assert!(app.take_clipboard().is_some_and(|t| t.starts_with("Run:")));
+        assert_eq!(
+            last_code_block("```\na\n```\n```\nb\nc\n```").as_deref(),
+            Some("b\nc")
+        );
+    }
+
+    #[test]
+    fn plan_mode_cycle_and_accept() {
+        let mut app = App::new(info());
+        let mode = |m: &str| Op::SetPermissionMode { mode: m.into() };
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.take_ops(), vec![mode("auto-edit")]);
+        app.on_engine(Event::PermissionMode {
+            mode: "auto-edit".into(),
+        });
+        type_str(&mut app, "/plan");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![mode("plan")]);
+        app.on_engine(Event::PermissionMode {
+            mode: "plan".into(),
+        });
+        type_str(&mut app, "/plan accept");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::AcceptPlan {
+                mode: "auto-edit".into()
+            }],
+            "back to the mode plan mode started from"
+        );
+    }
+
+    fn plan_turn_ends(app: &mut App) {
+        use quack_protocol::{TurnId, Usage};
+        app.on_engine(Event::TurnComplete {
+            turn: TurnId(1),
+            usage: Usage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                cached_prompt_tokens: None,
+                cache_write_tokens: None,
+            },
+        });
+    }
+
+    #[test]
+    fn plan_review_bar_accepts_or_takes_a_revision() {
+        let mut app = App::new(info());
+        let accept = |m: &str| vec![Op::AcceptPlan { mode: m.into() }];
+        let enter_plan = |app: &mut App| {
+            type_str(app, "/plan");
+            press(app, KeyCode::Enter);
+            app.on_engine(Event::PermissionMode {
+                mode: "plan".into(),
+            });
+            app.take_ops();
+            plan_turn_ends(app);
+            assert_eq!(app.review, Some(0), "the bar shows when a plan turn ends");
+        };
+
+        // The second choice: carry it out in auto-edit.
+        enter_plan(&mut app);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), accept("auto-edit"));
+        assert_eq!(app.review, None);
+        app.on_engine(Event::PermissionMode { mode: "ask".into() });
+
+        // Typing is the revision; it is sent as a plan-mode turn.
+        enter_plan(&mut app);
+        type_str(&mut app, "use sqlite instead");
+        assert_eq!(app.review, Some(0), "the bar stays while typing");
+        press(&mut app, KeyCode::Enter);
+        let ops = app.take_ops();
+        assert_eq!(ops.len(), 1, "{ops:?}");
+        assert!(
+            matches!(&ops[0], Op::UserTurn { items, .. } if items == &[InputItem::text("use sqlite instead")])
+        );
+        assert_eq!(app.review, None);
+
+        // Esc keeps planning; `1` accepts in the mode plan mode started from.
+        plan_turn_ends(&mut app);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.review, None);
+        assert!(app.take_ops().is_empty());
+        plan_turn_ends(&mut app);
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!(app.take_ops(), accept("ask"));
+    }
+
+    #[test]
+    fn questions_are_picked_typed_or_skipped() {
+        use quack_protocol::QuestionOption;
+        let mut app = App::new(info());
+        let questions = vec![
+            Question {
+                header: "Storage".into(),
+                question: "Where should tokens live?".into(),
+                options: vec![
+                    QuestionOption {
+                        label: "OS keyring".into(),
+                        description: None,
+                    },
+                    QuestionOption {
+                        label: "A dotfile".into(),
+                        description: None,
+                    },
+                ],
+                recommended: Some(1),
+            },
+            Question {
+                header: String::new(),
+                question: "Which database?".into(),
+                options: Vec::new(),
+                recommended: None,
+            },
+        ];
+        let ask = |app: &mut App| {
+            app.on_engine(Event::Questions {
+                call_id: CallId("q1".into()),
+                questions: questions.clone(),
+            });
+        };
+
+        ask(&mut app);
+        assert_eq!(
+            app.asking.as_ref().map(|a| a.selected),
+            Some(1),
+            "the recommendation"
+        );
+        press(&mut app, KeyCode::Char('1'));
+        type_str(&mut app, "sqlite");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::AnswerQuestions {
+                call_id: CallId("q1".into()),
+                answers: vec![
+                    Answer::Picked { index: 0 },
+                    Answer::Text {
+                        text: "sqlite".into()
+                    }
+                ],
+                stop_asking: false,
+            }]
+        );
+        assert!(app.asking.is_none());
+        assert!(app.input.is_empty());
+
+        // Enter takes the recommendation; Ctrl-S skips the rest and stops the asking.
+        ask(&mut app);
+        press(&mut app, KeyCode::Enter);
+        app.on_terminal(TermEvent::Key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::AnswerQuestions {
+                call_id: CallId("q1".into()),
+                answers: vec![Answer::Picked { index: 1 }, Answer::Skipped],
+                stop_asking: true,
+            }]
+        );
+
+        // Esc skips one question.
+        ask(&mut app);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.asking.as_ref().map(|a| a.current), Some(1));
+    }
+
+    #[test]
+    fn yolo_toggles_back_to_the_previous_mode() {
+        let mut app = App::new(info());
+        let mode = |m: &str| Op::SetPermissionMode { mode: m.into() };
+        app.on_engine(Event::PermissionMode {
+            mode: "auto-edit".into(),
+        });
+        type_str(&mut app, "/yolo");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![mode("yolo")]);
+        app.on_engine(Event::PermissionMode {
+            mode: "yolo".into(),
+        });
+        type_str(&mut app, "/yolo");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![mode("auto-edit")]);
+        type_str(&mut app, "/yolo off");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![mode("auto-edit")]);
+    }
+
+    #[test]
+    fn sandbox_toggles_without_changing_the_mode() {
+        let mut app = App::new(info());
+        app.on_engine(Event::PermissionMode {
+            mode: "plan".into(),
+        });
+        type_str(&mut app, "/sandbox");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![Op::SetSandbox { off: true }]);
+        app.on_engine(Event::Sandbox { off: true });
+        type_str(&mut app, "/sandbox");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![Op::SetSandbox { off: false }]);
+        type_str(&mut app, "/sandbox off");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![Op::SetSandbox { off: true }]);
+        assert_eq!(app.info.permission_mode, "plan");
+    }
+
+    #[test]
+    fn trust_prompt_opens_and_sends_the_decision() {
+        let mut app = App::new(info());
+        app.on_engine(Event::ProjectTrust {
+            path: "/r/.quack".into(),
+            summary: "1 MCP server".into(),
+            changed: false,
+        });
+        assert_eq!(app.modal.as_ref().map(|m| m.title.as_str()), Some("Trust"));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::TrustProject {
+                decision: "trusted".into()
+            }]
+        );
+        type_str(&mut app, "/reload");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![Op::ReloadConfig]);
+    }
+
+    #[test]
+    fn double_esc_opens_rewind_and_rewound_cuts_the_transcript() {
+        let mut app = App::new(info());
+        for text in ["one", "two", "three"] {
+            app.on_engine(Event::AssistantDelta { text: "x".into() });
+            app.transcript.push(Entry::User(text.into()));
+        }
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.modal.as_ref().map(|m| m.title.as_str()), Some("Rewind"));
+        assert_eq!(app.take_ops(), vec![Op::ListRewindPoints]);
+        app.modal = None;
+        app.on_engine(Event::Rewound {
+            back: 2,
+            text: "two".into(),
+        });
+        assert!(!app.transcript.contains(&Entry::User("two".into())));
+        assert!(app.transcript.contains(&Entry::User("one".into())));
+        assert_eq!(app.input.text(), "two");
+        type_str(&mut app, "");
+        app.input.clear();
+        type_str(&mut app, "/rewind 1 files --force");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::Rewind {
+                back: 1,
+                conversation: false,
+                files: true,
+                force: true
+            }]
+        );
+    }
+
+    #[test]
+    fn release_events_are_ignored() {
+        let mut app = App::new(info());
+        let mut ev = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        ev.kind = KeyEventKind::Release;
+        app.on_terminal(TermEvent::Key(ev));
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn slash_popup_runs_help_and_quit() {
+        let mut app = App::new(info());
+        type_str(&mut app, "/hel");
+        assert_eq!(
+            app.popup_matches().first().map(|c| c.name.as_str()),
+            Some("help")
+        );
+        press(&mut app, KeyCode::Enter);
+        assert!(app.modal.is_some());
+        press(&mut app, KeyCode::Esc);
+        assert!(app.modal.is_none());
+        type_str(&mut app, "/exit");
+        assert_eq!(
+            app.popup_matches().first().map(|c| c.name.as_str()),
+            Some("quit")
+        );
+        press(&mut app, KeyCode::Enter);
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn messages_become_user_turns_and_stream_back() {
+        let mut app = App::new(info());
+        type_str(&mut app, "hello");
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.take_ops().as_slice(), [Op::UserTurn { .. }]));
+        app.on_engine(Event::TurnStarted {
+            turn: quack_protocol::TurnId(1),
+        });
+        app.on_engine(Event::AssistantDelta { text: "hi ".into() });
+        app.on_engine(Event::AssistantDelta {
+            text: "there".into(),
+        });
+        assert_eq!(
+            app.transcript.last(),
+            Some(&Entry::Assistant("hi there".into()))
+        );
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.take_ops(), vec![Op::Interrupt]);
+    }
+
+    #[test]
+    fn models_modal_lists_catalog_and_switches() {
+        use quack_protocol::{ModelInfo, ProviderModels};
+        let mut app = App::new(info());
+        type_str(&mut app, "/models");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![Op::ListModels]);
+        app.on_engine(Event::ModelCatalog {
+            providers: vec![
+                ProviderModels {
+                    bundled: false,
+                    key: None,
+                    id: "charm".into(),
+                    available: true,
+                    note: "2 models".into(),
+                    models: vec![
+                        ModelInfo {
+                            id: "glm-5.3".into(),
+                            alias: None,
+                            context_window: Some(1_000_000),
+                            price: None,
+                        },
+                        ModelInfo {
+                            id: "qwen3.8-flash".into(),
+                            alias: None,
+                            context_window: None,
+                            price: None,
+                        },
+                    ],
+                },
+                ProviderModels {
+                    bundled: false,
+                    key: None,
+                    id: "novita".into(),
+                    available: false,
+                    note: "set NOVITA_API_KEY to use this provider".into(),
+                    models: Vec::new(),
+                },
+            ],
+            current: Some("charm/glm-5.3".into()),
+        });
+        type_str(&mut app, "qwen");
+        press(&mut app, KeyCode::Enter);
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SetModel {
+                provider: ProviderId("charm".into()),
+                model: ModelId("qwen3.8-flash".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn models_modal_ctrl_s_saves_default() {
+        use quack_protocol::{ModelInfo, ProviderModels};
+        let mut app = App::new(info());
+        type_str(&mut app, "/models");
+        press(&mut app, KeyCode::Enter);
+        app.take_ops();
+        app.on_engine(Event::ModelCatalog {
+            providers: vec![ProviderModels {
+                bundled: false,
+                key: None,
+                id: "charm".into(),
+                available: true,
+                note: String::new(),
+                models: vec![ModelInfo {
+                    id: "true".into(),
+                    alias: None,
+                    context_window: None,
+                    price: None,
+                }],
+            }],
+            current: None,
+        });
+        app.on_terminal(TermEvent::Key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SaveSetting {
+                key: "model.default".into(),
+                value: "\"charm/true\"".into(),
+                scope: WriteScope::User,
+            }]
+        );
+        app.on_engine(Event::SettingSaved {
+            key: "model.default".into(),
+            value: "\"charm/true\"".into(),
+            path: "/u/config.toml".into(),
+            note: None,
+        });
+        assert!(
+            matches!(app.transcript.last(), Some(Entry::System(t)) if t.contains("next start"))
+        );
+    }
+
+    #[test]
+    fn resume_picker_switches_and_replaces_transcript() {
+        use quack_protocol::{SessionInfo, SessionSummary};
+        let mut app = App::new(info());
+        app.transcript.push(Entry::User("old".into()));
+        type_str(&mut app, "/resume");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![Op::ListSessions]);
+        let summary = |id: &str, title: &str, current| SessionSummary {
+            id: SessionId(id.into()),
+            title: title.into(),
+            model: "charm/x".into(),
+            turns: 2,
+            age: "1h ago".into(),
+            started: "2026-10-17".into(),
+            current,
+        };
+        app.on_engine(Event::SessionList {
+            sessions: vec![
+                summary("aaa", "now", true),
+                summary("bbb", "fix the parser", false),
+            ],
+        });
+        type_str(&mut app, "parser");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::ResumeSession {
+                id: SessionId("bbb".into())
+            }]
+        );
+        app.on_engine(Event::SessionResumed {
+            session: SessionInfo {
+                id: SessionId("bbb".into()),
+                cwd: String::new(),
+                model: None,
+                profile: "generic".into(),
+            },
+            items: vec![ReplayItem::User {
+                text: "fix it".into(),
+            }],
+        });
+        assert!(!app.transcript.contains(&Entry::User("old".into())));
+        assert!(app.transcript.contains(&Entry::User("fix it".into())));
+    }
+
+    #[test]
+    fn config_set_saves_to_user_layer_and_applies_ui_live() {
+        let mut app = App::new(info());
+        type_str(&mut app, "/config set ui.ascii true");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SaveSetting {
+                key: "ui.ascii".into(),
+                value: "true".into(),
+                scope: WriteScope::User,
+            }]
+        );
+        app.on_engine(Event::SettingSaved {
+            key: "ui.ascii".into(),
+            value: "true".into(),
+            path: "/u/config.toml".into(),
+            note: None,
+        });
+        assert!(app.info.ui.ascii);
+    }
+
+    #[test]
+    fn double_ctrl_c_quits() {
+        let mut app = App::new(info());
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        app.on_terminal(TermEvent::Key(ctrl_c));
+        assert!(!app.should_quit());
+        app.on_terminal(TermEvent::Key(ctrl_c));
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn dropped_paths_split_like_a_shell() {
+        assert_eq!(split_paths("a.png  b.png"), ["a.png", "b.png"]);
+        assert_eq!(
+            split_paths("'/tmp/my shot.png' \"x y.png\""),
+            ["/tmp/my shot.png", "x y.png"]
+        );
+        if !cfg!(windows) {
+            assert_eq!(split_paths("/tmp/my\\ shot.png"), ["/tmp/my shot.png"]);
+        }
+        assert_eq!(file_url("file:///tmp/my%20shot.png"), "/tmp/my shot.png");
+        assert_eq!(file_url("plain%20text"), "plain%20text");
+    }
+
+    #[test]
+    fn a_paste_of_image_paths_attaches_them() {
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, b'I', b'H', b'D', b'R',
+            0, 0, 0, 2, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0x7D, 0x0C, 0xC0, 0xFA,
+        ];
+        let spaced =
+            std::env::temp_dir().join(format!("quack-tui-{} shot.png", std::process::id()));
+        std::fs::write(&spaced, PNG).expect("png");
+        let shown = spaced.display().to_string();
+        let mut app = App::new(info());
+        // Quoted, the way terminals send a dropped file with a space in its name.
+        assert!(app.attach_pasted(&format!("'{shown}'")));
+        // Unquoted with a bare space, as one path.
+        assert!(app.attach_pasted(&shown));
+        assert_eq!(app.attachments.len(), 2);
+        assert_eq!(app.attachments[0].path, shown);
+        assert_eq!(app.attachments[0].width, Some(2));
+        // Text that merely mentions the image is pasted as text.
+        assert!(!app.attach_pasted(&format!("look at {shown}")));
+        assert_eq!(app.attachments.len(), 2);
+        std::fs::remove_file(&spaced).ok();
+    }
+}

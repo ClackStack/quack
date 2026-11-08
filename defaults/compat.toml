@@ -1,0 +1,33 @@
+#:schema schemas/compat.json
+# Other coding agents' files (docs/plan/08-instructions-skills-commands.md#other-harnesses-files).
+# Delete entries, or this whole file, to stop using them.
+
+# Instruction files: read in a folder that has no AGENTS.md (the user ones when there is
+# no AGENTS.md in quack's config folder), and offered for merging into AGENTS.md with
+# /init. Folders (ending in /) are not read yet. `[instructions] other_agents = false` in
+# config.toml turns this off.
+[instructions]
+project = [
+    "CLAUDE.md",
+    "GEMINI.md",
+    ".cursorrules",
+    ".cursor/rules/",
+    ".github/copilot-instructions.md",
+    "CONVENTIONS.md",
+    ".windsurfrules",
+]
+user = ["~/.claude/CLAUDE.md", "~/.gemini/GEMINI.md"]
+
+# Detected only, not used yet:
+[skills]
+project = [".claude/skills/", ".codex/skills/", ".goose/skills/", ".maki/skills/"]
+user = ["~/.claude/skills/", "~/.codex/skills/", "~/.goose/skills/", "~/.maki/skills/"]
+
+[commands]
+project = [".claude/commands/"]
+user = ["~/.claude/commands/"]
+
+# Reported only, with an offer to convert into mcp.d/*.toml. Never executed in place.
+[mcp_configs]
+project = [".mcp.json", ".cursor/mcp.json", ".vscode/mcp.json"]
+user = ["~/.claude.json"]

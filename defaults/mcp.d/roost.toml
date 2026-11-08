@@ -1,0 +1,13 @@
+#:schema ../schemas/mcp.json
+# Roost: search and read internal documents (Office, PDF, text) over MCP,
+# without them leaving the network. One static binary, self-hosted:
+# github.com/paulhovey/roost.
+# Needs a running roost server and a token from `roost token create`, exported
+# as ROOST_TOKEN. Point `url` at your server; for an index on this machine use
+# the stdio form instead: command = "roost", args = ["mcp", "--config",
+# "/etc/roost/roost.toml"], env = { ROOST_TOKEN = "roost_..." }.
+enabled = false
+url = "https://roost.internal:8484/mcp"
+headers = { Authorization = { env = "ROOST_TOKEN", format = "Bearer {}" } }
+[tools]
+auto_approve = ["list_*", "search_*", "get_*", "read_*"]

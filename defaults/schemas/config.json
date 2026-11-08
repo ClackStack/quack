@@ -1,0 +1,783 @@
+{
+  "$defs": {
+    "AllowList": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": [],
+          "description": "Id globs. Empty allows everything."
+        },
+        "hosts": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": [],
+          "description": "Host globs a provider's `base_url` or a remote MCP server's `url` must match, e.g.\n`[\"llm.corp.example\", \"127.0.0.1\"]`. Empty allows every host."
+        }
+      },
+      "type": "object"
+    },
+    "CacheStrategy": {
+      "enum": [
+        "preserve",
+        "aggressive",
+        "auto"
+      ],
+      "type": "string"
+    },
+    "CatalogSettings": {
+      "additionalProperties": false,
+      "description": "Prices and context windows for models their provider doesn't describe.",
+      "properties": {
+        "refresh": {
+          "default": false,
+          "description": "Refresh the model catalog from `url` in the background, at most once a day. Off: the\ncatalog changes only with `quack catalog refresh` or a new install.",
+          "type": "boolean"
+        },
+        "url": {
+          "default": "",
+          "description": "Where the catalog comes from, in the models.dev format. Empty: nowhere.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ContextSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "budget_ratio": {
+          "default": 0.85,
+          "description": "Fraction of the model's context window we plan to use.",
+          "format": "double",
+          "type": "number"
+        },
+        "cache_strategy": {
+          "$ref": "#/$defs/CacheStrategy",
+          "default": "auto"
+        },
+        "compaction_threshold": {
+          "default": 0.8,
+          "format": "double",
+          "type": "number"
+        },
+        "window": {
+          "default": null,
+          "description": "Use at most this many tokens of the model's context window, also when nothing\nreports one: to try a small window, or to keep a local server's memory down (Ollama\ngets it as `num_ctx`). Unset: the model's whole window.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DefaultsSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "dir": {
+          "default": "",
+          "description": "Override the defaults bundle location; `none` disables it.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "EditFormat": {
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "The profile's choice, else `str_replace`.",
+          "type": "string"
+        },
+        {
+          "const": "str_replace",
+          "description": "`edit`: replace a unique snippet.",
+          "type": "string"
+        },
+        {
+          "const": "hashline",
+          "description": "Hash-anchored edits: `read` tags each line, and edits name lines by tag.",
+          "type": "string"
+        },
+        {
+          "const": "apply_patch",
+          "description": "`apply_patch`: the Codex patch format, several files per call.",
+          "type": "string"
+        },
+        {
+          "const": "whole_file",
+          "description": "No edit tool: files are rewritten whole with `write`.",
+          "type": "string"
+        },
+        {
+          "const": "search_replace_blocks",
+          "description": "`edit_blocks`: SEARCH/REPLACE blocks under each file's path.",
+          "type": "string"
+        }
+      ]
+    },
+    "InstructionSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": [
+            "AGENTS.md"
+          ],
+          "description": "Instruction file names, in order of preference; the first one in a folder is read."
+        },
+        "max_bytes": {
+          "default": 32768,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "other_agents": {
+          "default": true,
+          "description": "Also read other agents' files listed in `compat.toml` (CLAUDE.md, GEMINI.md,\n.cursorrules, …) where there is no file from `files`.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ItemToggles": {
+      "additionalProperties": false,
+      "properties": {
+        "disabled": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": []
+        }
+      },
+      "type": "object"
+    },
+    "ListOrAppend": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "properties": {
+            "append": {
+              "description": "Appended to the list from lower layers.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "append"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Schema-only mirror of the accepted shapes."
+    },
+    "MemoryScope": {
+      "oneOf": [
+        {
+          "enum": [
+            "data-dir"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "repo",
+          "description": "Store project memory under `.quack/memory` so it can be committed.",
+          "type": "string"
+        }
+      ]
+    },
+    "MemorySettings": {
+      "additionalProperties": false,
+      "properties": {
+        "index_max_tokens": {
+          "default": 1500,
+          "description": "Cap on the memory index in the prompt.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nudge": {
+          "default": true,
+          "description": "Remind the model to save a note when a message sounds like a correction or a lasting\npreference (\"from now on\", \"I prefer\", \"no, ...\").",
+          "type": "boolean"
+        },
+        "path": {
+          "default": "",
+          "description": "Where memory notes live. Empty: `<user data>/memory`.",
+          "type": "string"
+        },
+        "project_scope": {
+          "$ref": "#/$defs/MemoryScope",
+          "default": "data-dir"
+        },
+        "writes": {
+          "$ref": "#/$defs/MemoryWrites",
+          "default": "auto",
+          "description": "Whether the model's memory writes need approval."
+        }
+      },
+      "type": "object"
+    },
+    "MemoryWrites": {
+      "oneOf": [
+        {
+          "enum": [
+            "ask"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "auto",
+          "description": "Writes show in the transcript and are easy to undo.",
+          "type": "string"
+        }
+      ]
+    },
+    "ModelSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "default": "",
+          "description": "`<provider-id>/<model-id>` or `<provider-id>/<alias>`. Empty: pick with `/models`.",
+          "type": "string"
+        },
+        "planner": {
+          "default": "",
+          "description": "Model that writes plans in plan mode, e.g. a larger one. Accepting the plan hands it\nto the session's model as one message, instead of the planner's transcript. Empty:\nplan with the session's model.",
+          "type": "string"
+        },
+        "profile": {
+          "default": "",
+          "description": "A profile id for every model this session, e.g. `qwen-code`. Empty: each model's\nown `profile` (normally `auto`).",
+          "type": "string"
+        },
+        "remember_last": {
+          "default": true,
+          "description": "Start with the model last switched to, when it is still available. A project's\n`model.default`, `QUACK_MODEL` and `-m` still win; `default` is the fallback.",
+          "type": "boolean"
+        },
+        "small": {
+          "default": "",
+          "description": "Model for titles, summaries and cheap subtasks. Empty: use `default`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "NetworkSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "ca_bundle": {
+          "default": "",
+          "description": "Extra PEM roots, in addition to the OS store.",
+          "type": "string"
+        },
+        "egress_allow": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": []
+        },
+        "offline": {
+          "default": false,
+          "description": "Block all egress except provider base URLs and `egress_allow`.",
+          "type": "boolean"
+        },
+        "proxy": {
+          "default": "",
+          "description": "Empty: `HTTPS_PROXY` / system.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "PermissionMode": {
+      "description": "Ordered from least to most permissive, so policy can cap with `min`.",
+      "oneOf": [
+        {
+          "enum": [
+            "read-only",
+            "ask",
+            "auto-edit",
+            "full-auto"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "yolo",
+          "description": "No approvals and no sandbox. Only the built-in deny list and `deny` rules apply.",
+          "type": "string"
+        }
+      ]
+    },
+    "PermissionSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": []
+        },
+        "ask": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": []
+        },
+        "deny": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": []
+        },
+        "mode": {
+          "$ref": "#/$defs/PermissionMode",
+          "default": "ask"
+        }
+      },
+      "type": "object"
+    },
+    "Policy": {
+      "additionalProperties": false,
+      "properties": {
+        "locked": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": [],
+          "description": "Dotted settings keys that lower-precedence layers cannot change."
+        },
+        "max_permission_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "mcp": {
+          "$ref": "#/$defs/AllowList",
+          "default": {
+            "allowed": [],
+            "hosts": []
+          }
+        },
+        "project_config": {
+          "$ref": "#/$defs/ProjectConfigPolicy",
+          "default": "trusted-only"
+        },
+        "providers": {
+          "$ref": "#/$defs/AllowList",
+          "default": {
+            "allowed": [],
+            "hosts": []
+          }
+        }
+      },
+      "type": "object"
+    },
+    "ProjectConfigPolicy": {
+      "enum": [
+        "trusted-only",
+        "never",
+        "always"
+      ],
+      "type": "string"
+    },
+    "SandboxMode": {
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "`workspace-write` where this OS supports it (Linux with Landlock, macOS);\nelsewhere commands run without a sandbox, with a notice.",
+          "type": "string"
+        },
+        {
+          "const": "off",
+          "description": "Commands run without a sandbox.",
+          "type": "string"
+        },
+        {
+          "const": "workspace-write",
+          "description": "Commands may write only in the workspace and temp folders, with no network.",
+          "type": "string"
+        },
+        {
+          "const": "workspace-write-net",
+          "description": "Like `workspace-write`, with network access.",
+          "type": "string"
+        },
+        {
+          "const": "read-only",
+          "description": "Commands may not write anywhere, and have no network.",
+          "type": "string"
+        }
+      ]
+    },
+    "SandboxSettings": {
+      "additionalProperties": false,
+      "description": "The OS sandbox for shell commands (docs/plan/11-security.md#os-sandboxing).",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/SandboxMode",
+          "default": "auto"
+        },
+        "writable": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": [],
+          "description": "More folders commands may write to, besides the workspace and temp folders\n(e.g. `[\"~/.cargo\", \"~/.cache\"]`)."
+        }
+      },
+      "type": "object"
+    },
+    "SessionSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "default": "",
+          "description": "Empty: `<user data>/sessions`.",
+          "type": "string"
+        },
+        "retention_days": {
+          "default": 0,
+          "description": "0 keeps sessions forever.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "ShowReasoning": {
+      "enum": [
+        "hidden",
+        "collapsed",
+        "expanded"
+      ],
+      "type": "string"
+    },
+    "SkillSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "compat_paths": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": [],
+          "description": "More skill folders, e.g. another harness's `.claude/skills` once you accept it.\nRelative paths are from the workspace root."
+        },
+        "disabled": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": [],
+          "description": "Skill names to skip."
+        },
+        "index_max_tokens": {
+          "default": 1500,
+          "description": "Cap on the skill list in the system prompt.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "StartupPanel": {
+      "oneOf": [
+        {
+          "enum": [
+            "always",
+            "never"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "auto",
+          "description": "Show only when something needs attention or startup is slow (over half a second).",
+          "type": "string"
+        }
+      ]
+    },
+    "TelemetrySettings": {
+      "additionalProperties": false,
+      "properties": {
+        "otel_endpoint": {
+          "default": "",
+          "description": "Empty disables telemetry. Never enabled implicitly.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ToolSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "default_timeout_secs": {
+          "default": 120,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "edit_format": {
+          "$ref": "#/$defs/EditFormat",
+          "default": "auto"
+        },
+        "read_outline_tokens": {
+          "default": 2000,
+          "description": "`read` without a line range shows the outline of source files larger than this\n(in tokens), so the model reads only the part it needs. 0: always the whole file.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "shell": {
+          "default": "auto",
+          "description": "`auto`, `bash`, `zsh`, `pwsh`, `powershell`, `cmd`, or a path.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "UiSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "ascii": {
+          "default": false,
+          "description": "Use ASCII instead of box-drawing and spinner glyphs.",
+          "type": "boolean"
+        },
+        "mouse": {
+          "default": true,
+          "description": "Capture the mouse for wheel scrolling, clicks in the input and selecting text to copy.\nThe terminal's own selection then needs Shift held; turn this off to leave it to the\nterminal.",
+          "type": "boolean"
+        },
+        "reduced_motion": {
+          "default": false,
+          "description": "Replace spinners with static indicators.",
+          "type": "boolean"
+        },
+        "show_reasoning": {
+          "$ref": "#/$defs/ShowReasoning",
+          "default": "collapsed"
+        },
+        "startup_panel": {
+          "$ref": "#/$defs/StartupPanel",
+          "default": "auto"
+        },
+        "terminal_title": {
+          "default": true,
+          "description": "Set the terminal's window title to the duck and the session title, restoring the\nold one on exit.",
+          "type": "boolean"
+        },
+        "theme": {
+          "default": "auto",
+          "description": "`auto`, `dark`, `light`, or a theme name from `themes/`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "UpdateSettings": {
+      "additionalProperties": false,
+      "description": "Looking for new versions of quack.",
+      "properties": {
+        "check": {
+          "default": false,
+          "description": "Look for a new version at `url` at most once a day, and say so in the TUI. Off: only\n`quack update` looks.",
+          "type": "boolean"
+        },
+        "url": {
+          "default": "",
+          "description": "Answers with a redirect to `.../<version>`, as GitHub's `releases/latest` does, or\nwith the version as text. Empty: nowhere.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "bundles": {
+      "$ref": "#/$defs/ItemToggles",
+      "default": {
+        "disabled": []
+      },
+      "description": "Turn off installed bundles (`<layer>/bundles/<name>/`) by folder name."
+    },
+    "catalog": {
+      "$ref": "#/$defs/CatalogSettings",
+      "default": {
+        "refresh": false,
+        "url": ""
+      }
+    },
+    "context": {
+      "$ref": "#/$defs/ContextSettings",
+      "default": {
+        "budget_ratio": 0.85,
+        "cache_strategy": "auto",
+        "compaction_threshold": 0.8,
+        "window": null
+      }
+    },
+    "defaults": {
+      "$ref": "#/$defs/DefaultsSettings",
+      "default": {
+        "dir": ""
+      }
+    },
+    "hooks": {
+      "$ref": "#/$defs/ItemToggles",
+      "default": {
+        "disabled": []
+      },
+      "description": "Turn off hooks from lower layers; the system layer's hooks cannot be turned off."
+    },
+    "instructions": {
+      "$ref": "#/$defs/InstructionSettings",
+      "default": {
+        "files": [
+          "AGENTS.md"
+        ],
+        "max_bytes": 32768,
+        "other_agents": true
+      }
+    },
+    "keys": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "description": "Keybinding overrides: action name → key chord.",
+      "type": "object"
+    },
+    "lsp": {
+      "$ref": "#/$defs/ItemToggles",
+      "default": {
+        "disabled": []
+      }
+    },
+    "mcp": {
+      "$ref": "#/$defs/ItemToggles",
+      "default": {
+        "disabled": []
+      }
+    },
+    "memory": {
+      "$ref": "#/$defs/MemorySettings",
+      "default": {
+        "index_max_tokens": 1500,
+        "nudge": true,
+        "path": "",
+        "project_scope": "data-dir",
+        "writes": "auto"
+      }
+    },
+    "model": {
+      "$ref": "#/$defs/ModelSettings",
+      "default": {
+        "default": "",
+        "planner": "",
+        "profile": "",
+        "remember_last": true,
+        "small": ""
+      }
+    },
+    "network": {
+      "$ref": "#/$defs/NetworkSettings",
+      "default": {
+        "ca_bundle": "",
+        "egress_allow": [],
+        "offline": false,
+        "proxy": ""
+      }
+    },
+    "permissions": {
+      "$ref": "#/$defs/PermissionSettings",
+      "default": {
+        "allow": [],
+        "ask": [],
+        "deny": [],
+        "mode": "ask"
+      }
+    },
+    "policy": {
+      "$ref": "#/$defs/Policy",
+      "default": {
+        "locked": [],
+        "max_permission_mode": null,
+        "mcp": {
+          "allowed": [],
+          "hosts": []
+        },
+        "project_config": "trusted-only",
+        "providers": {
+          "allowed": [],
+          "hosts": []
+        }
+      },
+      "description": "Only honoured in the system layer."
+    },
+    "providers": {
+      "$ref": "#/$defs/ItemToggles",
+      "default": {
+        "disabled": []
+      },
+      "description": "Disable provider files from lower layers without deleting them."
+    },
+    "sandbox": {
+      "$ref": "#/$defs/SandboxSettings",
+      "default": {
+        "mode": "auto",
+        "writable": []
+      }
+    },
+    "sessions": {
+      "$ref": "#/$defs/SessionSettings",
+      "default": {
+        "path": "",
+        "retention_days": 0
+      }
+    },
+    "skills": {
+      "$ref": "#/$defs/SkillSettings",
+      "default": {
+        "compat_paths": [],
+        "disabled": [],
+        "index_max_tokens": 1500
+      }
+    },
+    "telemetry": {
+      "$ref": "#/$defs/TelemetrySettings",
+      "default": {
+        "otel_endpoint": ""
+      }
+    },
+    "tools": {
+      "$ref": "#/$defs/ToolSettings",
+      "default": {
+        "default_timeout_secs": 120,
+        "edit_format": "auto",
+        "read_outline_tokens": 2000,
+        "shell": "auto"
+      }
+    },
+    "ui": {
+      "$ref": "#/$defs/UiSettings",
+      "default": {
+        "ascii": false,
+        "mouse": true,
+        "reduced_motion": false,
+        "show_reasoning": "collapsed",
+        "startup_panel": "auto",
+        "terminal_title": true,
+        "theme": "auto"
+      }
+    },
+    "updates": {
+      "$ref": "#/$defs/UpdateSettings",
+      "default": {
+        "check": false,
+        "url": ""
+      }
+    }
+  },
+  "title": "Settings",
+  "type": "object"
+}

@@ -1,0 +1,7 @@
+category = "fix-symptom"
+prompt = "Accounting loads the file from `python -m orderly export` into their own system, and it doesn't match the saved orders: some rows have their columns shifted (order 1006 shows it), and some customers come out different from what was saved. Fix the export so that every value reads back exactly with Python's csv module. Keep the header and the columns as they are."
+requires = ["python"]
+base = "../_projects/orderly"
+
+[[check]]
+command = "{python} -m unittest discover -s tests -t ."
