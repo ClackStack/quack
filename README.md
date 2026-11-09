@@ -1,4 +1,11 @@
-# quack
+# _(•)> quack
+
+```
+   __
+<(o )___
+ ( ._> /
+  `---'
+```
 
 A fast, terminal-native coding agent designed for open-weight models. Run it with local servers
 (**llama.cpp, Ollama, vLLM, SGLang, LM Studio**) or hosted open-model services (**OpenRouter,
