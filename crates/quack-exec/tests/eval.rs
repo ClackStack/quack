@@ -28,19 +28,28 @@ fn task(suite: &Path, id: &str, toml: &str, files: &[(&str, &str)]) {
 #[tokio::test]
 async fn runs_checks_and_reports() {
     let server = MockServer::start().await;
-    // The edit task: one edit call, then an answer, each reporting its prompt size.
+    // The edit task: read the file, edit it, then answer, each reporting its prompt size.
+    // The scripted calls mount before the catch-all answer: the first match wins.
+    let args = json!({"path":"a.txt","old_string":"six","new_string":"seven"}).to_string();
+    Mock::given(method("POST"))
+        .and(body_string_contains("Change six"))
+        .respond_with(sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":8}})))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"role\":\"tool\""))
+        .and(body_string_contains("Change six"))
+        .respond_with(sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"edit","arguments":args}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":120,"completion_tokens":9}})))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
         .and(body_string_contains("\"role\":\"tool\""))
         .respond_with(sse(json!({
             "choices":[{"delta":{"content":"Done, it is 7."},"finish_reason":"stop"}],
             "usage":{"prompt_tokens":150,"completion_tokens":5}
         })))
-        .mount(&server)
-        .await;
-    let args = json!({"path":"a.txt","old_string":"six","new_string":"seven"}).to_string();
-    Mock::given(method("POST"))
-        .and(body_string_contains("Change six"))
-        .respond_with(sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"edit","arguments":args}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":120,"completion_tokens":9}})))
         .mount(&server)
         .await;
     // The asking task: a question nobody is there to answer, then the answer.
@@ -127,11 +136,11 @@ async fn runs_checks_and_reports() {
     let by = |id: &str| results.iter().find(|r| r.task == id).expect("result");
     let edit = by("edit-one");
     assert!(edit.passed, "{edit:?}");
-    assert_eq!((edit.steps, edit.tool_calls, edit.edit_failures), (2, 1, 0));
-    // How full the context got: the larger of the two requests.
+    assert_eq!((edit.steps, edit.tool_calls, edit.edit_failures), (3, 2, 0));
+    // How full the context got: the largest of the three requests.
     assert_eq!(
         (edit.prompt_tokens, edit.peak_prompt, edit.pruned),
-        (270, 150, 0)
+        (370, 150, 0)
     );
     assert_eq!(edit.model, "mock/tiny");
     // What the requests carried is recorded with the result.
@@ -178,18 +187,26 @@ async fn a_planner_plans_and_the_model_carries_it_out() {
         ))
         .mount(&server)
         .await;
+    let args = json!({"path":"a.txt","old_string":"six","new_string":"seven"}).to_string();
+    Mock::given(method("POST"))
+        .and(body_string_contains("[Plan handoff]"))
+        .respond_with(sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":"tool_calls"}]})))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("[Plan handoff]"))
+        .and(body_string_contains("\"role\":\"tool\""))
+        .respond_with(sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"edit","arguments":args}}]},"finish_reason":"tool_calls"}]})))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
         .and(body_string_contains("[Plan handoff]"))
         .and(body_string_contains("\"role\":\"tool\""))
         .respond_with(sse(
             json!({"choices":[{"delta":{"content":"Done, it is 7."},"finish_reason":"stop"}]}),
         ))
-        .mount(&server)
-        .await;
-    let args = json!({"path":"a.txt","old_string":"six","new_string":"seven"}).to_string();
-    Mock::given(method("POST"))
-        .and(body_string_contains("[Plan handoff]"))
-        .respond_with(sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"edit","arguments":args}}]},"finish_reason":"tool_calls"}]})))
         .mount(&server)
         .await;
 
@@ -233,8 +250,8 @@ async fn a_planner_plans_and_the_model_carries_it_out() {
     assert!(r.passed, "{r:?}");
     assert_eq!(
         (r.steps, r.tool_calls),
-        (3, 1),
-        "one planning step, two to carry it out"
+        (4, 2),
+        "one planning step, three to carry it out"
     );
     assert_eq!(
         r.model, "mock/tiny",
@@ -245,17 +262,27 @@ async fn a_planner_plans_and_the_model_carries_it_out() {
 #[tokio::test]
 async fn a_shared_base_hidden_checks_and_failure_labels() {
     let server = MockServer::start().await;
+    // The model reads the overlay's file, edits it, and answers; the bug is in the base's.
+    // The scripted calls mount before the catch-all answer: the first match wins.
+    Mock::given(method("POST"))
+        .and(body_string_contains("Fix the bug"))
+        .respond_with(sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","function":{"name":"read","arguments":"{\"path\":\"app.txt\"}"}}]},"finish_reason":"tool_calls"}]})))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let args = json!({"path":"app.txt","old_string":"v1","new_string":"v2"}).to_string();
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"role\":\"tool\""))
+        .and(body_string_contains("v1"))
+        .respond_with(sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"edit","arguments":args}}]},"finish_reason":"tool_calls"}]})))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
         .and(body_string_contains("\"role\":\"tool\""))
         .respond_with(sse(
             json!({"choices":[{"delta":{"content":"Fixed."},"finish_reason":"stop"}]}),
         ))
-        .mount(&server)
-        .await;
-    // The model edits the overlay's file, but the bug is in the base's.
-    let args = json!({"path":"app.txt","old_string":"v1","new_string":"v2"}).to_string();
-    Mock::given(method("POST"))
-        .respond_with(sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"edit","arguments":args}}]},"finish_reason":"tool_calls"}]})))
         .mount(&server)
         .await;
 

@@ -25,15 +25,26 @@ async fn engine(root: &Path, server: &MockServer, format: &str) -> EngineHandle 
     Engine::spawn(Arc::new(loaded))
 }
 
-async fn reply_with_call(server: &MockServer, name: &str, args: Value) {
+/// Script a turn of tool calls: the first request gets `calls[0]`, each result the next
+/// call, and the last result ends the turn.
+async fn reply_with_calls(server: &MockServer, calls: &[(&str, Value)]) {
+    let (first, rest) = calls.split_first().expect("at least one call");
+    Mock::given(method("POST"))
+        .respond_with(sse_call("c1", first.0, first.1.clone()))
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+    for (name, args) in rest {
+        Mock::given(method("POST"))
+            .and(body_string_contains("\"role\":\"tool\""))
+            .respond_with(sse_call("c1", name, args.clone()))
+            .up_to_n_times(1)
+            .mount(server)
+            .await;
+    }
     Mock::given(method("POST"))
         .and(body_string_contains("\"role\":\"tool\""))
         .respond_with(sse_text("done"))
-        .mount(server)
-        .await;
-    Mock::given(method("POST"))
-        .respond_with(sse_call("c1", name, args))
-        .up_to_n_times(1)
         .mount(server)
         .await;
 }
@@ -53,7 +64,15 @@ async fn apply_patch_changes_several_files_and_undo_restores_them() {
     let server = MockServer::start().await;
     let patch = "*** Begin Patch\n*** Update File: a.txt\n one\n-two\n+TWO\n three\n\
                  *** Delete File: b.txt\n*** Add File: sub/c.txt\n+new\n*** End Patch";
-    reply_with_call(&server, "apply_patch", json!({ "patch": patch })).await;
+    reply_with_calls(
+        &server,
+        &[
+            ("read", json!({ "path": "a.txt" })),
+            ("read", json!({ "path": "b.txt" })),
+            ("apply_patch", json!({ "patch": patch })),
+        ],
+    )
+    .await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let ws = tmp.path().join("ws");
     let mut engine = engine(tmp.path(), &server, "apply_patch").await;
@@ -117,7 +136,15 @@ async fn edit_blocks_edit_two_files_in_one_call() {
     let server = MockServer::start().await;
     let blocks = "a.txt\n<<<<<<< SEARCH\ntwo\n=======\n2\n>>>>>>> REPLACE\n\n\
                   b.txt\n<<<<<<< SEARCH\nbye\n=======\nhello\n>>>>>>> REPLACE\n";
-    reply_with_call(&server, "edit_blocks", json!({ "blocks": blocks })).await;
+    reply_with_calls(
+        &server,
+        &[
+            ("read", json!({ "path": "a.txt" })),
+            ("read", json!({ "path": "b.txt" })),
+            ("edit_blocks", json!({ "blocks": blocks })),
+        ],
+    )
+    .await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let ws = tmp.path().join("ws");
     let mut engine = engine(tmp.path(), &server, "search_replace_blocks").await;
@@ -156,5 +183,65 @@ async fn whole_file_offers_only_write() {
         assert!(!names.contains(&edit.to_owned()), "{names:?}");
     }
     assert!(body.contains("complete new content"), "{body}");
+    engine.shutdown().await;
+}
+
+/// An `edit` on a file the model never read is refused; after a `read` the same edit
+/// goes through.
+#[tokio::test]
+async fn blind_edit_is_refused_until_the_file_is_read() {
+    let server = MockServer::start().await;
+    let edit = json!({"path": "a.txt", "old_string": "two", "new_string": "2"});
+    reply_with_calls(
+        &server,
+        &[
+            ("edit", edit.clone()),
+            ("read", json!({ "path": "a.txt" })),
+            ("edit", edit),
+        ],
+    )
+    .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ws = tmp.path().join("ws");
+    let mut engine = engine(tmp.path(), &server, "str_replace").await;
+    std::fs::write(ws.join("a.txt"), "one\ntwo\n").expect("a");
+
+    turn(&mut engine, "change it").await;
+    let all = bodies(&server).await;
+    assert!(all[1].contains("has not been read yet"), "{}", all[1]);
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.txt")).expect("a"),
+        "one\n2\n"
+    );
+    engine.shutdown().await;
+}
+
+/// `write` over an existing file the model never read is refused; creating a new file
+/// with `write` needs no read.
+#[tokio::test]
+async fn overwriting_an_unread_file_is_refused() {
+    let server = MockServer::start().await;
+    let write = json!({"path": "a.txt", "content": "fresh\n"});
+    reply_with_calls(
+        &server,
+        &[
+            ("write", write.clone()),
+            ("read", json!({ "path": "a.txt" })),
+            ("write", write),
+        ],
+    )
+    .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ws = tmp.path().join("ws");
+    let mut engine = engine(tmp.path(), &server, "str_replace").await;
+    std::fs::write(ws.join("a.txt"), "old\n").expect("a");
+
+    turn(&mut engine, "replace it").await;
+    let all = bodies(&server).await;
+    assert!(all[1].contains("has not been read yet"), "{}", all[1]);
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.txt")).expect("a"),
+        "fresh\n"
+    );
     engine.shutdown().await;
 }

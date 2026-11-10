@@ -175,6 +175,15 @@ on_error = "deny"                  # deny | allow | warn
 - `user_prompt` hooks can add context (`{"additional_context": "..."}`).
 - Hooks from the project layer require trust. System-layer hooks can't be disabled by users (enterprise enforcement).
 
+### Enabling (2026-11-09)
+
+The shipped examples are `enabled = false`. `/hooks` turns one on with `Op::EnableHook`
+(`quack-config/src/enable.rs`): a defaults hook is copied into the user layer's `hooks.d/`
+with `enabled = true` (its payload folder named after the file goes with it; the shipped
+copy is never edited), a hook disabled in its own user or project file is enabled in
+place, a bare `enabled = false` override in the user layer is removed, and
+`[hooks] disabled` stops listing the id. Toggle-off still only writes `[hooks] disabled`.
+
 ### As implemented (2026-10-19, ahead of M3)
 
 - **Files.** `quack-config/src/hooks.rs` (`HookFile`, schema `hook.json`), loaded by

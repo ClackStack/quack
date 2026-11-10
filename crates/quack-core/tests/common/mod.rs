@@ -33,6 +33,17 @@ pub fn sse_raw(chunks: &[String]) -> ResponseTemplate {
 /// Isolated directories under `root`, one provider file `mock.toml`, no defaults bundle.
 /// The workspace is `root/ws`; the harness starts in `root/ws/<cwd>`.
 pub fn workspace(root: &Path, base_url: &str, models: &str, cwd: &str) -> Loaded {
+    workspace_in(root, base_url, models, cwd, None)
+}
+
+/// [`workspace`] with a defaults bundle at `defaults`, loaded as the lowest layer.
+pub fn workspace_in(
+    root: &Path,
+    base_url: &str,
+    models: &str,
+    cwd: &str,
+    defaults: Option<&Path>,
+) -> Loaded {
     let user = root.join("user");
     std::fs::create_dir_all(user.join("providers.d")).expect("mkdir");
     std::fs::write(
@@ -49,7 +60,13 @@ pub fn workspace(root: &Path, base_url: &str, models: &str, cwd: &str) -> Loaded
     ] {
         vars.insert(k.into(), root.join(sub).into_os_string());
     }
-    vars.insert("QUACK_DEFAULTS_DIR".into(), "none".into());
+    vars.insert(
+        "QUACK_DEFAULTS_DIR".into(),
+        defaults.map_or_else(
+            || OsString::from("none"),
+            |d| d.to_path_buf().into_os_string(),
+        ),
+    );
     let dir: PathBuf = root.join("ws").join(cwd);
     std::fs::create_dir_all(&dir).expect("mkdir");
     load_with(&move |k| vars.get(k).cloned(), &LoadOptions::new(dir)).expect("load")

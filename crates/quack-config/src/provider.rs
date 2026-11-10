@@ -132,6 +132,16 @@ pub fn with_keyring_key(text: &str, name: &str) -> Result<String, String> {
     Ok(doc.to_string())
 }
 
+/// A provider file's text with `api_key` read from the file `path`, keeping its comments
+/// and other settings.
+pub fn with_file_key(text: &str, path: &str) -> Result<String, String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{e}"))?;
+    let mut key = toml_edit::InlineTable::new();
+    key.insert("file", path.into());
+    doc["api_key"] = toml_edit::value(key);
+    Ok(doc.to_string())
+}
+
 impl ProviderFile {
     /// The id to look this provider up by in the model catalog. A server on this machine
     /// serves its own window at its own cost, so it needs asking for by name.
@@ -429,6 +439,17 @@ mod tests {
             out,
             "#:schema ../schemas/provider.json\n# A service.\nname = \"X\"\n\
              base_url = \"https://x/v1\"\napi_key = { keyring = \"x\" }\n"
+        );
+    }
+
+    #[test]
+    fn file_key_replaces_the_variable_and_keeps_the_rest() {
+        let text = "# A service.\nbase_url = \"https://x/v1\"\napi_key = { env = \"X_KEY\" }\n";
+        let out = with_file_key(text, "~/.config/quack/keys/x.key").expect("edit");
+        assert_eq!(
+            out,
+            "# A service.\nbase_url = \"https://x/v1\"\n\
+             api_key = { file = \"~/.config/quack/keys/x.key\" }\n"
         );
     }
 

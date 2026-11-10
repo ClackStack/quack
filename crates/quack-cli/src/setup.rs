@@ -202,25 +202,76 @@ fn hosted(config: &Loaded, io: &mut Io<'_>) -> Result<Option<String>, String> {
         return Ok(Some(service.id.clone()));
     }
     let env = service.env.clone().unwrap_or_default();
+    // The OS credential store when it is reachable, with the ways around it alongside.
+    let store = setup::key_store(config, &service.id)?;
+    let mut options: Vec<(&str, String)> = Vec::new();
+    match &store.0 {
+        setup::KeyStore::Keyring => options.push((
+            "keyring",
+            "the OS credential store (stored now, recommended)".into(),
+        )),
+        setup::KeyStore::File(_) => {
+            let reason = store
+                .1
+                .as_deref()
+                .unwrap_or("the OS credential store is not available");
+            io.say(&format!("({reason}.)"));
+        }
+    }
+    if matches!(store.0, setup::KeyStore::File(_)) {
+        options.push((
+            "file",
+            "a file only you can read (stored now, recommended)".into(),
+        ));
+    } else {
+        options.push(("file", "a file only you can read".into()));
+    }
+    options.push((
+        "env",
+        format!("the {env} environment variable (you set it)"),
+    ));
     io.say(&format!(
         "Where should the {} API key come from?",
         service.name
     ));
-    io.say("  1  the OS credential store (stored now, recommended)");
-    io.say(&format!("  2  the {env} environment variable (you set it)"));
-    match io.ask("> [1] ").as_deref() {
-        None => Ok(None),
-        Some("2") => {
+    for (i, (_, label)) in options.iter().enumerate() {
+        io.say(&format!("  {}  {label}", i + 1));
+    }
+    let answer = match io.ask("> [1] ") {
+        None => return Ok(None),
+        Some(a) if a.is_empty() => 1,
+        Some(a) => match a.parse::<usize>() {
+            Ok(n) if (1..=options.len()).contains(&n) => n,
+            _ => return Err(format!("`{a}` is not one of the numbers above.")),
+        },
+    };
+    match options[answer - 1].0 {
+        "env" => {
             io.say(&format!("Set {env} in your shell profile, for example"));
             io.say(&format!("  export {env}=…            (bash, zsh)"));
             io.say(&format!("  $env:{env} = \"…\"         (PowerShell)"));
             io.say("then start quack, or run setup again to pick a model.");
             Ok(None)
         }
-        Some(_) => {
-            store_key(io, &service.id)?;
-            let path = setup::use_keyring_key(config, service)?;
-            io.say(&format!("Wrote {}", path.display()));
+        kind => {
+            let key = read_secret(io, &service.id)?;
+            let store = match kind {
+                "file" => (
+                    setup::KeyStore::File(setup::key_file(config, &service.id)?),
+                    None,
+                ),
+                _ => (setup::KeyStore::Keyring, None),
+            };
+            let saved = setup::save_key_at(config, &service.id, &key, &store)?;
+            if let Some(key_file) = &saved.key {
+                io.say(&format!("Wrote {}", key_file.display()));
+            }
+            if let Some(path) = &saved.path {
+                io.say(&format!("Wrote {}", path.display()));
+            }
+            if let Some(note) = &saved.note {
+                io.say(note);
+            }
             Ok(Some(service.id.clone()))
         }
     }
@@ -244,9 +295,28 @@ fn by_url(config: &Loaded, io: &mut Io<'_>) -> Result<Option<String>, String> {
     let key = (io.secret)("API key, if it needs one (input hidden; Enter for none): ")
         .map_err(|e| format!("cannot read the key: {e}"))?;
     let mut text = setup::provider_text("Added by setup.", &url, None);
+    let mut note = None;
     if !key.is_empty() {
-        quack_config::keyring_set(&id, &key).map_err(|e| e.to_string())?;
-        text.push_str(&format!("api_key = {{ keyring = \"{id}\" }}\n"));
+        // The OS credential store when it is reachable; otherwise a key file.
+        match setup::key_store(config, &id)? {
+            (setup::KeyStore::Keyring, _) => {
+                quack_config::keyring_set(&id, &key).map_err(|e| e.to_string())?;
+                let quoted = serde_json::Value::from(id.as_str()).to_string();
+                text.push_str(&format!("api_key = {{ keyring = {quoted} }}\n"));
+            }
+            (setup::KeyStore::File(key_file), reason) => {
+                setup::write_key_file(&key_file, &key)?;
+                let shown = key_file.display().to_string();
+                let quoted = serde_json::Value::from(shown.as_str()).to_string();
+                text.push_str(&format!("api_key = {{ file = {quoted} }}\n"));
+                note = Some(format!(
+                    "{}; the key is stored in {shown} instead of the OS credential store",
+                    reason
+                        .as_deref()
+                        .unwrap_or("the OS credential store is not available")
+                ));
+            }
+        }
     }
     let target = setup::providers_dir(config)?.join(format!("{id}.toml"));
     if target.exists() {
@@ -257,16 +327,19 @@ fn by_url(config: &Loaded, io: &mut Io<'_>) -> Result<Option<String>, String> {
     }
     setup::write_new(&target, &text)?;
     io.say(&format!("Wrote {}", target.display()));
+    if let Some(note) = note {
+        io.say(&note);
+    }
     Ok(Some(id))
 }
 
-fn store_key(io: &mut Io<'_>, id: &str) -> Result<(), String> {
+fn read_secret(io: &mut Io<'_>, id: &str) -> Result<String, String> {
     let key = (io.secret)(&format!("{id} API key (input hidden): "))
         .map_err(|e| format!("cannot read the key: {e}"))?;
     if key.is_empty() {
         return Err("Nothing entered; nothing stored.".into());
     }
-    quack_config::keyring_set(id, &key).map_err(|e| e.to_string())
+    Ok(key)
 }
 
 /// List the provider's models and save the chosen one as `model.default`.
@@ -444,8 +517,14 @@ mod tests {
         )
         .expect("write");
         let config = Arc::new(isolated(tmp.path()));
-        // Option 2, the first service, the environment variable.
-        let mut input = std::io::Cursor::new(b"2\n1\n2\nq\n".to_vec());
+        // Option 2, the first service, then the environment variable. Its number moves
+        // when the OS credential store is not available and the file option leads.
+        let env_choice = if quack_config::keyring_available().is_ok() {
+            3
+        } else {
+            2
+        };
+        let mut input = std::io::Cursor::new(format!("2\n1\n{env_choice}\nq\n").into_bytes());
         let mut out = Vec::new();
         let mut io = Io {
             input: &mut input,

@@ -85,7 +85,7 @@ async fn detected_server_becomes_a_provider_and_the_default_model() {
         .await;
     let added = next_matching(&mut engine, |e| matches!(e, Event::ProviderAdded { .. })).await;
     assert!(
-        matches!(&added, Event::ProviderAdded { id, path: Some(_) } if id == "llama-cpp"),
+        matches!(&added, Event::ProviderAdded { id, path: Some(_), note: None } if id == "llama-cpp"),
         "{added:?}"
     );
     let text = std::fs::read_to_string(providers_d.join("llama-cpp.toml")).expect("file");
@@ -120,7 +120,7 @@ async fn detected_server_becomes_a_provider_and_the_default_model() {
         .await;
     let again = next_matching(&mut engine, |e| matches!(e, Event::ProviderAdded { .. })).await;
     assert!(
-        matches!(&again, Event::ProviderAdded { id, path: None } if id == "llama-cpp"),
+        matches!(&again, Event::ProviderAdded { id, path: None, .. } if id == "llama-cpp"),
         "{again:?}"
     );
     engine.shutdown().await;
@@ -177,7 +177,7 @@ async fn a_server_added_by_url_lists_its_models_and_a_service_waits_for_its_key(
             key: None,
         })
         .await;
-    let Event::ProviderAdded { id, path } =
+    let Event::ProviderAdded { id, path, note } =
         next_matching(&mut engine, |e| matches!(e, Event::ProviderAdded { .. })).await
     else {
         unreachable!()
@@ -185,6 +185,7 @@ async fn a_server_added_by_url_lists_its_models_and_a_service_waits_for_its_key(
     let port = server.address().port();
     assert_eq!(id, format!("server-{port}"));
     assert!(path.is_some());
+    assert_eq!(note, None, "no key, so nothing to say about the store");
     let text = std::fs::read_to_string(providers_d.join(format!("{id}.toml"))).expect("file");
     assert_eq!(
         text,
@@ -260,16 +261,18 @@ fn a_new_key_replaces_a_stored_one_or_moves_the_key_to_the_store() {
     };
 
     // Already in the store: replaced under its own name, and the file is left alone.
-    let path = set_provider_key_with(&loaded, "stored", "new-key", &mut store).expect("stored");
-    assert_eq!(path, None);
+    let out = set_provider_key_with(&loaded, "stored", "new-key", &mut store).expect("stored");
+    assert_eq!(out.path, None);
+    assert_eq!(out.note, None);
     assert_eq!(
         std::fs::read_to_string(providers_d.join("stored.toml")).expect("file"),
         stored
     );
 
     // Read from elsewhere: stored under the provider's id, and the file points at it.
-    let path = set_provider_key_with(&loaded, "from-env", "k2", &mut store).expect("moved");
-    assert_eq!(path, Some(providers_d.join("from-env.toml")));
+    let out = set_provider_key_with(&loaded, "from-env", "k2", &mut store).expect("moved");
+    assert_eq!(out.path, Some(providers_d.join("from-env.toml")));
+    assert_eq!(out.note, None);
     let text = std::fs::read_to_string(providers_d.join("from-env.toml")).expect("file");
     assert!(
         text.contains("api_key = { keyring = \"from-env\" }"),
@@ -286,5 +289,102 @@ fn a_new_key_replaces_a_stored_one_or_moves_the_key_to_the_store() {
             ("example/me".to_owned(), "new-key".to_owned()),
             ("from-env".to_owned(), "k2".to_owned())
         ]
+    );
+}
+
+#[test]
+fn a_key_without_a_secret_service_goes_into_a_file_the_provider_points_at() {
+    use quack_core::setup::{KeyStore, save_key_at_with};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = common::workspace(tmp.path(), "http://127.0.0.1:9/v1", "[]", "");
+    let providers_d = tmp.path().join("user/providers.d");
+    let example = "base_url = \"https://api.example.com/v1\"\n\
+                   api_key = { env = \"QUACK_TEST_UNSET_KEY\" }\n";
+    std::fs::write(providers_d.join("example.toml"), example).expect("write");
+    // A provider that already reads its key from a file keeps that file.
+    let their_file = tmp.path().join("elsewhere/custom.key");
+    let keyed = format!(
+        "base_url = \"https://api.example.org/v1\"\napi_key = {{ file = \"{}\" }}\n",
+        their_file.display()
+    );
+    std::fs::write(providers_d.join("keyed.toml"), &keyed).expect("write");
+    let reason = "no Secret Service is running".to_owned();
+    let no_ring = |_name: &str, _key: &str| {
+        panic!("the keyring must not be touched when the store is a file")
+    };
+
+    let key_file = tmp.path().join("user/keys/example.key");
+    let store = (KeyStore::File(key_file.clone()), Some(reason.clone()));
+    let out = save_key_at_with(&loaded, "example", "k1", &store, no_ring).expect("stored");
+    assert_eq!(std::fs::read_to_string(&key_file).expect("key file"), "k1");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = key_file.metadata().expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "only this user reads the key");
+    }
+    assert_eq!(
+        out.note.as_deref(),
+        Some(
+            format!(
+                "{reason}; the key is stored in {} instead of the OS credential store",
+                key_file.display()
+            )
+            .as_str()
+        )
+    );
+    let text = std::fs::read_to_string(providers_d.join("example.toml")).expect("file");
+    assert!(
+        text.contains(&format!(
+            "api_key = {{ file = \"{}\" }}",
+            key_file.display()
+        )),
+        "{text}"
+    );
+
+    let store = (
+        KeyStore::File(tmp.path().join("user/keys/keyed.key")),
+        Some(reason),
+    );
+    let out = save_key_at_with(&loaded, "keyed", "k2", &store, no_ring).expect("stored");
+    assert_eq!(out.path, None, "the provider file stays as it is");
+    assert_eq!(
+        std::fs::read_to_string(&their_file).expect("their key file"),
+        "k2"
+    );
+    let text = std::fs::read_to_string(providers_d.join("keyed.toml")).expect("file");
+    assert_eq!(text, keyed);
+}
+
+#[test]
+fn add_server_without_a_secret_service_writes_the_key_file() {
+    use quack_core::setup::add_server;
+    // When `secret-tool` is missing or has no service to talk to, the key goes to a
+    // file. With a real store the key would be touched, so this only checks headless.
+    if quack_config::keyring_available().is_ok() {
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = common::workspace(tmp.path(), "http://127.0.0.1:9/v1", "[]", "");
+    let key = "sk-test";
+    let added = add_server(&loaded, "https://api.example.com/v1", Some(key)).expect("added");
+    assert_eq!(added.id, "example");
+    let text =
+        std::fs::read_to_string(tmp.path().join("user/providers.d/example.toml")).expect("file");
+    let key_file = tmp.path().join("user/keys/example.key");
+    assert!(
+        text.contains(&format!(
+            "api_key = {{ file = \"{}\" }}",
+            key_file.display()
+        )),
+        "{text}"
+    );
+    assert_eq!(std::fs::read_to_string(&key_file).expect("key file"), key);
+    assert!(
+        added
+            .note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("the key is stored in")
     );
 }

@@ -45,7 +45,7 @@ quack
 
 On first launch, the interactive `/setup` wizard helps you configure a model in seconds:
 - **Local servers**: Automatically detects running instances of Ollama, llama.cpp, vLLM, or LM Studio.
-- **Hosted providers**: Configure API keys for OpenRouter, DeepSeek, Fireworks, and others (securely saved in your OS keyring).
+- **Hosted providers**: Configure API keys for OpenRouter, DeepSeek, Fireworks, and others (securely saved in your OS keyring; on headless Linux such as WSL, where no Secret Service runs, in a file only your user can read instead).
 - **ChatGPT**: Run `quack login chatgpt` to sign in via your browser.
 - **Custom endpoints**: Connect any OpenAI-compatible server URL.
 
@@ -59,6 +59,8 @@ On first launch, the interactive `/setup` wizard helps you configure a model in 
 | `quack exec "..."` | Run a single turn headlessly for scripts or CI pipelines |
 | `quack acp` | Start an Agent Client Protocol server for Zed, JetBrains, Neovim, or VS Code |
 | `quack keyring set <id>` | Store an API key securely in the OS credential store |
+
+Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` in the provider file reads a shell variable, `{ file = "path" }` a file (mode 0600 recommended), and `{ cmd = [..] }` a command. On Linux without a running Secret Service (WSL, servers, containers), `quack setup` and the TUI save keys to a file under your config folder automatically and say so.
 | `quack update` | Say whether a new version is out and how to get it; changes nothing |
 | `quack catalog refresh` | Download current model prices and context windows |
 
@@ -104,6 +106,7 @@ On first launch, the interactive `/setup` wizard helps you configure a model in 
   - `search_replace_blocks`: Multi-block SEARCH/REPLACE operations.
   - `whole_file`: Full file rewrites.
 - **Transactional guarantees**: Multi-file refactors check all changes before writing. If any single change fails, all touched files roll back to their original state.
+- **No blind edits**: Every changing tool refuses a file the model has not read (or written) yet, and one that changed on disk since it did; the refusal tells the model to read the file first.
 - **Distilled test output**: Build and test outputs (Cargo, Pytest, unittest, Go test, Jest, TAP) fold passing tests (`[... 42 passed tests omitted ...]`), retaining all assertion failures and stack traces while preserving context space.
 
 ### Code Intelligence (LSP)
@@ -145,7 +148,7 @@ On first launch, the interactive `/setup` wizard helps you configure a model in 
 
 - **Model Context Protocol (MCP)**: Supports stdio and streamable HTTP MCP servers configured as simple TOML files.
 - **Deferred discovery**: Large tool surfaces are indexed and searched dynamically (`tool_search`), avoiding context bloat.
-- **Event hooks**: Run custom scripts on session events (`session_start`, `user_prompt`, `pre_tool`, `post_tool`, `turn_end`) configured in `hooks.d/`.
+- **Event hooks**: Run custom scripts on session events (`session_start`, `user_prompt`, `pre_tool`, `post_tool`, `turn_end`) configured in `hooks.d/`; `/hooks` lists them and enables the shipped examples with a keypress.
 - **Custom slash commands**: Place markdown prompt templates in `commands/` (e.g. `commands/git/pr.md` becomes `/git:pr`).
 - **Bundles**: Group skills, commands, MCP servers, and hooks into shareable directory bundles.
 
@@ -457,8 +460,15 @@ info  network       llm.internal.example · policy allows only llm.internal.exam
 
 ### `hooks.d/<id>.toml`
 
+A hook ships disabled (`enabled = false`); `/hooks` in the TUI turns one on: its file
+(and the folder named after it, e.g. `jira/` next to `jira.toml`) is copied into your
+config folder's `hooks.d/` with `enabled = true`. Turning one off lists its id in
+`[hooks] disabled`, leaving the file alone.
+
 | Key | Default | Description |
 |---|---|---|
+| `enabled` | `true` | `false` disables the hook in place (the shipped examples set this) |
+| `description` | `""` | Shown in `/hooks` |
 | `event` | required | Target event: `session_start`, `user_prompt`, `pre_tool`, `post_tool`, `turn_end`, `session_end`, `pre_compact` |
 | `command` | required | Executable and arguments (`{dir}` is hook directory, `{python}` is system Python) |
 | `match.tool`, `match.pattern` | `""` | Tool name glob and argument pattern matchers |

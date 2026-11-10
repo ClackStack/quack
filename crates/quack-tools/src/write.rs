@@ -33,11 +33,7 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, String> {
     }
     if path.exists() {
         let file = TextFile::load(&path)?;
-        if ctx.reads.is_stale(&path) {
-            return Err(format!(
-                "{shown} changed on disk since you last read it; read it again first"
-            ));
-        }
+        ctx.reads.editable(&path, &shown)?;
         let after = content.replace("\r\n", "\n");
         Ok(Plan {
             encoded: file.encode(&after),
@@ -71,23 +67,28 @@ impl Tool for Write {
             EditFormat::WholeFile => {
                 "Create a file, or change one by writing its complete new content. Parent \
                  directories are created. Read a file before rewriting it, and keep every line \
-                 you are not changing exactly as it was."
+                 you are not changing exactly as it was; overwriting a file that was never \
+                 read fails."
             }
             EditFormat::ApplyPatch => {
                 "Create a new file or replace a file's entire content. Parent directories are \
-                 created. Prefer `apply_patch` for changing part of an existing file."
+                 created. Prefer `apply_patch` for changing part of an existing file; \
+                 overwriting a file that was never read fails."
             }
             EditFormat::SearchReplaceBlocks => {
                 "Create a new file or replace a file's entire content. Parent directories are \
-                 created. Prefer `edit_blocks` for changing part of an existing file."
+                 created. Prefer `edit_blocks` for changing part of an existing file; \
+                 overwriting a file that was never read fails."
             }
             EditFormat::Hashline => {
                 "Create a new file or replace a file's entire content. Parent directories are \
-                 created. Prefer `edit_hashline` for changing part of an existing file."
+                 created. Prefer `edit_hashline` for changing part of an existing file; \
+                 overwriting a file that was never read fails."
             }
             EditFormat::StrReplace | EditFormat::Auto => {
                 "Create a new file or replace a file's entire content. Parent directories are \
-                 created. Prefer `edit` for changing part of an existing file."
+                 created. Prefer `edit` for changing part of an existing file; overwriting a \
+                 file that was never read fails."
             }
         }
         .into()

@@ -121,10 +121,11 @@ pub enum Op {
     /// Ask for the hosted services in `providers.d` that take a key; answered with
     /// `Event::Services`.
     ListServices,
-    /// Store a provider's API key in the OS credential store. When its key is already read
-    /// from there, the entry is replaced and the provider file left alone
+    /// Store a provider's API key: in the OS credential store when it is reachable,
+    /// otherwise in a key file only this user can read. When its key is already read from
+    /// the store, the entry is replaced and the provider file left alone
     /// (`Event::ProviderAdded` without a `path`); otherwise its provider file (copied to the
-    /// user layer) is pointed at the new entry. A session using the provider sends the new
+    /// user layer) is pointed at the new key. A session using the provider sends the new
     /// key from its next request. Answered with `Event::ProviderAdded` and then
     /// `Event::ModelCatalog` for that provider alone.
     SetProviderKey {
@@ -132,7 +133,8 @@ pub enum Op {
         key: SecretText,
     },
     /// Add any OpenAI-compatible server by its URL, with its key (if any) in the OS
-    /// credential store. Answered like `SetProviderKey`.
+    /// credential store, or in a key file when there is no Secret Service. Answered like
+    /// `SetProviderKey`.
     AddServer {
         base_url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,6 +186,14 @@ pub enum Op {
     /// `settings-only` or `ignored`), then reload.
     TrustProject {
         decision: String,
+    },
+    /// Enable a hook that is off (`/hooks toggle <id>`): a hook shipped disabled is
+    /// copied into the user layer's `hooks.d/` with `enabled = true`, one in the user or
+    /// project layer is enabled in its own file, a bare `enabled = false` override in the
+    /// user layer is removed, and `[hooks] disabled` stops listing it. Answered with
+    /// `Event::HookEnabled`, then a reload.
+    EnableHook {
+        id: String,
     },
     Shutdown,
 }
@@ -248,6 +258,14 @@ pub enum Event {
     SettingSaved {
         key: String,
         value: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// A hook was enabled (`Op::EnableHook`); `path` is its file afterwards (the removed
+    /// `enabled = false` override, for a bare one). A config reload follows.
+    HookEnabled {
+        id: String,
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
@@ -368,10 +386,13 @@ pub enum Event {
         services: Vec<ServiceInfo>,
     },
     /// A provider file was written (`path`), or an existing one reused (`path` is `None`).
+    /// `note` says why the key is not in the OS credential store, when it is not.
     ProviderAdded {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     /// Skills the model can load, and the user can run as `/<name> [args]`.
     Skills {

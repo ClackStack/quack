@@ -151,23 +151,172 @@ pub fn key_source(key: &Secret) -> KeySource {
     }
 }
 
-/// Read a service's key from the OS credential store: its provider file is copied to the
-/// user layer (or edited there) with `api_key = { keyring = "<id>" }`. Store the key with
-/// `keyring_set(id, ..)` first. Returns the file written.
-pub fn use_keyring_key(config: &Loaded, service: &Service) -> Result<PathBuf, String> {
-    point_at_keyring(config, &service.id, &service.path)
+/// Where a saved key goes: the OS credential store, or a file only this user can read
+/// when there is no Secret Service (headless Linux: a server, WSL, a container).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyStore {
+    Keyring,
+    File(PathBuf),
+}
+
+/// The key store to use now. The OS credential store when it is reachable; otherwise the
+/// provider's key file, with the reason it is not the store.
+pub fn key_store(config: &Loaded, id: &str) -> Result<(KeyStore, Option<String>), String> {
+    match quack_config::keyring_available() {
+        Ok(()) => Ok((KeyStore::Keyring, None)),
+        Err(reason) => Ok((KeyStore::File(key_file(config, id)?), Some(reason))),
+    }
+}
+
+/// The key file for `id`: `keys/<id>.key` in the user layer, beside the provider files.
+pub fn key_file(config: &Loaded, id: &str) -> Result<PathBuf, String> {
+    let dir = config
+        .dirs
+        .layer_dir(LayerKind::User)
+        .ok_or_else(|| "the user layer has no directory".to_owned())?
+        .join("keys");
+    Ok(dir.join(format!("{id}.key")))
+}
+
+/// Write a key file only this user can read (mode 0600 on unix).
+pub fn write_key_file(path: &Path, key: &str) -> Result<(), String> {
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    let mut f = std::fs::OpenOptions::new();
+    f.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    f.mode(0o600);
+    f.open(path)
+        .and_then(|mut f| f.write_all(key.as_bytes()))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// What storing a key did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeySaved {
+    /// The key file, when the key went into one instead of the OS credential store.
+    pub key: Option<PathBuf>,
+    /// The provider file written, when the provider now points at the key.
+    pub path: Option<PathBuf>,
+    /// Why the key is not in the OS credential store, when it is not.
+    pub note: Option<String>,
+}
+
+/// Store `key` for provider `id` in `store`. A provider already reading the key from a
+/// file keeps its file; otherwise its provider file (copied to the user layer) is
+/// pointed at the key.
+pub fn save_key_at(
+    config: &Loaded,
+    id: &str,
+    key: &str,
+    store: &(KeyStore, Option<String>),
+) -> Result<KeySaved, String> {
+    save_key_at_with(config, id, key, store, |name, key| {
+        quack_config::keyring_set(name, key).map_err(|e| e.to_string())
+    })
+}
+
+/// [`save_key_at`] with `ring` in place of the OS credential store, for tests.
+pub fn save_key_at_with(
+    config: &Loaded,
+    id: &str,
+    key: &str,
+    store: &(KeyStore, Option<String>),
+    ring: impl FnOnce(&str, &str) -> Result<(), String>,
+) -> Result<KeySaved, String> {
+    let items = load_providers(config);
+    let item = items
+        .iter()
+        .find(|i| i.id == id)
+        .ok_or_else(|| format!("`{id}` is not a configured provider · /providers lists them"))?;
+    let file = item
+        .loaded()
+        .ok_or_else(|| format!("provider `{id}` did not load · /providers says why"))?;
+    if file.auth.is_some() {
+        return Err(format!(
+            "provider `{id}` uses a sign-in, not a key · run `quack login {id}`"
+        ));
+    }
+    if key.is_empty() {
+        return Err("nothing entered; nothing stored".into());
+    }
+    let note = |key_file: &Path| {
+        store.1.as_ref().map(|reason| {
+            format!(
+                "{reason}; the key is stored in {} instead of the OS credential store",
+                key_file.display()
+            )
+        })
+    };
+    match (&store.0, &file.api_key) {
+        (KeyStore::Keyring, Some(Secret::Keyring { keyring })) => {
+            ring(keyring, key)?;
+            Ok(KeySaved {
+                key: None,
+                path: None,
+                note: None,
+            })
+        }
+        (KeyStore::Keyring, _) => {
+            ring(id, key)?;
+            let path = point_at_keyring(config, id, &item.path)?;
+            Ok(KeySaved {
+                key: None,
+                path: Some(path),
+                note: None,
+            })
+        }
+        (KeyStore::File(_dest), Some(Secret::File { file })) => {
+            let path = quack_config::expand_home(file, &|k| std::env::var_os(k));
+            write_key_file(&path, key)?;
+            let why = note(&path);
+            Ok(KeySaved {
+                key: Some(path),
+                path: None,
+                note: why,
+            })
+        }
+        (KeyStore::File(dest), _) => {
+            write_key_file(dest, key)?;
+            let path = point_at_file(config, id, &item.path, dest)?;
+            Ok(KeySaved {
+                key: Some(dest.clone()),
+                path: Some(path),
+                note: note(dest),
+            })
+        }
+    }
 }
 
 fn point_at_keyring(config: &Loaded, id: &str, path: &Path) -> Result<PathBuf, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let text = read_provider(path)?;
     let text = quack_config::provider::with_keyring_key(&text, id)?;
+    write_pointed(config, id, path, &text)
+}
+
+fn point_at_file(config: &Loaded, id: &str, path: &Path, key: &Path) -> Result<PathBuf, String> {
+    let text = read_provider(path)?;
+    let shown = key.display().to_string();
+    let text = quack_config::provider::with_file_key(&text, &shown)?;
+    write_pointed(config, id, path, &text)
+}
+
+fn read_provider(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+fn write_pointed(config: &Loaded, id: &str, path: &Path, text: &str) -> Result<PathBuf, String> {
     let target = providers_dir(config)?.join(format!("{id}.toml"));
     if target == path {
         std::fs::write(&target, text)
             .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
     } else {
-        write_new(&target, &text)?;
+        write_new(&target, text)?;
     }
     Ok(target)
 }
@@ -341,6 +490,8 @@ pub struct Added {
     pub id: String,
     /// The file written; `None` when a configured provider already points at the server.
     pub path: Option<PathBuf>,
+    /// Why the key is not in the OS credential store, when it is not.
+    pub note: Option<String>,
 }
 
 /// Add a server as a provider in the user layer. A provider that already points at the
@@ -359,13 +510,18 @@ fn add_file(config: &Loaded, id: &str, base_url: &str, text: &str) -> Result<Add
     check_id(id)?;
     check_policy(config, id, base_url)?;
     if let Some(id) = configured_at(config, base_url) {
-        return Ok(Added { id, path: None });
+        return Ok(Added {
+            id,
+            path: None,
+            note: None,
+        });
     }
     let (id, path) = free_file(config, id)?;
     write_new(&path, text)?;
     Ok(Added {
         id,
         path: Some(path),
+        note: None,
     })
 }
 
@@ -390,8 +546,9 @@ fn free_file(config: &Loaded, id: &str) -> Result<(String, PathBuf), String> {
 }
 
 /// Add any OpenAI-compatible server by its URL, named after its host. A key is stored in
-/// the OS credential store under the provider id. A provider that already points at the
-/// server is reused, and the key is then left alone.
+/// the OS credential store under the provider id; when there is no Secret Service
+/// (headless Linux), in a key file only this user can read. A provider that already
+/// points at the server is reused, and the key is then left alone.
 pub fn add_server(config: &Loaded, base_url: &str, key: Option<&str>) -> Result<Added, String> {
     let base_url = base_url.trim();
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
@@ -401,61 +558,63 @@ pub fn add_server(config: &Loaded, base_url: &str, key: Option<&str>) -> Result<
     check_id(&id)?;
     check_policy(config, &id, base_url)?;
     if let Some(id) = configured_at(config, base_url) {
-        return Ok(Added { id, path: None });
+        return Ok(Added {
+            id,
+            path: None,
+            note: None,
+        });
     }
     let (id, path) = free_file(config, &id)?;
     let mut text = provider_text("Added by setup.", base_url, None);
+    let mut note = None;
     if let Some(key) = key.filter(|k| !k.is_empty()) {
-        quack_config::keyring_set(&id, key).map_err(|e| e.to_string())?;
-        let quoted = serde_json::Value::from(id.as_str()).to_string();
-        text.push_str(&format!("api_key = {{ keyring = {quoted} }}\n"));
+        match quack_config::keyring_available() {
+            Ok(()) => {
+                quack_config::keyring_set(&id, key).map_err(|e| e.to_string())?;
+                let quoted = serde_json::Value::from(id.as_str()).to_string();
+                text.push_str(&format!("api_key = {{ keyring = {quoted} }}\n"));
+            }
+            Err(reason) => {
+                let file = key_file(config, &id)?;
+                write_key_file(&file, key)?;
+                let shown = file.display().to_string();
+                let quoted = serde_json::Value::from(shown.as_str()).to_string();
+                text.push_str(&format!("api_key = {{ file = {quoted} }}\n"));
+                note = Some(format!(
+                    "{reason}; the key is stored in {shown} instead of the OS credential \
+                     store"
+                ));
+            }
+        }
     }
     write_new(&path, &text)?;
     Ok(Added {
         id,
         path: Some(path),
+        note,
     })
 }
 
-/// Store a provider's key in the OS credential store and read it from there. A key already
-/// read from the store is replaced under its own name, and nothing else changes (`None`);
-/// otherwise the provider file is pointed at the new entry, and the file written is returned.
-pub fn set_provider_key(config: &Loaded, id: &str, key: &str) -> Result<Option<PathBuf>, String> {
-    set_provider_key_with(config, id, key, |name, key| {
+/// Store a provider's key: in the OS credential store when it is reachable, otherwise in
+/// a key file only this user can read. A key already read from a file is written back to
+/// its file; one read from the store is replaced under its own name, and nothing else
+/// changes (`KeySaved::path` is then `None`); otherwise the provider file is pointed at
+/// the key, and `KeySaved::path` is the file written.
+pub fn set_provider_key(config: &Loaded, id: &str, key: &str) -> Result<KeySaved, String> {
+    let store = key_store(config, id)?;
+    save_key_at_with(config, id, key, &store, |name, key| {
         quack_config::keyring_set(name, key).map_err(|e| e.to_string())
     })
 }
 
-/// [`set_provider_key`] with `store` in place of the OS credential store.
+/// [`set_provider_key`] with `ring` in place of the OS credential store, for tests.
 pub fn set_provider_key_with(
     config: &Loaded,
     id: &str,
     key: &str,
-    store: impl FnOnce(&str, &str) -> Result<(), String>,
-) -> Result<Option<PathBuf>, String> {
-    let items = load_providers(config);
-    let item = items
-        .iter()
-        .find(|i| i.id == id)
-        .ok_or_else(|| format!("`{id}` is not a configured provider · /providers lists them"))?;
-    let file = item
-        .loaded()
-        .ok_or_else(|| format!("provider `{id}` did not load · /providers says why"))?;
-    if file.auth.is_some() {
-        return Err(format!(
-            "provider `{id}` uses a sign-in, not a key · run `quack login {id}`"
-        ));
-    }
-    if key.is_empty() {
-        return Err("nothing entered; nothing stored".into());
-    }
-    match &file.api_key {
-        Some(Secret::Keyring { keyring }) => store(keyring, key).map(|()| None),
-        _ => {
-            store(id, key)?;
-            point_at_keyring(config, id, &item.path).map(Some)
-        }
-    }
+    ring: impl FnOnce(&str, &str) -> Result<(), String>,
+) -> Result<KeySaved, String> {
+    save_key_at_with(config, id, key, &(KeyStore::Keyring, None), ring)
 }
 
 /// A provider id for a URL: `https://api.example.com/v1` → `example`,

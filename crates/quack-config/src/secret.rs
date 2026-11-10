@@ -160,6 +160,18 @@ pub fn keyring_delete(_name: &str) -> Result<(), SecretError> {
     Err(SecretError::KeyringUnsupported)
 }
 
+/// Whether a secret can be stored in the OS credential store right now. `Err` says why
+/// not, in a sentence that names the ways around it (`env`, `file`, `cmd`).
+#[cfg(feature = "keyring")]
+pub fn keyring_available() -> Result<(), String> {
+    crate::keyring::available()
+}
+
+#[cfg(not(feature = "keyring"))]
+pub fn keyring_available() -> Result<(), String> {
+    Err("this build has no keyring support".into())
+}
+
 /// Expand a leading `~` to the home directory (`%USERPROFILE%` on Windows).
 pub fn expand_home(path: &str, env: Env<'_>) -> PathBuf {
     let rest = path

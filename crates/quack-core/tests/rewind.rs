@@ -27,22 +27,33 @@ async fn next<T>(engine: &mut EngineHandle, pick: impl Fn(Event) -> Option<T>) -
 #[tokio::test]
 async fn rewind_restores_files_and_conversation() {
     let server = MockServer::start().await;
+    // "first task" reads crlf.txt, then edits it; "second task" creates new.txt.
+    Mock::given(method("POST"))
+        .and(body_string_contains("first task"))
+        .respond_with(sse_call(
+            "c0",
+            "read",
+            serde_json::json!({"path": "crlf.txt"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"role\":\"tool\""))
+        .respond_with(sse_call(
+            "c1",
+            "edit",
+            serde_json::json!({"path": "crlf.txt", "old_string": "two", "new_string": "TWO"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
         .and(body_string_contains("second task"))
         .respond_with(sse_call(
             "c2",
             "write",
             serde_json::json!({"path": "new.txt", "content": "created"}),
-        ))
-        .up_to_n_times(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(body_string_contains("first task"))
-        .respond_with(sse_call(
-            "c1",
-            "edit",
-            serde_json::json!({"path": "crlf.txt", "old_string": "two", "new_string": "TWO"}),
         ))
         .up_to_n_times(1)
         .mount(&server)

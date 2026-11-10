@@ -1094,6 +1094,7 @@ impl Engine {
         self.emit(Event::ProviderAdded {
             id: added.id.clone(),
             path: added.path.map(|p| p.display().to_string()),
+            note: added.note,
         });
         let reference = format!("{}/{model}", added.id);
         match crate::setup::default_model_if_unset(&self.config, &reference) {
@@ -1157,6 +1158,7 @@ impl Engine {
             let _ = tx.send(Event::ProviderAdded {
                 id: added.id.clone(),
                 path: added.path.map(|p| p.display().to_string()),
+                note: added.note,
             });
             let providers = crate::models::catalog_of(config, Some(&added.id)).await;
             let _ = tx.send(Event::ModelCatalog { providers, current });
@@ -1687,8 +1689,13 @@ impl Engine {
                     .filter(|p| p.id == id)
                     .collect();
                 self.connect(live, move |config| {
-                    crate::setup::set_provider_key(config, &id, &key.0)
-                        .map(|path| crate::setup::Added { id, path })
+                    crate::setup::set_provider_key(config, &id, &key.0).map(|saved| {
+                        crate::setup::Added {
+                            id,
+                            path: saved.path,
+                            note: saved.note,
+                        }
+                    })
                 });
             }
             Op::AddServer { base_url, key } => self.connect(Vec::new(), move |config| {
@@ -1777,6 +1784,33 @@ impl Engine {
                         error: EngineError {
                             kind: EngineErrorKind::Config,
                             message: format!("cannot save the trust decision: {message}"),
+                        },
+                    }),
+                }
+            }
+            Op::EnableHook { id } => {
+                match self.config.enable_hook(&id) {
+                    Ok(outcome) => {
+                        // Still listed by another layer's config.toml: the copy or edit
+                        // alone would not turn the hook on.
+                        let note = (!outcome.unlisted
+                            && self.config.settings.hooks.disabled.iter().any(|d| d == &id))
+                        .then(|| {
+                            "also listed in [hooks] disabled by another layer's config.toml"
+                                .to_owned()
+                        });
+                        self.emit(Event::HookEnabled {
+                            id: id.clone(),
+                            path: outcome.path.display().to_string(),
+                            note,
+                        });
+                        self.queued.push_back(Queued::Reload);
+                        self.next_queued(done, reload);
+                    }
+                    Err(message) => self.emit(Event::Error {
+                        error: EngineError {
+                            kind: EngineErrorKind::Config,
+                            message,
                         },
                     }),
                 }
@@ -2367,6 +2401,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::Rewind { .. } => "rewind",
         Op::ReloadConfig => "reload_config",
         Op::TrustProject { .. } => "trust_project",
+        Op::EnableHook { .. } => "enable_hook",
         Op::Shutdown => "shutdown",
     }
 }

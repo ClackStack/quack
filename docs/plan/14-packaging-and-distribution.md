@@ -49,7 +49,7 @@ When no provider is configured:
 - `quack setup` (also reachable from the panel) is an interactive wizard:
   1. Lists provider files found in the defaults dir, and lets the user enable one by copying it to the user layer (`toml_edit`, comments preserved).
   2. Offers **local server detection**, but only when the user explicitly picks it: it probes `localhost:11434` (Ollama), `:8080` (llama.cpp), `:8000` (vLLM), `:1234` (LM Studio), `:30000` (SGLang). These are loopback only.
-  3. Asks for the API key, using the secret form of the user's choice (env / keyring / cmd).
+  3. Asks for the API key, using the secret form of the user's choice (env / keyring / file / cmd).
   4. Runs model discovery and picks a default model.
 - No wizard step needs internet access.
 - Goal: from install to a first working turn **in under a minute** on a machine already running a local server. Detection is also offered from the startup panel's "No providers configured" state, so users don't need to know about `quack setup`. Detected servers are written as minimal provider files (just `base_url`, plus `api = "ollama"` for Ollama), following [01](01-configuration.md).
@@ -58,8 +58,8 @@ When no provider is configured:
 
 - `quack setup` asks one question at a time and reads plain lines, so it can also be scripted through stdin. It offers three choices:
   1. **Look for servers on this machine.** It probes 127.0.0.1 on ports 11434, 8080, 8000, 1234 and 30000, waiting 1.5 s on each. A server counts only when it answers with a model list.
-  2. **Use a hosted service** from the configured ones (out of the box, the bundle's open-model services and model makers' APIs and coding plans), grouped by each file's `group`. A service whose key is set is used as is. Otherwise the key goes into the OS credential store and the file is copied to the user layer with `api_key = { keyring = "<id>" }`, or the wizard says which variable to set.
-  3. **Add a server by URL.** An optional key is stored in the credential store.
+  2. **Use a hosted service** from the configured ones (out of the box, the bundle's open-model services and model makers' APIs and coding plans), grouped by each file's `group`. A service whose key is set is used as is. Otherwise the key goes into the OS credential store and the file is copied to the user layer with `api_key = { keyring = "<id>" }`, or the wizard offers a key file or says which variable to set.
+  3. **Add a server by URL.** An optional key is stored in the credential store, or in a key file where no Secret Service runs.
 
   It then lists the provider's models and saves the chosen one as `model.default`.
 - `/setup` in the TUI runs the same local detection and shows one row per server and model. Enter writes the provider file and switches to that model, which becomes `model.default` only if none is set. A server that a configured provider already points at is reused rather than written again.
@@ -73,10 +73,22 @@ When no provider is configured:
 Someone who installs `quack-plucked` and runs `quack` should not have to know about `quack setup`. So the TUI now covers all three of the wizard's choices:
 - **It opens on its own.** When startup ends with no model ready and no `[model] default` configured, `/setup` opens once, unless a trust prompt is waiting. That offer does not probe anything: "find servers on this machine" waits for Enter, so detection still runs only when asked. Typing `/setup` yourself probes at once, as before.
 - **Three tabs:** *This machine* (detection, as before), *Hosted services* (the configured services that take a key, from `Op::ListServices`; with no defaults bundle this tab says so and points to the next one), and *Any server* (by URL, plus how to write a provider file by hand).
-- **Keys are typed into a prompt box** that shows them as dots. Entering a key was earlier left to `quack setup` so that keys never went through the TUI. It is allowed now with these limits: the key never enters the input, its history or the transcript. It travels in `Op::SetProviderKey` / `Op::AddServer` as a `SecretText`, whose `Debug` output is redacted. The engine stores it in the OS credential store under the provider id (on `spawn_blocking`, because Linux shells out to `secret-tool`) and writes only `api_key = { keyring = "<id>" }`. If the credential store is unavailable, the error says so, and the service's row explains how to use its variable instead.
+- **Keys are typed into a prompt box** that shows them as dots. Entering a key was earlier left to `quack setup` so that keys never went through the TUI. It is allowed now with these limits: the key never enters the input, its history or the transcript. It travels in `Op::SetProviderKey` / `Op::AddServer` as a `SecretText`, whose `Debug` output is redacted. The engine stores it in the OS credential store under the provider id (on `spawn_blocking`, because Linux shells out to `secret-tool`) and writes only `api_key = { keyring = "<id>" }`. Where there is no Secret Service (headless Linux: a server, WSL, a container), the engine saves the key to `keys/<id>.key` in the user layer (mode 0600) instead, points the provider file at it with `api_key = { file = ... }`, and says so in the note of `Event::ProviderAdded`; the prompt's help text says the same up front, so the user always knows how to use `env`, `file` or `cmd` instead.
 - **A URL** is checked for `http(s)://`, and the id comes from the host (`setup::id_from_url`, shared with the wizard). It asks no name question.
 - **Then the model:** once the engine replies with `Event::ProviderAdded`, it sends `Event::ModelCatalog` for that provider alone, and the TUI opens `/models` on it. A model picked there is remembered as the last used one, so the next start uses it. A ready hosted service goes straight to `/models`, filtered to its id.
 - Tests: `core/tests/setup.rs` (adding a server by URL, listing services, refusals), and the TUI tests `first_run_offers_setup_and_adds_a_server_by_url` (the key is never drawn, never in `Debug`, never in the input) and `setup_is_not_offered_when_a_model_is_ready_and_esc_backs_out_of_a_prompt`.
+
+### Keys without a Secret Service (2026-11-09)
+
+On headless Linux (a server, WSL, a container) there is no Secret Service, so `secret-tool`
+fails even when the binary is installed. `keyring::available()` (`quack-config`) probes for
+a reachable service and classifies the error; `quack doctor` uses the probe, not just the
+binary. The engine and the wizard still prefer the OS credential store, but fall back to a
+key file (`keys/<id>.key` in the user layer, mode 0600) when it is not reachable, pointing
+the provider file at `api_key = { file = ... }` and saying so. `quack setup`'s hosted step
+also offers the key file and the environment variable explicitly, with the keyring first
+only where it works. Every keyring failure message names the ways around it (`env`,
+`file`, `cmd`).
 
 ## Release artifacts
 

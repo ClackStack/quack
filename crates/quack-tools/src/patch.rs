@@ -50,17 +50,14 @@ impl Change {
     }
 }
 
-/// Load an existing file for changing, refusing one that changed since it was read.
+/// Load an existing file for a model-authored change, refusing one the model never
+/// read, or that changed since it did.
 pub(crate) fn load(ctx: &ToolCtx, path: &std::path::Path, shown: &str) -> Result<TextFile, String> {
     if !path.exists() {
         return Err(format!("{shown} does not exist"));
     }
     let file = TextFile::load(path)?;
-    if ctx.reads.is_stale(path) {
-        return Err(format!(
-            "{shown} changed on disk since you last read it; read it again before editing"
-        ));
-    }
+    ctx.reads.editable(path, shown)?;
     Ok(file)
 }
 
@@ -492,7 +489,8 @@ impl Tool for ApplyPatch {
          `*** Update File: <path>` (optionally followed by `*** Move to: <path>`), then hunks. \
          A hunk may start with `@@ <a line just above it>`, then lists lines starting with ` ` \
          (context, unchanged), `-` (removed) or `+` (added). Give about 3 lines of context \
-         above and below each change, copied exactly. Paths are relative to the workspace root."
+         above and below each change, copied exactly. Paths are relative to the workspace root. \
+         Read a file before the patch changes or deletes it; an unread file refuses the section."
             .into()
     }
 

@@ -20,11 +20,14 @@ turns it off, leaving the empty profile (no prompt beyond the instructions).
 - `dsh`: DeepSeek Harness tool names (`read`, `write`, `edit`, `bash`, `todo_write`), for
   DeepSeek.
 - `vibe`: Mistral Vibe tool names (`read_file`, `write_file`, `edit`, `bash`, `grep`,
-  `todo`), for Mistral.
+  `todo`), for Mistral coding models (Large 4, Medium 3.5, Codestral, Devstral).
 
 Most family profiles have empty `[match]` lists: they are used only when a model names
 them (`profile = "qwen-code"`) until `quack eval` shows they beat `generic` for that
 family; `zcode` (GLM-5) and `dsh` (DeepSeek-V4) passed that bar on 2026-10-20 and are
-matched automatically. Each file's comment has the proposed globs. Every prompt is
+matched automatically. `vibe` (Mistral coding models) is matched automatically too, as
+of 2026-11-09: it tied `generic`'s pass rate on a single hard pass with clearly fewer
+steps and cost, and its `--repeat 3` confirmation is still owed. Each file's comment
+has the proposed globs for the profiles still waiting. Every prompt is
 original text; only tool names and parameter shapes follow the family's own harness
 (see each `source`).

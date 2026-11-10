@@ -180,6 +180,80 @@ pub(crate) fn add_to_list_text(text: &str, key: &str, items: &[String]) -> Resul
     Ok(out)
 }
 
+/// Remove one entry from a list setting in a `config.toml`. Returns whether the file
+/// changed; a missing file, list or entry changes nothing. A list emptied this way has
+/// its key removed, so the lower layers' lists still apply.
+pub fn remove_from_list(file: &Path, key: &str, item: &str) -> Result<bool, String> {
+    let text = match std::fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("cannot read {}: {e}", file.display())),
+    };
+    match remove_from_list_text(&text, key, item).map_err(|e| format!("{}: {e}", file.display()))? {
+        None => Ok(false),
+        Some(updated) => {
+            write_atomic(file, &updated)?;
+            Ok(true)
+        }
+    }
+}
+
+pub(crate) fn remove_from_list_text(
+    text: &str,
+    key: &str,
+    item: &str,
+) -> Result<Option<String>, String> {
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| format!("not valid TOML: {}", e.message()))?;
+    let Some((table, leaf)) = existing_table(&mut doc, key) else {
+        return Ok(None);
+    };
+    let array = match table.get_mut(leaf) {
+        Some(toml_edit::Item::Value(value)) => match value {
+            toml_edit::Value::Array(a) => Some(a),
+            toml_edit::Value::InlineTable(t) => {
+                t.get_mut("append").and_then(toml_edit::Value::as_array_mut)
+            }
+            _ => None,
+        },
+        Some(toml_edit::Item::Table(t)) => t
+            .get_mut("append")
+            .and_then(toml_edit::Item::as_value_mut)
+            .and_then(toml_edit::Value::as_array_mut),
+        _ => None,
+    };
+    let Some(array) = array else {
+        return Ok(None);
+    };
+    let before = array.len();
+    array.retain(|v| v.as_str() != Some(item));
+    if array.len() == before {
+        return Ok(None);
+    }
+    if array.is_empty() {
+        table.remove(leaf);
+    }
+    let out = doc.to_string();
+    toml::from_str::<Settings>(&out).map_err(|e| e.message().to_owned())?;
+    Ok(Some(out))
+}
+
+/// The table holding a dotted key's leaf, when it and its parents exist, and the leaf's
+/// name. Unlike [`table_for`], nothing is created.
+fn existing_table<'a, 'k>(
+    doc: &'a mut toml_edit::DocumentMut,
+    key: &'k str,
+) -> Option<(&'a mut toml_edit::Table, &'k str)> {
+    let parts: Vec<&str> = key.split('.').collect();
+    let (leaf, parents) = parts.split_last()?;
+    let mut table = doc.as_table_mut();
+    for p in parents {
+        table = table.get_mut(p)?.as_table_mut()?;
+    }
+    Some((table, leaf))
+}
+
 /// The table holding a dotted key's leaf, created as needed, and the leaf's name.
 fn table_for<'a, 'k>(
     doc: &'a mut toml_edit::DocumentMut,
