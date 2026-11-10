@@ -1,0 +1,57 @@
+[package]
+name = "quack-gui"
+description = "Desktop client: the pure-Rust bridge between webviews and engines, and the Tauri shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+quack-config.workspace = true
+quack-core.workspace = true
+quack-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+# The Tauri shell (docs/plan/15-desktop-client.md). Gated behind `desktop` so the
+# default `cargo build`, `cargo test --workspace` and the MSRV check never compile
+# or resolve webkit/gtk system libraries.
+tauri = { version = "2", optional = true }
+tauri-plugin-clipboard-manager = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-notification = { version = "2", optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true }
+tauri-plugin-window-state = { version = "2", optional = true }
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+wiremock.workspace = true
+
+[features]
+desktop = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-clipboard-manager",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-notification",
+    "dep:tauri-plugin-opener",
+    "dep:tauri-plugin-single-instance",
+    "dep:tauri-plugin-window-state",
+]
+
+[[bin]]
+name = "quack-gui"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[lints]
+workspace = true

@@ -268,9 +268,11 @@ Milestones: G1 desktop MVP (Welcome/recent folders, login-shell `PATH` & `.app` 
 
 **Exit criteria**
 - [ ] G0 go/no-go recorded with crate counts and the `cargo deny` result
-- [ ] A scripted approval round-trip and 16 ms delta coalescing run through the pure-Rust bridge core (`cargo test -p quack-gui` against the wiremock engine)
+- [x] A scripted approval round-trip and 16 ms delta coalescing run through the pure-Rust bridge core (`cargo test -p quack-gui` against the wiremock engine) — landed 2026-11-09 with the engine-per-tab registry, duplicate-session guard, clean shutdown, AppInfo snapshot and recent-folder persistence; the Tauri tree enters `Cargo.lock` (322 crates) behind `--features desktop`, with the `gui` CI job compiling it on all four OSes
 - [ ] `quack-gui` completes a real task against a local model on Linux, macOS and Windows x64 + ARM64
 - [ ] Workspace clippy/test/MSRV stay green without `--exclude` flags; no GUI artifacts change the existing release targets
+
+- **G0 bridge core + SPA skeleton** (2026-11-09): `crates/quack-gui` (pure-Rust bridge: engine-per-tab registry with the resume-aware duplicate-session guard, 16 ms delta coalescer, AppInfo snapshot, recent folders, login-shell PATH) and `crates/quack-gui/ui` (SvelteKit 3 + Svelte 5 runes SPA: Transport seam over Tauri IPC with a scripted browser dev transport, Welcome view, workspace shell with transcript, markdown without dependencies, tool cards with diffs, approvals, questions, model picker, mode pill, context meter as the water line, sessions/plan/sub-agent sidebar). `quack-protocol` grew the ts-rs export behind a `ts` feature (`protocol.ts`, CI-checked) and `ReplayItem` gained `detail` and `Reasoning` per the plan. The Tauri shell (`--features desktop`) and the four-OS `gui` CI job are in; not yet exercised against a real local model — that is the G1 exit.
 
 ## Cross-cutting, every milestone
 

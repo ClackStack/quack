@@ -894,16 +894,18 @@ fn begin(ctx: &TurnCtx, call: &ToolCall, summary: &str) {
 }
 
 fn finish(ctx: &TurnCtx, call: &ToolCall, summary: &str, out: ToolOutput) -> ToolOutput {
-    session::record(
-        ctx.log.as_ref(),
-        "tool",
-        serde_json::json!({
-            "call_id": call.id,
-            "summary": summary,
-            "ok": out.ok,
-            "result": out.summary,
-        }),
-    );
+    let mut data = serde_json::json!({
+        "call_id": call.id,
+        "summary": summary,
+        "ok": out.ok,
+        "result": out.summary,
+    });
+    // ReplayItem::Tool.detail: the full diff or output, for a collapsible card on resume.
+    // Left out when there is none, so older readers of the log stay unaffected.
+    if let Some(detail) = &out.detail {
+        data["detail"] = Value::String(detail.clone());
+    }
+    session::record(ctx.log.as_ref(), "tool", data);
     ctx.emit(Event::ToolCallEnd {
         call_id: CallId(ctx.key(&call.id)),
         result: ToolResultSummary {

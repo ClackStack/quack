@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// A subsystem that reports progress during startup. One row each in the startup panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Subsystem {
     Config,
@@ -52,6 +53,7 @@ impl Subsystem {
 
 /// Progress of one subsystem.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum LoadState {
     Pending,

@@ -58,6 +58,7 @@ On first launch, the interactive `/setup` wizard helps you configure a model in 
 | `quack doctor` | Diagnose environment, sandbox, tools, and provider connections |
 | `quack exec "..."` | Run a single turn headlessly for scripts or CI pipelines |
 | `quack acp` | Start an Agent Client Protocol server for Zed, JetBrains, Neovim, or VS Code |
+| `quack-gui` | Open the desktop app (Tauri): the same engine in a window, one tab per folder |
 | `quack keyring set <id>` | Store an API key securely in the OS credential store |
 | `quack update` | Say whether a new version is out and how to get it; changes nothing |
 | `quack catalog refresh` | Download current model prices and context windows |
@@ -76,6 +77,7 @@ On first launch, the interactive `/setup` wizard helps you configure a model in 
 - **Collaborative plan mode**: `/plan` lets you explore solutions and approve checklists before modifying files, with optional dual-model planning.
 - **Extensible with MCP & LSP**: Native Model Context Protocol (stdio & HTTP) support, background language servers for 10+ languages, sub-agents, and custom slash commands.
 - **Editor integration (ACP)**: Connect quack directly into your editor panel via the Agent Client Protocol.
+- **Desktop app**: `quack-gui` opens the same engine in a native window — streamed transcript, approvals with diffs, plan checklist, and the session sidebar — built on the same Op/Event protocol as the TUI (docs/plan/15-desktop-client.md).
 
 ---
 

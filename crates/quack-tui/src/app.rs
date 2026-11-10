@@ -1217,16 +1217,18 @@ impl App {
                             summary,
                             ok,
                             result,
+                            detail,
                         } => Entry::Tool(ToolEntry {
                             call_id: CallId(String::new()),
                             name: summary.split_whitespace().next().unwrap_or_default().to_owned(),
                             summary,
                             ok: Some(ok),
                             result,
-                            detail: String::new(),
+                            detail: detail.unwrap_or_default(),
                             started: None,
                             took: None,
                         }),
+                        ReplayItem::Reasoning { text } => Entry::Reasoning(text),
                         ReplayItem::Compacted => {
                             Entry::System("── earlier conversation summarized ──".into())
                         }

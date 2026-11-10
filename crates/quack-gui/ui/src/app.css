@@ -1,0 +1,267 @@
+/*
+ * quack-gui design tokens (crates/quack-gui/ui).
+ *
+ * The field-guide palette from website/DESIGN.md and the TUI's theme.rs, drawn as a
+ * working tool: paper grounds, hairline rules, the TUI's inks (duck yellow, beak
+ * orange, sky) doing real jobs, leaf/pink reserved for pass/fail. Dark mode turns the
+ * paper to dusk; the inks stay. Mono carries the machine voice; prose carries the
+ * transcript.
+ */
+
+:root {
+	--bg: #ffffff;
+	--bg-soft: #f1fafd;
+	--bg-panel: #ffffff;
+	--bg-raised: #ffffff;
+	--ink: #1d2a3a;
+	--ink-2: #46596d;
+	--ink-3: #64788c;
+	--rule: #d5dee6;
+	--rule-soft: #e5ecf2;
+
+	--duck: #ffd60a;
+	--duck-line: #e8cf55;
+	--duck-soft: #fff4b8;
+	--duck-ink: #7a6100;
+	--sky: #5ec8e5;
+	--sky-soft: #d6f2fa;
+	--sky-ink: #086a86;
+	--beak: #ff9f43;
+	--beak-ink: #b25300;
+	--beak-soft: #fff1e3;
+
+	--ok: #22743a;
+	--ok-soft: #e5f5e9;
+	--fail: #b0244c;
+	--fail-soft: #fff2f5;
+	--warn: #a06e00;
+
+	--selection: rgba(94, 200, 229, 0.28);
+	--user-row: #f6f8fa;
+
+	--term: #16191f;
+	--term-text: #d8dee9;
+	--term-dim: #8a94a6;
+
+	--focus: #086a86;
+
+	--font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+	--font-mono: ui-monospace, 'JetBrains Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
+
+	--text-ui: 13.5px;
+	--text-prose: 15px;
+	--text-mono: 13px;
+	--leading-prose: 1.65;
+	--leading-ui: 1.45;
+
+	--r-sm: 4px;
+	--r-md: 6px;
+	--r-lg: 8px;
+	--r-xl: 12px;
+
+	--sp-xs: 4px;
+	--sp-sm: 8px;
+	--sp-md: 16px;
+	--sp-lg: 24px;
+	--sp-xl: 32px;
+
+	--header-h: 48px;
+	--sidebar-w: 264px;
+
+	--shadow-pop: 0 6px 24px rgba(29, 42, 58, 0.14), 0 1px 3px rgba(29, 42, 58, 0.1);
+	--shadow-card: 0 1px 2px rgba(29, 42, 58, 0.08);
+}
+
+:root[data-theme='dark'] {
+	--bg: #1d2a3a;
+	--bg-soft: #16212e;
+	--bg-panel: #223146;
+	--bg-raised: #283951;
+	--ink: #dde7f0;
+	--ink-2: #b7c6d5;
+	--ink-3: #8fa2b5;
+	--rule: #3a4c61;
+	--rule-soft: #2e3f53;
+
+	--duck-soft: #3a3313;
+	--duck-ink: #ffd60a;
+	--sky-soft: #14384a;
+	--sky-ink: #7ad4ec;
+	--beak-soft: #3f2c14;
+	--beak-ink: #ffb25e;
+
+	--ok: #8fd694;
+	--ok-soft: #1d3327;
+	--fail: #ff8fab;
+	--fail-soft: #3c1d28;
+	--warn: #e3b341;
+
+	--selection: rgba(94, 200, 229, 0.32);
+	--user-row: #243347;
+
+	--term: #10151c;
+	--term-text: #d8dee9;
+	--term-dim: #8a94a6;
+
+	--focus: #7ad4ec;
+
+	--shadow-pop: 0 6px 24px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
+	--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		transition-duration: 0.01ms !important;
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	height: 100%;
+}
+
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--ink);
+	font-family: var(--font-ui);
+	font-size: var(--text-ui);
+	line-height: var(--leading-ui);
+	-webkit-font-smoothing: antialiased;
+}
+
+::selection {
+	background: var(--selection);
+}
+
+:focus-visible {
+	outline: 2px solid var(--focus);
+	outline-offset: 1px;
+	border-radius: var(--r-sm);
+}
+
+button {
+	font: inherit;
+	color: inherit;
+	background: none;
+	border: none;
+	padding: 0;
+	cursor: pointer;
+}
+
+button:disabled {
+	cursor: default;
+	opacity: 0.55;
+}
+
+input,
+textarea,
+select {
+	font: inherit;
+	color: inherit;
+}
+
+code,
+pre,
+kbd {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono);
+}
+
+/* The browser chrome quack did not draw still carries the design. */
+::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+::-webkit-scrollbar-thumb {
+	background: var(--rule);
+	border-radius: 5px;
+	border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover {
+	background: var(--ink-3);
+}
+::-webkit-scrollbar-corner {
+	background: transparent;
+}
+
+/* Shared control styles (global because the components are many and small). */
+.btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 12px;
+	border-radius: var(--r-lg);
+	border: 1px solid var(--rule);
+	background: var(--bg-raised);
+	color: var(--ink);
+	font-weight: 500;
+	transition: background-color 120ms ease-out, border-color 120ms ease-out;
+}
+
+.btn:hover:not(:disabled) {
+	background: var(--bg-soft);
+	border-color: var(--ink-3);
+}
+
+.btn-primary {
+	background: var(--sky-ink);
+	border-color: var(--sky-ink);
+	color: #ffffff;
+}
+
+:root[data-theme='dark'] .btn-primary {
+	color: #10151c;
+}
+
+.btn-primary:hover:not(:disabled) {
+	background: var(--sky);
+	border-color: var(--sky);
+	color: #10151c;
+}
+
+.btn-danger {
+	color: var(--fail);
+	border-color: var(--fail);
+}
+
+.btn-danger:hover:not(:disabled) {
+	background: var(--fail-soft);
+}
+
+.pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 10px;
+	border-radius: 999px;
+	border: 1px solid var(--rule);
+	color: var(--ink-2);
+	font-size: 12.5px;
+	font-weight: 600;
+	white-space: nowrap;
+}
+
+.pill-live {
+	border-color: var(--duck-line);
+	background: var(--duck-soft);
+	color: var(--duck-ink);
+}
+
+.kbd {
+	font-family: var(--font-mono);
+	font-size: 11px;
+	color: var(--ink-3);
+	border: 1px solid var(--rule);
+	border-bottom-width: 2px;
+	border-radius: var(--r-sm);
+	padding: 1px 5px;
+	background: var(--bg-soft);
+}
