@@ -32,7 +32,7 @@ export function tauriTransport(): Transport {
 			const channel = new Channel<TabMessage>();
 			// The AppInfo snapshot is the bridge's first message on the channel; capture it
 			// for the caller and fan everything out to the listeners from the start.
-			const info = await new Promise<AppInfo>((resolve) => {
+			const infoReady = new Promise<AppInfo>((resolve) => {
 				channel.onmessage = (message: TabMessage) => {
 					if ('info' in message) resolve(message.info);
 					fan(message);
@@ -45,7 +45,7 @@ export function tauriTransport(): Transport {
 				resume: resumeArg,
 				events: channel
 			});
-			return { tab, info };
+			return { tab, info: await infoReady };
 		},
 
 		async sendOp(tab: number, op: Op): Promise<void> {

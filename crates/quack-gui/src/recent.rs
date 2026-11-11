@@ -87,10 +87,8 @@ mod tests {
 
     #[test]
     fn touch_moves_to_front_and_deduplicates() {
-        let mut recent = RecentFolders {
-            file: std::env::temp_dir().join("unused.json"),
-            entries: Vec::new(),
-        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut recent = RecentFolders::at(dir.path().to_path_buf());
         recent.touch(PathBuf::from("/a"));
         recent.touch(PathBuf::from("/b"));
         recent.touch(PathBuf::from("/a"));
@@ -100,10 +98,8 @@ mod tests {
 
     #[test]
     fn list_respects_the_limit() {
-        let mut recent = RecentFolders {
-            file: std::env::temp_dir().join("unused.json"),
-            entries: Vec::new(),
-        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut recent = RecentFolders::at(dir.path().to_path_buf());
         for i in 0..5 {
             recent.touch(PathBuf::from(format!("/{i}")));
         }

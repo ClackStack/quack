@@ -14,7 +14,7 @@
 
 	async function send() {
 		const body = text.trim();
-		if (!body || session.approval) return;
+		if (!body || session.approval || session.closed) return;
 		text = '';
 		autogrow();
 		await session.submit(body);
@@ -44,6 +44,7 @@
 			onkeydown={onKeydown}
 			oninput={autogrow}
 			aria-label="Message"
+			disabled={session.closed}
 		></textarea>
 		<div class="row">
 			<span class="hint">
@@ -53,7 +54,7 @@
 					<span><span class="kbd">⏎</span> send · <span class="kbd">⇧⏎</span> newline</span>
 				{/if}
 			</span>
-			<button class="btn btn-primary" onclick={() => void send()} disabled={!text.trim() || session.approval !== null}>
+			<button class="btn btn-primary" onclick={() => void send()} disabled={!text.trim() || session.approval !== null || session.closed}>
 				Send
 			</button>
 		</div>

@@ -79,7 +79,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 - **Collaborative plan mode**: `/plan` lets you explore solutions and approve checklists before modifying files, with optional dual-model planning.
 - **Extensible with MCP & LSP**: Native Model Context Protocol (stdio & HTTP) support, background language servers for 10+ languages, sub-agents, and custom slash commands.
 - **Editor integration (ACP)**: Connect quack directly into your editor panel via the Agent Client Protocol.
-- **Desktop app**: `quack-gui` opens the same engine in a native window — streamed transcript, approvals with diffs, plan checklist, and the session sidebar — built on the same Op/Event protocol as the TUI (docs/plan/15-desktop-client.md).
+- **Desktop app**: `quack-gui` opens the same engine in a native window — streamed transcript, approvals with diffs, plan checklist, and the session sidebar — built on the same Op/Event protocol as the TUI (docs/plan/15-desktop-client.md). The desktop client is an MVP in progress: one live engine per workspace, with separate tabs for separate folders. See the [foundation review and remaining work](docs/plan/15-desktop-client.md#foundation-review-2026-11-10).
 
 ---
 

@@ -30,8 +30,8 @@ pub struct DeltaCoalescer {
 }
 
 impl DeltaCoalescer {
-    /// Feed one event. `None` means it was a delta and is buffered — send nothing yet.
-    /// `Some(event)` means send `flush()` first if anything is buffered, then the event.
+    /// Feed one event. `false` means it was a delta and is buffered — send nothing yet.
+    /// `true` means send `flush()` first if anything is buffered, then the event.
     pub fn on(&mut self, event: &Event) -> bool {
         match event {
             Event::AssistantDelta { text } => self.push(Stream::Assistant(None), text.clone()),

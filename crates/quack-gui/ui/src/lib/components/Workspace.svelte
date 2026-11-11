@@ -9,13 +9,15 @@
 
 	let {
 		session,
-		tabCount,
+		sessions,
+		activeIndex,
 		onSelectTab,
 		onCloseTab,
 		onNewTab
 	}: {
 		session: Session;
-		tabCount: number;
+		sessions: Session[];
+		activeIndex: number;
 		onSelectTab: (index: number) => void;
 		onCloseTab: (index: number) => void;
 		onNewTab: () => void;
@@ -36,14 +38,13 @@
 
 <div class="workspace">
 	<Header {session} />
-	{#if tabCount > 1}
-		<div class="tabs" role="tablist" aria-label="Workspace tabs (prototype: tabs share one session)">
-			<!-- G2: one tab per folder; the strip previews the shell -->
-			<div class="tab" role="tab" aria-selected="true">{session.info?.cwd ?? ''}</div>
-			<button class="tab ghost" onclick={onNewTab}>+</button>
-			<span class="spacer"></span>
-		</div>
-	{/if}
+	<div class="tabs" aria-label="Workspaces">
+		{#each sessions as tab, i (tab.tab)}
+			<button class="tab" aria-current={i === activeIndex ? 'page' : undefined} onclick={() => onSelectTab(i)}>{tab.info?.cwd ?? 'Workspace'}</button>
+			<button class="tab ghost" aria-label={`Close ${tab.info?.cwd ?? 'workspace'}`} onclick={() => onCloseTab(i)}>×</button>
+		{/each}
+		<button class="tab ghost" aria-label="Open folder" onclick={onNewTab}>+</button>
+	</div>
 
 	<div class="body">
 		<main>
@@ -78,7 +79,7 @@
 	.workspace {
 		height: 100vh;
 		display: grid;
-		grid-template-rows: auto 1fr;
+		grid-template-rows: auto auto 1fr;
 		overflow: hidden;
 	}
 
@@ -104,10 +105,6 @@
 		background: none;
 		border-style: dashed;
 		color: var(--ink-2);
-	}
-
-	.spacer {
-		flex: 1;
 	}
 
 	.body {

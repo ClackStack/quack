@@ -277,6 +277,8 @@ Milestones: G1 desktop MVP (Welcome/recent folders, login-shell `PATH` & `.app` 
 
 - **G0 bridge core + SPA skeleton** (2026-11-09): `crates/quack-gui` (pure-Rust bridge: engine-per-tab registry with the resume-aware duplicate-session guard, 16 ms delta coalescer, AppInfo snapshot, recent folders, login-shell PATH) and `crates/quack-gui/ui` (SvelteKit 3 + Svelte 5 runes SPA: Transport seam over Tauri IPC with a scripted browser dev transport, Welcome view, workspace shell with transcript, markdown without dependencies, tool cards with diffs, approvals, questions, model picker, mode pill, context meter as the water line, sessions/plan/sub-agent sidebar). `quack-protocol` grew the ts-rs export behind a `ts` feature (`protocol.ts`, CI-checked) and `ReplayItem` gained `detail` and `Reasoning` per the plan. The Tauri shell (`--features desktop`) and the four-OS `gui` CI job are in; not yet exercised against a real local model — that is the G1 exit.
 
+- **Desktop foundation review** (2026-11-10): fixed the IPC open deadlock and early-event loss, introduced a pre-spawn one-live-engine-per-workspace guard, tracked session id changes, made no-model startup asynchronous, surfaced event-stream loss/closed state, corrected standalone desktop features, asset path and IPC CSP, and synchronized the lockfile with the existing rmcp pin. Added IPC/frontend lifecycle and bridge regression tests. The [review notes](15-desktop-client.md#foundation-review-2026-11-10) retain the open setup/trust, packaging, action acknowledgement, PATH, lock/reconnect and native smoke-test work; G1 is not declared complete.
+
 ## Cross-cutting, every milestone
 
 - Windows checklist items from each doc

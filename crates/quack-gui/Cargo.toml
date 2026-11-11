@@ -13,6 +13,9 @@ publish = false
 quack-config.workspace = true
 quack-core.workspace = true
 quack-protocol.workspace = true
+quack-providers.workspace = true
+quack-context.workspace = true
+quack-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -37,7 +40,25 @@ tempfile.workspace = true
 wiremock.workspace = true
 
 [features]
+# Keep standalone desktop builds at parity with the CLI. Workspace feature
+# unification must not be required to load the shipped providers and grammars.
+proto-openai-chat = ["quack-providers/proto-openai-chat"]
+proto-openai-responses = ["quack-providers/proto-openai-responses"]
+proto-anthropic = ["quack-providers/proto-anthropic"]
+proto-ollama = ["quack-providers/proto-ollama"]
+auth-chatgpt = ["proto-openai-responses", "quack-providers/auth-chatgpt"]
+lang-common = ["quack-context/lang-common", "quack-tools/lang-common"]
+tokenizers-hf = ["quack-providers/tokenizers"]
+keyring = ["quack-config/keyring"]
 desktop = [
+    "proto-openai-chat",
+    "proto-openai-responses",
+    "proto-anthropic",
+    "proto-ollama",
+    "auth-chatgpt",
+    "lang-common",
+    "tokenizers-hf",
+    "keyring",
     "dep:tauri",
     "dep:tauri-build",
     "dep:tauri-plugin-clipboard-manager",

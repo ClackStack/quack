@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use quack_core::Resume;
-use quack_gui::{Registry, Sink, TabMessage};
+use quack_gui::{OpenError, Registry, Sink, TabMessage};
 use serde::Deserialize;
 use tauri::ipc::Channel;
 use tauri::{Manager, RunEvent, State};
@@ -59,7 +59,7 @@ async fn open_folder(
     cwd: String,
     resume: Option<ResumeDto>,
     events: Channel<TabMessage>,
-) -> Result<u64, String> {
+) -> Result<u64, OpenError> {
     let resume = resume.map(Into::into).unwrap_or(Resume::New);
     let mut registry = state.lock().await;
     registry
@@ -69,7 +69,6 @@ async fn open_folder(
             Arc::new(ChannelSink(events)),
         )
         .await
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -88,13 +87,14 @@ async fn close_tab(state: State<'_, RegistryState>, tab: u64) -> Result<(), Stri
 }
 
 #[tauri::command]
-fn recent_folders(
+async fn recent_folders(
     state: State<'_, RegistryState>,
     limit: Option<u32>,
-) -> Vec<quack_gui::RecentFolder> {
-    state
-        .blocking_lock()
-        .recent_folders(limit.unwrap_or(10).max(1) as usize)
+) -> Result<Vec<quack_gui::RecentFolder>, String> {
+    Ok(state
+        .lock()
+        .await
+        .recent_folders(limit.unwrap_or(10).max(1) as usize))
 }
 
 fn main() {

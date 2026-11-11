@@ -123,7 +123,7 @@ async fn approval_round_trip_over_send_op() {
     // Step 2: the request carries the tool result; the model answers.
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .and(body_string_contains("notes.txt"))
+        .and(body_string_contains("\"role\":\"tool\""))
         .respond_with(sse_text("Done."))
         .mount(&server)
         .await;
@@ -214,6 +214,14 @@ async fn refuses_a_second_engine_on_the_same_session() {
         .expect("send the turn");
     let (_seen, _done) = collect_until(&mut rx, |e| matches!(e, Event::TurnComplete { .. })).await;
 
+    let loaded = common::workspace(tmp.path(), &server.uri());
+    let (dir, entries) = quack_core::list_sessions(&loaded);
+    let entry = entries
+        .iter()
+        .find(|e| e.id == session.id.0)
+        .expect("saved session");
+    let log = dir.join(&entry.dir).join("events.jsonl");
+    let before = std::fs::read(&log).expect("read log");
     let (sink2, mut rx2) = collecting_sink();
     let err = registry
         .open(ws_of(tmp.path()), Resume::Id(session.id.0.clone()), sink2)
@@ -223,6 +231,11 @@ async fn refuses_a_second_engine_on_the_same_session() {
         panic!("wrong error: {err}");
     };
     assert_eq!(existing, tab);
+    assert_eq!(
+        std::fs::read(&log).expect("read log"),
+        before,
+        "reject the duplicate BEFORE the resume can append to its log"
+    );
     assert!(
         rx2.try_recv().is_err(),
         "the refused open must not have sent anything"
@@ -260,4 +273,53 @@ async fn send_op_rejects_garbage_and_unknown_tabs() {
         .await
         .expect_err("unknown tabs are refused");
     assert!(e.contains("no open tab 999"), "{e}");
+}
+
+#[tokio::test]
+async fn opens_without_a_ready_model_even_when_latest_was_requested() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = common::workspace(tmp.path(), &server.uri());
+    std::fs::remove_file(tmp.path().join("user/providers.d/mock.toml")).expect("remove provider");
+    let mut registry = Registry::with_parts(fixed_loader(loaded), tmp.path().join("gui-data"));
+    let (sink, mut rx) = collecting_sink();
+    let tab = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        registry.open(ws_of(tmp.path()), Resume::Latest, sink),
+    )
+    .await
+    .expect("open does not wait for model readiness")
+    .expect("open");
+    collect_until(&mut rx, |ev| matches!(ev, Event::StartupComplete)).await;
+    registry.close(tab).await;
+}
+
+#[tokio::test]
+async fn workspace_ownership_survives_new_session_and_releases_on_close() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (mut registry, tab, mut rx) = open(tmp.path(), &server).await;
+    collect_until(&mut rx, |ev| matches!(ev, Event::StartupComplete)).await;
+    let (sink, _rx2) = collecting_sink();
+    assert!(
+        matches!(registry.open(ws_of(tmp.path()), Resume::New, sink).await,
+        Err(OpenError::AlreadyOpen { tab: existing }) if existing == tab)
+    );
+    registry
+        .send_op(tab, serde_json::json!({"op":"new_session"}))
+        .await
+        .expect("new session");
+    let (_, configured) =
+        collect_until(&mut rx, |ev| matches!(ev, Event::SessionConfigured { .. })).await;
+    let Event::SessionConfigured { session } = configured else {
+        unreachable!()
+    };
+    assert_eq!(registry.tab_of(&session.id), Some(tab));
+    registry.close(tab).await;
+    let (sink, _rx3) = collecting_sink();
+    registry
+        .open(ws_of(tmp.path()), Resume::New, sink)
+        .await
+        .expect("workspace ownership released");
+    registry.close_all().await;
 }

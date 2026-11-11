@@ -95,6 +95,7 @@ export class Session {
 	sessions = $state<SessionSummary[]>([]);
 	resumed = $state(false);
 	starting = $state(true);
+	closed = $state(false);
 
 	#transport: Transport;
 
@@ -102,12 +103,18 @@ export class Session {
 		this.#transport = transport;
 		this.tab = tab;
 		this.info = info;
+		this.currentModel = info.model;
+		this.mode = info.permission_mode as PermissionMode;
 	}
 
 	/** Feed one protocol event; the only place transcript state is written. */
 	onEvent(ev: Event) {
 		switch (ev.event) {
 			case 'session_configured':
+				this.starting = false;
+				this.currentModel = ev.session.model ?? null;
+				break;
+			case 'startup_complete':
 				this.starting = false;
 				break;
 			case 'session_resumed':
@@ -174,6 +181,7 @@ export class Session {
 				this.streaming = false;
 				this.#sealStreams();
 				this.approval = null;
+				this.questions = null;
 				this.lastUsage = {
 					prompt: ev.usage.prompt_tokens,
 					completion: ev.usage.completion_tokens,
@@ -184,6 +192,7 @@ export class Session {
 				this.streaming = false;
 				this.#sealStreams();
 				this.approval = null;
+				this.questions = null;
 				this.items.push({ kind: 'system', id: nextId(), tone: 'warning', text: `Interrupted: ${ev.reason}` });
 				break;
 			case 'speed':
@@ -284,6 +293,16 @@ export class Session {
 		}
 	}
 
+	onClosed(reason: string | null) {
+		this.closed = true;
+		this.starting = false;
+		this.streaming = false;
+		this.#sealStreams();
+		this.approval = null;
+		this.questions = null;
+		if (reason) this.items.push({ kind: 'system', id: nextId(), tone: 'error', text: reason });
+	}
+
 	#pushReplay(item: ReplayItem) {
 		if (item.kind === 'user') {
 			this.items.push({ kind: 'user', id: nextId(), text: item.text, files: [], images: [] });
@@ -311,7 +330,10 @@ export class Session {
 	#appendStream(kind: 'assistant' | 'reasoning', text: string) {
 		const open = this.#openStreaming(kind);
 		if (open) open.text += text;
-		else this.items.push({ kind, id: nextId(), text, streaming: true });
+		else {
+			this.#sealStreams();
+			this.items.push({ kind, id: nextId(), text, streaming: true });
+		}
 	}
 
 	#openStreaming(kind: 'assistant' | 'reasoning'): (Extract<Item, { kind: 'assistant' }> | Extract<Item, { kind: 'reasoning' }>) | undefined {
@@ -329,6 +351,7 @@ export class Session {
 	// ---- actions ----
 
 	async submit(text: string, files: string[] = [], images: string[] = []) {
+		if (this.closed) throw new Error('This workspace has stopped · close and reopen the folder');
 		this.#sealStreams();
 		this.items.push({ kind: 'user', id: nextId(), text, files, images });
 		await this.#transport.sendOp(this.tab, {
@@ -375,7 +398,10 @@ export class Session {
 	}
 
 	async setModel(providerModel: string) {
-		const [provider, model] = providerModel.split('/');
+		const slash = providerModel.indexOf('/');
+		const provider = providerModel.slice(0, slash);
+		const model = providerModel.slice(slash + 1);
+		if (slash < 1) return;
 		if (!provider || !model) return;
 		await this.#transport.sendOp(this.tab, { op: 'set_model', provider, model });
 	}
@@ -396,6 +422,10 @@ export class Session {
 
 	async compact(focus?: string) {
 		await this.#transport.sendOp(this.tab, { op: 'compact', ...(focus ? { focus } : {}) });
+	}
+
+	async listModels() {
+		await this.#transport.sendOp(this.tab, { op: 'list_models' });
 	}
 
 	async listSessions() {

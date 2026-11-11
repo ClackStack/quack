@@ -27,8 +27,8 @@ No server component exists. `quack-gui` depends on `quack-core`/`quack-config` (
 
 The pure-Rust bridge (`crates/quack-gui`, no Tauri dependency by default), the SvelteKit SPA (`crates/quack-gui/ui`), and the Tauri shell (`src/main.rs` behind `--features desktop`) exist; CI gained a `gui` job (four OSes; Linux installs the webkit2gtk dev packages) that checks and builds the SPA, regenerates `protocol.ts` with `git diff --exit-code`, and compiles the shell. Notes and deviations from the sketches above:
 
-- `open_folder` returns `{ tab }`; the `AppInfo` snapshot arrives as the channel's first message (the envelope sketch below is canonical). The SPA's Transport captures it so the header can render immediately.
-- Opening a tab waits for `SessionResumed` specifically, not "configured or resumed": a resuming engine first announces a fresh `SessionConfigured`, and waiting for the right one of the two is what makes the duplicate-session guard hold (`refuses_a_second_engine_on_the_same_session`).
+- `open_folder` returns a numeric tab id; the `AppInfo` snapshot arrives as the channel's first message (the envelope sketch below is canonical). The SPA's Transport captures it so the header can render immediately.
+- Opening returns after the initial `SessionConfigured`, including when no model is ready. Resume/replay continues asynchronously. One live engine owns each workspace, checked before spawning; a duplicate open returns a structured `already_open` error and the SPA focuses that tab. This prevents startup resume records and later session switches from introducing a second log writer.
 - The login-shell `PATH` merge lives in `path_env`, behind `desktop`: `std::env::set_var` is `unsafe` in edition 2024 and the workspace denies `unsafe_code`, so the merge is scoped to the shell with an `#[allow]` and a SAFETY comment (single-threaded startup, before any engine spawns).
 - Deltas coalesce per stream (`(agent id, kind, call id)`), merge in start order, and flush on a 16 ms tick or before any non-delta event; deltas inside `Event::Agent` are buffered under their own id.
 - The SPA is hand-rolled CSS (the plan's lean dependency list) with system font stacks; the one npm addition beyond the listed set is `@tauri-apps/api` (+ `plugin-dialog`) because `withGlobalTauri` stays false. `npm run dev` in a plain browser works against a scripted dev transport through the same `Transport` seam.
@@ -38,12 +38,38 @@ The pure-Rust bridge (`crates/quack-gui`, no Tauri dependency by default), the S
 - SvelteKit 3 removed the `$lib` alias: the SPA imports with `#lib/*`, resolved for vite by the package.json `imports` field and for TypeScript by an explicit `paths` entry in `tsconfig.json` (kit's generated tsconfig only mirrors the deprecated `alias` option). `npm run check` (svelte-check) and `npm run build` (adapter-static → `build/`, the Tauri `frontendDist`) are clean.
 - The shell needs icons at compile time: even with no icon configured, `generate_context!` falls back to `icons/icon.png` (and Windows' resource embed and macOS dev look for `icon.ico`/`icon.icns`), so `icons/` holds the standard set (32x32, 128x128, 128x128@2x, icon.png/ico/icns), drawn by `icons/make_icons.py` (Pillow, on the app.css palette, with the title duck's solid `>` beak) and listed under `bundle.icon`. `git_branch`'s tests use `.git/HEAD` fixtures instead of asserting the checkout's real branch, which broke on any branch name and on CI's detached-HEAD clones.
 
+## Foundation review (2026-11-10)
+
+The shared engine, protocol boundary, feature-gated Tauri shell and generated protocol types remain the foundation. The review fixed:
+
+- **Open handshake deadlock:** the transport now invokes `open_folder` before waiting for its first channel snapshot; command failures reject immediately.
+- **Lost startup/replay:** the page registers a session on the first `AppInfo`, before the command resolves, so startup facts and saved transcript events have an owner. Page teardown removes the listener. Model catalog requests are explicit, and provider/model splitting preserves slashes inside model ids.
+- **Session ownership:** the pre-spawn workspace guard prevents duplicate resume writes, including after New/Resume/Fork operations. Opening without a ready model no longer waits for a second session announcement that never arrives.
+- **Event loss and shutdown:** broadcast lag shuts down the engine and reports a recoverable closed state instead of silently continuing with an incomplete transcript or missed approval. Closed is emitted after shutdown; the composer disables sends for a stopped tab.
+- **Standalone builds:** `desktop` enables the CLI-equivalent provider protocols, ChatGPT auth, grammars, tokenizer and keyring features; it does not rely on workspace feature unification. `frontendDist` points at `ui/build` relative to the Tauri config, and CSP allows only self and the IPC endpoints for connections, following [Tauri's CSP guidance](https://v2.tauri.app/security/csp/).
+- **Build/test hygiene:** the lockfile now matches the existing `rmcp = 3.9.0` workspace pin. The approval mock matches a tool-role message, and recent-folder tests use isolated temporary directories.
+
+Regression tests exercise the IPC handshake, early replay, duplicate focusing, closed-state handling, model ids containing slashes, no-model startup, pre-spawn log integrity and workspace ownership across session changes. The browser demo alone is not an integration test.
+
+Validated locally on Linux: `cargo test -p quack-gui -p quack-mcp --locked` (29 tests), `cargo test -p quack-gui --features desktop --locked` (17 tests), desktop Clippy with `RUSTFLAGS="-D warnings"` and `--all-targets --locked`, `cargo fmt --all --check`, Svelte analysis, `npm run check`, `npm test` (15 tests), and `npm run build`. Rust tests used `QUACK_DEFAULTS_DIR=none`; no live model calls were made. Full-workspace/MSRV checks and native-window tests on the four-platform matrix were not run in this review.
+
+Before calling the desktop MVP ready:
+
+- Add first-run provider setup and the project-trust decision surface. The engine still enforces trust; the current SPA does not render `ProjectTrust` or offer `TrustProject`.
+- Package `defaults/` as native resources and exercise resolution from an installed app. The config loader understands macOS `Resources/defaults`, but `bundle.resources` is not configured yet; checkout runs must set `QUACK_DEFAULTS_DIR`.
+- Complete session-switch acknowledgement and action error handling: New/Resume currently clear the view optimistically, and failed approval/question submissions need a visible retry path.
+- Bound and parse login-shell PATH lookup (shell startup can hang or print banners; fish and trailing newlines need handling).
+- Reduce the app-wide registry lock around open/close waits so a slow shutdown cannot delay another tab's Interrupt. Define webview reload/reconnect ownership so discarded channels cannot leave unreachable engines behind.
+- Run native-window smoke tests and one local-model task on each supported OS/architecture. Compile checks and mock-server tests do not prove webview runtime behavior, packaged assets, or platform shutdown behavior.
+
+These remain G1–G3 work; this review does not mark the desktop release or cross-platform smoke criteria complete.
+
 ## The bridge
 
 One `Channel` per tab, created by the frontend and handed to `open_folder`; commands carry a tab id:
 
 ```
-invoke("open_folder", { cwd, resume, events })   → { tab, info }
+invoke("open_folder", { cwd, resume, events })   → tab (number); AppInfo arrives on events first
 invoke("send_op",     { tab, op })               // op is the tagged JSON, parsed with serde_json into quack_protocol::Op
 invoke("close_tab",   { tab })                   // awaits engine.shutdown() so MCP/LSP and session_end hooks finish
 events.listen(…)                                 // {"tab":…,"event":{…}}, {"tab":…,"info":{…}} or {"tab":…,"closed":{…}}
@@ -51,8 +77,8 @@ events.listen(…)                                 // {"tab":…,"event":{…}},
 
 - `send_op` accepts the `Op`'s serde JSON as-is (`#[serde(tag = "op")]`, `snake_case`); no translation layer beyond the tab envelope.
 - **TypeScript types are generated from `quack-protocol`:** `ts-rs` (behind a non-default feature/test on `quack-protocol`, adding zero crates to normal builds) exports `protocol.ts`, checked in CI with `git diff --exit-code` the same way `quack config schema --dir defaults/schemas` checks the config schemas.
-- **`AppInfo` snapshot:** at tab start and on `Event::ConfigReloaded`, the bridge reads `engine.config()` (`Arc<Loaded>`) and sends the same static facts the TUI's `AppInfo::from_config` gathers (`setting_rows()`, `layers`, permission `rules`, `bundles`, git `branch`, `ui` settings). All config and key mutations go through existing `Op`s (`Op::SaveSetting`, `Op::SetProviderKey`, `Op::AddServer`, `Op::AddProvider`, `ApprovalDecision::AlwaysAllow`) — the GUI never calls `toml_edit` directly.
-- **Independent engines & clean shutdown:** opening a tab loads that folder's config and spawns its engine (the ACP pattern). The registry refuses to open the same `SessionId` in two tabs at once (focusing the existing tab instead) so two engines never write to the same JSONL log. Closing a tab or quitting the app awaits `engine.shutdown()` so child processes, MCP/LSP servers and `session_end` hooks clean up.
+- **`AppInfo` snapshot:** at tab start and after `Event::StartupComplete` (including reloads), the bridge reads `engine.config()` (`Arc<Loaded>`) and sends the same static facts the TUI's `AppInfo::from_config` gathers (`setting_rows()`, `layers`, permission `rules`, `bundles`, git `branch`, `ui` settings). All config and key mutations go through existing `Op`s (`Op::SaveSetting`, `Op::SetProviderKey`, `Op::AddServer`, `Op::AddProvider`, `ApprovalDecision::AlwaysAllow`) — the GUI never calls `toml_edit` directly.
+- **Independent engines & clean shutdown:** opening a tab loads that folder's config and spawns its engine (the ACP pattern). The registry refuses a second live engine for the same canonical workspace before spawning it (focusing the existing tab instead). Session ids are tracked as they change. This is a deliberate MVP limit: use the session sidebar to switch sessions within a workspace; separate folders can have separate tabs. Closing a tab or quitting the app awaits `engine.shutdown()` so child processes, MCP/LSP servers and `session_end` hooks clean up.
 - **Always-on 16 ms delta coalescing:** `Channel::send` posts asynchronously to the webview queue and does not block when JS rendering lags. Each tab's bridge task buffers `AssistantDelta`, `ReasoningDelta` and `ToolCallOutputDelta` (including inside `Event::Agent`) and flushes them on a 16 ms (60 fps) tick — or immediately before any non-delta event (`ToolCallBegin`, `ApprovalRequest`, `TurnComplete`) — matching `quack-tui`'s frame loop and cutting IPC/DOM churn by 10–20× during fast streaming.
 - **Desktop environment parity:**
   - **Login-shell `PATH` (macOS/Linux):** when launched from Finder/Dock or a desktop launcher rather than a terminal, `quack-gui` resolves the user's login-shell `PATH` once at startup before spawning engines, so `quack-shell`, `quack-mcp` (`npx`/`uvx`), `quack-lsp` and `secret-tool` find the same tools as the TUI.

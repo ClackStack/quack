@@ -1,10 +1,10 @@
 //! The engine-per-tab registry (docs/plan/15-desktop-client.md#the-bridge).
 //!
 //! Opening a tab loads the folder's config and spawns its engine (the ACP pattern),
-//! waits for the session to be configured or resumed, and hands the engine to a
+//! waits for the initial session announcement, and hands the engine to a
 //! forwarder task that pushes coalesced [`TabMessage`]s into the tab's [`Sink`] — on
-//! desktop, a wrapper around a `tauri::ipc::Channel`. The registry refuses to open a
-//! session that is already open in another tab, so two engines never write to one
+//! desktop, a wrapper around a `tauri::ipc::Channel`. The registry refuses a second
+//! live engine for a workspace before spawning it, so two engines never write to one
 //! JSONL log, and a close awaits `engine.shutdown()` so MCP/LSP servers and
 //! `session_end` hooks finish.
 
@@ -17,7 +17,7 @@ use quack_config::LoadOptions;
 use quack_core::{Engine, EngineHandle, Resume};
 use quack_protocol::{Event, Op, SessionId};
 use serde::Serialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::appinfo::AppInfo;
@@ -94,11 +94,12 @@ impl TabMessage {
 }
 
 /// Why a folder did not open.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum OpenError {
     Config(String),
     Engine(String),
-    /// The session is already open in that tab; focus it instead of spawning again.
+    /// The workspace is already open in that tab; focus it instead of spawning again.
     AlreadyOpen {
         tab: TabId,
     },
@@ -110,7 +111,7 @@ impl std::fmt::Display for OpenError {
             Self::Config(e) => write!(f, "could not load the config: {e}"),
             Self::Engine(e) => write!(f, "the engine did not start: {e}"),
             Self::AlreadyOpen { tab } => {
-                write!(f, "this session is already open in tab {tab}")
+                write!(f, "this workspace is already open in tab {tab}")
             }
         }
     }
@@ -125,8 +126,9 @@ pub type Loader = Arc<dyn Fn(LoadOptions) -> Result<quack_config::Loaded, String
 /// One open tab: the ops half of its engine, a stop signal for the forwarder, and the
 /// forwarder itself (which owns the engine and awaits its shutdown at the end).
 struct Tab {
-    session: SessionId,
+    session: watch::Receiver<SessionId>,
     cwd: PathBuf,
+    workspace: PathBuf,
     ops: mpsc::Sender<Op>,
     stop: mpsc::UnboundedSender<()>,
     forwarder: JoinHandle<()>,
@@ -191,35 +193,39 @@ impl Registry {
         resume: Resume,
         sink: Arc<dyn Sink>,
     ) -> Result<TabId, OpenError> {
+        self.tabs.retain(|_, t| !t.forwarder.is_finished());
         let opts = LoadOptions::new(cwd.clone());
-        let loaded = (self.load)(opts).map_err(OpenError::Config)?;
-        let fresh = matches!(resume, Resume::New);
+        let load = self.load.clone();
+        let loaded = tokio::task::spawn_blocking(move || load(opts))
+            .await
+            .map_err(|e| OpenError::Config(e.to_string()))?
+            .map_err(OpenError::Config)?;
+        // One live engine per workspace: session switching must never create two
+        // writers to the same log (or competing edits to the same working tree).
+        // Check BEFORE spawning: resume appends a record as part of startup.
+        let workspace = workspace_key(&loaded.dirs.workspace_root);
+        if let Some((&tab, _)) = self.tabs.iter().find(|(_, t)| t.workspace == workspace) {
+            return Err(OpenError::AlreadyOpen { tab });
+        }
         let mut engine = Engine::spawn_with(Arc::new(loaded), resume);
         let mut startup = Vec::new();
-        // A resuming engine first announces the fresh session it was born with
-        // (SessionConfigured), then replaces it (SessionResumed) — or warns
-        // "cannot resume: …" and falls back to the fresh one. Waiting for the right
-        // one of the two is what makes the duplicate-session guard below mean
-        // something.
-        let mut resume_failed = false;
+        // The initial session is always announced, even when no model is ready.
+        // Forward resume/replay asynchronously; do not wait for a warning's wording
+        // or for a second SessionConfigured that may never arrive.
         let opened = tokio::time::timeout(OPEN_TIMEOUT, async {
             loop {
                 match engine.events.recv().await {
-                    Ok(ev) => match &ev {
-                        Event::SessionConfigured { session } if fresh || resume_failed => {
-                            break Ok(session.clone());
-                        }
-                        Event::SessionResumed { session, .. } => {
-                            break Ok(session.clone());
-                        }
-                        Event::Warning { message } if message.starts_with("cannot resume") => {
-                            resume_failed = true;
+                    Ok(ev) => {
+                        if let Event::SessionConfigured { session } = &ev {
+                            let session = session.clone();
                             startup.push(ev);
+                            break Ok(session);
                         }
-                        Event::Error { error } => break Err(error.message.clone()),
-                        _ => startup.push(ev),
-                    },
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        startup.push(ev);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        break Err(format!("lost {n} startup events · reopen the folder"));
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         break Err("the engine stopped".to_owned());
                     }
@@ -245,12 +251,14 @@ impl Registry {
             tab,
             AppInfo::from_config(&engine.config()),
         ));
-        let (forwarder, ops, stop) = spawn_forwarder(tab, engine, sink, startup);
+        let (session_tx, session_rx) = watch::channel(session.id);
+        let (forwarder, ops, stop) = spawn_forwarder(tab, engine, sink, startup, session_tx);
         self.tabs.insert(
             tab,
             Tab {
-                session: session.id,
+                session: session_rx,
                 cwd: cwd.clone(),
+                workspace,
                 ops,
                 stop,
                 forwarder,
@@ -280,7 +288,7 @@ impl Registry {
     pub fn tab_of(&self, session: &SessionId) -> Option<TabId> {
         self.tabs
             .iter()
-            .find(|(_, t)| &t.session == session)
+            .find(|(_, t)| *t.session.borrow() == *session)
             .map(|(tab, _)| *tab)
     }
 
@@ -289,9 +297,9 @@ impl Registry {
         self.tabs.get(&tab).map(|t| &t.cwd)
     }
 
-    /// Close a tab: stop its forwarder, which flushes pending deltas, announces
-    /// [`Payload::Closed`] and awaits `engine.shutdown()` (MCP/LSP servers and
-    /// `session_end` hooks included).
+    /// Close a tab: stop its forwarder, which flushes pending deltas and awaits
+    /// `engine.shutdown()` (MCP/LSP servers and `session_end` hooks included)
+    /// before announcing [`Payload::Closed`].
     pub async fn close(&mut self, tab: TabId) {
         if let Some(t) = self.tabs.remove(&tab) {
             drop(t.ops);
@@ -327,6 +335,7 @@ fn spawn_forwarder(
     mut engine: EngineHandle,
     sink: Arc<dyn Sink>,
     startup: Vec<Event>,
+    session: watch::Sender<SessionId>,
 ) -> (JoinHandle<()>, mpsc::Sender<Op>, mpsc::UnboundedSender<()>) {
     let (ops, mut ops_rx) = mpsc::channel::<Op>(16);
     let (stop_tx, mut stop_rx) = mpsc::unbounded_channel::<()>();
@@ -356,6 +365,11 @@ fn spawn_forwarder(
                 },
                 ev = engine.events.recv() => match ev {
                     Ok(ev) => {
+                        if let Event::SessionConfigured { session: info }
+                            | Event::SessionResumed { session: info, .. } = &ev
+                        {
+                            session.send_replace(info.id.clone());
+                        }
                         // StartupComplete also follows Op::ReloadConfig, and by then
                         // engine.config() is the fresh one; ConfigReloaded fires before.
                         if matches!(ev, Event::StartupComplete) {
@@ -370,7 +384,14 @@ fn spawn_forwarder(
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(n, "gui tab lagged behind the engine");
+                        for merged in coalescer.flush() {
+                            sink.send(TabMessage::event(tab, merged));
+                        }
+                        engine.shutdown().await;
+                        sink.send(TabMessage::closed(tab, Some(format!(
+                            "Lost {n} engine events · reopen the folder to restore the session"
+                        ))));
+                        return;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 },
@@ -379,8 +400,19 @@ fn spawn_forwarder(
         for merged in coalescer.flush() {
             sink.send(TabMessage::event(tab, merged));
         }
-        sink.send(TabMessage::closed(tab, None));
         engine.shutdown().await;
+        sink.send(TabMessage::closed(tab, None));
     });
     (task, ops, stop_tx)
+}
+
+/// Resolve symlinks before comparing workspace ownership; compare case-insensitively
+/// on the platforms where workspace paths are normally case-insensitive.
+fn workspace_key(path: &std::path::Path) -> PathBuf {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if cfg!(any(windows, target_os = "macos")) {
+        PathBuf::from(path.to_string_lossy().to_lowercase())
+    } else {
+        path
+    }
 }
