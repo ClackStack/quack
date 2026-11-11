@@ -117,3 +117,60 @@ async fn fork_branches_and_export_writes_the_transcript() {
     assert_eq!(users(&resumed(tmp.path(), &server.uri(), &forked).await), 2);
     assert_eq!(users(&resumed(tmp.path(), &server.uri(), &parent).await), 1);
 }
+
+#[tokio::test]
+async fn small_model_title_is_saved_and_restored() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(wiremock::matchers::body_string_contains(
+            r#""model":"small""#,
+        ))
+        .respond_with(sse_text("Login form validation"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(wiremock::matchers::body_string_contains(
+            r#""model":"tiny""#,
+        ))
+        .respond_with(sse_text("Sure."))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut loaded = workspace(tmp.path(), &server.uri(), r#"["tiny", "small"]"#, "");
+    loaded.settings.model.small = "mock/small".into();
+    let loaded = Arc::new(loaded);
+    let mut engine = Engine::spawn(loaded.clone());
+    engine
+        .submit(Op::UserTurn {
+            items: vec![quack_core::protocol::InputItem::text(
+                "Please fix the login form.",
+            )],
+            overrides: Default::default(),
+        })
+        .await;
+    let title = "Login form validation";
+    let is_title = |e: &Event| match e {
+        Event::SessionTitle { title: Some(t) } if t == title => Some(()),
+        _ => None,
+    };
+    let events = common::until_done(&mut engine).await;
+    if !events.iter().any(|e| is_title(e).is_some()) {
+        until(&mut engine, is_title).await;
+    }
+    engine.submit(Op::ListSessions).await;
+    let sessions = until(&mut engine, |e| match e {
+        Event::SessionList { sessions } => Some(sessions.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(sessions[0].title, title);
+    engine.shutdown().await;
+
+    let mut engine = Engine::spawn_with(loaded, Resume::Latest);
+    until(&mut engine, is_title).await;
+    engine.shutdown().await;
+}

@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -420,10 +420,18 @@ async fn shipped_jira_hook_fetches_linked_issues() {
         .await;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/hooks.d");
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("defaults")
+        .join("hooks.d");
     let hooks = tmp.path().join("user").join("hooks.d");
     std::fs::create_dir_all(hooks.join("jira")).expect("mkdir");
-    std::fs::copy(shipped.join("jira/jira.py"), hooks.join("jira/jira.py")).expect("script");
+    std::fs::copy(
+        shipped.join("jira").join("jira.py"),
+        hooks.join("jira").join("jira.py"),
+    )
+    .expect("script");
     // Enabled, pointed at the mock, with a token written in (tests never read real env).
     // Normalize line endings first: a Windows checkout has CRLF, and the replaces below
     // (notably removing the `enabled = false` line) match LF text.
@@ -499,10 +507,18 @@ async fn enabling_a_shipped_hook_copies_it_into_the_user_layer_and_runs_it() {
         .await;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/hooks.d");
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("defaults")
+        .join("hooks.d");
     let defaults = tmp.path().join("defaults").join("hooks.d");
     std::fs::create_dir_all(defaults.join("jira")).expect("mkdir");
-    std::fs::copy(shipped.join("jira/jira.py"), defaults.join("jira/jira.py")).expect("script");
+    std::fs::copy(
+        shipped.join("jira").join("jira.py"),
+        defaults.join("jira").join("jira.py"),
+    )
+    .expect("script");
     // As shipped, but pointed at the mock with the token written in (tests never read
     // real env). Line endings normalized: a Windows checkout has CRLF.
     let toml = std::fs::read_to_string(shipped.join("jira.toml"))
@@ -520,7 +536,12 @@ async fn enabling_a_shipped_hook_copies_it_into_the_user_layer_and_runs_it() {
         Some(&tmp.path().join("defaults")),
     );
     let mut engine = Engine::spawn(Arc::new(loaded));
-    engine.submit(Op::EnableHook { id: "jira".into() }).await;
+    engine
+        .submit(Op::EnableHook {
+            id: "jira".into(),
+            replace_payload: None,
+        })
+        .await;
     let mut enabled = None;
     loop {
         let e = tokio::time::timeout(Duration::from_secs(10), engine.events.recv())
@@ -536,8 +557,9 @@ async fn enabling_a_shipped_hook_copies_it_into_the_user_layer_and_runs_it() {
     }
     let enabled = enabled.expect("HookEnabled before the reload");
 
-    let copy = tmp.path().join("user/hooks.d/jira.toml");
+    let copy = tmp.path().join("user").join("hooks.d").join("jira.toml");
     assert_eq!(enabled, copy.display().to_string());
+    assert_eq!(PathBuf::from(&enabled), copy);
     let text = std::fs::read_to_string(&copy).expect("copy");
     assert!(text.contains("enabled = true"), "{text}");
     assert!(
@@ -551,8 +573,15 @@ async fn enabling_a_shipped_hook_copies_it_into_the_user_layer_and_runs_it() {
         "the shipped comments survive the copy: {text}"
     );
     assert_eq!(
-        std::fs::read_to_string(tmp.path().join("user/hooks.d/jira/jira.py")).expect("payload"),
-        std::fs::read_to_string(shipped.join("jira/jira.py")).expect("shipped payload")
+        std::fs::read_to_string(
+            tmp.path()
+                .join("user")
+                .join("hooks.d")
+                .join("jira")
+                .join("jira.py")
+        )
+        .expect("payload"),
+        std::fs::read_to_string(shipped.join("jira").join("jira.py")).expect("shipped payload")
     );
     let shipped_text = std::fs::read_to_string(defaults.join("jira.toml")).expect("shipped");
     assert!(

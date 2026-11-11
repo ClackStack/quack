@@ -160,7 +160,7 @@ These are the project's core promises; tests and CI enforce them:
   - Path comparisons are case-insensitive on Windows and macOS (`quack-tools/src/paths.rs`).
   - The edit tools keep each file's CRLF/LF and BOM (`quack-tools/src/text.rs`).
 - **Windows key events:** crossterm reports both Press and Release on Windows. The TUI acts on Press and Repeat only (`App::on_terminal`); keep it that way for new input handling.
-- **Pinned crate:** `rmcp` is pinned (`=3.5.1`) because MCP 2026-07-28 support is new. Don't bump it casually.
+- **Pinned crate:** `rmcp` is pinned (`=3.9.0`) because MCP 2026-07-28 support is new. Don't bump it casually.
 - **Features:** cargo features gate the protocols (`proto-openai-chat`, `proto-openai-responses`, `proto-anthropic`, `proto-ollama`), grammars (`lang-common`), HF tokenizers, ACP and the keyring (see `quack-cli` `[features]`). A provider that names a compiled-out protocol must fail to load on its own, with a clear error, while everything else loads.
 - **Project config:** it lives in `.quack/` under the workspace root (for example `.quack/mcp.d/`). An untrusted project config runs nothing until the user trusts it (see the trust tests in `quack-core`).
 - **TUI drawing** takes `&App`. The only state that drawing writes is in `Cell`s (`scroll`, `view`), which it clamps and remembers for the next key press. Keep everything else in `draw` free of side effects.

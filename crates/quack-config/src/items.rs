@@ -42,9 +42,20 @@ pub fn load_items<T: DeserializeOwned>(
     layers: &[(LayerKind, PathBuf)],
     subdir: &str,
 ) -> Vec<Item<T>> {
+    load_items_except(layers, subdir, &[])
+}
+
+pub(crate) fn load_items_except<T: DeserializeOwned>(
+    layers: &[(LayerKind, PathBuf)],
+    subdir: &str,
+    excluded: &[PathBuf],
+) -> Vec<Item<T>> {
     let mut by_id: BTreeMap<String, Item<T>> = BTreeMap::new();
     for (layer, dir) in layers {
-        for path in toml_files(&dir.join(subdir)) {
+        for path in toml_files(&dir.join(subdir))
+            .into_iter()
+            .filter(|p| !excluded.contains(p))
+        {
             let stem = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())

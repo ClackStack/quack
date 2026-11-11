@@ -1220,6 +1220,9 @@ impl App {
                 path,
                 note,
             } => self.on_setting_saved(&key, &value, &path, note),
+            Event::HookPayloadChoice { id, path } => {
+                self.modal = Some(modal::hook_payload(&id, &path, &self.theme));
+            }
             Event::HookEnabled { id, path, note } => {
                 let mut text = format!("hook `{id}` enabled ({path})");
                 if let Some(n) = note {
@@ -2728,6 +2731,16 @@ impl App {
             "hooks" if args.is_empty() => {
                 self.modal = Some(modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme));
             }
+            "hooks"
+                if args.starts_with("keep-payload ") || args.starts_with("replace-payload ") =>
+            {
+                if let Some((choice, id)) = args.split_once(' ') {
+                    self.ops.push(Op::EnableHook {
+                        id: id.to_owned(),
+                        replace_payload: Some(choice == "replace-payload"),
+                    });
+                }
+            }
             "hooks" => match args.strip_prefix("toggle ").map(str::trim) {
                 Some(id)
                     if self
@@ -2763,7 +2776,10 @@ impl App {
                         self.ops.push(Op::ReloadConfig);
                         self.note(format!("hook `{id}` turned off; reloading"));
                     } else {
-                        self.ops.push(Op::EnableHook { id: id.to_owned() });
+                        self.ops.push(Op::EnableHook {
+                            id: id.to_owned(),
+                            replace_payload: None,
+                        });
                     }
                 }
                 _ => self.note("usage: /hooks, or /hooks toggle <name>".into()),
@@ -3632,6 +3648,26 @@ mod tests {
     }
 
     #[test]
+    fn session_alias_resumes_or_lists() {
+        let mut app = App::new(info());
+        type_str(&mut app, "/session");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![Op::ListSessions]);
+        assert!(app.modal.is_some());
+
+        let mut app = App::new(info());
+        type_str(&mut app, "/session s-123");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::ResumeSession {
+                id: SessionId("s-123".into())
+            }]
+        );
+        assert!(app.resuming);
+    }
+
+    #[test]
     fn config_set_saves_to_user_layer_and_applies_ui_live() {
         let mut app = App::new(info());
         type_str(&mut app, "/config set ui.ascii true");
@@ -3782,6 +3818,30 @@ mod tests {
     }
 
     #[test]
+    fn hook_payload_choice_can_keep_replace_or_cancel() {
+        for (key, replace_payload) in [
+            (KeyCode::Enter, Some(false)),
+            (KeyCode::Down, Some(true)),
+            (KeyCode::Esc, None),
+        ] {
+            let mut app = App::new(info());
+            app.on_engine(Event::HookPayloadChoice {
+                id: "jira".into(),
+                path: "user/hooks.d/jira".into(),
+            });
+            press(&mut app, key);
+            if key == KeyCode::Down {
+                press(&mut app, KeyCode::Enter);
+            }
+            let expected = replace_payload.map(|replace| Op::EnableHook {
+                id: "jira".into(),
+                replace_payload: Some(replace),
+            });
+            assert_eq!(app.take_ops(), expected.into_iter().collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
     fn toggling_a_hook_off_lists_it_and_on_goes_through_the_engine() {
         let hook = |enabled: bool| quack_config::Item {
             id: "jira".into(),
@@ -3813,7 +3873,13 @@ mod tests {
         let mut app = App::new(i);
         type_str(&mut app, "/hooks toggle jira");
         press(&mut app, KeyCode::Enter);
-        assert_eq!(app.take_ops(), vec![Op::EnableHook { id: "jira".into() }]);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::EnableHook {
+                id: "jira".into(),
+                replace_payload: None
+            }]
+        );
 
         // An enabled hook is turned off by listing it.
         let mut i = info();

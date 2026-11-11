@@ -179,10 +179,13 @@ on_error = "deny"                  # deny | allow | warn
 
 The shipped examples are `enabled = false`. `/hooks` turns one on with `Op::EnableHook`
 (`quack-config/src/enable.rs`): a defaults hook is copied into the user layer's `hooks.d/`
-with `enabled = true` (its payload folder named after the file goes with it; the shipped
-copy is never edited), a hook disabled in its own user or project file is enabled in
-place, a bare `enabled = false` override in the user layer is removed, and
-`[hooks] disabled` stops listing the id. Toggle-off still only writes `[hooks] disabled`.
+with `enabled = true`. If the matching payload folder already exists in the user
+layer, the TUI asks whether to keep it or replace it with the bundled folder. Escape
+cancels the enable. A hook disabled in its own user or trusted project file is enabled
+in place, and a bare `enabled = false` override in either layer is removed. Enabling
+clears the id from active user and project disable lists and masks any inherited entry
+in user settings. System policy locks and command-line overrides can still block
+activation. The engine confirms success after loading the hook from the updated config.
 
 ### As implemented (2026-10-19, ahead of M3)
 

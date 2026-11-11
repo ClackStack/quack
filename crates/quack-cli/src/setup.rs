@@ -463,10 +463,16 @@ mod tests {
         let out = String::from_utf8_lossy(&out);
         assert_eq!(code, exit::OK, "{out}");
         let id = setup::id_from_url(&url);
-        let file = std::fs::read_to_string(tmp.path().join(format!("user/providers.d/{id}.toml")))
-            .expect("provider file");
+        let file = std::fs::read_to_string(
+            tmp.path()
+                .join("user")
+                .join("providers.d")
+                .join(format!("{id}.toml")),
+        )
+        .expect("provider file");
         assert_eq!(file, format!("# Added by setup.\nbase_url = \"{url}\"\n"));
-        let cfg = std::fs::read_to_string(tmp.path().join("user/config.toml")).expect("config");
+        let cfg =
+            std::fs::read_to_string(tmp.path().join("user").join("config.toml")).expect("config");
         assert!(cfg.contains(&format!("default = \"{id}/coder\"")), "{cfg}");
         assert!(out.contains("none ready yet"), "{out}");
     }
@@ -508,7 +514,7 @@ mod tests {
     async fn wizard_offers_configured_services_and_says_how_to_set_a_key() {
         let tmp = tempfile::tempdir().expect("tempdir");
         // A service from a lower layer, as the defaults bundle provides them.
-        let dir = tmp.path().join("system/providers.d");
+        let dir = tmp.path().join("system").join("providers.d");
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(
             dir.join("example.toml"),
@@ -538,6 +544,6 @@ mod tests {
         assert!(out.contains("needs QUACK_TEST_UNSET_KEY"), "{out}");
         assert!(out.contains("export QUACK_TEST_UNSET_KEY="), "{out}");
         // Nothing is written for a key read from a variable.
-        assert!(!tmp.path().join("user/providers.d").exists());
+        assert!(!tmp.path().join("user").join("providers.d").exists());
     }
 }

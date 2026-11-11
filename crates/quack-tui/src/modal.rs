@@ -2180,6 +2180,32 @@ pub(crate) fn theme(current: &str, theme: &Theme) -> Modal {
 }
 
 /// The `/hooks` modal: configured hooks from `hooks.d` and their recent runs.
+pub(crate) fn hook_payload(id: &str, path: &str, theme: &Theme) -> Modal {
+    let items = [
+        ("Keep existing folder", "keep-payload"),
+        ("Replace with bundled folder", "replace-payload"),
+    ]
+    .into_iter()
+    .map(|(label, action)| {
+        let mut item = placeholder(
+            label,
+            &format!("An existing payload for `{id}` was found at {path}."),
+            theme,
+        );
+        item.action = Some(format!("/hooks {action} {id}"));
+        item.run = true;
+        item
+    })
+    .collect();
+    Modal::new(
+        "Hook payload",
+        vec![ModalTab {
+            title: "Hook payload".into(),
+            items,
+        }],
+    )
+}
+
 pub(crate) fn hooks(
     hooks: &[quack_config::Item<quack_config::HookFile>],
     runs: &[crate::app::HookRun],
@@ -2259,8 +2285,7 @@ pub(crate) fn hooks(
                             "⏎ enable it (removes that override)".into()
                         }
                         ItemState::Disabled(why) if why == "listed in `disabled`" => {
-                            "⏎ turn it on (removed from [hooks] disabled in your config.toml)"
-                                .into()
+                            "⏎ enable it and clear its disabled setting".into()
                         }
                         _ if h.layer == LayerKind::Defaults => {
                             "⏎ enable it (copied into your config folder)".into()

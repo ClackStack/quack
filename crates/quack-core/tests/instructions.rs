@@ -32,9 +32,9 @@ async fn chain_at_start_and_nested_files_with_the_first_read() {
     std::fs::create_dir_all(ws.join("app")).expect("mkdir");
     std::fs::create_dir_all(ws.join("pkg")).expect("mkdir");
     std::fs::write(ws.join("AGENTS.md"), "ROOT-RULES").expect("write");
-    std::fs::write(ws.join("app/AGENTS.md"), "APP-RULES").expect("write");
-    std::fs::write(ws.join("pkg/AGENTS.md"), "PKG-RULES").expect("write");
-    std::fs::write(ws.join("pkg/lib.txt"), "library").expect("write");
+    std::fs::write(ws.join("app").join("AGENTS.md"), "APP-RULES").expect("write");
+    std::fs::write(ws.join("pkg").join("AGENTS.md"), "PKG-RULES").expect("write");
+    std::fs::write(ws.join("pkg").join("lib.txt"), "library").expect("write");
     let loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "app");
     assert_eq!(loaded.dirs.workspace_root, ws);
 
@@ -97,7 +97,7 @@ async fn memory_index_in_the_prompt_and_notes_saved_by_the_tool() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     // A profile whose prompt is only the memory index.
-    let profile = tmp.path().join("user/profiles.d/mem");
+    let profile = tmp.path().join("user").join("profiles.d").join("mem");
     std::fs::create_dir_all(&profile).expect("mkdir");
     std::fs::write(
         profile.join("profile.toml"),
@@ -105,7 +105,7 @@ async fn memory_index_in_the_prompt_and_notes_saved_by_the_tool() {
     )
     .expect("write");
     std::fs::write(profile.join("system.md"), "MEMORY: {{ memory_index }}").expect("write");
-    let global = tmp.path().join("data/memory");
+    let global = tmp.path().join("data").join("memory");
     std::fs::create_dir_all(&global).expect("mkdir");
     std::fs::write(
         global.join("MEMORY.md"),
@@ -114,7 +114,7 @@ async fn memory_index_in_the_prompt_and_notes_saved_by_the_tool() {
     .expect("write");
     std::fs::create_dir_all(global.join("notes")).expect("mkdir");
     std::fs::write(
-        global.join("notes/tabs.md"),
+        global.join("notes").join("tabs.md"),
         "---\nname: tabs\ndescription: prefers tabs\ntype: user\n---\n\nTabs.\n",
     )
     .expect("write");
@@ -136,7 +136,7 @@ async fn memory_index_in_the_prompt_and_notes_saved_by_the_tool() {
         .expect("one project")
         .expect("entry")
         .path();
-    let note = std::fs::read_to_string(project.join("notes/uses-pnpm.md")).expect("note");
+    let note = std::fs::read_to_string(project.join("notes").join("uses-pnpm.md")).expect("note");
     assert!(note.contains("Use pnpm, never npm."));
     engine.shutdown().await;
 }
@@ -153,7 +153,7 @@ async fn a_lasting_preference_gets_a_reminder_to_save_it() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(tmp.path().join("user")).expect("mkdir");
         std::fs::write(
-            tmp.path().join("user/config.toml"),
+            tmp.path().join("user").join("config.toml"),
             format!("[memory]\nnudge = {nudge}\n"),
         )
         .expect("config");
@@ -192,7 +192,7 @@ async fn skills_are_listed_loaded_by_the_tool_and_run_by_name() {
         .await;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let profile = tmp.path().join("user/profiles.d/sk");
+    let profile = tmp.path().join("user").join("profiles.d").join("sk");
     std::fs::create_dir_all(&profile).expect("mkdir");
     std::fs::write(
         profile.join("profile.toml"),
@@ -200,7 +200,12 @@ async fn skills_are_listed_loaded_by_the_tool_and_run_by_name() {
     )
     .expect("write");
     std::fs::write(profile.join("system.md"), "SKILLS: {{ skills }}").expect("write");
-    let skill = tmp.path().join("ws/.agents/skills/release");
+    let skill = tmp
+        .path()
+        .join("ws")
+        .join(".agents")
+        .join("skills")
+        .join("release");
     std::fs::create_dir_all(&skill).expect("mkdir");
     std::fs::write(
         skill.join("SKILL.md"),

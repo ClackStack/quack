@@ -45,7 +45,7 @@ async fn detected_server_becomes_a_provider_and_the_default_model() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let loaded = common::workspace(tmp.path(), &server.uri(), "[]", "");
     // Start with no providers at all.
-    let providers_d = tmp.path().join("user/providers.d");
+    let providers_d = tmp.path().join("user").join("providers.d");
     std::fs::remove_file(providers_d.join("mock.toml")).expect("rm");
     let config = Arc::new(loaded);
 
@@ -101,7 +101,8 @@ async fn detected_server_becomes_a_provider_and_the_default_model() {
         unreachable!()
     };
     assert_eq!(session.model.as_deref(), Some("llama-cpp/tiny"));
-    let user_config = std::fs::read_to_string(tmp.path().join("user/config.toml")).expect("config");
+    let user_config =
+        std::fs::read_to_string(tmp.path().join("user").join("config.toml")).expect("config");
     assert!(
         user_config.contains("default = \"llama-cpp/tiny\""),
         "{user_config}"
@@ -146,7 +147,7 @@ async fn a_server_added_by_url_lists_its_models_and_a_service_waits_for_its_key(
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let loaded = common::workspace(tmp.path(), &server.uri(), "[]", "");
-    let providers_d = tmp.path().join("user/providers.d");
+    let providers_d = tmp.path().join("user").join("providers.d");
     std::fs::remove_file(providers_d.join("mock.toml")).expect("rm");
     // A hosted service whose key is read from a variable nobody sets.
     std::fs::write(
@@ -244,7 +245,7 @@ fn a_new_key_replaces_a_stored_one_or_moves_the_key_to_the_store() {
     use quack_core::setup::set_provider_key_with;
     let tmp = tempfile::tempdir().expect("tempdir");
     let loaded = common::workspace(tmp.path(), "http://127.0.0.1:9/v1", "[]", "");
-    let providers_d = tmp.path().join("user/providers.d");
+    let providers_d = tmp.path().join("user").join("providers.d");
     let stored = "base_url = \"https://api.example.com/v1\"\n\
                   api_key = { keyring = \"example/me\" }\n";
     std::fs::write(providers_d.join("stored.toml"), stored).expect("write");
@@ -297,12 +298,12 @@ fn a_key_without_a_secret_service_goes_into_a_file_the_provider_points_at() {
     use quack_core::setup::{KeyStore, save_key_at_with};
     let tmp = tempfile::tempdir().expect("tempdir");
     let loaded = common::workspace(tmp.path(), "http://127.0.0.1:9/v1", "[]", "");
-    let providers_d = tmp.path().join("user/providers.d");
+    let providers_d = tmp.path().join("user").join("providers.d");
     let example = "base_url = \"https://api.example.com/v1\"\n\
                    api_key = { env = \"QUACK_TEST_UNSET_KEY\" }\n";
     std::fs::write(providers_d.join("example.toml"), example).expect("write");
     // A provider that already reads its key from a file keeps that file.
-    let their_file = tmp.path().join("elsewhere/custom.key");
+    let their_file = tmp.path().join("elsewhere").join("custom.key");
     let keyed = format!(
         "base_url = \"https://api.example.org/v1\"\napi_key = {{ file = \"{}\" }}\n",
         their_file.display()
@@ -313,7 +314,7 @@ fn a_key_without_a_secret_service_goes_into_a_file_the_provider_points_at() {
         panic!("the keyring must not be touched when the store is a file")
     };
 
-    let key_file = tmp.path().join("user/keys/example.key");
+    let key_file = tmp.path().join("user").join("keys").join("example.key");
     let store = (KeyStore::File(key_file.clone()), Some(reason.clone()));
     let out = save_key_at_with(&loaded, "example", "k1", &store, no_ring).expect("stored");
     assert_eq!(std::fs::read_to_string(&key_file).expect("key file"), "k1");
@@ -343,7 +344,7 @@ fn a_key_without_a_secret_service_goes_into_a_file_the_provider_points_at() {
     );
 
     let store = (
-        KeyStore::File(tmp.path().join("user/keys/keyed.key")),
+        KeyStore::File(tmp.path().join("user").join("keys").join("keyed.key")),
         Some(reason),
     );
     let out = save_key_at_with(&loaded, "keyed", "k2", &store, no_ring).expect("stored");
@@ -369,9 +370,14 @@ fn add_server_without_a_secret_service_writes_the_key_file() {
     let key = "sk-test";
     let added = add_server(&loaded, "https://api.example.com/v1", Some(key)).expect("added");
     assert_eq!(added.id, "example");
-    let text =
-        std::fs::read_to_string(tmp.path().join("user/providers.d/example.toml")).expect("file");
-    let key_file = tmp.path().join("user/keys/example.key");
+    let text = std::fs::read_to_string(
+        tmp.path()
+            .join("user")
+            .join("providers.d")
+            .join("example.toml"),
+    )
+    .expect("file");
+    let key_file = tmp.path().join("user").join("keys").join("example.key");
     assert!(
         text.contains(&format!(
             "api_key = {{ file = \"{}\" }}",

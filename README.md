@@ -155,7 +155,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 ### Interface
 
 - **Full-screen Ratatui TUI**: Markdown formatting, syntax-highlighted code blocks, tables, and optional ASCII mode (`--ascii`).
-- **Window title**: The terminal's title shows the duck and what the session is about (`_(•)> fix the login bug`), and marks when a turn runs or quack needs you. `ui.terminal_title = false` turns it off.
+- **Window title**: The terminal's title shows the duck and what the session is about (`_(•)> fix the login bug`), and marks when a turn runs or quack needs you. If `[model] small` is configured, quack makes one background request to title the session from the first message. The title also appears in `/resume`. The first line serves as the fallback, and `/title` sets it manually. `ui.terminal_title = false` turns it off.
 - **Smooth scrolling and selection**: Mouse wheel scrolling, click-to-position cursor, and OSC 52 terminal copy integration.
 - **Interactive pickers**: Fast, fuzzy-filtered modals for `/models`, `/providers`, `/config`, `/context`, `/stats`, `/doctor`, and `/help`.
 - **Status bar**: Real-time indicators for active permission mode, context window utilization, model generation speed, and background tasks.
@@ -462,8 +462,10 @@ info  network       llm.internal.example · policy allows only llm.internal.exam
 
 A hook ships disabled (`enabled = false`); `/hooks` in the TUI turns one on: its file
 (and the folder named after it, e.g. `jira/` next to `jira.toml`) is copied into your
-config folder's `hooks.d/` with `enabled = true`. Turning one off lists its id in
-`[hooks] disabled`, leaving the file alone.
+config folder's `hooks.d/` with `enabled = true`. If the payload folder already
+exists, choose whether to keep it or replace it with the bundled folder. Enabling
+clears the hook's disabled entries in active user and project settings. Quack reloads
+and confirms the hook is active. Turning a hook off lists its id in `[hooks] disabled`.
 
 | Key | Default | Description |
 |---|---|---|

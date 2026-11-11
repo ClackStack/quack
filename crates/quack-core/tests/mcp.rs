@@ -157,7 +157,7 @@ async fn mcp_ready(engine: &mut EngineHandle) {
 }
 
 fn add_server(root: &std::path::Path, uri: &str, extra: &str) {
-    let dir = root.join("user/mcp.d");
+    let dir = root.join("user").join("mcp.d");
     std::fs::create_dir_all(&dir).expect("mkdir");
     std::fs::write(dir.join("fx.toml"), format!("url = \"{uri}/mcp\"\n{extra}")).expect("write");
 }

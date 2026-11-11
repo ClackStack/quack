@@ -187,13 +187,11 @@ pub enum Op {
     TrustProject {
         decision: String,
     },
-    /// Enable a hook that is off (`/hooks toggle <id>`): a hook shipped disabled is
-    /// copied into the user layer's `hooks.d/` with `enabled = true`, one in the user or
-    /// project layer is enabled in its own file, a bare `enabled = false` override in the
-    /// user layer is removed, and `[hooks] disabled` stops listing it. Answered with
-    /// `Event::HookEnabled`, then a reload.
+    /// Enable a hook and reload, or ask how to handle an existing payload.
     EnableHook {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replace_payload: Option<bool>,
     },
     Shutdown,
 }
@@ -262,8 +260,12 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
-    /// A hook was enabled (`Op::EnableHook`); `path` is its file afterwards (the removed
-    /// `enabled = false` override, for a bare one). A config reload follows.
+    /// Enabling this hook needs a choice about the existing payload.
+    HookPayloadChoice {
+        id: String,
+        path: String,
+    },
+    /// A hook was enabled and loaded into the engine.
     HookEnabled {
         id: String,
         path: String,

@@ -50,7 +50,7 @@ regex = "1.13.1"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # Pinned: MCP 2026-07-28 support is new (docs/plan/09-mcp.md#implementation).
-rmcp = { version = "=3.5.1", default-features = false, features = ["client", "transport-async-rw", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "=3.9.0", default-features = false, features = ["client", "transport-async-rw", "transport-streamable-http-client-reqwest"] }
 ratatui = "0.30"
 schemars = "1.2"
 serde = { version = "1.0.229", features = ["derive"] }

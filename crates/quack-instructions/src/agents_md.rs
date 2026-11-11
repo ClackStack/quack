@@ -246,16 +246,16 @@ mod tests {
         let root = tmp.path();
         write(&root.join("AGENTS.md"), "root rules");
         write(&root.join("CLAUDE.md"), "duplicate, ignored");
-        write(&root.join("app/CLAUDE.md"), "app rules");
-        write(&root.join("app/web/AGENTS.md"), "web rules");
-        write(&root.join("other/AGENTS.md"), "not on the chain");
-        let global = tmp.path().join("cfg/AGENTS.md");
+        write(&root.join("app").join("CLAUDE.md"), "app rules");
+        write(&root.join("app").join("web").join("AGENTS.md"), "web rules");
+        write(&root.join("other").join("AGENTS.md"), "not on the chain");
+        let global = tmp.path().join("cfg").join("AGENTS.md");
         write(&global, "global rules");
 
         let l = load(
             &[(global.clone(), global.parent().expect("dir").to_path_buf())],
             root,
-            &root.join("app/web"),
+            &root.join("app").join("web"),
             &rules(),
         );
         let order: Vec<usize> = ["global rules", "root rules", "app rules", "web rules"]
@@ -279,7 +279,7 @@ mod tests {
             &root.join("AGENTS.md"),
             "intro\n@docs/style.md\n@docs/style.md\n@../secret.txt\nmail @someone about it",
         );
-        write(&root.join("docs/style.md"), "use tabs\n@nested.md");
+        write(&root.join("docs").join("style.md"), "use tabs\n@nested.md");
         write(&tmp.path().join("secret.txt"), "SECRET");
         let l = load(&[], &root, &root, &rules());
         assert!(
@@ -301,7 +301,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         write(&root.join("AGENTS.md"), &"x".repeat(100));
-        write(&root.join("a/AGENTS.md"), "more");
+        write(&root.join("a").join("AGENTS.md"), "more");
         let r = Rules {
             max_bytes: 60,
             ..rules()
@@ -318,20 +318,28 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         write(&root.join("AGENTS.md"), "root");
-        write(&root.join("pkg/AGENTS.md"), "pkg rules");
-        write(&root.join("pkg/deep/AGENTS.md"), "deep rules");
-        write(&root.join("pkg/deep/x.rs"), "");
+        write(&root.join("pkg").join("AGENTS.md"), "pkg rules");
+        write(
+            &root.join("pkg").join("deep").join("AGENTS.md"),
+            "deep rules",
+        );
+        write(&root.join("pkg").join("deep").join("x.rs"), "");
         let n = Nested::new(root, rules(), [root.to_path_buf()]);
-        let first = n.attach(&root.join("pkg/deep/x.rs")).expect("attached");
+        let first = n
+            .attach(&root.join("pkg").join("deep").join("x.rs"))
+            .expect("attached");
         assert!(first.contains("pkg rules") && first.contains("deep rules"));
         assert!(first.starts_with("[instructions for pkg/deep/"));
-        assert_eq!(n.attach(&root.join("pkg/deep/x.rs")), None);
+        assert_eq!(n.attach(&root.join("pkg").join("deep").join("x.rs")), None);
         assert_eq!(n.attach(&root.join("x.rs")), None);
 
         // After a resume, files already in the conversation are not attached again.
         let again = Nested::new(root, rules(), [root.to_path_buf()]);
         again.mark_shown(&first);
-        assert_eq!(again.attach(&root.join("pkg/deep/x.rs")), None);
+        assert_eq!(
+            again.attach(&root.join("pkg").join("deep").join("x.rs")),
+            None
+        );
     }
 
     #[test]

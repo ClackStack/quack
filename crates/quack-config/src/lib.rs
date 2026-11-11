@@ -35,7 +35,7 @@ pub use bundle::{Bundle, BundleFile};
 pub use catalog::{Catalog, Catalogs};
 pub use diagnostic::FileDiagnostic;
 pub use edit::{SettingRow, set_in_file, write_atomic};
-pub use enable::HookEnabled;
+pub use enable::{HookEnableOutcome, HookEnabled};
 pub use hooks::HookFile;
 pub use items::{Item, ItemState, glob_match, is_loopback, load_dir_items, load_items, url_host};
 pub use load::{

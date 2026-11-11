@@ -5,17 +5,23 @@
 //! copied into the user layer's `hooks.d/`, its payload folder with it, so an upgrade
 //! replaces the shipped copy freely. A hook disabled in its own file in the user or
 //! project layer is enabled in place. A bare `enabled = false` override (a file that
-//! only switches the hook off) is removed when it is the user's own; anywhere else it
-//! names the file to delete.
+//! only switches the hook off) is removed in the user or trusted project layer.
 
 use std::path::{Path, PathBuf};
 
 use crate::diagnostic::read_text;
 use crate::edit::{remove_from_list, write_atomic};
-use crate::items::Item;
-use crate::load::Loaded;
+use crate::items::{Item, load_items_except};
+use crate::load::{LayerStatus, Loaded, Origin, ProjectStatus};
 use crate::paths::LayerKind;
-use crate::{HookFile, ItemState, load_hooks};
+use crate::{HookFile, ItemState, TrustDecision, load_hooks};
+
+/// A completed enable or a payload decision required before writing any files.
+#[derive(Debug)]
+pub enum HookEnableOutcome {
+    Enabled(HookEnabled),
+    ChoosePayload(PathBuf),
+}
 
 /// What enabling a hook changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,49 +42,184 @@ impl Loaded {
     /// effect from the next load. Refuses what it cannot or should not do, with a
     /// message that says what to do instead.
     pub fn enable_hook(&self, id: &str) -> Result<HookEnabled, String> {
-        let Some(item) = load_hooks(self).into_iter().find(|h| h.id == id) else {
-            return Err(format!(
-                "no hook `{id}` is configured; add it to hooks.d first"
-            ));
-        };
-        if item.layer == LayerKind::System {
-            return Err(format!(
-                "hook `{id}` is enforced by the system layer and cannot be changed"
-            ));
+        match self.enable_hook_with_payload(id, None)? {
+            HookEnableOutcome::Enabled(outcome) => Ok(outcome),
+            HookEnableOutcome::ChoosePayload(path) => Err(format!(
+                "choose whether to keep or replace {}",
+                path.display()
+            )),
         }
-        if let ItemState::Failed(d) = &item.state {
-            return Err(format!(
-                "hook `{id}` does not load: {}; fix its file first",
-                d.one_line()
-            ));
+    }
+
+    /// Enable the hook, asking before replacing an existing payload.
+    pub fn enable_hook_with_payload(
+        &self,
+        id: &str,
+        replace_payload: Option<bool>,
+    ) -> Result<HookEnableOutcome, String> {
+        const KEY: &str = "hooks.disabled";
+        let mut item = load_hooks(self)
+            .into_iter()
+            .find(|h| h.id == id)
+            .ok_or_else(|| format!("no hook `{id}` is configured; add it to hooks.d first"))?;
+        let mut overrides = Vec::new();
+        let off = loop {
+            if item.layer == LayerKind::System {
+                return Err(format!(
+                    "hook `{id}` is enforced by the system layer and cannot be changed"
+                ));
+            }
+            if let ItemState::Failed(d) = &item.state {
+                return Err(format!(
+                    "hook `{id}` does not load: {}; fix its file first",
+                    d.one_line()
+                ));
+            }
+            let off = file_off(&item.path)?;
+            if !matches!(off, FileOff::Bare) {
+                break off;
+            }
+            if !matches!(item.layer, LayerKind::User | LayerKind::Project) {
+                return Err(format!(
+                    "hook `{id}` is switched off by {}; edit that file to enable it",
+                    item.path.display()
+                ));
+            }
+            overrides.push(item.path);
+            item = load_items_except::<HookFile>(&self.item_layers(), "hooks.d", &overrides)
+                .into_iter()
+                .find(|h| h.id == id)
+                .ok_or_else(|| {
+                    format!("no hook definition remains after removing the overrides for `{id}`")
+                })?;
+        };
+
+        if matches!(off, FileOff::Flag)
+            && item.layer == LayerKind::Defaults
+            && let Some((from, to)) = self.payload_dirs(&item)
+            && from.is_dir()
+            && to.symlink_metadata().is_ok()
+            && replace_payload.is_none()
+        {
+            return Ok(HookEnableOutcome::ChoosePayload(to));
         }
-        let file = match file_off(&item.path)? {
-            FileOff::On => None,
-            FileOff::Flag => Some(self.enable_flag(&item)?),
-            FileOff::Bare => Some(self.remove_override(&item)?),
+
+        if self.settings.hooks.disabled.iter().any(|d| d == id) {
+            if self.settings.policy.locks(KEY) {
+                return Err(format!("`{KEY}` is locked by the system policy"));
+            }
+            if matches!(self.origin_of(KEY), Origin::Cli | Origin::Env(_)) {
+                return Err(format!(
+                    "hook `{id}` is disabled by {}; change that override first",
+                    self.origin_of(KEY)
+                ));
+            }
+        }
+
+        let file = match off {
+            FileOff::Flag => Some(self.enable_flag(&item, &overrides, replace_payload)?),
+            _ => None,
         };
-        let unlisted = match self.layer_file(LayerKind::User) {
-            Some(config) => remove_from_list(&config, "hooks.disabled", id)?,
-            None => false,
-        };
-        match file {
-            Some(outcome) => Ok(HookEnabled {
+        for path in &overrides {
+            if file.as_ref().is_none_or(|f| f.path != *path) {
+                std::fs::remove_file(path)
+                    .map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+            }
+        }
+        let mut unlisted = false;
+        let mut project_changed = item.layer == LayerKind::Project && file.is_some()
+            || overrides.iter().any(|p| p.starts_with(&self.dirs.project));
+        if !self.settings.policy.locks(KEY) {
+            for layer in &self.layers {
+                if matches!(layer.kind, LayerKind::User | LayerKind::Project)
+                    && layer.status == LayerStatus::Loaded
+                    && let Some(dir) = &layer.dir
+                    && remove_from_list(&dir.join("config.toml"), KEY, id)?
+                {
+                    unlisted = true;
+                    project_changed |= layer.kind == LayerKind::Project;
+                }
+            }
+        }
+        if project_changed {
+            self.refresh_hook_project_trust()?;
+        }
+
+        // Mask an inherited entry in the user layer. If the project appends other
+        // entries, leave those in the project so subsequent changes still take effect.
+        let fresh = self.reload().map_err(|e| e.to_string())?;
+        if fresh.settings.hooks.disabled.iter().any(|d| d == id) {
+            let mut inherited = fresh.settings.hooks.disabled.as_slice();
+            if let Origin::File {
+                layer: LayerKind::Project,
+                path,
+            } = fresh.origin_of(KEY)
+            {
+                let text =
+                    read_text(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                let table: toml::Table = toml::from_str(&text).map_err(|e| e.to_string())?;
+                let appended = table
+                    .get("hooks")
+                    .and_then(toml::Value::as_table)
+                    .and_then(|hooks| hooks.get("disabled"))
+                    .and_then(toml::Value::as_table)
+                    .and_then(|disabled| disabled.get("append"))
+                    .and_then(toml::Value::as_array)
+                    .ok_or_else(|| {
+                        format!("hook `{id}` is still disabled in {}", path.display())
+                    })?;
+                inherited = &inherited[..inherited.len().saturating_sub(appended.len())];
+            }
+            let remaining = toml::Value::Array(
+                inherited
+                    .iter()
+                    .filter(|d| *d != id)
+                    .cloned()
+                    .map(toml::Value::String)
+                    .collect(),
+            );
+            fresh.save_setting(LayerKind::User, KEY, &remaining.to_string())?;
+            unlisted = true;
+        }
+        let file = file.or_else(|| {
+            overrides.first().map(|path| HookEnabled {
+                path: path.clone(),
+                copied_from: None,
+                unlisted: false,
+            })
+        });
+        Ok(HookEnableOutcome::Enabled(match file {
+            Some(outcome) => HookEnabled {
                 unlisted,
                 ..outcome
-            }),
-            None if unlisted => Ok(HookEnabled {
+            },
+            None if unlisted => HookEnabled {
                 path: item.path.clone(),
                 copied_from: None,
                 unlisted,
-            }),
-            None => Err(format!("hook `{id}` is already enabled")),
-        }
+            },
+            None => return Err(format!("hook `{id}` is already enabled")),
+        }))
+    }
+
+    fn refresh_hook_project_trust(&self) -> Result<(), String> {
+        let decision = match self.project {
+            ProjectStatus::Trusted => TrustDecision::Trusted,
+            ProjectStatus::SettingsOnly => TrustDecision::SettingsOnly,
+            _ => return Err("project config is no longer trusted".into()),
+        };
+        self.trust_project(decision).map(|_| ())
     }
 
     /// A full hook file with `enabled = false`: copy a defaults hook into the user
     /// layer without the flag, or set `enabled = true` in the user's or project's own
     /// file.
-    fn enable_flag(&self, item: &Item<HookFile>) -> Result<HookEnabled, String> {
+    fn enable_flag(
+        &self,
+        item: &Item<HookFile>,
+        overrides: &[PathBuf],
+        replace_payload: Option<bool>,
+    ) -> Result<HookEnabled, String> {
         let text = read_text(&item.path)
             .map_err(|e| format!("cannot read {}: {e}", item.path.display()))?;
         let mut doc: toml_edit::DocumentMut = text
@@ -108,27 +249,19 @@ impl Loaded {
                     .file_name()
                     .ok_or_else(|| format!("{} has no file name", item.path.display()))?;
                 let dest = user.join(name);
-                if dest.exists() {
+                if dest.exists() && !overrides.contains(&dest) {
                     return Err(format!(
                         "{} already exists; set `enabled = true` in it",
                         dest.display()
                     ));
                 }
-                // The payload folder named after the file (`jira.toml` → `jira/`) goes
-                // first, so the copied file marks a completed enable.
-                if let Some(stem) = dest.file_stem()
-                    && let Some(from) = item.path.parent().map(|p| p.join(stem))
+                if let Some((from, to)) = self.payload_dirs(item)
                     && from.is_dir()
                 {
-                    let to = user.join(stem);
-                    if to.exists() {
-                        std::fs::remove_dir_all(&to)
-                            .map_err(|e| format!("cannot replace {}: {e}", to.display()))?;
-                    }
-                    copy_tree(&from, &to)
-                        .map_err(|e| format!("cannot copy {}: {e}", from.display()))?;
+                    install_payload(&from, &to, replace_payload, || write_atomic(&dest, &out))?;
+                } else {
+                    write_atomic(&dest, &out)?;
                 }
-                write_atomic(&dest, &out)?;
                 Ok(HookEnabled {
                     path: dest,
                     copied_from: Some(item.path.clone()),
@@ -146,25 +279,61 @@ impl Loaded {
         }
     }
 
-    /// A file that only switches the hook off: removing it is the enable. Only the
-    /// user's own override is removed; anywhere else the user is told where it is.
-    fn remove_override(&self, item: &Item<HookFile>) -> Result<HookEnabled, String> {
-        if item.layer == LayerKind::User {
-            std::fs::remove_file(&item.path)
-                .map_err(|e| format!("cannot remove {}: {e}", item.path.display()))?;
-            return Ok(HookEnabled {
-                path: item.path.clone(),
-                copied_from: None,
-                unlisted: false,
-            });
-        }
-        Err(format!(
-            "hook `{}` is switched off by {}, which quack does not edit; \
-             delete that file to enable it",
-            item.id,
-            item.path.display()
+    fn payload_dirs(&self, item: &Item<HookFile>) -> Option<(PathBuf, PathBuf)> {
+        let stem = item.path.file_stem()?;
+        Some((
+            item.path.parent()?.join(stem),
+            self.dirs.user_config.join("hooks.d").join(stem),
         ))
     }
+}
+
+/// Stage the defaults and keep the old payload available until the hook file is saved.
+fn install_payload(
+    from: &Path,
+    to: &Path,
+    replace: Option<bool>,
+    save: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let existing = match to.symlink_metadata() {
+        Ok(_) if replace == Some(false) => return save(),
+        Ok(_) if replace == Some(true) => true,
+        Ok(_) => {
+            return Err(format!(
+                "choose whether to keep or replace {}",
+                to.display()
+            ));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(format!("cannot inspect {}: {e}", to.display())),
+    };
+    let parent = to.parent().expect("payload is under hooks.d");
+    let error = |e| format!("cannot install {}: {e}", to.display());
+    std::fs::create_dir_all(parent).map_err(error)?;
+    let stage = tempfile::tempdir_in(parent).map_err(error)?;
+    let new = stage.path().join("new");
+    let old = stage.path().join("old");
+    copy_tree(from, &new).map_err(error)?;
+    if existing {
+        std::fs::rename(to, &old).map_err(error)?;
+    }
+    let result = std::fs::rename(&new, to).map_err(error).and_then(|()| {
+        save().inspect_err(|_| {
+            let _ = std::fs::rename(to, &new);
+        })
+    });
+    if result.is_err()
+        && existing
+        && let Err(e) = std::fs::rename(&old, to)
+    {
+        let recovery = stage.keep();
+        return Err(format!(
+            "cannot restore {}: {e}; previous payload is at {}",
+            to.display(),
+            recovery.join("old").display()
+        ));
+    }
+    result
 }
 
 /// The `enabled` flag of a hook's file, read fresh from disk: the item state can hide
@@ -216,13 +385,14 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 mod tests {
     use std::collections::HashMap;
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     use crate::LoadOptions;
     use crate::{ItemState, LayerKind, load_hooks, load_with};
 
     struct Fixture {
         _tmp: tempfile::TempDir,
-        root: std::path::PathBuf,
+        root: PathBuf,
         vars: HashMap<String, OsString>,
     }
 
@@ -251,8 +421,12 @@ mod tests {
             }
         }
 
+        fn path(&self, rel: &str) -> PathBuf {
+            rel.split('/').fold(self.root.clone(), |p, seg| p.join(seg))
+        }
+
         fn write(&self, rel: &str, text: &str) {
-            let path = self.root.join(rel);
+            let path = self.path(rel);
             std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
             std::fs::write(path, text).expect("write");
         }
@@ -278,24 +452,21 @@ mod tests {
         let loaded = f.load();
 
         let done = loaded.enable_hook("jira").expect("enable");
-        assert_eq!(
-            done.copied_from,
-            Some(f.root.join("defaults/hooks.d/jira.toml"))
-        );
+        assert_eq!(done.copied_from, Some(f.path("defaults/hooks.d/jira.toml")));
         assert!(!done.unlisted);
 
-        let copy = f.root.join("user/hooks.d/jira.toml");
+        let copy = f.path("user/hooks.d/jira.toml");
         let text = std::fs::read_to_string(&copy).expect("copy");
         assert!(text.starts_with("# shipped\n"), "comments kept: {text}");
         assert!(text.contains("enabled = true"), "{text}");
         assert!(!text.contains("enabled = false"), "{text}");
         assert_eq!(
-            std::fs::read_to_string(f.root.join("user/hooks.d/jira/run.py")).expect("payload"),
+            std::fs::read_to_string(f.path("user/hooks.d/jira/run.py")).expect("payload"),
             "print('hi')\n"
         );
         // The shipped files are untouched.
         assert!(
-            std::fs::read_to_string(f.root.join("defaults/hooks.d/jira.toml"))
+            std::fs::read_to_string(f.path("defaults/hooks.d/jira.toml"))
                 .expect("shipped")
                 .contains("enabled = false")
         );
@@ -306,6 +477,96 @@ mod tests {
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].layer, LayerKind::User);
         assert!(matches!(&hooks[0].state, ItemState::Loaded(_)));
+    }
+
+    #[test]
+    fn an_existing_payload_requires_a_choice() {
+        for replace in [false, true] {
+            let f = Fixture::new();
+            f.write(
+                "defaults/hooks.d/jira.toml",
+                &format!("enabled = false\n{HOOK}"),
+            );
+            f.write("defaults/hooks.d/jira/run.py", "bundled");
+            f.write("user/hooks.d/jira/run.py", "custom");
+            f.write("user/hooks.d/jira/extra", "custom extra");
+            // A bare override must survive until the choice is made.
+            f.write("user/hooks.d/jira.toml", "enabled = false\n");
+            let loaded = f.load();
+            let folder = f.path("user/hooks.d/jira");
+            assert!(matches!(
+                loaded.enable_hook_with_payload("jira", None).expect("choice"),
+                super::HookEnableOutcome::ChoosePayload(path) if path == folder
+            ));
+            assert_eq!(
+                std::fs::read_to_string(folder.with_extension("toml")).expect("override"),
+                "enabled = false\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(folder.join("run.py")).expect("custom"),
+                "custom"
+            );
+
+            assert!(matches!(
+                loaded
+                    .enable_hook_with_payload("jira", Some(replace))
+                    .expect("enable"),
+                super::HookEnableOutcome::Enabled(_)
+            ));
+            assert_eq!(
+                std::fs::read_to_string(folder.join("run.py")).expect("payload"),
+                if replace { "bundled" } else { "custom" }
+            );
+            assert_eq!(folder.join("extra").exists(), !replace);
+            assert!(load_hooks(&f.load())[0].loaded().is_some());
+        }
+    }
+
+    #[test]
+    fn enabling_clears_the_active_lists_and_preserves_other_entries() {
+        let f = Fixture::new();
+        f.write(
+            "defaults/hooks.d/jira.toml",
+            &format!("enabled = false\n{HOOK}"),
+        );
+        f.write(
+            "system/config.toml",
+            "[hooks]\ndisabled = [\"jira\", \"system-other\"]\n",
+        );
+        f.write(
+            "user/config.toml",
+            "[hooks]\ndisabled.append = [\"jira\", \"user-other\"]\n",
+        );
+        f.write(
+            "repo/.quack/config.toml",
+            "[hooks]\ndisabled.append = [\"jira\", \"project-other\"]\n",
+        );
+        f.load()
+            .trust_project(crate::TrustDecision::Trusted)
+            .expect("trust");
+        f.load().enable_hook("jira").expect("enable");
+
+        let loaded = f.load();
+        assert_eq!(loaded.project, crate::ProjectStatus::Trusted);
+        assert_eq!(
+            loaded.settings.hooks.disabled,
+            ["system-other", "user-other", "project-other"]
+        );
+        assert!(load_hooks(&loaded)[0].loaded().is_some());
+        let project = std::fs::read_to_string(f.path("repo/.quack/config.toml")).expect("project");
+        let project: toml::Table = toml::from_str(&project).expect("parse project");
+        assert_eq!(
+            project["hooks"]["disabled"]["append"]
+                .as_array()
+                .expect("append"),
+            &[toml::Value::String("project-other".into())],
+        );
+
+        f.write("user/config.toml", "[hooks]\ndisabled = [\"jira\"]\n");
+        assert!(matches!(
+            load_hooks(&f.load())[0].state,
+            ItemState::Disabled(_)
+        ));
     }
 
     #[test]
@@ -323,10 +584,10 @@ mod tests {
 
         let done = loaded.enable_hook("jira").expect("enable");
         assert!(done.unlisted);
-        let config = std::fs::read_to_string(f.root.join("user/config.toml")).expect("config");
+        let config = std::fs::read_to_string(f.path("user/config.toml")).expect("config");
         assert!(config.contains("disabled = [\"other\"] # mine"), "{config}");
         assert!(!config.contains("jira"), "{config}");
-        let copy = std::fs::read_to_string(f.root.join("user/hooks.d/jira.toml")).expect("copy");
+        let copy = std::fs::read_to_string(f.path("user/hooks.d/jira.toml")).expect("copy");
         assert!(!copy.contains("enabled = false"), "{copy}");
     }
 
@@ -340,7 +601,7 @@ mod tests {
         let loaded = f.load();
 
         let done = loaded.enable_hook("watch").expect("enable");
-        assert_eq!(done.path, f.root.join("user/hooks.d/watch.toml"));
+        assert_eq!(done.path, f.path("user/hooks.d/watch.toml"));
         assert_eq!(done.copied_from, None);
         let text = std::fs::read_to_string(&done.path).expect("file");
         assert!(text.contains("enabled = true # off for now"), "{text}");
@@ -362,7 +623,7 @@ mod tests {
         let err = loaded.enable_hook("jira").expect_err("refused");
         assert!(err.contains("already exists"), "{err}");
         assert_eq!(
-            std::fs::read_to_string(f.root.join("user/hooks.d/jira.toml")).expect("kept"),
+            std::fs::read_to_string(f.path("user/hooks.d/jira.toml")).expect("kept"),
             "id = \"local-jira\"\nevent = \"turn_end\"\ncommand = [\"x\"]\n"
         );
     }
@@ -375,7 +636,7 @@ mod tests {
         let loaded = f.load();
 
         let done = loaded.enable_hook("jira").expect("enable");
-        assert_eq!(done.path, f.root.join("user/hooks.d/jira.toml"));
+        assert_eq!(done.path, f.path("user/hooks.d/jira.toml"));
         assert!(!done.path.exists());
     }
 

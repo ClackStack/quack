@@ -174,13 +174,15 @@ Optional support for Claude and GPT, as data like every other provider ([02](02-
 - Hot reload of config directories
   - 2026-10-25: the config folders are watched (polling, no new crates) and a change gives a notice to `/reload` ([01](01-configuration.md#hot-reload)). Still open: reloading by itself, with only the changed MCP/LSP servers restarted
 - `/fork`, `/export`, auto titles; `/fork --worktree` parallel sessions
-  - Landed 2026-10-25: `/fork` (a copy of the log and undo points under a new id; `parent` and `at` in its `session_start`) and `/export [md|json] [path]` ([07](07-sessions-memory-checkpoints.md#commands)). Still open: titles from the `small` model, `/fork --worktree`
+  - Landed 2026-10-25: `/fork` (a copy of the log and undo points under a new id; `parent` and `at` in its `session_start`) and `/export [md|json] [path]` ([07](07-sessions-memory-checkpoints.md#commands)). Landed 2026-11-10: titles from the `small` model for the terminal window and resume picker. Still open: `/fork --worktree`
 - Bundles (`bundles/`, `/bundles`)
   - Landed 2026-10-25: `<layer>/bundles/<name>/` with `bundle.toml`, loaded as extra item folders below their layer, `[bundles] disabled`, `/bundles` ([08](08-instructions-skills-commands.md#bundles))
 - Sub-agents (`task` tool) with `/tasks` views (moved from M5)
   - Landed early (2026-10-19): `agents.d` (`explore` read-only on `[model] small`, `general`), `task` with a fresh context and its own todo list, read-only agents in parallel and allowed in plan mode, workers' approvals through the client, `todo` hand-off that ticks plan items, `Event::Plan`, `/tasks`, a `doctor` row ([04](04-agent-loop-and-tools.md#sub-agents)). Mock-server tests only; not yet measured with `quack eval`
 
 Landed early (2026-10-18): the project trust flow (Trust modal, `/trust`, `quack trust`, fingerprinted decisions; [01](01-configuration.md#as-implemented-2026-10-18)), and `/reload` keeping the conversation (folder watching is still to do; [01](01-configuration.md#hot-reload)). `/undo` and `/rewind` from edit pre-images ([07](07-sessions-memory-checkpoints.md#as-implemented-2026-10-18-ahead-of-m3)). Skills discovery, the `skill` tool, `{{ skills }}`, `/<skill>` and `/skills` ([08](08-instructions-skills-commands.md#as-implemented-2026-10-18-ahead-of-m3)). Still to do for skills: other harnesses' folders through the detection prompt. Hooks (2026-10-19): `hooks.d` with all seven events, `match` on tools, targets and prompts, secrets in `env`, enforced system-layer hooks, `on_error`, a `/doctor` row and the `jira` example ([11](11-security.md#as-implemented-2026-10-19-ahead-of-m3)). Enabling a shipped hook (2026-11-09): `/hooks` ⏎ copies a hook shipped `enabled = false` into the user layer with the flag flipped (payload folder with it, shipped copy untouched), fixes hooks disabled in their own file, and clears `[hooks] disabled`; before this the toggle only rewrote that list, so the shipped jira hook stayed off ([11](11-security.md#enabling-2026-11-09)).
+
+On 2026-11-10, `/hooks` gained a keep-or-replace prompt for existing payloads and verifies activation after reloading all active config layers.
 
 **Exit criteria**
 - [ ] GitHub MCP server works on Windows via `npx` (`.cmd` resolution) and on Linux/macOS

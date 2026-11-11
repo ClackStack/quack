@@ -56,7 +56,7 @@ async fn writes_stay_inside_and_network_is_blocked() {
     )
     .await;
     assert!(ok, "{out}");
-    assert!(ws.join("d/e/f").exists());
+    assert!(ws.join("d").join("e").join("f").exists());
 
     let script = format!("echo no > '{}'", outside.join("x.txt").display());
     let (ok, out) = sh(&policy, &script, &ws).await;
@@ -131,7 +131,7 @@ async fn cargo_builds_in_the_sandbox() {
     )
     .expect("write");
     std::fs::write(
-        ws.join("src/main.rs"),
+        ws.join("src").join("main.rs"),
         "fn main() { println!(\"built\"); }\n",
     )
     .expect("write");

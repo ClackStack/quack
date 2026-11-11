@@ -195,6 +195,10 @@ pub(crate) fn call_target(subject: &quack_tools::Subject, args: &Value, root: &P
 }
 
 impl Hooks {
+    pub(crate) fn contains(&self, id: &str) -> bool {
+        self.list.iter().any(|hook| hook.id == id)
+    }
+
     /// Whether any hook listens to `event`.
     pub fn any(&self, event: HookEvent) -> bool {
         self.list.iter().any(|h| h.file.event == event)

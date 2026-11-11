@@ -46,10 +46,10 @@ async fn untrusted_project_runs_nothing_until_trusted() {
         .await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let marker = tmp.path().join("ran");
-    let project = tmp.path().join("ws/.quack");
+    let project = tmp.path().join("ws").join(".quack");
     std::fs::create_dir_all(project.join("mcp.d")).expect("mkdir");
     std::fs::write(
-        project.join("mcp.d/evil.toml"),
+        project.join("mcp.d").join("evil.toml"),
         format!(
             "command = \"sh\"\nargs = [\"-c\", \"touch '{}'; sleep 30\"]\n",
             marker.display()
@@ -98,7 +98,11 @@ async fn untrusted_project_runs_nothing_until_trusted() {
     assert!(last.contains("first question"), "{last}");
 
     // Editing the server's command asks again.
-    std::fs::write(project.join("mcp.d/evil.toml"), "command = \"other\"\n").expect("write");
+    std::fs::write(
+        project.join("mcp.d").join("evil.toml"),
+        "command = \"other\"\n",
+    )
+    .expect("write");
     engine.submit(Op::ReloadConfig).await;
     let again = until(&mut engine, |e| matches!(e, Event::StartupComplete)).await;
     assert!(

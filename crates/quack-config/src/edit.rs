@@ -181,8 +181,8 @@ pub(crate) fn add_to_list_text(text: &str, key: &str, items: &[String]) -> Resul
 }
 
 /// Remove one entry from a list setting in a `config.toml`. Returns whether the file
-/// changed; a missing file, list or entry changes nothing. A list emptied this way has
-/// its key removed, so the lower layers' lists still apply.
+/// changed; a missing file, list or entry changes nothing. Empty replacement lists
+/// continue masking lower layers.
 pub fn remove_from_list(file: &Path, key: &str, item: &str) -> Result<bool, String> {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
@@ -230,9 +230,6 @@ pub(crate) fn remove_from_list_text(
     array.retain(|v| v.as_str() != Some(item));
     if array.len() == before {
         return Ok(None);
-    }
-    if array.is_empty() {
-        table.remove(leaf);
     }
     let out = doc.to_string();
     toml::from_str::<Settings>(&out).map_err(|e| e.message().to_owned())?;
