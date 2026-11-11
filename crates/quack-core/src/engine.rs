@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -86,6 +86,7 @@ enum Queued {
     Accept(String),
     /// `/fork`.
     Fork,
+    HookSave(Box<Op>),
 }
 
 /// The conversation once a model is ready.
@@ -176,6 +177,8 @@ pub struct Engine {
     asked: u64,
     /// The pending browser sign-in, aborted on cancel, replacement or shutdown.
     sign_in: Option<JoinHandle<()>>,
+    hook_tasks: JoinSet<()>,
+    hook_checks: BTreeMap<u64, CancellationToken>,
 }
 
 impl Engine {
@@ -229,6 +232,8 @@ impl Engine {
             asks,
             asked: 0,
             sign_in: None,
+            hook_tasks: JoinSet::new(),
+            hook_checks: BTreeMap::new(),
             mcp: crate::mcp::Mcp::new(McpManager::new(
                 Vec::new(),
                 PathBuf::new(),
@@ -306,6 +311,23 @@ impl Engine {
                             self.reloading = false;
                             self.emit(Event::StartupComplete);
                         }
+                        Reload::HookSaved { request, id, result } => {
+                            self.reloading = false;
+                            match result {
+                                Ok((config, note)) => {
+                                    self.config = Arc::new(*config);
+                                    self.config_tx.send_replace(self.config.clone());
+                                    self.load_hooks().await;
+                                    self.emit(Event::ConfigReloaded);
+                                    match crate::hook_setup::inspect(&self.config, &id) {
+                                        Ok(info) if info.enabled && !self.hooks.contains(&id) => self.emit(Event::HookSetupFailed { request, message: "The settings were saved, but the hook did not load. Check /hooks and /doctor before using it.".into() }),
+                                        Ok(info) => self.emit(Event::HookSetupSaved { request, info, note }),
+                                        Err(message) => self.emit(Event::HookSetupFailed { request, message }),
+                                    }
+                                }
+                                Err(message) => self.emit(Event::HookSetupFailed { request, message }),
+                            }
+                        }
                     }
                     self.next_queued(&done_tx, &reload_tx);
                 }
@@ -327,6 +349,9 @@ impl Engine {
                     }
                 }
                 Some(ask) = asks.recv() => self.on_server_ask(ask),
+                _ = self.hook_tasks.join_next(), if !self.hook_tasks.is_empty() => {
+                    self.hook_checks.retain(|_, cancel| !cancel.is_cancelled());
+                }
                 op = ops.recv() => {
                     let Some(op) = op else { break };
                     if !self.handle(op, &done_tx, &reload_tx).await {
@@ -338,6 +363,10 @@ impl Engine {
         if let Some((_, cancel)) = self.running.take() {
             cancel.cancel();
         }
+        for cancel in self.hook_checks.values() {
+            cancel.cancel();
+        }
+        self.hook_tasks.abort_all();
         if let Some(task) = self.sign_in.take() {
             task.abort();
             let _ = task.await;
@@ -1868,6 +1897,72 @@ impl Engine {
                     }),
                 }
             }
+            Op::InspectHookSetup { id, request } => {
+                let config = self.config.clone();
+                let tx = self.tx.clone();
+                self.hook_tasks.spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let fresh = config.reload().map_err(|_| {
+                            "Cannot reload the configuration; fix its errors first.".to_owned()
+                        })?;
+                        crate::hook_setup::inspect(&fresh, &id)
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("Cannot inspect the hook configuration.".into()));
+                    let event = match result {
+                        Ok(info) => Event::HookSetup { request, info },
+                        Err(message) => Event::HookSetupFailed { request, message },
+                    };
+                    let _ = tx.send(event);
+                });
+            }
+            op @ Op::SaveHookSetup { .. } => {
+                if let Op::SaveHookSetup { request, .. } = &op {
+                    self.emit(Event::HookSetupPending { request: *request });
+                }
+                self.queued.push_back(Queued::HookSave(Box::new(op)));
+                self.next_queued(done, reload);
+            }
+            Op::CheckHookSetup {
+                id,
+                request,
+                revision,
+                connection,
+                url,
+            } => {
+                let config = self.config.clone();
+                let tx = self.tx.clone();
+                let cancel = CancellationToken::new();
+                self.hook_checks.insert(request, cancel.clone());
+                self.hook_tasks.spawn(async move {
+                    let root = config.dirs.workspace_root.clone();
+                    let prepared = tokio::task::spawn_blocking(move || {
+                        crate::hook_setup::check_binding(&config, &id, &revision, &connection, &url)
+                            .map(|(file, dir)| (file, dir, url))
+                    })
+                    .await;
+                    let result = match prepared {
+                        Ok(Ok((file, dir, url))) => {
+                            crate::hooks::check(file, dir, root, url, cancel.clone()).await
+                        }
+                        Ok(Err(error)) => Err(error),
+                        Err(_) => Err("Cannot prepare the access check.".into()),
+                    };
+                    let (status, message) =
+                        result.unwrap_or_else(|message| ("invalid".into(), message));
+                    let _ = tx.send(Event::HookCheckResult {
+                        request,
+                        status,
+                        message,
+                    });
+                    cancel.cancel();
+                });
+            }
+            Op::CancelHookCheck { request } => {
+                if let Some(cancel) = self.hook_checks.remove(&request) {
+                    cancel.cancel();
+                }
+            }
             Op::Shutdown => return false,
         }
         true
@@ -1896,9 +1991,52 @@ impl Engine {
                 Some(Queued::Reload(hook)) => self.begin_reload(reload.clone(), hook),
                 Some(Queued::Accept(mode)) => self.accept_plan(&mode, done.clone()),
                 Some(Queued::Fork) => self.fork_session(),
+                Some(Queued::HookSave(op)) => self.begin_hook_save(*op, reload.clone()),
                 None => break,
             }
         }
+    }
+
+    fn begin_hook_save(&mut self, op: Op, reload: mpsc::Sender<Reload>) {
+        let Op::SaveHookSetup {
+            id,
+            request,
+            revision,
+            connections,
+            enable,
+            replace_payload,
+        } = op
+        else {
+            return;
+        };
+        self.reloading = true;
+        let config = self.config.clone();
+        self.hook_tasks.spawn(async move {
+            let name = id.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let note = crate::hook_setup::save(
+                    &config,
+                    &name,
+                    &revision,
+                    &connections,
+                    enable,
+                    replace_payload,
+                )?;
+                let fresh = config.reload().map_err(|_| {
+                    "The hook was saved but could not be reloaded; run /reload.".to_owned()
+                })?;
+                Ok((Box::new(fresh), note))
+            })
+            .await
+            .unwrap_or_else(|_| Err("Cannot save the hook configuration.".into()));
+            let _ = reload
+                .send(Reload::HookSaved {
+                    request,
+                    id,
+                    result,
+                })
+                .await;
+        });
     }
 
     /// Read the config files again off the async threads.
@@ -2382,6 +2520,11 @@ fn fresh_provider(config: &Loaded, id: &str) -> Result<Provider, String> {
 enum Reload {
     Read(Result<Box<Loaded>, String>, Option<(String, String)>),
     Ready(Box<StartupOutcome>),
+    HookSaved {
+        request: u64,
+        id: String,
+        result: Result<(Box<Loaded>, Option<String>), String>,
+    },
 }
 
 /// Load an image the user attached to a turn. Relative paths resolve against the
@@ -2543,6 +2686,10 @@ fn op_name(op: &Op) -> &'static str {
         Op::ReloadConfig => "reload_config",
         Op::TrustProject { .. } => "trust_project",
         Op::EnableHook { .. } => "enable_hook",
+        Op::InspectHookSetup { .. } => "inspect_hook_setup",
+        Op::SaveHookSetup { .. } => "save_hook_setup",
+        Op::CheckHookSetup { .. } => "check_hook_setup",
+        Op::CancelHookCheck { .. } => "cancel_hook_check",
         Op::Shutdown => "shutdown",
     }
 }

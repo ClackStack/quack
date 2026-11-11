@@ -289,7 +289,7 @@ impl Loaded {
 }
 
 /// Stage the defaults and keep the old payload available until the hook file is saved.
-fn install_payload(
+pub(crate) fn install_payload(
     from: &Path,
     to: &Path,
     replace: Option<bool>,

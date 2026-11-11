@@ -202,7 +202,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         "Memory notes: read them, delete with ^s",
         None,
     ),
-    c("hooks", &[], "", "Hooks and their recent runs", None),
+    c(
+        "hooks",
+        &[],
+        "[configure|test|toggle <id>]",
+        "Configure hook connections and credentials",
+        None,
+    ),
     c(
         "instructions",
         &[],
@@ -308,6 +314,13 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Ctrl-P", "Command palette (/help)"),
     ("Shift-Tab", "Cycle mode: ask → auto-edit → plan"),
     ("Tab (in modal)", "Switch tab"),
+    ("Tab / Shift-Tab (hook setup)", "Move between fields"),
+    ("Ctrl-S / Ctrl-E (hook setup)", "Save / Save and enable"),
+    ("Ctrl-T (hook setup)", "Check access using unsaved settings"),
+    (
+        "Ctrl-R / Ctrl-X (hook secret)",
+        "Remove credential / choose external source",
+    ),
     (
         "Ctrl-S (in modal)",
         "Secondary action, e.g. save as default in /models",

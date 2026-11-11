@@ -2052,6 +2052,7 @@ dependencies = [
 name = "quack-protocol"
 version = "0.1.0"
 dependencies = [
+ "schemars",
  "serde",
  "serde_json",
 ]
@@ -2159,6 +2160,7 @@ dependencies = [
  "quack-protocol",
  "ratatui",
  "tokio",
+ "toml",
  "tracing",
  "unicode-width 0.2.3",
 ]

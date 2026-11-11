@@ -2282,7 +2282,7 @@ pub(crate) fn hooks(
                     runs.iter().filter(|r| r.id == h.id).collect();
                 let last = hook_runs.last().copied();
                 let mut detail = Vec::new();
-                let (hint, can_toggle, enabled) = match &h.state {
+                let (hint, can_toggle, _enabled) = match &h.state {
                     ItemState::Loaded(f) if f.enabled => {
                         detail.push(Line::styled(h.id.clone(), theme.ok));
                         detail.push(Line::raw(""));
@@ -2329,23 +2329,14 @@ pub(crate) fn hooks(
                         ("failed".into(), false, false)
                     }
                 };
-                let action = if !can_toggle {
-                    String::new()
-                } else if enabled {
-                    "⏎ turn it off (saved to [hooks] disabled in your config.toml)".into()
-                } else {
-                    match &h.state {
-                        ItemState::Disabled(why) if why.starts_with("disabled by ") => {
-                            "⏎ enable it (removes that override)".into()
-                        }
-                        ItemState::Disabled(why) if why == "listed in `disabled`" => {
-                            "⏎ enable it and clear its disabled setting".into()
-                        }
-                        _ if h.layer == LayerKind::Defaults => {
-                            "⏎ enable it (copied into your config folder)".into()
-                        }
-                        _ => "⏎ enable it (sets `enabled = true` in its file)".into(),
+                let action = if can_toggle {
+                    if matches!(&h.state, ItemState::Loaded(f) if f.setup.is_none()) {
+                        "Enter or Ctrl-S enables or disables this hook.".to_owned()
+                    } else {
+                        "Enter configures the hook; Ctrl-S enables or disables it.".to_owned()
                     }
+                } else {
+                    String::new()
                 };
                 detail.push(field(theme, "layer", h.layer.label().into()));
                 detail.push(field(theme, "file", h.path.display().to_string()));
@@ -2376,9 +2367,19 @@ pub(crate) fn hooks(
                     label: h.id.clone(),
                     hint,
                     detail,
-                    action: can_toggle.then(|| format!("/hooks toggle {}", h.id)),
+                    action: can_toggle.then(|| {
+                        format!(
+                            "/hooks {} {}",
+                            if matches!(&h.state, ItemState::Loaded(f) if f.setup.is_none()) {
+                                "toggle"
+                            } else {
+                                "configure"
+                            },
+                            h.id
+                        )
+                    }),
                     run: can_toggle,
-                    alt: None,
+                    alt: can_toggle.then(|| format!("/hooks toggle {}", h.id)),
                     charts: Vec::new(),
                 }
             })
@@ -2391,6 +2392,7 @@ pub(crate) fn hooks(
             items,
         }],
     )
+    .with_alt("enable/disable")
 }
 
 pub(crate) fn skills(skills: &[quack_protocol::SkillInfo], theme: &Theme) -> Modal {

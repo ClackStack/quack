@@ -199,7 +199,7 @@ Also on 2026-11-10, the disabled `forge-review` hook adds REST metadata and unif
 
 Review diffs are retained in full, with a size warning above 9,000 bytes. The hook's `full_context = true` setting preserves stdout and context beyond the default capture and token limits, warning above 8,000 estimated tokens. A mock regression verifies that a diff larger than 1 MiB reaches the model with its final lines intact.
 
-Planned on 2026-11-10, [TUI hook setup](16-hook-setup.md) adds service configuration, masked credential entry, multiple self-hosted connections, immediate activation and explicit access checks through `/hooks`, preserving existing commands and file-based configuration. Private GitHub PR setup and Jira setup are acceptance criteria.
+Implemented on 2026-11-10, [TUI hook setup](16-hook-setup.md) adds bundle-defined forms, masked credential entry, OS credential storage/private-file fallback, multiple self-hosted connections, credential rotation and explicit draft access checks through `/hooks`. Save preserves a disabled hook; Save and enable activates it after the running turn without restarting MCP/LSP or making remote requests. Existing commands remain. Handlers stay Python; the engine, setup and all regression tests are Rust. This is the initial configuration format; no migration framework is needed before launch.
 
 **Exit criteria**
 - [ ] GitHub MCP server works on Windows via `npx` (`.cmd` resolution) and on Linux/macOS

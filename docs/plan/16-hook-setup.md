@@ -1,228 +1,174 @@
 # 16 — Hook setup in the TUI
 
-Status is planned, as of 2026-11-10.
+Implemented 2026-11-10. This is the initial pre-launch format. There is no legacy
+installation migration framework. Existing commands and custom script hooks remain.
 
-## Outcome
+## Outcome and user flow
 
-A developer can enable a shipped hook, configure its service, enter credentials,
-check a private review URL and start using it in the same TUI session. Setup also
-covers Jira and multiple self-hosted GitLab, Gitea/Forgejo and Bitbucket instances.
-The existing CLI, slash commands, environment variables, keyring commands and
-handwritten hook files continue to work.
+A developer configures private reviews and Jira issues entirely inside `/hooks`.
+The engine and client are Rust. Link handlers remain removable Python files in the
+defaults bundle; all committed regression tests are Rust.
 
-The surface follows the existing ratatui pickers and masked prompts. It supports
-keyboard operation, light/dark themes, ASCII mode and narrow terminals. The primary
-flow is configuration, followed by one Save and enable action.
+1. Open `/hooks`, select the hook and press Enter to configure it.
+2. Edit an existing connection, or add one from the bundle's service presets.
+3. Enter the server base URL, including an installation prefix when needed. Public
+   service addresses are prefilled. API bases derived from the web address remain
+   visible under advanced settings and can be overridden.
+4. Choose public, token or Basic authentication as offered by the preset. Paste a
+   token into a masked field; Basic authentication also needs an account email.
+   Contextual help supplies token instructions and access requirements.
+5. Ctrl-S saves while preserving the hook's enabled state. Ctrl-E saves and enables.
+   Credentials use the OS credential store, with private-file fallback when needed;
+   the result identifies the storage used.
+6. Paste a review/issue URL into the normal composer. The next turn uses the saved
+   connection, without a separate reload or restarting MCP/LSP services.
 
-## User flows
+There are presets for GitHub, GitHub Enterprise, GitLab, Gitea, Forgejo, Bitbucket
+Cloud/Data Center and Jira Cloud/Server/Data Center. Multiple instances of a service
+can coexist, including distinct installations on one host. Server bases are explicit;
+a pasted review URL is used for access checks rather than guessing ambiguous GitLab
+subgroup/installation prefixes.
 
-### Private GitHub review
+A connection has a stable ID. It can be edited, disabled, removed, or have its
+credential replaced or removed. Removing it does not enable a legacy argument entry.
+An explicit `connections = []` means no connections. The most specific matching web
+prefix wins; a disabled specific connection suppresses a broader match. Duplicate
+enabled web bases are rejected.
 
-1. Open `/hooks`, select the code-review hook and choose Configure.
-2. Select GitHub. Its public web and API addresses are prefilled from the bundle.
-3. Choose authentication. Public access and Personal access token are available.
-4. Paste the token into a masked field. Show a link or copyable address for the
-   service's token instructions, including repository access requirements.
-5. Choose Save and enable. Store the credential, write its reference, enable the
-   hook and refresh the running engine. Return to the hook details with the saved
-   connection and its status visible.
-6. Paste a private PR URL in the normal composer. The next turn uses the saved key.
+## Forms and commands
 
-An existing connection opens directly to its editable fields. Adding another
-connection always has an explicit Add connection action.
+Forms use the existing terminal styles, themes, borders and ASCII glyph choices.
+They show one selected field with its help, so the same flow works at 80x24 and
+60x20. Tab/Shift-Tab changes fields, Enter edits, and left/right cycles choices.
+V includes advanced fields. ? opens scrollable help, including token documentation
+and the configuration source. Escape backs out; leaving a dirty draft offers keep,
+discard, or reload. Tokens never enter composer history.
 
-### Self-hosted forge
+Ctrl-T opens a sample URL prompt using unsaved settings. A check does not persist
+credentials, enable hooks, call a model, or add conversation context. A review check
+requires readable metadata and diff; metadata alone reports partial access. Statuses
+also distinguish authentication failure, missing/inaccessible resources, rate limits,
+connection failures and invalid settings. A 404 does not claim a token is invalid.
+Remote verification is optional; local validation is required for saving.
 
-1. Choose Add connection, then the forge type and server address. Optionally paste
-   a review URL to populate the address and show which instance it belongs to.
-2. Preserve installation prefixes. Derive a proposed API base using bundle data,
-   show it, and allow an override under advanced fields.
-3. Enter a display name and credentials. Authentication choices follow the selected
-   forge, including Bitbucket Cloud's email and API token combination.
-4. Save and enable. The connection appears alongside the others, with its host and
-   credential status. Add, edit, disable, remove and rotate credentials from here.
-
-Support multiple instances of one forge and distinct installations on one host.
-Each connection has a stable identifier and separate credential references.
-
-### Jira and other hooks
-
-Jira gets the same flow for server address, token and optional account email,
-plus its existing size/comment options under advanced fields. A hook author can
-supply setup fields as data to obtain this interface. Existing custom hooks can
-still be listed, enabled and disabled when they have no setup descriptor.
-
-### Check access and recover
-
-Each connection offers Check access. A sample review or issue URL checks access to
-that resource using the configured REST endpoints and authentication. A general
-identity check, where the service supports it, reports only what it establishes.
-The test never calls a model or adds its response to conversation context.
-
-Show separate states for Saved, Checking, Verified for this URL, Authentication
-failed, Resource unavailable, Rate limited, and Cannot reach server. A 404 may mean
-missing access. Include the next useful action and retain the entered nonsecret
-fields after a failure. Distinguish a local configuration check from a successful
-remote request. Show when a previous verification is stale after an edit.
-
-Saving requires local validation. Remote verification is an explicit action and
-its failure can be retried or dismissed while keeping the saved configuration.
-Cancel and Escape return to the previous screen. Escape from a dirty form offers
-Keep editing or Discard changes. Secrets are cleared when the draft is discarded.
-
-## Commands and navigation
+Checks run as background engine tasks. Escape/Ctrl-C cancels a pending check and its
+child process tree. External credential commands use the cancellable runner too.
+Keyring resolution stays off the async runtime and is covered by the check deadline.
+An edit invalidates prior verification. Closing a form or cancelling a check prevents
+late results from updating a different draft. Verification is session-local; after a
+restart the UI reports configured settings with access not yet checked.
 
 | Entry | Behavior |
 |---|---|
-| `/hooks` | Existing list, with configuration and connection status in its details |
-| Enter on a shipped hook requiring setup | Opens setup on first use |
-| Configure action | Opens saved settings and connections |
-| Enable/disable action | Explicit action available alongside Configure |
-| `/hooks toggle <id>` | Existing direct toggle behavior |
-| `/hooks configure <id>` | Direct entry to the same setup form |
-| `/hooks test <id>` | Opens connection/resource selection for Check access |
-| `quack keyring set <id>` | Existing credential storage command |
-| `/reload` | Existing reload action, also useful after external edits |
+| `/hooks` | Hook list, connection setup and recent runs |
+| Enter on a configurable hook | Open setup |
+| Ctrl-S in the hook list | Existing enable/disable action |
+| `/hooks configure <id>` | Direct setup entry |
+| `/hooks test <id>` | Select a connection/resource for Check access |
+| `/hooks toggle <id>` | Existing direct toggle |
+| `quack keyring set <id>` | Existing credential command |
+| `/reload` | Existing full reload after external changes |
 
-Use the existing modal action and alternate-action mechanisms where they fit.
-Display the available keys in the modal footer and `/help`. Tab and Shift-Tab move
-between fields, Enter accepts the current step, and validation returns focus to
-the affected field. Pasted tokens stay masked and never enter input history.
-Long hostnames, errors and paths wrap. At narrow sizes, show the selected field
-and its help in a single-column flow with a visible Back action.
+Inside a form Ctrl-S saves, Ctrl-E saves and enables, Ctrl-T checks, A adds, Ctrl-D
+toggles the selected connection, and Delete removes it from the draft. Secret fields
+offer Keep (empty input), Replace (masked input), Remove (Ctrl-R), and an external
+source (Ctrl-X: env, file, keyring or command). R reloads saved values after offering
+to discard edits; Shift-R reloads and reapplies the draft for review. Keys are shown
+in the form footer or contextual help and the command catalogue.
 
-## Data and backwards compatibility
+## Data contract
 
-Add optional, versioned setup metadata to hook definitions. Keep labels, service
-presets, web/API base templates, authentication choices, help links and validation
-hints in the defaults bundle. The Rust UI renders a small set of field types
-including text, URL, choice, integer, boolean, secret and repeatable connections.
-The metadata must describe every initially supported forge and Jira.
+`HookFile.setup` holds optional declarative metadata. It is parsed separately from
+the executable definition: an invalid or unsupported descriptor does not prevent
+normal hook execution. Version 1 describes fields, service presets and a web-scope
+field. Field types are text, URL, integer, boolean, choice and secret, with required
+conditions, help, advanced grouping and credential-destination markers. Presets carry
+service labels, initial values, allowed choices, derived fields and help links.
+Service addresses and Python commands remain TOML data, never compiled constants.
 
-Store user-selected values as optional structured hook settings, alongside existing
-fields in the user hook file. Keep secrets represented by the existing `Secret`
-references and binding them through the hook's existing environment mechanism.
-Connection identifiers determine stable, collision-free credential bindings.
-The script receives nonsecret settings and credential variable names in its stdin
-JSON event. Credential values are resolved by the engine and passed in the child
-environment, as they are today.
+`HookFile.connections` optionally stores `HookBinding` entries: a plain connection
+(ID, preset, enabled flag, values) and a map of `Secret` credential references.
+The script receives nonsecret connection values and generated credential variable
+names on stdin. Resolved values travel only in its child environment. An unavailable
+connection credential is reported without its value; other connections still run.
+Required legacy `[env]` bindings retain their existing failure behavior. A runtime
+preparation containing unavailable credentials is retried on the next use.
 
-Treat connection credential availability separately. An unavailable credential on
-one instance must produce a connection-specific error while other configured
-instances keep working. Setup metadata identifies optional connection bindings.
-The engine reports a redacted unavailable-binding status to the script, which
-reports it when a matching link is used. Preserve fail-on-resolution-error behavior
-for existing required hook environment bindings.
+The forge handler still accepts handwritten `--host` entries when no structured
+connection list is supplied; Jira still accepts handwritten environment settings.
+An explicit list is authoritative, even when empty. No automatic import or migration
+of older user installations is required before launch. Existing custom hooks without
+descriptors remain executable and can be toggled using existing commands.
 
-Update the forge script to consume structured connections while retaining its
-existing `--host` arguments. Preserve the Jira environment settings. Define
-precedence explicitly so a configured connection is fetched once. The setup loader
-imports recognizable existing `--host` and `[env]` entries into a draft, preserving
-credential sources and options. Saving preserves unknown fields and custom command
-arguments. If an existing command cannot be mapped safely, show its source and the
-specific incompatible fields and keep the direct configuration route available.
+For checks the command receives `event = "check"`, a single connection, `url` and
+`matches`. It returns a structured `status` and redacted `message`, without context.
+The same parsing/authentication/REST routines serve checks and normal link handling.
+The hook JSON schema documents the descriptor and connection shapes.
 
-Setup descriptors are declarative. Opening a form reads configuration and metadata.
-Secret resolution, scripts and remote checks run when their actions need them.
-Invalid or newer descriptors produce an actionable configuration status while the
-hook's existing runtime definition remains usable. New fields remain optional,
-with existing files retaining their runtime behavior. Regenerate the hook schema.
+## Engine, storage and activation
 
-## Engine and storage
+Inspection, save, check and cancellation use typed Ops/Events and request IDs.
+The client owns drafts; filesystem writes, subprocesses and credential access belong
+to the engine. Inspection reads metadata and credential source information without
+resolving a token, running a script or making a remote request. Stored tokens never
+come back to the UI. `SecretText` protects user-entered credential values in Debug.
+Prepared hook commands also redact their environment in Debug output.
 
-All TUI operations go through typed Ops and Events. Extend the protocol with setup
-inspection, save and explicit test operations, carrying request identifiers so a
-late response cannot replace a different form or connection. Add each new Op to
-`op_name`. Secret input uses `SecretText`, following provider setup.
+Before storing a key, validate the draft, connection IDs, choices, required fields,
+web/API addresses, duplicate bases, policy and current revision. Changing the preset
+or a credential destination requires explicit replacement/removal/source selection;
+Keep cannot silently send an old credential to a new server. Authenticated API bases
+require HTTPS, except local loopback servers used for local development and mocks.
+A sample URL must belong to the selected web base before its secret is resolved.
 
-The engine returns redacted descriptors, current values, credential source/state,
-effective layer and write capabilities. It never sends a stored token back to the
-UI. The TUI holds form drafts and submits intentional changes, including an
-explicit Keep, Replace or Remove choice for a credential. An empty masked field
-means Keep when a credential already exists.
+Saving stages fresh credential references, installs any required payload, and then
+atomically writes the connection configuration while preserving TOML comments.
+Existing payload collisions require Keep or Replace before credential storage.
+Failed staging removes newly created entries which have no saved reference. Rotation
+switches references before retiring owned obsolete entries, retaining any secret
+still referenced by another connection/hook. External sources are never deleted.
+Storage tests inject an isolated store and never access the developer's keyring.
 
-Reuse or extract the credential-saving helper in `quack-core/src/setup.rs`.
-Use the OS credential store when available and the existing private-file fallback
-on headless Linux or a compiled-out keyring. Show which storage was used. Preserve
-existing environment, file, command and keyring references when editing unrelated
-fields. Offer the existing external secret sources in advanced settings.
+The default write target is the user layer. Trusted project definitions are edited
+in place and their trust fingerprint is refreshed; their secrets remain in user
+credential storage. System enforcement, policy locks and environment/CLI disable
+overrides are respected. Stale revisions reject the write before changing active
+configuration. The client can reload and reapply its draft for review.
 
-Stage configuration and payload changes, validate them and commit the enabled
-configuration only after credentials and payloads are ready. Reuse the payload
-keep/replace flow in `quack-config/src/enable.rs` and comment-preserving atomic
-writes in `quack-config/src/edit.rs`. Keep saved credentials reachable on partial
-failure. For rotation, stage a new credential reference and switch the config only
-after storage succeeds, then clean up owned obsolete entries. Retries are
-idempotent. Removing a connection preserves shared or externally managed secrets.
+Saves wait for the running turn's boundary, then reread configuration and rebuild
+only the hook list and prepared credentials. They publish the updated config and
+report the effective saved state. They do not invoke the full `/reload` startup path,
+restart MCP/LSP, or make remote requests. Opening/saving a form does not test access.
 
-Protect edits against a stale config revision. On a conflict, reload the changed
-values and offer to reapply the draft. Respect system enforcement, policy locks
-and project trust. Default setup writes to the user layer. Show when a higher
-layer determines the effective value and provide an explanation before saving an
-ineffective override. Credentials stay in user credential storage even when an
-existing trusted project definition references them.
+## Networking and privacy
 
-After saving, reload and verify the effective hook and connections before reporting
-success. Rebuild cached prepared commands and secret bindings so the next prompt
-uses the new values. Serialize changes with turn execution at the engine's safe
-reload boundary. Show pending application if a running turn must finish first.
-Persist connection configuration and safe status metadata across restart.
+Handlers retain exact-origin credential/redirect checks, prefix-aware matching,
+query/fragment removal from added review context, and TLS certificate validation.
+Advanced fields expose extra CA roots, proxy and request timeout. Hook subprocess
+traffic follows the existing documented OS/network controls; it is outside the
+engine's in-process HTTP egress gate. Enabling/configuring a hook authorizes its
+configured APIs. No network discovery occurs on opening a form.
 
-## Checks, privacy and networking
+Check diagnostics omit response bodies, headers, tokens and secret-bearing URLs.
+The engine redacts resolved secret values from returned messages and does not write
+check requests/results into the conversation or session log. Token input stays out
+of transcripts, composer history, tracing and Debug output. The initial sign-in path
+uses tokens; browser OAuth is outside this implementation.
 
-An explicit test runs the hook's declared check entry point through the engine's
-existing process runner with cancellation and timeout. Its request and response
-are structured, with a redacted diagnostic result. Reuse the script's URL parsing,
-REST request and authentication code so setup verification matches normal use.
-Validate that the sample URL belongs to the selected connection before resolving
-its credential. Cancelling a test leaves the configuration and conversation usable.
+## Verification
 
-Show the API destinations while configuring the service. Retain exact-origin
-credential scoping, HTTPS for tokens, prefix-aware URL matching and redirect
-checks. Hooks remain configured child processes with the documented networking
-semantics. Saving or opening setup triggers no remote request. Any future browser
-sign-in can use the same credential storage once a service supplies that flow.
-Personal access tokens are the initial authentication path.
-
-Secret input and values must stay out of transcript entries, command history,
-tracing, serialized session records, Debug output, test diagnostics and setup
-responses. Test errors omit headers and secret-bearing query strings. Logging
-reports the action and result using connection IDs and safe host information.
-
-## Delivery sequence
-
-1. Define optional setup/settings data and redacted protocol types. Add descriptors
-   for the shipped forge and Jira hooks and backwards-compatible script parsing.
-2. Implement inspection, credential persistence, staged saving and live activation
-   in config/core. Reuse provider credential storage and hook enable/reload logic.
-3. Add `/hooks` configuration screens, repeatable connections, masked input,
-   credential rotation and source-aware statuses. Ship the private GitHub flow here.
-4. Add explicit connection/resource checks and recovery states. Complete Jira and
-   every self-hosted adapter through the same forms before calling setup complete.
-5. Update schemas, README, hook examples, slash-command help, plan docs and roadmap.
-
-## Acceptance and verification
-
-- A user configures a private GitHub PR entirely in the TUI and uses it immediately.
-- A user adds two self-hosted GitLab instances, including a URL prefix, and each
-  receives only its configured credential. Gitea/Forgejo and both Bitbucket APIs
-  work through the same flow, including Bitbucket Cloud Basic authentication.
-- Jira can be configured through the same field and credential primitives.
-- Editing, disabling, removing, rotating and restarting preserve the expected state.
-- Existing CLI/slash commands, environment setup, handwritten files and hooks
-  without setup metadata continue to work.
-- Tests cover failed secret storage, failed writes, partial saves, stale revisions,
-  shared secrets, cached credential refresh, payload collisions, enforced hooks,
-  project trust, external overrides and cancel/retry behavior.
-- Mock API/model integration tests prove that saving enables private review fetches
-  on the next prompt, failed tests remain recoverable, and secret values never
-  appear in client events or session logs. Use isolated key storage fixtures.
-- TUI behavior tests and reviewed snapshots cover first setup, saved connections,
-  masked input, errors and narrow layouts at 80x24 and 60x20, plus ASCII mode and
-  Windows Press/Repeat handling.
-- Existing full-diff behavior and size warnings continue through configured hooks.
-  Verification uses mock endpoints and requires no paid model calls.
-
-The initial design assumes personal access tokens, explicit connection checks and
-user-layer configuration. Service labels and presets remain bundle data so future
-hooks can acquire a setup form without adding service-specific TUI screens.
+- Rust engine tests configure a private review, save/enable, fetch on the next prompt,
+  and restart successfully. Save-only keeps a disabled hook disabled. Opening/saving
+  makes no service/model requests beyond normal startup.
+- Rust subprocess tests exercise every forge REST route and authentication form,
+  Jira, nested GitLab paths, longest-prefix routing, disabled/empty lists, deduplication,
+  malformed URLs, query stripping, cross-origin redirects, unavailable credentials,
+  partial checks and actionable HTTP errors. Full diffs larger than 2 MiB survive.
+- Rust storage tests cover failed stores, conflicts during staging, private-file mode,
+  fresh references on rotation, shared references and external secret preservation.
+- TUI key tests cover masked paste, separate engine Ops, save versus enable, adding
+  connections, cancellation, dirty drafts and late responses. Reviewed snapshots
+  cover 80x24, 60x20 and masked input in light/ASCII mode.
+- Existing generic hooks, CLI/slash commands, schema generation, workspace tests,
+  warning-free clippy and minimal-feature builds remain required checks. No paid
+  model calls or real service credentials are needed for verification.

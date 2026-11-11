@@ -98,6 +98,9 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App) {
         modal.draw(f, &app.theme, &app.glyphs);
     }
     draw_prompt(f, app);
+    if let Some(form) = &app.hook_form {
+        form.draw(f, &app.theme, &app.glyphs, app.info.ui.ascii);
+    }
 }
 
 /// `/setup`'s question box: a URL or a key, over everything else. A key is drawn as dots.
@@ -715,7 +718,7 @@ fn draw_input(f: &mut Frame<'_>, app: &App, area: Rect) {
             widths.get(r).copied().unwrap_or(0)
         });
     }
-    if app.modal.is_none() {
+    if app.modal.is_none() && app.hook_form.is_none() {
         let x = inner.x + 2 + u16::try_from(cur_col).unwrap_or(0);
         let y = inner.y + u16::try_from(cur_row - first).unwrap_or(0);
         f.set_cursor_position((x.min(inner.right().saturating_sub(1)), y));
@@ -1700,6 +1703,30 @@ mod tests {
         let mut app = started_app();
         app.modal = Some(crate::modal::help(&app.theme));
         insta::assert_snapshot!(render(&app, 100, 30));
+    }
+
+    #[test]
+    fn hook_setup_connections_and_masked_input() {
+        use crate::theme::{Glyphs, Theme};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(test_info());
+        started(&mut app);
+        app.hook_form = Some(crate::hook_form::HookForm::new(crate::hook_form::example()));
+        insta::assert_snapshot!("hook_setup_80x24", render(&app, 80, 24));
+        insta::assert_snapshot!("hook_setup_60x20", render(&app, 60, 20));
+        let form = app.hook_form.as_mut().expect("form");
+        form.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for _ in 0..3 {
+            form.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        form.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        form.paste("private-test-token");
+        app.info.ui.ascii = true;
+        app.glyphs = Glyphs::new(true);
+        app.theme = Theme::resolve("light", false);
+        let shown = render(&app, 60, 20);
+        assert!(!shown.contains("private-test-token"));
+        insta::assert_snapshot!("hook_setup_secret_light_ascii_60x20", shown);
     }
 
     #[test]

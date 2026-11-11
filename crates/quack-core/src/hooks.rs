@@ -43,12 +43,23 @@ struct Hook {
     prepared: Mutex<Option<Arc<Prepared>>>,
 }
 
-#[derive(Debug)]
 struct Prepared {
     program: PathBuf,
     args: Vec<String>,
     cwd: PathBuf,
     env: BTreeMap<String, OsString>,
+    connections: Option<Value>,
+    secret_env: Vec<String>,
+}
+
+impl std::fmt::Debug for Prepared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Prepared")
+            .field("program", &self.program)
+            .field("cwd", &self.cwd)
+            .field("environment_keys", &self.env.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
 }
 
 /// What a hook is matched against.
@@ -295,11 +306,18 @@ impl Hooks {
         input: &Value,
         cancel: &CancellationToken,
     ) -> Result<Option<Reply>, String> {
-        let prepared = self.prepared(hook).await?;
+        let prepared = self.prepared(hook, cancel).await?;
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
+        let mut input = input.clone();
+        if let Some(connections) = &prepared.connections {
+            input["connections"] = connections.clone();
+        }
         let opts = quack_shell::ExecOptions {
             cwd: prepared.cwd.clone(),
             env: prepared.env.clone(),
-            stdin: serde_json::to_vec(input).unwrap_or_default(),
+            stdin: serde_json::to_vec(&input).unwrap_or_default(),
             full_stdout: hook.file.full_context,
             timeout: Duration::from_secs(hook.file.timeout_secs),
             cancel: cancel.child_token(),
@@ -318,17 +336,45 @@ impl Hooks {
 
     /// The command ready to start. Secrets resolve once (a `cmd` or keyring secret runs a
     /// process, so off the runtime); a failure is retried on the next run.
-    async fn prepared(&self, hook: &Hook) -> Result<Arc<Prepared>, String> {
+    async fn prepared(
+        &self,
+        hook: &Hook,
+        cancel: &CancellationToken,
+    ) -> Result<Arc<Prepared>, String> {
         if let Some(p) = hook.prepared.lock().ok().and_then(|p| p.clone()) {
             return Ok(p);
         }
-        let file = hook.file.clone();
+        let mut file = hook.file.clone();
         let (dir, root) = (hook.dir.clone(), self.root.clone());
+        let timeout = Duration::from_secs(file.timeout_secs);
+        if let Some(bindings) = file.connections.as_mut() {
+            for binding in bindings.iter_mut().filter(|b| b.connection.enabled) {
+                for secret in binding.credentials.values_mut() {
+                    if check_secret_command(secret, &root, cancel, timeout)
+                        .await
+                        .is_err()
+                    {
+                        *secret = quack_config::Secret::Plain(String::new());
+                    }
+                }
+            }
+        }
         let p = tokio::task::spawn_blocking(move || prepare(&file, &dir, &root))
             .await
             .map_err(|e| e.to_string())??;
         let p = Arc::new(p);
-        if let Ok(mut slot) = hook.prepared.lock() {
+        let unavailable = p
+            .connections
+            .as_ref()
+            .and_then(Value::as_array)
+            .is_some_and(|connections| {
+                connections.iter().any(|c| {
+                    c["unavailable_credentials"]
+                        .as_array()
+                        .is_some_and(|v| !v.is_empty())
+                })
+            });
+        if !unavailable && let Ok(mut slot) = hook.prepared.lock() {
             *slot = Some(p.clone());
         }
         Ok(p)
@@ -512,12 +558,42 @@ fn prepare(file: &HookFile, dir: &Path, root: &Path) -> Result<Prepared, String>
         c => root.join(quack_config::expand_home(&expand(c, dir), &get)),
     };
     let mut env = quack_shell::inherited_env(file.inherit_env.as_deref());
+    let mut secret_env = file.env.keys().cloned().collect::<Vec<_>>();
     for (k, secret) in &file.env {
         let v = secret
             .resolve(&get)
             .map_err(|e| format!("env `{k}`: {e}"))?;
         env.insert(k.clone(), v.into());
     }
+    let connections = file.connections.as_ref().map(|bindings| {
+        Value::Array(
+            bindings
+                .iter()
+                .enumerate()
+                .map(|(index, binding)| {
+                    let mut credentials = BTreeMap::new();
+                    let mut unavailable = Vec::new();
+                    if binding.connection.enabled {
+                        for (field, secret) in &binding.credentials {
+                            let variable =
+                                format!("QUACK_HOOK_C{index}_{}", field.to_ascii_uppercase());
+                            secret_env.push(variable.clone());
+                            match secret.resolve(&get) {
+                                Ok(value) => {
+                                    env.insert(variable.clone(), value.into());
+                                    credentials.insert(field.clone(), variable);
+                                }
+                                Err(_) => unavailable.push(field.clone()),
+                            }
+                        }
+                    }
+                    json!({"id": binding.connection.id, "preset": binding.connection.preset,
+                "enabled": binding.connection.enabled, "values": binding.connection.values,
+                "credentials": credentials, "unavailable_credentials": unavailable})
+                })
+                .collect(),
+        )
+    });
     let search = env.get("PATH").cloned().or_else(|| get("PATH"));
     let mut words = file.command.iter().map(|w| {
         let w = expand(w, dir);
@@ -538,7 +614,154 @@ fn prepare(file: &HookFile, dir: &Path, root: &Path) -> Result<Prepared, String>
         args: words.collect(),
         cwd,
         env,
+        connections,
+        secret_env,
     })
+}
+
+/// Deliberate access check. It never emits hook context or session records.
+pub(crate) async fn check(
+    file: HookFile,
+    dir: PathBuf,
+    root: PathBuf,
+    resource: String,
+    cancel: CancellationToken,
+) -> Result<(String, String), String> {
+    let timeout = Duration::from_secs(file.timeout_secs.clamp(1, 120));
+    let task = async {
+        let mut file = file;
+        for secret in file.env.values_mut() {
+            check_secret_command(secret, &root, &cancel, timeout).await?;
+        }
+        if let Some(bindings) = file.connections.as_mut() {
+            for binding in bindings {
+                for secret in binding.credentials.values_mut() {
+                    check_secret_command(secret, &root, &cancel, timeout).await?;
+                }
+            }
+        }
+        let prepared = tokio::task::spawn_blocking(move || prepare(&file, &dir, &root))
+            .await
+            .map_err(|_| "Cannot prepare the hook check.".to_owned())??;
+        let input = json!({"event": "check", "url": resource, "matches": [resource], "connections": prepared.connections});
+        let result = quack_shell::exec(
+            &prepared.program,
+            &prepared.args,
+            quack_shell::ExecOptions {
+                cwd: prepared.cwd,
+                env: prepared.env.clone(),
+                stdin: serde_json::to_vec(&input).unwrap_or_default(),
+                full_stdout: false,
+                timeout,
+                cancel: cancel.child_token(),
+            },
+        )
+        .await
+        .map_err(|_| "Cannot start the hook; check Python and the hook payload.".to_owned())?;
+        if result.cancelled {
+            return Ok(("cancelled".into(), "Access check cancelled.".into()));
+        }
+        if result.timed_out {
+            return Ok((
+                "unreachable".into(),
+                "The access check timed out; check the server, proxy and request timeout.".into(),
+            ));
+        }
+        if result.exit_code != Some(0) {
+            return Err(
+                "The hook check failed to run; check its setup descriptor and Python installation."
+                    .into(),
+            );
+        }
+        let reply: Value = serde_json::from_str(&result.stdout).map_err(|_| {
+            "The hook returned an invalid check response; check its payload version.".to_owned()
+        })?;
+        let status = reply["status"]
+            .as_str()
+            .filter(|s| {
+                matches!(
+                    *s,
+                    "verified"
+                        | "partial"
+                        | "authentication_failed"
+                        | "resource_unavailable"
+                        | "rate_limited"
+                        | "unreachable"
+                        | "invalid"
+                )
+            })
+            .ok_or("The hook returned an unknown check status.")?
+            .to_owned();
+        let mut message = reply["message"]
+            .as_str()
+            .unwrap_or("Access check finished.")
+            .chars()
+            .take(1000)
+            .collect::<String>();
+        for value in prepared
+            .secret_env
+            .iter()
+            .filter_map(|key| prepared.env.get(key))
+            .filter_map(|v| v.to_str())
+            .filter(|v| !v.is_empty())
+        {
+            // Child environment values include the resolved credentials.
+            if message.contains(value) {
+                message = message.replace(value, "[redacted]");
+            }
+        }
+        Ok((status, message))
+    };
+    tokio::select! {
+        _ = cancel.cancelled() => Ok(("cancelled".into(), "Access check cancelled.".into())),
+        result = tokio::time::timeout(timeout, task) => result.unwrap_or_else(|_| { cancel.cancel(); Ok(("unreachable".into(), "The access check timed out; retry after checking the credential source and server.".into())) }),
+    }
+}
+
+async fn check_secret_command(
+    secret: &mut quack_config::Secret,
+    root: &Path,
+    cancel: &CancellationToken,
+    timeout: Duration,
+) -> Result<(), String> {
+    if cancel.is_cancelled() {
+        return Err("Credential resolution cancelled.".into());
+    }
+    let quack_config::Secret::Cmd { cmd } = secret else {
+        return Ok(());
+    };
+    let (program, args) = cmd
+        .split_first()
+        .ok_or("The credential command is empty.")?;
+    let env = quack_shell::inherited_env(None);
+    let program =
+        quack_shell::resolve_program(program, env.get("PATH").map(OsString::as_os_str), root)
+            .map_err(|_| "Cannot find the credential command; check its source.".to_owned())?;
+    let result = quack_shell::exec(
+        &program,
+        args,
+        quack_shell::ExecOptions {
+            cwd: root.into(),
+            env,
+            stdin: Vec::new(),
+            full_stdout: false,
+            timeout,
+            cancel: cancel.child_token(),
+        },
+    )
+    .await
+    .map_err(|_| "Cannot run the credential command.".to_owned())?;
+    if result.exit_code != Some(0)
+        || result.cancelled
+        || result.timed_out
+        || result.stdout.trim().is_empty()
+    {
+        return Err(
+            "The credential command did not return a value; check its source or retry.".into(),
+        );
+    }
+    *secret = quack_config::Secret::Plain(result.stdout.trim().into());
+    Ok(())
 }
 
 /// `/doctor`: why the hook's program or a `{dir}` file it names cannot be found. Resolves

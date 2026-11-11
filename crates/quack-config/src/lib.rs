@@ -11,6 +11,7 @@ pub mod catalog;
 mod diagnostic;
 mod edit;
 pub mod enable;
+pub mod hook_setup;
 pub mod hooks;
 mod items;
 #[cfg(feature = "keyring")]

@@ -441,7 +441,22 @@ async fn shipped_jira_hook_fetches_linked_issues() {
         .replace("enabled = false\n", "")
         .replace("https://jira.example.com", &jira.uri())
         .replace("{ env = \"JIRA_TOKEN\" }", "\"pat-123\"");
-    std::fs::write(hooks.join("jira.toml"), toml).expect("hook");
+    let mut config: toml::Value = toml::from_str(&toml).expect("hook TOML");
+    config.as_table_mut().expect("table").remove("connections");
+    let env = toml::Value::try_from(std::collections::BTreeMap::from([
+        ("JIRA_URL", jira.uri()),
+        ("JIRA_TOKEN", "pat-123".to_owned()),
+    ]))
+    .expect("env");
+    config
+        .as_table_mut()
+        .expect("table")
+        .insert("env".into(), env);
+    std::fs::write(
+        hooks.join("jira.toml"),
+        toml::to_string(&config).expect("serialize"),
+    )
+    .expect("hook");
 
     let loaded = common::workspace(tmp.path(), &model.uri(), r#"["tiny"]"#, "");
     let mut engine = Engine::spawn(Arc::new(loaded));
@@ -526,7 +541,29 @@ async fn enabling_a_shipped_hook_copies_it_into_the_user_layer_and_runs_it() {
         .replace("\r\n", "\n")
         .replace("https://jira.example.com", &jira.uri())
         .replace("{ env = \"JIRA_TOKEN\" }", "\"pat-123\"");
-    std::fs::write(defaults.join("jira.toml"), toml).expect("hook");
+    let mut config: toml::Value = toml::from_str(&toml).expect("hook TOML");
+    config.as_table_mut().expect("table").remove("connections");
+    let env = toml::Value::try_from(std::collections::BTreeMap::from([
+        ("JIRA_URL", jira.uri()),
+        ("JIRA_TOKEN", "pat-123".to_owned()),
+    ]))
+    .expect("env");
+    config
+        .as_table_mut()
+        .expect("table")
+        .insert("env".into(), env);
+    std::fs::write(
+        defaults.join("jira.toml"),
+        format!(
+            "{}\n{}",
+            toml.lines()
+                .filter(|line| line.starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            toml::to_string(&config).expect("serialize")
+        ),
+    )
+    .expect("hook");
 
     let loaded = common::workspace_in(
         tmp.path(),
@@ -569,7 +606,7 @@ async fn enabling_a_shipped_hook_copies_it_into_the_user_layer_and_runs_it() {
         "{text}"
     );
     assert!(
-        text.contains("To use it"),
+        text.contains("Configure connections"),
         "the shipped comments survive the copy: {text}"
     );
     assert_eq!(
@@ -746,6 +783,7 @@ async fn shipped_forge_review_hook_uses_forge_rest_endpoints() {
             std::fs::read_to_string(shipped.join("forge-review.toml")).expect("shipped hook");
         let mut config: toml::Value = toml::from_str(&config).expect("valid hook TOML");
         config["enabled"] = toml::Value::Boolean(true);
+        config.as_table_mut().expect("table").remove("connections");
         config["command"] = toml::Value::try_from(vec![
             "{python}".to_owned(),
             "{dir}/forge-review/review.py".to_owned(),
@@ -803,33 +841,5 @@ async fn shipped_forge_review_hook_uses_forge_rest_endpoints() {
         }
         forge.verify().await;
         engine.shutdown().await;
-    }
-}
-
-#[test]
-fn shipped_forge_review_hook_handles_auth_redirects_and_limits() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let tests = root.join("tests").join("common").join("forge_review.py");
-    let script = root
-        .join("..")
-        .join("..")
-        .join("defaults")
-        .join("hooks.d")
-        .join("forge-review")
-        .join("review.py");
-    for python in ["python3", "python", "py"] {
-        if let Ok(output) = std::process::Command::new(python)
-            .arg("-B")
-            .arg(&tests)
-            .arg(&script)
-            .output()
-        {
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
     }
 }

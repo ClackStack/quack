@@ -16,6 +16,7 @@ use ratatui::layout::Rect;
 
 use crate::commands::{self, COMMANDS, Command};
 use crate::fuzzy;
+use crate::hook_form::{Action as HookAction, HookForm};
 use crate::input::Input;
 use crate::modal::{self, Modal, ModalOutcome};
 use crate::select::{self, Pane, Selection};
@@ -620,6 +621,11 @@ pub struct App {
     files: Vec<String>,
     /// Hook runs recorded this session (`/hooks`).
     pub(crate) hook_runs: Vec<HookRun>,
+    pub(crate) hook_form: Option<HookForm>,
+    hook_request: u64,
+    hook_inspect: Option<u64>,
+    hook_reapply: Option<Vec<quack_protocol::HookConnectionDraft>>,
+    hook_test_after_inspect: bool,
     /// What `/setup` has found so far.
     setup: modal::SetupView,
     /// A question from `/setup`, drawn over everything else.
@@ -700,6 +706,11 @@ impl App {
             mcp_prompts: Vec::new(),
             files: Vec::new(),
             hook_runs: Vec::new(),
+            hook_form: None,
+            hook_request: 0,
+            hook_inspect: None,
+            hook_reapply: None,
+            hook_test_after_inspect: false,
             setup: modal::SetupView::default(),
             prompt: None,
             setup_adding: false,
@@ -1250,6 +1261,53 @@ impl App {
                 path,
                 note,
             } => self.on_setting_saved(&key, &value, &path, note),
+            Event::HookSetup { request, info } => {
+                if self.hook_inspect == Some(request) && self.modal.as_ref().is_some_and(|m| m.title == "Hook setup") {
+                    self.hook_inspect = None;
+                    self.modal = None;
+                    let mut form = HookForm::new(info);
+                    if let Some(drafts) = self.hook_reapply.take() { form.restore_drafts(drafts); }
+                    if self.hook_test_after_inspect {
+                        if form.drafts.len() == 1 { form.key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)); }
+                        else { form.status = "Select a connection, then press Ctrl-T to check a review or issue URL.".into(); }
+                    }
+                    self.hook_form = Some(form);
+                }
+            }
+            Event::HookSetupSaved { request, info, note } => {
+                if self.hook_form.as_ref().is_some_and(|f| f.pending == Some(request)) {
+                    let enabled = info.enabled;
+                    let problem = info.problem.clone();
+                    let mut form = HookForm::new(info);
+                    form.status = if let Some(problem) = problem {
+                        format!("Settings saved, but the hook needs attention: {problem}")
+                    } else {
+                        let state = if enabled { "Saved and applied. The next prompt uses these settings." }
+                            else { "Saved. The hook remains disabled; Ctrl-E enables it." };
+                        note.map_or_else(|| state.to_owned(), |note| format!("{state} {note}"))
+                    };
+                    self.hook_form = Some(form);
+                }
+            }
+            Event::HookSetupPending { request } => {
+                if let Some(form) = self.hook_form.as_mut().filter(|f| f.pending == Some(request)) {
+                    form.status = "Saving… Applies after any running turn finishes.".into();
+                }
+            }
+            Event::HookSetupFailed { request, message } => {
+                if let Some(form) = self.hook_form.as_mut().filter(|f| f.pending == Some(request)) {
+                    form.result("Could not save", message);
+                } else if self.hook_inspect == Some(request) {
+                    self.hook_inspect = None;
+                    self.modal = Some(modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme));
+                    self.note(message);
+                }
+            }
+            Event::HookCheckResult { request, status, message } => {
+                if let Some(form) = self.hook_form.as_mut().filter(|f| f.pending == Some(request)) {
+                    form.result(&status.replace('_', " "), message);
+                }
+            }
             Event::HookPayloadChoice { id, path } => {
                 self.modal = Some(modal::hook_payload(&id, &path, &self.theme));
             }
@@ -1558,7 +1616,9 @@ impl App {
             TermEvent::Key(key) if key.kind != KeyEventKind::Release => self.on_key(key),
             TermEvent::Paste(text) => {
                 self.selection = None;
-                if let Some(p) = &mut self.prompt {
+                if let Some(form) = &mut self.hook_form {
+                    form.paste(&text);
+                } else if let Some(p) = &mut self.prompt {
                     p.text
                         .push_str(text.lines().next().unwrap_or_default().trim());
                     p.error = None;
@@ -1580,7 +1640,8 @@ impl App {
                 self.selection = None;
                 self.dirty = true;
             }
-            TermEvent::Mouse(m) if self.modal.is_none() => match m.kind {
+            TermEvent::Mouse(m) if self.modal.is_none() && self.hook_form.is_none() => match m.kind
+            {
                 MouseEventKind::ScrollUp => self.scroll_up(WHEEL_ROWS),
                 MouseEventKind::ScrollDown => self.scroll_down(WHEEL_ROWS),
                 MouseEventKind::Down(MouseButton::Left) => self.press(m.column, m.row),
@@ -1708,8 +1769,83 @@ impl App {
         (first + usize::from(y - area.y), col)
     }
 
+    fn open_hook_setup(&mut self, id: &str) {
+        self.hook_request += 1;
+        self.hook_inspect = Some(self.hook_request);
+        self.hook_form = None;
+        self.hook_reapply = None;
+        self.hook_test_after_inspect = false;
+        self.modal = Some(Modal::new("Hook setup", Vec::new()));
+        self.ops.push(Op::InspectHookSetup {
+            id: id.into(),
+            request: self.hook_request,
+        });
+    }
+
+    fn on_hook_key(&mut self, key: KeyEvent) {
+        let Some(mut form) = self.hook_form.take() else {
+            return;
+        };
+        let key = if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
+        {
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+        } else {
+            key
+        };
+        match form.key(key) {
+            HookAction::None => {}
+            HookAction::Close => {
+                self.modal = Some(modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme));
+                return;
+            }
+            HookAction::Reload => {
+                self.hook_reapply = None;
+                self.open_hook_setup(&form.info.id);
+                return;
+            }
+            HookAction::ReloadDraft => {
+                let drafts = form.drafts;
+                self.open_hook_setup(&form.info.id);
+                self.hook_reapply = Some(drafts);
+                return;
+            }
+            HookAction::Cancel(request) => self.ops.push(Op::CancelHookCheck { request }),
+            HookAction::Save {
+                enable,
+                replace_payload,
+            } => {
+                self.hook_request += 1;
+                self.ops.push(Op::SaveHookSetup {
+                    id: form.info.id.clone(),
+                    request: self.hook_request,
+                    revision: form.info.revision.clone(),
+                    connections: form.drafts.clone(),
+                    enable,
+                    replace_payload,
+                });
+                form.waiting(self.hook_request, false);
+            }
+            HookAction::Check { connection, url } => {
+                self.hook_request += 1;
+                self.ops.push(Op::CheckHookSetup {
+                    id: form.info.id.clone(),
+                    request: self.hook_request,
+                    revision: form.info.revision.clone(),
+                    connection,
+                    url,
+                });
+                form.waiting(self.hook_request, true);
+            }
+        }
+        self.hook_form = Some(form);
+    }
+
     fn on_key(&mut self, key: KeyEvent) {
         self.dirty = true;
+        if self.hook_form.is_some() {
+            self.on_hook_key(key);
+            return;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // Any key lets go of a selection. Ctrl-C, out of habit, copies it again rather than
         // interrupting or quitting.
@@ -2792,6 +2928,12 @@ impl App {
             },
             "hooks" if args.is_empty() => {
                 self.modal = Some(modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme));
+            }
+            "hooks" if args.starts_with("configure ") || args.starts_with("test ") => {
+                if let Some((action, id)) = args.split_once(' ') {
+                    self.open_hook_setup(id.trim());
+                    self.hook_test_after_inspect = action == "test";
+                }
             }
             "hooks"
                 if args.starts_with("keep-payload ") || args.starts_with("replace-payload ") =>
@@ -3904,6 +4046,64 @@ mod tests {
     }
 
     #[test]
+    fn hook_setup_uses_engine_ops_and_keeps_pasted_secrets_out_of_the_composer() {
+        let mut app = App::new(info());
+        type_str(&mut app, "/hooks configure forge-review");
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            app.take_ops().as_slice(),
+            [Op::InspectHookSetup { request: 1, .. }]
+        ));
+        app.on_engine(Event::HookSetup {
+            request: 1,
+            info: crate::hook_form::example(),
+        });
+        assert!(app.hook_form.is_some());
+        press(&mut app, KeyCode::Enter);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Tab);
+        }
+        press(&mut app, KeyCode::Enter);
+        app.on_terminal(TermEvent::Paste("private-test-token".into()));
+        let mut released = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        released.kind = KeyEventKind::Release;
+        app.on_terminal(TermEvent::Key(released));
+        assert!(app.input.is_empty());
+        press(&mut app, KeyCode::Enter);
+        app.on_terminal(TermEvent::Key(KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+        )));
+        let ops = app.take_ops();
+        assert!(!format!("{ops:?}").contains("private-test-token"));
+        assert!(
+            matches!(ops.as_slice(),[Op::SaveHookSetup{enable:Some(true),connections,..}] if matches!(connections[0].credentials.get("token"),Some(quack_protocol::HookCredentialChange::Replace{value}) if value.0=="private-test-token"))
+        );
+        app.on_engine(Event::HookSetupFailed {
+            request: 999,
+            message: "wrong response".into(),
+        });
+        assert!(
+            !app.hook_form
+                .as_ref()
+                .expect("form")
+                .status
+                .contains("wrong response")
+        );
+        app.on_engine(Event::HookSetupFailed {
+            request: 2,
+            message: "Retry after unlocking the store.".into(),
+        });
+        assert!(
+            app.hook_form
+                .as_ref()
+                .expect("form")
+                .status
+                .contains("unlocking")
+        );
+    }
+
+    #[test]
     fn toggling_a_hook_off_lists_it_and_on_goes_through_the_engine() {
         let hook = |enabled: bool| quack_config::Item {
             id: "jira".into(),
@@ -3918,6 +4118,8 @@ mod tests {
                     matcher: Default::default(),
                     command: vec!["x".into()],
                     env: Default::default(),
+                    setup: None,
+                    connections: None,
                     inherit_env: None,
                     cwd: String::new(),
                     timeout_secs: 10,

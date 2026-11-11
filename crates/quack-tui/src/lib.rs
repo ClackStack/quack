@@ -9,6 +9,7 @@ mod charts;
 mod commands;
 mod fuzzy;
 mod highlight;
+mod hook_form;
 mod input;
 mod markdown;
 mod modal;

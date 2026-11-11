@@ -4,10 +4,12 @@
 //! This crate has no async-runtime dependency so it can be used by ACP translation,
 //! headless output and tests without pulling in tokio.
 
+mod hooks;
 mod ids;
 pub mod image;
 mod startup;
 
+pub use hooks::*;
 pub use ids::{CallId, CheckpointId, EventIndex, ModelId, ProviderId, SessionId, TurnId};
 pub use image::Image;
 pub use startup::{LoadState, Subsystem};
@@ -197,6 +199,30 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replace_payload: Option<bool>,
     },
+    /// Inspect a hook without resolving credentials or running its command.
+    InspectHookSetup {
+        id: String,
+        request: u64,
+    },
+    SaveHookSetup {
+        id: String,
+        request: u64,
+        revision: String,
+        connections: Vec<HookConnectionDraft>,
+        /// None keeps the current enabled state.
+        enable: Option<bool>,
+        replace_payload: Option<bool>,
+    },
+    CheckHookSetup {
+        id: String,
+        request: u64,
+        revision: String,
+        connection: HookConnectionDraft,
+        url: String,
+    },
+    CancelHookCheck {
+        request: u64,
+    },
     Shutdown,
 }
 
@@ -204,6 +230,27 @@ pub enum Op {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
+    HookSetup {
+        request: u64,
+        info: HookSetupInfo,
+    },
+    HookSetupSaved {
+        request: u64,
+        info: HookSetupInfo,
+        note: Option<String>,
+    },
+    HookSetupPending {
+        request: u64,
+    },
+    HookSetupFailed {
+        request: u64,
+        message: String,
+    },
+    HookCheckResult {
+        request: u64,
+        status: String,
+        message: String,
+    },
     // lifecycle
     StartupProgress {
         subsystem: Subsystem,

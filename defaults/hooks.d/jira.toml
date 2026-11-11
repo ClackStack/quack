@@ -1,32 +1,138 @@
 #:schema ../schemas/hook.json
-# Adds the Jira issues a prompt links to (https://jira.example.com/browse/PAY-1234) to
-# that prompt, so the model sees them before it answers. jira/jira.py fetches each issue
-# over Jira's REST API (Server, Data Center or Cloud) and returns it as XML. It needs
-# Python 3 and nothing else.
-#
-# To use it, run `/hooks` in quack and press ⏎ on the jira hook: it is copied into
-# hooks.d in your config folder (`quack config paths` shows where; an administrator can
-# use the system folder, where users cannot turn it off) and enabled, with jira/ copied
-# with it. Copying the file and the jira/ folder by hand works the same. Then set
-# JIRA_URL below, in your copy.
-# `/doctor` checks the hook without running it.
+# Configure connections and credentials through /hooks.
 enabled = false
 description = "Jira issues linked in the prompt"
 event = "user_prompt"
-# Any Jira-style issue link. The script fetches only links to JIRA_URL.
 match = { prompt = 'https?://\S+/browse/[A-Z][A-Z0-9_]+-\d+' }
 command = ["{python}", "{dir}/jira/jira.py"]
-timeout_secs = 20
+timeout_secs = 25
 on_error = "warn"
+connections = []
 
-[env]
-JIRA_URL = "https://jira.example.com"
-# A personal access token. From the environment, or from the OS keyring after
-# `quack keyring set jira`: JIRA_TOKEN = { keyring = "jira" }
-JIRA_TOKEN = { env = "JIRA_TOKEN" }
-# Jira Cloud: your account email here, and an API token as JIRA_TOKEN.
-# JIRA_USER = "you@example.com"
-# JIRA_MAX_ISSUES = "5"
-# JIRA_MAX_COMMENTS = "5"
-# JIRA_MAX_CHARS = "4000"
-# JIRA_CA_BUNDLE = "~/corp-ca.pem"
+[setup]
+version = 1
+scope_field = "web_url"
+
+[[setup.fields]]
+id = "label"
+label = "Connection name"
+kind = "text"
+required = true
+default = "My connection"
+help = "A name you will recognize in the connection list."
+
+[[setup.fields]]
+id = "web_url"
+label = "Server URL"
+kind = "url"
+required = true
+credential_scope = true
+help = "The web address, including an installation prefix if used. Enter the server base, not a review URL."
+
+[[setup.fields]]
+id = "auth"
+label = "Authentication"
+kind = "choice"
+required = true
+default = "public"
+choices = ["public", "token", "basic"]
+help = "Use left/right to choose public access, token, or email and API token (basic)."
+
+[[setup.fields]]
+id = "token"
+label = "Access token"
+kind = "secret"
+help = "Paste your token here. It stays masked. Empty keeps the saved credential."
+[setup.fields.required_when]
+auth = ["token", "basic"]
+
+[[setup.fields]]
+id = "user"
+label = "Account email"
+kind = "text"
+help = "Required for Basic authentication, such as an Atlassian API token."
+[setup.fields.required_when]
+auth = ["basic"]
+
+[[setup.fields]]
+id = "api_url"
+label = "API base URL"
+kind = "url"
+required = true
+advanced = true
+credential_scope = true
+help = "Requests and credentials go only to this API origin. Check this address before saving."
+
+[[setup.fields]]
+id = "ca_bundle"
+label = "Extra CA certificate file"
+kind = "text"
+advanced = true
+help = "Optional PEM file added to the system trust store. A leading ~/ is supported."
+
+[[setup.fields]]
+id = "proxy"
+label = "HTTP proxy URL"
+kind = "url"
+advanced = true
+help = "Optional proxy without embedded credentials. Empty uses the inherited proxy environment."
+
+[[setup.fields]]
+id = "timeout"
+label = "Request timeout (seconds)"
+kind = "integer"
+default = "5"
+advanced = true
+help = "Timeout for each REST request. The hook also has an overall timeout."
+
+[[setup.fields]]
+id = "max_issues"
+label = "Issues per prompt"
+kind = "integer"
+default = "5"
+advanced = true
+help = "Maximum linked issues to load per prompt."
+
+[[setup.fields]]
+id = "max_comments"
+label = "Comments per issue"
+kind = "integer"
+default = "5"
+advanced = true
+help = "Newest comments retained per issue. Zero omits comments."
+
+[[setup.fields]]
+id = "max_chars"
+label = "Description/comment characters"
+kind = "integer"
+default = "4000"
+advanced = true
+help = "Maximum description or comment length."
+
+[[setup.presets]]
+id = "jira-cloud"
+label = "Jira Cloud"
+help = "Use your Jira site URL, Atlassian email and API token. Help: https://developer.atlassian.com/cloud/jira/platform/basic-auth-for-rest-apis/"
+[setup.presets.values]
+kind = "jira"
+web_url = ""
+api_url = ""
+auth = "basic"
+[setup.presets.choices]
+auth = ["basic"]
+[setup.presets.derived]
+api_url = "{web_url}"
+
+[[setup.presets]]
+id = "jira-server"
+label = "Jira Server / Data Center"
+help = "Use a Jira personal access token with issue read access. Include any installation prefix in the server URL."
+[setup.presets.values]
+kind = "jira"
+web_url = ""
+api_url = ""
+auth = "token"
+[setup.presets.choices]
+auth = ["token"]
+[setup.presets.derived]
+api_url = "{web_url}"

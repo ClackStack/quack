@@ -177,6 +177,16 @@ on_error = "deny"                  # deny | allow | warn
 
 ### Enabling (2026-11-09)
 
+The shipped examples remain disabled. `/hooks` now opens bundle-defined connection
+forms for credentials and service settings ([16](16-hook-setup.md)). Save preserves
+the enabled state; Save and enable activates after a running turn without restarting
+other services or contacting an API. Credentials use user credential storage even
+when a trusted project definition is edited. Explicit checks share the normal
+Python handler's parsing, authentication and REST routes, run under cancellation
+and a deadline, and add no model/session context. They validate the selected web
+scope before resolving its credential. The original direct toggle remains available
+through `/hooks toggle <id>` and Ctrl-S in the list.
+
 The shipped examples are `enabled = false`. `/hooks` turns one on with `Op::EnableHook`
 (`quack-config/src/enable.rs`): a defaults hook is copied into the user layer's `hooks.d/`
 with `enabled = true`. If the matching payload folder already exists in the user

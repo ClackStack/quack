@@ -1,15 +1,34 @@
 # defaults/hooks.d
 
-Example hooks, one per file, all `enabled = false`. To use one, run `/hooks` in quack and
-press ⏎ on it: the hook's file (and the folder its `command` names with `{dir}`, if any)
-is copied into `hooks.d` in your config folder (`quack config paths` shows where) with
-`enabled = true`, and `[hooks] disabled` stops listing it. The shipped copy stays as it
-is, so an upgrade replaces it freely. Doing it by hand works the same: copy the file and
-its folder, and set `enabled = true`. `/doctor` checks a hook without running it.
+Example hooks ship disabled. Open `/hooks`, select a hook and press Enter to
+configure it. Choose a service or edit an existing connection, enter its server URL,
+choose authentication and paste the token into the masked field. Ctrl-E **saves and
+enables** the hook; the next prompt uses it after any running turn finishes. Ctrl-S
+saves settings while preserving the enabled state. Ctrl-T checks a sample review or
+issue URL using the current draft without saving, enabling, or calling a model.
 
-A hook keeps scripts and data next to its file in a folder named after it (`jira.toml`
-→ `jira/`); its `command` reaches them with `{dir}`. When you toggle a hook off, quack
-lists it in `[hooks] disabled` in your config.toml instead of touching the file.
+Use A to add a connection, Ctrl-D to disable one, and Delete to remove one from the
+draft. Tab/Shift-Tab moves between fields; Enter edits; left/right cycles choices.
+V includes advanced fields (API base, CA certificates, proxy and timeout, plus Jira
+size/comment limits). ? shows scrollable help and token instructions. Secrets stay
+masked and out of composer history. An empty secret field keeps its saved source;
+Ctrl-R removes it and Ctrl-X selects an env, file, keyring or command source.
+Changing a credential destination requires replacing, removing or explicitly
+selecting its credential source again.
+
+Credentials use the OS credential store, with private-file fallback when it is not
+available. The TUI reports the storage used. Rotation stages a fresh reference;
+shared and external credentials are preserved when removing a connection. Errors
+keep the draft. R reloads saved settings (asking before discarding edits); Shift-R
+reloads and reapplies the draft for review.
+
+The hook's TOML and matching script folder are copied into your user config on the
+first save. Existing payloads require an explicit keep/replace choice. Updates to
+connections activate without restarting MCP/LSP or calling a remote service.
+`/hooks configure <id>`, `/hooks test <id>`, `/hooks toggle <id>`, Ctrl-S in the hook
+list, `quack keyring set <id>` and `/reload` are also available. Hooks without forms
+can still be toggled. System hooks are enforced, and project hooks require trust.
+`/doctor` checks programs and payloads without running them.
 
 A hook needs an `event` and a `command`. The command gets the event as JSON on stdin and
 may answer on stdout; see docs/plan/11-security.md#hooks, or `../schemas/hook.json` for
@@ -22,23 +41,20 @@ every option.
 
 ## Linked code reviews
 
-Enable `forge-review` through `/hooks`. Public GitHub, GitLab, Gitea, Codeberg
-and Bitbucket Cloud links then work anonymously where the server permits it.
-Add credentials in your copy's `[env]` for private repositories or authenticated
-rate limits. Each `--host` entry names the credential variable used exclusively
-for that API. Variables whose names end in `_USER` enable Bitbucket Cloud Basic
-authentication with the corresponding token. Other Bitbucket tokens use Bearer
-authentication. GitLab uses `PRIVATE-TOKEN`, Gitea/Forgejo uses `token`, and GitHub
-uses Bearer authentication.
+Configure `forge-review` through `/hooks`. Public connections for GitHub, GitLab,
+Gitea, Codeberg (Forgejo) and Bitbucket Cloud are prefilled. For private repositories,
+select token authentication and enter the credential. Bitbucket Cloud supports
+Atlassian email plus API token with basic authentication, and access tokens with
+token authentication. GitHub Enterprise, GitLab, Gitea/Forgejo and Bitbucket Data
+Center support explicit self-hosted web and API bases, including URL prefixes.
+Confirm the API base under advanced fields before saving. Use the server base URL,
+including its installation prefix, rather than a full review URL.
 
-Add a `--host` entry for each self-hosted instance, including installations under
-a URL prefix. The four arguments are the forge type, web base URL, API base URL,
-and credential variable name (`"-"` means anonymous). Use `gitea` for Forgejo too.
-For example, a GitLab installed at `https://git.example/team` uses that web base
-and `https://git.example/team/api/v4`. GitHub Enterprise uses `github` with its
-web base and `/api/v3` API base. Bitbucket Data Center uses `bitbucket-server`
-with its web base and `/rest/api/latest` API base. Copy the commented entries
-in the TOML and add the matching secret in `[env]`.
+Add as many instances as needed, each with its own credential source. The most
+specific matching installation prefix wins, including a disabled connection. An
+explicit `connections = []` prevents fetching. A missing credential affects its
+connection while others keep working. A review check verifies both metadata and
+the diff; readable metadata with an unavailable diff reports partial access.
 
 The hook reads up to two distinct reviews per prompt. Each includes title,
 state, description and branch/commit references where available, followed by a
@@ -53,14 +69,36 @@ affected review or diff, so another review can still load. Server-side diff
 limits still apply, including GitLab's raw-diff limits. These snapshots describe
 the review at fetch time and consume the model's configured context window.
 
-Requests use a five-second timeout and the hook has a 25-second overall timeout.
-Tokens require HTTPS. Redirects stay within the API origin, including Bitbucket
+Requests default to a five-second timeout and the hook has a 25-second overall timeout.
+Tokens require HTTPS, except for local loopback servers. Redirects stay within the API origin, including Bitbucket
 Cloud's redirect from a pull request diff to a repository diff. System TLS
 roots and standard proxy environment variables apply.
 
 Enabling the hook authorizes its child process to contact the configured API
 bases. Hook subprocess networking is subject to operating-system and network
 controls. Quack's in-process offline/egress gate does not govern these requests.
+
+### Hook author setup metadata
+
+`[setup]` is optional, with `version = 1`, `scope_field`, `fields` and `presets`.
+Fields support text, URL, integer, boolean, choice and secret values, plus required
+conditions, advanced grouping, help text and credential-destination markers.
+Presets supply service labels, initial values, choices and derived field templates.
+See the shipped TOML files and `../schemas/hook.json` for examples.
+
+`connections` stores connection IDs, preset IDs, enabled flags, plain settings and
+`Secret` credential references. The engine passes connection settings on stdin;
+`credentials` maps secret field IDs to generated environment-variable names.
+`unavailable_credentials` lists fields that could not resolve, without their values.
+The script owns URL parsing, API selection, request headers and response rendering.
+An explicit list is authoritative over script arguments and environment defaults.
+
+For Check access the same command receives `event = "check"`, a single connection,
+`url` and `matches`. Return JSON with `status` and `message`, without added context.
+Supported statuses are `verified`, `partial`, `authentication_failed`,
+`resource_unavailable`, `rate_limited`, `unreachable` and `invalid`. Checks use the
+normal subprocess runner, a deadline, cancellation and redacted diagnostics.
+Unsupported setup descriptor versions leave the normal hook executable usable.
 
 ### API references
 

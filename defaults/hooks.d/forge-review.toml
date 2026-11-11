@@ -3,29 +3,257 @@ enabled = false
 description = "Pull and merge requests linked in the prompt"
 event = "user_prompt"
 match = { prompt = 'https?://[^\s<>"`]+/(?:pull|pulls|pull-requests|merge_requests)/[0-9][^\s<>"`]*' }
-command = [
-    "{python}", "{dir}/forge-review/review.py",
-    # Each --host takes: forge, web base, API base, token variable (or "-" for anonymous).
-    "--host", "github", "https://github.com", "https://api.github.com", "GITHUB_TOKEN",
-    "--host", "gitlab", "https://gitlab.com", "https://gitlab.com/api/v4", "GITLAB_TOKEN",
-    "--host", "gitea", "https://gitea.com", "https://gitea.com/api/v1", "GITEA_TOKEN",
-    "--host", "gitea", "https://codeberg.org", "https://codeberg.org/api/v1", "CODEBERG_TOKEN",
-    "--host", "bitbucket", "https://bitbucket.org", "https://api.bitbucket.org/2.0", "BITBUCKET_TOKEN",
-    # "--host", "gitlab", "https://git.example.com/team", "https://git.example.com/team/api/v4", "WORK_GITLAB_TOKEN",
-    # "--host", "bitbucket-server", "https://bitbucket.example.com", "https://bitbucket.example.com/rest/api/latest", "WORK_BITBUCKET_TOKEN",
-    # "--host", "gitea", "https://forge.example.com", "https://forge.example.com/api/v1", "WORK_FORGE_TOKEN",
-]
+command = ["{python}", "{dir}/forge-review/review.py"]
 timeout_secs = 25
 full_context = true
 on_error = "warn"
 
-[env]
-# Uncomment only the credentials you use. Keyring entries work here too.
-# GITHUB_TOKEN = { env = "GITHUB_TOKEN" }
-# GITLAB_TOKEN = { env = "GITLAB_TOKEN" }
-# GITEA_TOKEN = { env = "GITEA_TOKEN" }
-# CODEBERG_TOKEN = { env = "CODEBERG_TOKEN" }
-# BITBUCKET_TOKEN = { env = "BITBUCKET_TOKEN" }
-# BITBUCKET_TOKEN_USER = "you@example.com" # Set for Bitbucket Cloud API token Basic auth.
-# WORK_GITLAB_TOKEN = { keyring = "work-gitlab" }
-# WORK_FORGE_TOKEN = { keyring = "work-forge" }
+[[connections]]
+[connections.connection]
+id = "github"
+preset = "github"
+enabled = true
+[connections.connection.values]
+label = "GitHub"
+kind = "github"
+web_url = "https://github.com"
+api_url = "https://api.github.com"
+auth = "public"
+user = ""
+ca_bundle = ""
+proxy = ""
+timeout = "5"
+
+[[connections]]
+[connections.connection]
+id = "gitlab"
+preset = "gitlab"
+enabled = true
+[connections.connection.values]
+label = "GitLab (cloud or self-hosted)"
+kind = "gitlab"
+web_url = "https://gitlab.com"
+api_url = "https://gitlab.com/api/v4"
+auth = "public"
+user = ""
+ca_bundle = ""
+proxy = ""
+timeout = "5"
+
+[[connections]]
+[connections.connection]
+id = "gitea"
+preset = "gitea"
+enabled = true
+[connections.connection.values]
+label = "Gitea (cloud or self-hosted)"
+kind = "gitea"
+web_url = "https://gitea.com"
+api_url = "https://gitea.com/api/v1"
+auth = "public"
+user = ""
+ca_bundle = ""
+proxy = ""
+timeout = "5"
+
+[[connections]]
+[connections.connection]
+id = "forgejo"
+preset = "forgejo"
+enabled = true
+[connections.connection.values]
+label = "Forgejo (cloud or self-hosted)"
+kind = "gitea"
+web_url = "https://codeberg.org"
+api_url = "https://codeberg.org/api/v1"
+auth = "public"
+user = ""
+ca_bundle = ""
+proxy = ""
+timeout = "5"
+
+[[connections]]
+[connections.connection]
+id = "bitbucket"
+preset = "bitbucket"
+enabled = true
+[connections.connection.values]
+label = "Bitbucket Cloud"
+kind = "bitbucket"
+web_url = "https://bitbucket.org"
+api_url = "https://api.bitbucket.org/2.0"
+auth = "public"
+user = ""
+ca_bundle = ""
+proxy = ""
+timeout = "5"
+
+[setup]
+version = 1
+scope_field = "web_url"
+
+[[setup.fields]]
+id = "label"
+label = "Connection name"
+kind = "text"
+required = true
+default = "My connection"
+help = "A name you will recognize in the connection list."
+
+[[setup.fields]]
+id = "web_url"
+label = "Server URL"
+kind = "url"
+required = true
+credential_scope = true
+help = "The web address, including an installation prefix if used. Enter the server base, not a review URL."
+
+[[setup.fields]]
+id = "auth"
+label = "Authentication"
+kind = "choice"
+required = true
+default = "public"
+choices = ["public", "token", "basic"]
+help = "Use left/right to choose public access, token, or email and API token (basic)."
+
+[[setup.fields]]
+id = "token"
+label = "Access token"
+kind = "secret"
+help = "Paste your token here. It stays masked. Empty keeps the saved credential."
+[setup.fields.required_when]
+auth = ["token", "basic"]
+
+[[setup.fields]]
+id = "user"
+label = "Account email"
+kind = "text"
+help = "Required for Basic authentication, such as an Atlassian API token."
+[setup.fields.required_when]
+auth = ["basic"]
+
+[[setup.fields]]
+id = "api_url"
+label = "API base URL"
+kind = "url"
+required = true
+advanced = true
+credential_scope = true
+help = "Requests and credentials go only to this API origin. Check this address before saving."
+
+[[setup.fields]]
+id = "ca_bundle"
+label = "Extra CA certificate file"
+kind = "text"
+advanced = true
+help = "Optional PEM file added to the system trust store. A leading ~/ is supported."
+
+[[setup.fields]]
+id = "proxy"
+label = "HTTP proxy URL"
+kind = "url"
+advanced = true
+help = "Optional proxy without embedded credentials. Empty uses the inherited proxy environment."
+
+[[setup.fields]]
+id = "timeout"
+label = "Request timeout (seconds)"
+kind = "integer"
+default = "5"
+advanced = true
+help = "Timeout for each REST request. The hook also has an overall timeout."
+
+[[setup.presets]]
+id = "github"
+label = "GitHub"
+help = "Read access to the selected repository is required. Token help: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens"
+[setup.presets.values]
+kind = "github"
+web_url = "https://github.com"
+api_url = "https://api.github.com"
+auth = "public"
+[setup.presets.choices]
+auth = ["public", "token"]
+
+[[setup.presets]]
+id = "github-enterprise"
+label = "GitHub Enterprise"
+help = "Use your GitHub Enterprise web address. Authorize organization access when required."
+[setup.presets.values]
+kind = "github"
+web_url = ""
+api_url = ""
+auth = "public"
+[setup.presets.choices]
+auth = ["public", "token"]
+[setup.presets.derived]
+api_url = "{web_url}/api/v3"
+
+[[setup.presets]]
+id = "gitlab"
+label = "GitLab (cloud or self-hosted)"
+help = "Token scope: read_api. Help: https://docs.gitlab.com/user/profile/personal_access_tokens/"
+[setup.presets.values]
+kind = "gitlab"
+web_url = "https://gitlab.com"
+api_url = ""
+auth = "public"
+[setup.presets.choices]
+auth = ["public", "token"]
+[setup.presets.derived]
+api_url = "{web_url}/api/v4"
+
+[[setup.presets]]
+id = "gitea"
+label = "Gitea (cloud or self-hosted)"
+help = "Use a token with repository read access. Help: https://docs.gitea.com/development/api-usage"
+[setup.presets.values]
+kind = "gitea"
+web_url = "https://gitea.com"
+api_url = ""
+auth = "public"
+[setup.presets.choices]
+auth = ["public", "token"]
+[setup.presets.derived]
+api_url = "{web_url}/api/v1"
+
+[[setup.presets]]
+id = "forgejo"
+label = "Forgejo (cloud or self-hosted)"
+help = "Use a token with repository read access. Help: https://forgejo.org/docs/latest/user/api-usage/"
+[setup.presets.values]
+kind = "gitea"
+web_url = "https://codeberg.org"
+api_url = ""
+auth = "public"
+[setup.presets.choices]
+auth = ["public", "token"]
+[setup.presets.derived]
+api_url = "{web_url}/api/v1"
+
+[[setup.presets]]
+id = "bitbucket"
+label = "Bitbucket Cloud"
+help = "API tokens: select basic and enter your Atlassian email. Access tokens: select token. Help: https://support.atlassian.com/bitbucket-cloud/docs/using-api-tokens/"
+[setup.presets.values]
+kind = "bitbucket"
+web_url = "https://bitbucket.org"
+api_url = "https://api.bitbucket.org/2.0"
+auth = "public"
+[setup.presets.choices]
+auth = ["public", "basic", "token"]
+
+[[setup.presets]]
+id = "bitbucket-server"
+label = "Bitbucket Data Center"
+help = "Enter your self-hosted Bitbucket web address and a token with repository read access."
+[setup.presets.values]
+kind = "bitbucket-server"
+web_url = ""
+api_url = ""
+auth = "public"
+[setup.presets.choices]
+auth = ["public", "token"]
+[setup.presets.derived]
+api_url = "{web_url}/rest/api/latest"

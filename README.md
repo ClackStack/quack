@@ -148,7 +148,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 
 - **Model Context Protocol (MCP)**: Supports stdio and streamable HTTP MCP servers configured as simple TOML files.
 - **Deferred discovery**: Large tool surfaces are indexed and searched dynamically (`tool_search`), avoiding context bloat.
-- **Event hooks**: Run custom scripts on session events (`session_start`, `user_prompt`, `pre_tool`, `post_tool`, `turn_end`) configured in `hooks.d/`; `/hooks` lists them and enables the shipped examples with a keypress. Examples load linked Jira issues and GitHub, GitLab, Gitea/Forgejo or Bitbucket code reviews into context, with self-hosted setup in [defaults/hooks.d](defaults/hooks.d/README.md).
+- **Event hooks**: Run custom scripts on session events (`session_start`, `user_prompt`, `pre_tool`, `post_tool`, `turn_end`) configured in `hooks.d/`. `/hooks` configures linked Jira issues and GitHub, GitLab, Gitea/Forgejo or Bitbucket reviews, including private repositories and multiple self-hosted instances. Enter credentials in a masked field, then **Save and enable**; the next prompt uses them. [Setup and examples](defaults/hooks.d/README.md).
 - **Custom slash commands**: Place markdown prompt templates in `commands/` (e.g. `commands/git/pr.md` becomes `/git:pr`).
 - **Bundles**: Group skills, commands, MCP servers, and hooks into shareable directory bundles.
 
@@ -460,8 +460,17 @@ info  network       llm.internal.example · policy allows only llm.internal.exam
 
 ### `hooks.d/<id>.toml`
 
-A hook ships disabled (`enabled = false`); `/hooks` in the TUI turns one on: its file
-(and the folder named after it, e.g. `jira/` next to `jira.toml`) is copied into your
+A hook ships disabled (`enabled = false`). `/hooks` opens its setup form; Ctrl-S saves
+without changing its enabled state, Ctrl-E saves and enables, and Ctrl-T checks a
+sample URL against the current draft without saving or calling a model. The form
+supports masked tokens, OS credential storage with private-file fallback, external
+credential sources, multiple instances, rotation, and per-connection enable/disable.
+Changes apply after any running turn, without restarting MCP or LSP services.
+`/hooks configure <id>`, `/hooks test <id>`, `/hooks toggle <id>`, keyring commands and
+`/reload` remain available. Python 3 is required by the shipped link handlers.
+
+Enabling a shipped hook copies its file
+and the folder named after it (e.g. `jira/` next to `jira.toml`) into your
 config folder's `hooks.d/` with `enabled = true`. If the payload folder already
 exists, choose whether to keep it or replace it with the bundled folder. Enabling
 clears the hook's disabled entries in active user and project settings. Quack reloads
@@ -477,6 +486,8 @@ and confirms the hook is active. Turning a hook off lists its id in `[hooks] dis
 | `match.prompt` | `""` | Regular expression for `user_prompt` events |
 | `timeout_secs` | `10` | Maximum hook execution duration |
 | `full_context` | `false` | Preserve full stdout and added context, warning above 8,000 estimated tokens |
+| `setup` | none | Versioned, declarative TUI fields and service presets; optional for custom hooks |
+| `connections` | none | Connection settings and credential references, passed to the script on stdin with credentials in its environment; an explicit empty list disables all connections |
 | `on_error` | `"warn"` | Failure behavior: `warn`, `allow` (silent continue), or `deny` |
 
 ---

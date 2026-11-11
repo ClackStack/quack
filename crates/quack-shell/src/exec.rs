@@ -15,6 +15,24 @@ use crate::Tree;
 /// Default output kept per stream; the rest is dropped.
 const MAX_CAPTURE: usize = 1024 * 1024;
 
+/// A dropped execution future must also stop grandchildren (kill_on_drop stops only
+/// the immediate child on Unix).
+struct KillOnDrop(Option<Tree>);
+
+impl KillOnDrop {
+    fn kill(&mut self) {
+        if let Some(tree) = self.0.take() {
+            tree.kill();
+        }
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
 #[derive(Debug)]
 pub struct ExecOptions {
     pub cwd: PathBuf,
@@ -57,7 +75,7 @@ pub async fn exec(
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
     let mut child = cmd.spawn()?;
-    let tree = Tree::new(&child);
+    let mut tree = KillOnDrop(Some(Tree::new(&child)));
     // A program that never reads its input must not block the write.
     if let Some(mut stdin) = child.stdin.take() {
         let input = opts.stdin;
@@ -170,6 +188,40 @@ mod tests {
         assert!(r.timed_out);
         assert_eq!(r.exit_code, None);
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_execution_stops_grandchildren() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("quack-exec-drop-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&dir).expect("test directory");
+        let mut options = opts("", 5000);
+        options.cwd = dir.clone();
+        let task = tokio::spawn(async move {
+            exec(Path::new("/bin/sh"),&["-c".into(),"sh -c 'while test ! -f go; do sleep 0.02; done; touch done' & touch ready; wait".into()],options).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !dir.join("ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child started");
+        task.abort();
+        let _ = task.await;
+        std::fs::write(dir.join("go"), "").expect("release grandchild if alive");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let survived = dir.join("done").exists();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(
+            !survived,
+            "grandchildren must stop when the execution future is dropped"
+        );
     }
 
     /// `findstr` reads stdin and prints the lines that match; a missing file goes to stderr.

@@ -111,7 +111,7 @@ All configuration UIs share one modal widget, so they look and behave the same:
 | `/skills` | | Skill list by layer; view SKILL.md; enable/disable; invoke |
 | `/commands` | | Custom commands from each layer's `commands/` folder: name, arguments, description, file (built 2026-10-18). Typing `/<name> args` runs one |
 | `/memory` | | Memory browser: global/project tabs, view, edit, delete, open folder |
-| `/hooks` | | Hooks from `hooks.d`: event, matcher, command, layer, recent runs and durations (`Event::HookRan`); Enter toggles non-system hooks on or off via `[hooks] disabled` (built 2026-11-08) |
+| `/hooks` | `[configure\|test\|toggle <id>]` | Hook connections, masked credentials and explicit access checks. Enter opens bundle-defined setup, Ctrl-S toggles from the list; inside setup Ctrl-S saves and Ctrl-E saves and enables. Applies after the running turn without restarting other services. Custom hooks retain their direct toggle command. See [16](16-hook-setup.md). |
 | `/instructions` | | The AGENTS.md files in the system prompt, then those attached to tool results so far, each with its size and text (built 2026-10-18). Opening in an editor is still to do; `/init` generates one |
 | `/init` | | Generate AGENTS.md for this repo |
 | `/todo` | | Expand the plan line above the input into the whole checklist, and back (built 2026-10-18; above the input rather than a side pane, so it works at any width) |
