@@ -51,7 +51,18 @@ fn changes(args: &Value, ctx: &ToolCtx) -> Result<Vec<patch::Change>, String> {
         .into_iter()
         .map(|(path, before, after)| {
             let shown = paths::display(&ctx.root, &path);
-            let file = patch::load(ctx, &path, &shown)?;
+            // The rename's content is the server's, not the model's, so it needs no
+            // read first; only a file that changed mid-approval is refused.
+            if !path.exists() {
+                return Err(format!("{shown} does not exist"));
+            }
+            let file = TextFile::load(&path)?;
+            if ctx.reads.is_stale(&path) {
+                return Err(format!(
+                    "{shown} changed on disk since you last read it; read it again before \
+                     editing"
+                ));
+            }
             if file.text != before {
                 return Err(format!(
                     "{shown} changed while the rename was being approved; run it again"

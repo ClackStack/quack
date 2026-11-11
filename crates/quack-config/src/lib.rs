@@ -10,6 +10,7 @@ pub mod bundle;
 pub mod catalog;
 mod diagnostic;
 mod edit;
+pub mod enable;
 pub mod hooks;
 mod items;
 #[cfg(feature = "keyring")]
@@ -34,6 +35,7 @@ pub use bundle::{Bundle, BundleFile};
 pub use catalog::{Catalog, Catalogs};
 pub use diagnostic::FileDiagnostic;
 pub use edit::{SettingRow, set_in_file, write_atomic};
+pub use enable::{HookEnableOutcome, HookEnabled};
 pub use hooks::HookFile;
 pub use items::{Item, ItemState, glob_match, is_loopback, load_dir_items, load_items, url_host};
 pub use load::{
@@ -44,7 +46,9 @@ pub use lsp::LspServerFile;
 pub use mcp::McpServerFile;
 pub use paths::{Dirs, Env, LayerKind, find_workspace_root, user_data_dir};
 pub use provider::ProviderFile;
-pub use secret::{Secret, SecretError, expand_home, keyring_delete, keyring_parts, keyring_set};
+pub use secret::{
+    Secret, SecretError, expand_home, keyring_available, keyring_delete, keyring_parts, keyring_set,
+};
 pub use settings::Settings;
 pub use state::{last_model, save_last_model};
 pub use trust::{ProjectSummary, TrustDecision};

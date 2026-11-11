@@ -393,11 +393,15 @@ mod tests {
         )
         .expect("index");
         std::fs::write(
-            m.project.join("notes/c.md"),
+            m.project.join("notes").join("c.md"),
             "---\nname: c\ndescription: Note c\ntype: project\n---\n\nC.\n",
         )
         .expect("note");
-        std::fs::write(m.project.join("notes/a.sync-conflict-20261025.md"), "x").expect("copy");
+        std::fs::write(
+            m.project.join("notes").join("a.sync-conflict-20261025.md"),
+            "x",
+        )
+        .expect("copy");
 
         assert_eq!(
             m.index_text(),

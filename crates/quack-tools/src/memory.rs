@@ -371,7 +371,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let c = ctx(tmp.path());
         std::fs::create_dir_all(tmp.path().join("src")).expect("mkdir");
-        std::fs::write(tmp.path().join("src/main.rs"), "").expect("write");
+        std::fs::write(tmp.path().join("src").join("main.rs"), "").expect("write");
         let body = "Entry is `src/main.rs:3`; config in `src/old.rs` and `./conf/x.toml`. \
                     Not paths: `foo.bar()`, `a b/c`, `https://x/y`, `--out/x`.";
         run(

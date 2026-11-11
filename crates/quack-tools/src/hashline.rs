@@ -799,16 +799,6 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, Refused> {
     let numbering_text = numbering
         .as_ref()
         .map_or(file.text.clone(), |v| v.text.to_string());
-    // The ranges the model wrote out itself. (`block` edits resolve their own, which
-    // need no check: the model was shown the anchor line, and the construct is the
-    // code's, not the model's counting.)
-    let written: Vec<(usize, usize)> = specs
-        .iter()
-        .filter_map(|s| match s {
-            Spec::Replace { start, end, .. } => Some((*start, *end)),
-            _ => None,
-        })
-        .collect();
 
     // `block` edits become the lines of the construct around their anchor, numbered
     // against the same version as the numbers the model sent.
@@ -881,6 +871,16 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, Refused> {
             }
         };
     }
+
+    // The ranges the model wrote out itself, plus the constructs `block` resolved to:
+    // every range an edit replaces is checked against what outputs showed.
+    let written: Vec<(usize, usize)> = specs
+        .iter()
+        .filter_map(|s| match s {
+            Spec::Replace { start, end, .. } => Some((*start, *end)),
+            _ => None,
+        })
+        .collect();
 
     let ops_for = |len: usize| -> Result<Vec<Op>, String> {
         specs.iter().map(|s| to_op(s, len, &shown)).collect()

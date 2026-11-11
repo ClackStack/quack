@@ -5,13 +5,21 @@ source = "Original prompt text (quack project, Apache-2.0). Only the tool names 
 # Measured once (2026-10-21, openrouter/mistralai/mistral-large-4-0, hard suite,
 # single pass): 14/14 like `generic`, but 172 vs 236 steps, $0.94 vs $1.70, parse
 # failures 0 vs 12, edit failures 1 vs 23; eval-compare calls steps, cost and prompt
-# tokens clearly lower. [match] stays empty until --repeat 3 confirms it (about $8
-# at 2026-10-21 prices). Proposed:
-#   model = ["*mistral-large-4*", "*mistral-codestral*"]
-#   priority = 50
-# Use it now with `profile = "vibe"` on a model.
+# tokens clearly lower. Enabled 2026-11-09 on that single pass, because the names
+# still match today's mistralai/mistral-vibe builtins and quack's tools already
+# accept the argument spellings it uses (`file_path`, `todos` items with extra
+# fields). The `--repeat 3` confirmation is still owed (about $8 at 2026-10-21
+# prices); until then treat it as promising, not proven.
+# `mistral-medium-2604` is the direct-API alias of the current medium generation.
 [match]
-model = []
+model = [
+    "*mistral-large-4*",
+    "*mistral-medium-3*",
+    "*mistral-medium-2604*",
+    "*codestral*",
+    "*devstral*",
+]
+priority = 50
 
 [defaults]
 edit_format = "str_replace"

@@ -436,6 +436,11 @@ impl Prompt {
         }
     }
 
+    /// What happens to a saved key where no Secret Service is running.
+    const KEY_STORE_HELP: &str = "Without a Secret Service (headless Linux, WSL, a server), \
+         the key is kept in a file only your user can read instead, and the provider file \
+         points at it.";
+
     fn server_key(url: String) -> Self {
         Self {
             title: "Add a server · 2 of 2".into(),
@@ -444,7 +449,8 @@ impl Prompt {
                 format!(
                     "The key for {url}, if it needs one. Leave it empty for a server on your own network that takes none."
                 ),
-                "It goes to the OS credential store, never into a file.".into(),
+                "It goes to the OS credential store, not into the provider file.".into(),
+                Self::KEY_STORE_HELP.into(),
             ],
             secret: true,
             text: String::new(),
@@ -476,6 +482,7 @@ impl Prompt {
                 "To keep using {var}, press esc, change it in your shell and start quack again."
             ));
         }
+        help.push(Self::KEY_STORE_HELP.into());
         help.push("This session sends the new key from its next request.".into());
         Self {
             title: format!("New {id} key"),
@@ -499,6 +506,7 @@ impl Prompt {
                 "To use the {env} environment variable instead, press esc, set it in your shell and start quack again."
             ));
         }
+        help.push(Self::KEY_STORE_HELP.into());
         Self {
             title: format!("{name} API key"),
             label: "API key".into(),
@@ -986,6 +994,12 @@ impl App {
                 self.startup_frame = self.frame;
                 self.trust = None;
                 self.note("config reloaded".into());
+                if self.modal.as_ref().is_some_and(|m| m.title == "Hooks") {
+                    self.modal = Some(
+                        modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme)
+                            .keep_place(self.modal.as_ref()),
+                    );
+                }
             }
             Event::ProjectTrust {
                 path,
@@ -1134,23 +1148,30 @@ impl App {
                 self.setup.services = Some(services);
                 self.refresh_setup();
             }
-            Event::ProviderAdded { id, path } if self.rekeying => {
+            Event::ProviderAdded {
+                id, path, note, ..
+            } if self.rekeying => {
                 self.rekeying = false;
-                self.note(match path {
-                    Some(path) => format!(
+                self.note(match (note, path) {
+                    (Some(note), _) => format!("stored the new {id} key · {note}"),
+                    (None, Some(path)) => format!(
                         "stored the new {id} key in the OS credential store; {path} now reads \
                          it from there"
                     ),
-                    None => format!("replaced the {id} key"),
+                    (None, None) => format!("replaced the {id} key"),
                 });
             }
-            Event::ProviderAdded { id, path } if self.setup_adding => {
+            Event::ProviderAdded { id, path, note, .. } if self.setup_adding => {
                 // Its models follow; the user picks one.
                 self.setup_adding = false;
-                self.note(match path {
+                let mut said = match path {
                     Some(path) => format!("added provider {id} ({path}); pick a model"),
                     None => format!("using the existing provider {id}; pick a model"),
-                });
+                };
+                if let Some(note) = note {
+                    said.push_str(&format!(" · {note}"));
+                }
+                self.note(said);
                 self.prompt = None;
                 self.modal = Some(modal::models(
                     None,
@@ -1159,7 +1180,7 @@ impl App {
                     &self.theme,
                 ));
             }
-            Event::ProviderAdded { id, path } => self.note(match path {
+            Event::ProviderAdded { id, path, .. } => self.note(match path {
                 Some(path) => format!("added provider {id} ({path}); switching…"),
                 None => format!("using the existing provider {id}; switching…"),
             }),
@@ -1199,6 +1220,17 @@ impl App {
                 path,
                 note,
             } => self.on_setting_saved(&key, &value, &path, note),
+            Event::HookPayloadChoice { id, path } => {
+                self.modal = Some(modal::hook_payload(&id, &path, &self.theme));
+            }
+            Event::HookEnabled { id, path, note } => {
+                let mut text = format!("hook `{id}` enabled ({path})");
+                if let Some(n) = note {
+                    text.push_str(": ");
+                    text.push_str(&n);
+                }
+                self.note(text);
+            }
             Event::SessionResumed { session, items } => {
                 if std::mem::take(&mut self.resuming) {
                     self.transcript.clear();
@@ -2701,6 +2733,16 @@ impl App {
             "hooks" if args.is_empty() => {
                 self.modal = Some(modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme));
             }
+            "hooks"
+                if args.starts_with("keep-payload ") || args.starts_with("replace-payload ") =>
+            {
+                if let Some((choice, id)) = args.split_once(' ') {
+                    self.ops.push(Op::EnableHook {
+                        id: id.to_owned(),
+                        replace_payload: Some(choice == "replace-payload"),
+                    });
+                }
+            }
             "hooks" => match args.strip_prefix("toggle ").map(str::trim) {
                 Some(id)
                     if self
@@ -2709,29 +2751,38 @@ impl App {
                         .iter()
                         .any(|h| h.id == id && h.layer != quack_config::LayerKind::System) =>
                 {
-                    let mut disabled = self.info.hooks_disabled.clone();
-                    let off = !disabled.iter().any(|d| d == id);
-                    if off {
-                        disabled.push(id.to_owned());
-                    } else {
-                        disabled.retain(|d| d != id);
-                    }
-                    let list = disabled
+                    // On means the engine enables the hook wherever it is disabled: it
+                    // copies one shipped with `enabled = false` into the user layer, and
+                    // drops the id from `[hooks] disabled`.
+                    let on = self
+                        .info
+                        .hooks
                         .iter()
-                        .map(|d| toml_string(d))
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                        .find(|h| h.id == id)
+                        .is_some_and(|h| h.loaded().is_some_and(|f| f.enabled))
+                        && !self.info.hooks_disabled.iter().any(|d| d == id);
                     self.modal = None;
-                    self.ops.push(Op::SaveSetting {
-                        key: "hooks.disabled".into(),
-                        value: format!("[{list}]"),
-                        scope: WriteScope::User,
-                    });
-                    self.ops.push(Op::ReloadConfig);
-                    self.note(format!(
-                        "hook `{id}` turned {}; reloading",
-                        if off { "off" } else { "on" }
-                    ));
+                    if on {
+                        let mut disabled = self.info.hooks_disabled.clone();
+                        disabled.push(id.to_owned());
+                        let list = disabled
+                            .iter()
+                            .map(|d| toml_string(d))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        self.ops.push(Op::SaveSetting {
+                            key: "hooks.disabled".into(),
+                            value: format!("[{list}]"),
+                            scope: WriteScope::User,
+                        });
+                        self.ops.push(Op::ReloadConfig);
+                        self.note(format!("hook `{id}` turned off; reloading"));
+                    } else {
+                        self.ops.push(Op::EnableHook {
+                            id: id.to_owned(),
+                            replace_payload: None,
+                        });
+                    }
                 }
                 _ => self.note("usage: /hooks, or /hooks toggle <name>".into()),
             },
@@ -3599,6 +3650,26 @@ mod tests {
     }
 
     #[test]
+    fn session_alias_resumes_or_lists() {
+        let mut app = App::new(info());
+        type_str(&mut app, "/session");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![Op::ListSessions]);
+        assert!(app.modal.is_some());
+
+        let mut app = App::new(info());
+        type_str(&mut app, "/session s-123");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::ResumeSession {
+                id: SessionId("s-123".into())
+            }]
+        );
+        assert!(app.resuming);
+    }
+
+    #[test]
     fn config_set_saves_to_user_layer_and_applies_ui_live() {
         let mut app = App::new(info());
         type_str(&mut app, "/config set ui.ascii true");
@@ -3746,5 +3817,88 @@ mod tests {
         type_str(&mut app, "/hooks");
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.modal.as_ref().map(|m| m.title.as_str()), Some("Hooks"));
+    }
+
+    #[test]
+    fn hook_payload_choice_can_keep_replace_or_cancel() {
+        for (key, replace_payload) in [
+            (KeyCode::Enter, Some(false)),
+            (KeyCode::Down, Some(true)),
+            (KeyCode::Esc, None),
+        ] {
+            let mut app = App::new(info());
+            app.on_engine(Event::HookPayloadChoice {
+                id: "jira".into(),
+                path: "user/hooks.d/jira".into(),
+            });
+            press(&mut app, key);
+            if key == KeyCode::Down {
+                press(&mut app, KeyCode::Enter);
+            }
+            let expected = replace_payload.map(|replace| Op::EnableHook {
+                id: "jira".into(),
+                replace_payload: Some(replace),
+            });
+            assert_eq!(app.take_ops(), expected.into_iter().collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn toggling_a_hook_off_lists_it_and_on_goes_through_the_engine() {
+        let hook = |enabled: bool| quack_config::Item {
+            id: "jira".into(),
+            path: "/tmp/defaults/hooks.d/jira.toml".into(),
+            layer: quack_config::LayerKind::Defaults,
+            state: if enabled {
+                quack_config::ItemState::Loaded(quack_config::hooks::HookFile {
+                    id: None,
+                    enabled: true,
+                    description: String::new(),
+                    event: quack_config::hooks::HookEvent::UserPrompt,
+                    matcher: Default::default(),
+                    command: vec!["x".into()],
+                    env: Default::default(),
+                    inherit_env: None,
+                    cwd: String::new(),
+                    timeout_secs: 10,
+                    on_error: Default::default(),
+                })
+            } else {
+                quack_config::ItemState::Disabled("enabled = false".into())
+            },
+        };
+
+        // Shipped with `enabled = false`: the engine enables it, it does not merely
+        // rewrite `[hooks] disabled`.
+        let mut i = info();
+        i.hooks = vec![hook(false)];
+        let mut app = App::new(i);
+        type_str(&mut app, "/hooks toggle jira");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::EnableHook {
+                id: "jira".into(),
+                replace_payload: None
+            }]
+        );
+
+        // An enabled hook is turned off by listing it.
+        let mut i = info();
+        i.hooks = vec![hook(true)];
+        let mut app = App::new(i);
+        type_str(&mut app, "/hooks toggle jira");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![
+                Op::SaveSetting {
+                    key: "hooks.disabled".into(),
+                    value: "[\"jira\"]".into(),
+                    scope: WriteScope::User,
+                },
+                Op::ReloadConfig,
+            ]
+        );
     }
 }

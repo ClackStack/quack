@@ -99,7 +99,7 @@ impl Tool for Shell {
     }
 
     fn summary(&self, args: &Value, _ctx: &ToolCtx) -> String {
-        format!("$ {}", arg_str(args, CMD).unwrap_or_default().trim())
+        format!("shell {}", arg_str(args, CMD).unwrap_or_default().trim())
     }
 
     fn preview(&self, args: &Value, ctx: &ToolCtx) -> Result<ApprovalRequest, String> {

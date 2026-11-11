@@ -261,7 +261,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cp = Checkpoints::open(tmp.path().join("cp"));
         let a = tmp.path().join("a.txt");
-        let b = tmp.path().join("new/b.txt");
+        let b = tmp.path().join("new").join("b.txt");
         std::fs::write(&a, b"one\r\n").expect("write");
 
         let s = cp.before(1, "c1", &a).expect("before");

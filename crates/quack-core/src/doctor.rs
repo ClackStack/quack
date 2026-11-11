@@ -206,14 +206,13 @@ fn local(config: &Loaded) -> Vec<DoctorCheck> {
         )
     });
     if cfg!(not(any(windows, target_os = "macos"))) {
-        out.push(if runs(Path::new("secret-tool"), &["--version"]) {
-            check("keyring", CheckStatus::Ok, "secret-tool found")
-        } else {
-            check(
+        out.push(match quack_config::keyring_available() {
+            Ok(()) => check("keyring", CheckStatus::Ok, "Secret Service reachable"),
+            Err(reason) => check(
                 "keyring",
                 CheckStatus::Info,
-                "secret-tool not found; `keyring` secrets need libsecret-tools (Debian/Ubuntu) or libsecret",
-            )
+                format!("{reason}; `env`, `file` or `cmd` secrets work without it"),
+            ),
         });
     }
 

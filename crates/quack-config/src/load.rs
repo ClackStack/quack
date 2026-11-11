@@ -563,8 +563,12 @@ mod tests {
             }
         }
 
+        fn path(&self, rel: &str) -> PathBuf {
+            rel.split('/').fold(self.root.clone(), |p, seg| p.join(seg))
+        }
+
         fn write(&self, rel: &str, text: &str) {
-            let path = self.root.join(rel);
+            let path = self.path(rel);
             std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
             std::fs::write(path, text).expect("write");
         }
@@ -611,7 +615,7 @@ mod tests {
             "[model]\ndefault = \"p/project\"",
         );
         assert_eq!(f.load(|_| {}).remembered_model(), None);
-        std::fs::remove_file(f.root.join("repo/.quack/config.toml")).expect("rm");
+        std::fs::remove_file(f.path("repo/.quack/config.toml")).expect("rm");
 
         // Turned off, or locked by policy.
         f.write(

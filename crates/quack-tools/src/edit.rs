@@ -44,11 +44,7 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, String> {
         return Err(format!("{shown} does not exist"));
     }
     let file = TextFile::load(&path)?;
-    if ctx.reads.is_stale(&path) {
-        return Err(format!(
-            "{shown} changed on disk since you last read it; read it again before editing"
-        ));
-    }
+    ctx.reads.editable(&path, &shown)?;
     if old == new {
         return Err("old_string and new_string are identical; nothing to change".into());
     }
@@ -348,7 +344,7 @@ impl Tool for StrReplace {
     fn description(&self, _ctx: &ToolCtx) -> String {
         "Replace text in a file. `old_string` must match the file exactly (including indentation) \
          and be unique unless `replace_all` is true; include a few surrounding lines to make it \
-         unique. Read the file first."
+         unique. Read the file first; a file that was never read refuses the edit."
             .into()
     }
 

@@ -62,12 +62,17 @@ async fn edit_reports_diagnostics(sandbox: bool) {
         .mount(&server)
         .await;
     Mock::given(method("POST"))
-        .and(body_string_contains("break it"))
+        .and(body_string_contains("\"role\":\"tool\""))
         .respond_with(sse_call(
             "c1",
             "edit",
             serde_json::json!({"path": "a.fx", "old_string": "fn main() {}", "new_string": "fn main() { ERROR }"}),
         ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse_call("c0", "read", serde_json::json!({"path": "a.fx"})))
         .up_to_n_times(1)
         .mount(&server)
         .await;

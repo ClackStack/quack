@@ -2685,6 +2685,7 @@ mod tests {
         app.on_engine(Event::ProviderAdded {
             id: "gpu-box".into(),
             path: Some("providers.d/gpu-box.toml".into()),
+            note: None,
         });
         assert_eq!(app.modal.as_ref().map(|m| m.title.as_str()), Some("Models"));
         assert!(app.prompt.is_none());
@@ -2745,6 +2746,7 @@ mod tests {
         app.on_engine(Event::ProviderAdded {
             id: "example".into(),
             path: None,
+            note: None,
         });
         assert!(app.modal.is_none());
         assert!(render(&app, 100, 30).contains("replaced the example key"));

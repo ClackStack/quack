@@ -179,7 +179,8 @@ impl Tool for EditBlocks {
          own line, then:\n<<<<<<< SEARCH\n(the exact lines to find)\n=======\n(the lines to put \
          there)\n>>>>>>> REPLACE\nThe SEARCH lines must match the file exactly and only once; \
          include enough lines to be unique. An empty SEARCH creates a new file. Several blocks \
-         and files can go in one call."
+         and files can go in one call. Read a file before changing it; an unread file refuses \
+         the change."
             .into()
     }
 

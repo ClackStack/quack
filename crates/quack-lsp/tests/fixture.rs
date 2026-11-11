@@ -149,7 +149,7 @@ async fn real_rust_analyzer() {
     )
     .expect("write");
     std::fs::create_dir(root.join("src")).expect("mkdir");
-    let main = root.join("src/main.rs");
+    let main = root.join("src").join("main.rs");
     std::fs::write(
         &main,
         "fn add(a: u32) -> u32 { a }\nfn main() { add(1); }\n",

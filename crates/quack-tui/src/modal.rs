@@ -2180,6 +2180,32 @@ pub(crate) fn theme(current: &str, theme: &Theme) -> Modal {
 }
 
 /// The `/hooks` modal: configured hooks from `hooks.d` and their recent runs.
+pub(crate) fn hook_payload(id: &str, path: &str, theme: &Theme) -> Modal {
+    let items = [
+        ("Keep existing folder", "keep-payload"),
+        ("Replace with bundled folder", "replace-payload"),
+    ]
+    .into_iter()
+    .map(|(label, action)| {
+        let mut item = placeholder(
+            label,
+            &format!("An existing payload for `{id}` was found at {path}."),
+            theme,
+        );
+        item.action = Some(format!("/hooks {action} {id}"));
+        item.run = true;
+        item
+    })
+    .collect();
+    Modal::new(
+        "Hook payload",
+        vec![ModalTab {
+            title: "Hook payload".into(),
+            items,
+        }],
+    )
+}
+
 pub(crate) fn hooks(
     hooks: &[quack_config::Item<quack_config::HookFile>],
     runs: &[crate::app::HookRun],
@@ -2234,7 +2260,7 @@ pub(crate) fn hooks(
                         detail.push(field(theme, "state", "disabled in file".into()));
                         detail.push(field(theme, "event", f.event.label().into()));
                         detail.push(field(theme, "command", f.command.join(" ")));
-                        ("off".into(), false, false)
+                        ("off".into(), h.layer != LayerKind::System, false)
                     }
                     ItemState::Disabled(why) => {
                         detail.push(Line::styled(h.id.clone(), theme.dim));
@@ -2247,6 +2273,24 @@ pub(crate) fn hooks(
                         detail.push(Line::raw(""));
                         detail.push(Line::styled(d.one_line(), theme.error));
                         ("failed".into(), false, false)
+                    }
+                };
+                let action = if !can_toggle {
+                    String::new()
+                } else if enabled {
+                    "⏎ turn it off (saved to [hooks] disabled in your config.toml)".into()
+                } else {
+                    match &h.state {
+                        ItemState::Disabled(why) if why.starts_with("disabled by ") => {
+                            "⏎ enable it (removes that override)".into()
+                        }
+                        ItemState::Disabled(why) if why == "listed in `disabled`" => {
+                            "⏎ enable it and clear its disabled setting".into()
+                        }
+                        _ if h.layer == LayerKind::Defaults => {
+                            "⏎ enable it (copied into your config folder)".into()
+                        }
+                        _ => "⏎ enable it (sets `enabled = true` in its file)".into(),
                     }
                 };
                 detail.push(field(theme, "layer", h.layer.label().into()));
@@ -2269,13 +2313,7 @@ pub(crate) fn hooks(
                 }
                 if can_toggle {
                     detail.push(Line::raw(""));
-                    detail.push(Line::styled(
-                        format!(
-                            "⏎ turn it {} (saved to [hooks] disabled in your config.toml)",
-                            if enabled { "off" } else { "on" }
-                        ),
-                        theme.dim,
-                    ));
+                    detail.push(Line::styled(action, theme.dim));
                 } else if h.layer == LayerKind::System {
                     detail.push(Line::raw(""));
                     detail.push(Line::styled("Enforced by the system layer.", theme.dim));
@@ -2885,6 +2923,11 @@ pub(crate) fn setup(view: &SetupView, theme: &Theme) -> Modal {
                          and the provider file in your config folder only names it",
                         theme.dim,
                     ));
+                    detail.push(Line::styled(
+                        "Without a Secret Service (WSL, a server) it is kept in a file only \
+                         your user can read instead.",
+                        theme.dim,
+                    ));
                     if let Some(env) = &s.env {
                         detail.push(Line::raw(""));
                         detail.push(Line::styled(
@@ -2921,7 +2964,8 @@ pub(crate) fn setup(view: &SetupView, theme: &Theme) -> Modal {
                 Line::raw(""),
                 Line::styled(
                     "The key goes to the OS credential store; the provider file written to \
-                     your config folder only names it.",
+                     your config folder only names it. Without a Secret Service (WSL, a \
+                     server) it is kept in a file only your user can read instead.",
                     theme.dim,
                 ),
                 Line::raw(""),

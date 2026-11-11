@@ -56,7 +56,7 @@ Rules:
 - `quack --resume <id>` resumes by id or unique prefix; `quack sessions` lists them. `/resume` opens the picker (title, age, turns, model, first message preview, fuzzy search).
 - `/fork` starts a new session that branches from the current point. Its `session_start` records `parent` + event index.
 - `/rewind` picks a previous user message. The conversation is truncated to before it (by appending a `rewind` event; nothing is deleted), and the user is optionally offered to **restore files** to the matching checkpoint.
-- `/title <text>`. Automatic titles come from the `small` model after the first turn, if one is configured. Otherwise the title is the truncated first message, with no extra model call.
+- `/title <text>`. Automatic titles come from the `small` model in the background when the first turn starts, if one is configured. The truncated first line is shown immediately and stays if generation fails. Generated titles are saved for the terminal window title and resume picker. A manual title takes precedence.
 - `/export [md|json]` writes a readable transcript.
 - `quack sessions prune --older-than 30d` cleans up. `[sessions] retention_days` does the same automatically.
 
@@ -64,7 +64,7 @@ As implemented (2026-10-25):
 
 - `/fork` (`Op::ForkSession`) waits for a running turn to finish. It copies the session's records, keeping their times, into a new session whose `session_start` adds `parent` (the original id) and `at` (how many records were copied). It also copies the `checkpoints/` folder, so `/undo` and `/rewind` still restore files changed before the fork. The engine then writes to the new log under a new id, with the title marked `(fork)`. The conversation on screen and in the model's history doesn't change, and the original stays resumable as it was. To fork from an earlier point, `/fork` and then `/rewind`.
 - `/export [md|json] [path]` (`Op::Export`) rebuilds the transcript from the log as resume does, so rewound turns are left out, and writes it in the session's folder. The default name is made from the title (`quack-<title-slug>-<id8>.md`). Markdown has `## You` / `## quack` sections, each tool call as a `<details>` block with its result fenced, and a line where history was compacted. JSON holds the id, title, model, start date and the `ReplayItem`s.
-- Not built yet: automatic titles from the `small` model (the first message is the title, with no model call), `/fork --worktree`, and `quack sessions prune`.
+- Not built yet: `/fork --worktree`, and `quack sessions prune`.
 
 ### Parallel sessions in worktrees
 

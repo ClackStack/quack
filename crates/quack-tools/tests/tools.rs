@@ -75,7 +75,7 @@ async fn write_read_edit_search() {
     .await;
     assert!(e.ok, "{e:?}");
     assert!(
-        std::fs::read_to_string(dir.path().join("src/lib.rs"))
+        std::fs::read_to_string(dir.path().join("src").join("lib.rs"))
             .expect("read")
             .contains("fn c()")
     );
@@ -83,7 +83,7 @@ async fn write_read_edit_search() {
     // Changed behind the model's back: the next edit is refused until it reads again.
     std::thread::sleep(Duration::from_millis(20));
     std::fs::write(
-        dir.path().join("src/lib.rs"),
+        dir.path().join("src").join("lib.rs"),
         "fn a() {}\nfn c() {}\n// external\n",
     )
     .expect("write");

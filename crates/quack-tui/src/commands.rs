@@ -70,7 +70,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     ),
     c(
         "resume",
-        &["sessions"],
+        &["sessions", "session"],
         "[id]",
         "Browse and resume past sessions; with an id, resume directly",
         None,

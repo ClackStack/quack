@@ -166,6 +166,25 @@ impl ReadTracker {
         }
     }
 
+    /// Refuse a blind change: `Err` when the file was never read (or written) in this
+    /// session, or changed on disk since it was. Lock failures fail open, like `is_stale`.
+    pub fn editable(&self, path: &Path, shown: &str) -> Result<(), String> {
+        let Ok(seen) = self.seen.lock() else {
+            return Ok(());
+        };
+        match seen.get(path) {
+            None => Err(format!(
+                "{shown} has not been read yet; read it before editing it"
+            )),
+            Some(recorded) if Self::stamp(path).is_some_and(|now| now != *recorded) => {
+                Err(format!(
+                    "{shown} changed on disk since you last read it; read it again before editing"
+                ))
+            }
+            Some(_) => Ok(()),
+        }
+    }
+
     /// Note that the model was shown `lines` of `text` (the file's whole, LF-normalized
     /// content) under `tag`. Showing a version again makes it the newest.
     pub fn saw(&self, path: &Path, tag: &str, text: &str, lines: (usize, usize)) {

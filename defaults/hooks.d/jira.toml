@@ -4,9 +4,11 @@
 # over Jira's REST API (Server, Data Center or Cloud) and returns it as XML. It needs
 # Python 3 and nothing else.
 #
-# To use it, copy this file and the jira/ folder to hooks.d in your config folder
-# (`quack config paths` shows where; an administrator can use the system folder, where
-# users cannot turn it off). Then delete the `enabled = false` line and set JIRA_URL.
+# To use it, run `/hooks` in quack and press ⏎ on the jira hook: it is copied into
+# hooks.d in your config folder (`quack config paths` shows where; an administrator can
+# use the system folder, where users cannot turn it off) and enabled, with jira/ copied
+# with it. Copying the file and the jira/ folder by hand works the same. Then set
+# JIRA_URL below, in your copy.
 # `/doctor` checks the hook without running it.
 enabled = false
 description = "Jira issues linked in the prompt"

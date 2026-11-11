@@ -504,7 +504,6 @@ pub fn check_workspace(
 /// The internal tool behind a call, from the transcript summary's first word.
 fn internal_tool(summary: &str) -> String {
     match summary.split_whitespace().next().unwrap_or_default() {
-        "$" => "shell".into(),
         "patch" => "apply_patch".into(),
         "list" => "list_dir".into(),
         "ask" => "ask_user".into(),
