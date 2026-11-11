@@ -161,6 +161,17 @@ Optional support for Claude and GPT, as data like every other provider ([02](02-
 - Adapters: Claude effort (`output_config.effort`), a third cache breakpoint, cache-write usage and `cost.cache_write`; Responses `prompt_cache_key`, `phase`, cache writes, and the ChatGPT plan route (tools in a namespace, no sampling or output cap). Provider files gained `extra_body` and `[auth]`.
 - Tested against mock servers only (the browser sign-in end to end with a signed ID token, renewal, revocation; replay and filtering of sealed replies). Not yet run live; no family profile turned on for these models.
 
+## Subscription setup (2026-11-10)
+
+- `/setup` and `quack setup` now list subscription providers alongside API-key services.
+  The ChatGPT plan signs in through the browser and continues to model selection; saved
+  credentials need refresh tokens and plan consent before setup shows them as ready.
+- The TUI offers URL copying, cancellation with Escape or Ctrl-C, retry after an error,
+  and reauthentication from the hosted-service row. Authentication uses the existing issuer
+  flow and private credential files, with no provider ids or hosts compiled in.
+- Validation uses mock OAuth issuers, local callbacks, credential-state checks and setup
+  interaction tests. No live sign-ins or model calls were made.
+
 ## M3 — Ecosystem: "it plugs into everything, safely"
 
 - MCP via rmcp, targeting spec 2026-07-28 with fallback to older revisions: stdio + streamable HTTP, `mcp.d`, deferred tools + `tool_search`, prompts as commands, resources, sampling (gated), elicitation, `/mcp`
@@ -183,6 +194,12 @@ Optional support for Claude and GPT, as data like every other provider ([02](02-
 Landed early (2026-10-18): the project trust flow (Trust modal, `/trust`, `quack trust`, fingerprinted decisions; [01](01-configuration.md#as-implemented-2026-10-18)), and `/reload` keeping the conversation (folder watching is still to do; [01](01-configuration.md#hot-reload)). `/undo` and `/rewind` from edit pre-images ([07](07-sessions-memory-checkpoints.md#as-implemented-2026-10-18-ahead-of-m3)). Skills discovery, the `skill` tool, `{{ skills }}`, `/<skill>` and `/skills` ([08](08-instructions-skills-commands.md#as-implemented-2026-10-18-ahead-of-m3)). Still to do for skills: other harnesses' folders through the detection prompt. Hooks (2026-10-19): `hooks.d` with all seven events, `match` on tools, targets and prompts, secrets in `env`, enforced system-layer hooks, `on_error`, a `/doctor` row and the `jira` example ([11](11-security.md#as-implemented-2026-10-19-ahead-of-m3)). Enabling a shipped hook (2026-11-09): `/hooks` ⏎ copies a hook shipped `enabled = false` into the user layer with the flag flipped (payload folder with it, shipped copy untouched), fixes hooks disabled in their own file, and clears `[hooks] disabled`; before this the toggle only rewrote that list, so the shipped jira hook stayed off ([11](11-security.md#enabling-2026-11-09)).
 
 On 2026-11-10, `/hooks` gained a keep-or-replace prompt for existing payloads and verifies activation after reloading all active config layers.
+
+Also on 2026-11-10, the disabled `forge-review` hook adds REST metadata and unified diffs for linked GitHub, GitLab, Gitea/Forgejo and Bitbucket Cloud/Data Center reviews, with per-instance credentials and explicit self-hosted web/API bases. Mock API/model tests cover all forge adapters, with script regressions for authentication, redirects and fetch limits ([11](11-security.md#linked-code-reviews-2026-11-10)).
+
+Review diffs are retained in full, with a size warning above 9,000 bytes. The hook's `full_context = true` setting preserves stdout and context beyond the default capture and token limits, warning above 8,000 estimated tokens. A mock regression verifies that a diff larger than 1 MiB reaches the model with its final lines intact.
+
+Planned on 2026-11-10, [TUI hook setup](16-hook-setup.md) adds service configuration, masked credential entry, multiple self-hosted connections, immediate activation and explicit access checks through `/hooks`, preserving existing commands and file-based configuration. Private GitHub PR setup and Jira setup are acceptance criteria.
 
 **Exit criteria**
 - [ ] GitHub MCP server works on Windows via `npx` (`.cmd` resolution) and on Linux/macOS
@@ -280,3 +297,5 @@ Milestones: G1 desktop MVP (Welcome/recent folders, login-shell `PATH` & `.app` 
 - Windows checklist items from each doc
 - Fixtures for every new model or server quirk discovered
 - Docs updated with each feature (user docs live in `docs/`, separate from `docs/plan/`)
+
+- 2026-11-10: Refreshed `/config` Layers with status hints, spaced panes and more room for wrapped paths. Enter copies the full selected path through OSC 52 while keeping the modal open.

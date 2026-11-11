@@ -174,6 +174,8 @@ pub struct Engine {
     /// Where MCP servers' forms and sampling requests arrive, and how many have.
     asks: mpsc::Sender<ServerAsk>,
     asked: u64,
+    /// The pending browser sign-in, aborted on cancel, replacement or shutdown.
+    sign_in: Option<JoinHandle<()>>,
 }
 
 impl Engine {
@@ -226,6 +228,7 @@ impl Engine {
             agent_runs: Arc::default(),
             asks,
             asked: 0,
+            sign_in: None,
             mcp: crate::mcp::Mcp::new(McpManager::new(
                 Vec::new(),
                 PathBuf::new(),
@@ -334,6 +337,10 @@ impl Engine {
         }
         if let Some((_, cancel)) = self.running.take() {
             cancel.cancel();
+        }
+        if let Some(task) = self.sign_in.take() {
+            task.abort();
+            let _ = task.await;
         }
         startup.abort();
         if let Some(end) = self.session_hooks(HookEvent::SessionEnd, "quit") {
@@ -1679,6 +1686,35 @@ impl Engine {
                 api,
                 model,
             } => self.add_provider(&id, &base_url, api.as_deref(), model),
+            Op::SignIn { id } => {
+                if let Some(task) = self.sign_in.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
+                if let Some(id) = id {
+                    let config = self.config.clone();
+                    let tx = self.tx.clone();
+                    self.sign_in = Some(tokio::spawn(async move {
+                        let result = match crate::setup::sign_in_provider(&config, &id) {
+                            Ok(provider) => {
+                                provider
+                                    .sign_in(|url| {
+                                        let _ = tx.send(Event::SignInUrl {
+                                            id: id.clone(),
+                                            url: url.to_owned(),
+                                        });
+                                    })
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        };
+                        let _ = tx.send(Event::SignInResult {
+                            id,
+                            error: result.err(),
+                        });
+                    }));
+                }
+            }
             Op::ListServices => {
                 let config = self.config.clone();
                 let tx = self.tx.clone();
@@ -2491,6 +2527,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::RestartMcp { .. } => "restart_mcp",
         Op::AddProvider { .. } => "add_provider",
         Op::ListServices => "list_services",
+        Op::SignIn { .. } => "sign_in",
         Op::SetProviderKey { .. } => "set_provider_key",
         Op::AddServer { .. } => "add_server",
         Op::SetPermissionMode { .. } => "set_permission_mode",

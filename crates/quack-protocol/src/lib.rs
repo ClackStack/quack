@@ -118,9 +118,13 @@ pub enum Op {
         api: Option<String>,
         model: String,
     },
-    /// Ask for the hosted services in `providers.d` that take a key; answered with
+    /// Ask for the hosted services in `providers.d` using API keys or subscriptions; answered with
     /// `Event::Services`.
     ListServices,
+    /// Start a subscription sign-in, or cancel the pending sign-in with `id = None`.
+    SignIn {
+        id: Option<String>,
+    },
     /// Store a provider's API key: in the OS credential store when it is reachable,
     /// otherwise in a key file only this user can read. When its key is already read from
     /// the store, the entry is replaced and the provider file left alone
@@ -386,6 +390,15 @@ pub enum Event {
     /// The hosted services setup offers, grouped as they should be listed.
     Services {
         services: Vec<ServiceInfo>,
+    },
+    /// A browser sign-in address, followed by a result when it completes.
+    SignInUrl {
+        id: String,
+        url: String,
+    },
+    SignInResult {
+        id: String,
+        error: Option<String>,
     },
     /// A provider file was written (`path`), or an existing one reused (`path` is `None`).
     /// `note` says why the key is not in the OS credential store, when it is not.
@@ -754,9 +767,12 @@ pub struct DetectedServer {
     pub configured: Option<String>,
 }
 
-/// A hosted service from `providers.d` that takes a key.
+/// A hosted service from `providers.d` using an API key or subscription.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceInfo {
+    /// Uses browser sign-in instead of an API key.
+    #[serde(default)]
+    pub subscription: bool,
     pub id: String,
     pub name: String,
     /// Heading it is listed under.
@@ -765,7 +781,7 @@ pub struct ServiceInfo {
     /// The variable its key is read from, when it is read from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
-    /// Its key can be read now.
+    /// Its key is configured, or its saved sign-in allows plan usage.
     pub ready: bool,
     /// Where its key is read from.
     #[serde(default, skip_serializing_if = "Option::is_none")]

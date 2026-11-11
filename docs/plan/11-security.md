@@ -227,13 +227,28 @@ activation. The engine confirms success after loading the hook from the updated 
   - `turn_end`, `session_end`: notification only; `turn_end` runs in the background.
 - **Order.** The hooks for one event run in id order, one after another; a later
   `pre_tool` hook sees the arguments an earlier one changed, and a denial stops the rest.
-  A hook's context is capped at about 8,000 tokens.
+  A hook's context is capped at about 8,000 tokens by default. `full_context = true`
+  preserves full stdout and context and emits a warning above that token threshold.
 - **Reporting.** `Event::HookRan` (id, event, outcome, time, message, context tokens); the
   TUI shows a line when a hook added context, decided or said something. Each run is a
   `hook` record in the session log. `/doctor` has a hooks row: each file loads and its
   program and `{dir}` files exist (nothing runs, no secrets are resolved).
 - **Tests.** `crates/quack-core/tests/hooks.rs`, with Python hooks against the mock model,
   including the shipped `defaults/hooks.d/jira.toml` against a mock Jira.
+
+### Linked code reviews (2026-11-10)
+
+The disabled `forge-review` example loads REST metadata and unified diffs for
+GitHub, GitLab, Gitea/Forgejo and Bitbucket Cloud/Data Center review links.
+Explicit web/API base pairs support self-hosted installations, URL prefixes and
+per-instance credentials. It deduplicates reviews, constrains redirects
+to the API origin and requires HTTPS for credentials. Local mock integration tests
+exercise every adapter, with script regressions for authentication and limits.
+Hook subprocess requests are outside the in-process egress gate. Enabling this
+hook authorizes its configured APIs. Diffs are loaded in full with a user-visible
+size warning above 9,000 bytes, using `full_context = true` to retain the complete
+output through the process runner and engine. Setup and endpoint references are in
+[the hook documentation](../../defaults/hooks.d/README.md).
 
 ## Audit log (enterprise)
 

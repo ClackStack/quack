@@ -47,6 +47,9 @@ pub struct HookFile {
     pub cwd: String,
     #[serde(default = "timeout")]
     pub timeout_secs: u64,
+    /// Preserve stdout and added context in full. Warn above 8,000 estimated tokens.
+    #[serde(default)]
+    pub full_context: bool,
     /// What a failure (a crash, a timeout, unreadable output) means.
     #[serde(default)]
     pub on_error: OnError,
@@ -168,6 +171,7 @@ mod tests {
                 .expect("parse");
         assert_eq!(f.event, HookEvent::TurnEnd);
         assert_eq!(f.timeout_secs, 10);
+        assert!(!f.full_context);
         assert_eq!(f.on_error, OnError::Warn);
         assert_eq!(f.check(), Ok(()));
 

@@ -51,7 +51,7 @@ When no provider is configured:
   2. Offers **local server detection**, but only when the user explicitly picks it: it probes `localhost:11434` (Ollama), `:8080` (llama.cpp), `:8000` (vLLM), `:1234` (LM Studio), `:30000` (SGLang). These are loopback only.
   3. Asks for the API key, using the secret form of the user's choice (env / keyring / file / cmd).
   4. Runs model discovery and picks a default model.
-- No wizard step needs internet access.
+- Local-server setup works without internet access. Hosted discovery and subscription sign-in contact only the configured provider and issuer when selected.
 - Goal: from install to a first working turn **in under a minute** on a machine already running a local server. Detection is also offered from the startup panel's "No providers configured" state, so users don't need to know about `quack setup`. Detected servers are written as minimal provider files (just `base_url`, plus `api = "ollama"` for Ollama), following [01](01-configuration.md).
 
 ### As implemented (2026-10-18)
@@ -72,11 +72,28 @@ When no provider is configured:
 
 Someone who installs `quack-plucked` and runs `quack` should not have to know about `quack setup`. So the TUI now covers all three of the wizard's choices:
 - **It opens on its own.** When startup ends with no model ready and no `[model] default` configured, `/setup` opens once, unless a trust prompt is waiting. That offer does not probe anything: "find servers on this machine" waits for Enter, so detection still runs only when asked. Typing `/setup` yourself probes at once, as before.
-- **Three tabs:** *This machine* (detection, as before), *Hosted services* (the configured services that take a key, from `Op::ListServices`; with no defaults bundle this tab says so and points to the next one), and *Any server* (by URL, plus how to write a provider file by hand).
+- **Three tabs:** *This machine* (detection, as before), *Hosted services* (the configured services with API keys or subscription sign-in, from `Op::ListServices`; with no defaults bundle this tab says so and points to the next one), and *Any server* (by URL, plus how to write a provider file by hand).
 - **Keys are typed into a prompt box** that shows them as dots. Entering a key was earlier left to `quack setup` so that keys never went through the TUI. It is allowed now with these limits: the key never enters the input, its history or the transcript. It travels in `Op::SetProviderKey` / `Op::AddServer` as a `SecretText`, whose `Debug` output is redacted. The engine stores it in the OS credential store under the provider id (on `spawn_blocking`, because Linux shells out to `secret-tool`) and writes only `api_key = { keyring = "<id>" }`. Where there is no Secret Service (headless Linux: a server, WSL, a container), the engine saves the key to `keys/<id>.key` in the user layer (mode 0600) instead, points the provider file at it with `api_key = { file = ... }`, and says so in the note of `Event::ProviderAdded`; the prompt's help text says the same up front, so the user always knows how to use `env`, `file` or `cmd` instead.
 - **A URL** is checked for `http(s)://`, and the id comes from the host (`setup::id_from_url`, shared with the wizard). It asks no name question.
 - **Then the model:** once the engine replies with `Event::ProviderAdded`, it sends `Event::ModelCatalog` for that provider alone, and the TUI opens `/models` on it. A model picked there is remembered as the last used one, so the next start uses it. A ready hosted service goes straight to `/models`, filtered to its id.
 - Tests: `core/tests/setup.rs` (adding a server by URL, listing services, refusals), and the TUI tests `first_run_offers_setup_and_adds_a_server_by_url` (the key is never drawn, never in `Debug`, never in the input) and `setup_is_not_offered_when_a_model_is_ready_and_esc_backs_out_of_a_prompt`.
+
+### Subscription sign-in (2026-11-10)
+
+Hosted services in both setup interfaces include configured `[auth]` providers, including
+the bundle's ChatGPT plan. Selecting one without a usable saved sign-in opens its browser
+flow, shows a URL that can be opened manually, and requires consent to use the plan. The TUI
+keeps the URL in a copyable modal; Escape or Ctrl-C cancels the pending listener. A failed or
+declined sign-in returns to setup, while success continues to model selection. Saved sign-ins
+with refresh credentials and plan consent go straight to the model list. No API-key prompt
+or provider-file rewrite is involved for subscriptions. Credentials use the existing private
+auth files in the user data directory. Standalone `quack login` remains supported.
+
+The TUI uses `Op::SignIn` and `Event::SignInUrl` / `Event::SignInResult`; authentication stays
+in the engine and the browser launch stays in the client. Model discovery reads the same
+resolved credential directory. Unsupported sign-in builds report their existing feature
+error when selected. Tests cover listing and readiness, consent, browser callbacks, cancel,
+retry, copying the URL without adding it to history, and saving a selected model.
 
 ### Keys without a Secret Service (2026-11-09)
 

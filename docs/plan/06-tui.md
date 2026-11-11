@@ -185,3 +185,11 @@ Defaults are listed in `quack keys --print`. Users override them in `config.toml
 
 - Text selection in full-screen mode: resolved 2026-10-22, in-app drag-to-copy (see Windows terminals above).
 - Should we support a split-pane diff view (side-by-side) for approvals on wide terminals? Proposed: yes, automatically at ≥160 columns.
+
+### Config layer paths (2026-11-10)
+
+The `/config` Layers tab shows status beside each layer and a wider details pane
+with the selected file path. The panes have a one-column gap on wide terminals
+and stack on narrow terminals. Enter copies the full path through the terminal’s
+OSC 52 clipboard support and keeps the modal open. Layers without a file path
+have no copy action.

@@ -204,6 +204,7 @@ struct TokenEndpoint {
     key: Arc<ring::signature::RsaKeyPair>,
     issuer: String,
     seen: Arc<Mutex<Seen>>,
+    scopes: &'static str,
 }
 
 impl Respond for TokenEndpoint {
@@ -241,13 +242,22 @@ impl Respond for TokenEndpoint {
             "refresh_token": "r1",
             "id_token": jwt(&self.key, &claims),
             "expires_in": 3600,
-            "scope": PLAN_SCOPES,
+            "scope": self.scopes,
         }))
     }
 }
 
 #[tokio::test]
 async fn sign_in_registers_checks_the_id_token_and_signs_out() {
+    setup_sign_in(true).await;
+}
+
+#[tokio::test]
+async fn setup_sign_in_requires_consent_to_use_the_plan() {
+    setup_sign_in(false).await;
+}
+
+async fn setup_sign_in(allow_plan: bool) {
     let server = MockServer::start().await;
     let data = tempfile::tempdir().expect("tempdir");
     let key = Arc::new(ring::signature::RsaKeyPair::from_pkcs8(&KEY_PKCS8_DER).expect("key"));
@@ -274,6 +284,11 @@ async fn sign_in_registers_checks_the_id_token_and_signs_out() {
             key,
             issuer: server.uri(),
             seen: seen.clone(),
+            scopes: if allow_plan {
+                PLAN_SCOPES
+            } else {
+                "openid profile email offline_access"
+            },
         })
         .mount(&server)
         .await;
@@ -288,8 +303,8 @@ async fn sign_in_registers_checks_the_id_token_and_signs_out() {
     let p = provider(&server, data.path());
     let login = p.login().expect("login");
     let browser = seen.clone();
-    let done = login
-        .sign_in(false, move |url| {
+    let done = p
+        .sign_in(move |url| {
             // Play the browser: read the request, come back to the callback.
             let q: Vec<(String, String)> = url
                 .split_once('?')
@@ -324,11 +339,19 @@ async fn sign_in_registers_checks_the_id_token_and_signs_out() {
                 let _ = reqwest::get(back).await;
             });
         })
-        .await
-        .expect("signed in");
-    assert_eq!(done.email, "a@example.com");
-    assert!(done.plan);
+        .await;
+    if allow_plan {
+        assert!(done.is_ok(), "{done:?}");
+    } else {
+        assert!(
+            done.expect_err("consent denied")
+                .contains("did not allow plan usage")
+        );
+    }
+    assert_eq!(p.subscription_ready(), allow_plan);
+    assert_eq!(p.not_ready().is_none(), allow_plan);
     let c = saved(data.path());
+    assert_eq!(c.email, "a@example.com");
     assert_eq!(
         (c.client_id.as_str(), c.subject.as_str()),
         ("oaiapp_1", "user-1")

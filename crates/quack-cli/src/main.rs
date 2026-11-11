@@ -92,6 +92,7 @@ fn main() -> ExitCode {
                 input: &mut stdin.lock(),
                 out: &mut std::io::stdout(),
                 secret: &commands::read_secret,
+                browser: &quack_core::setup::open_sign_in_browser,
             };
             setup::run(Arc::new(loaded), &mut io).await
         }),

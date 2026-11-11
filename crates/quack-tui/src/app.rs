@@ -607,6 +607,7 @@ pub struct App {
     pub(crate) sandbox_off: bool,
     /// Text for the terminal's clipboard (OSC 52), written by the event loop.
     clipboard: Option<String>,
+    browser: Option<String>,
     /// The session title, for the terminal window's title.
     session_title: Option<String>,
     /// Installed skills, runnable as `/<name>`.
@@ -627,6 +628,7 @@ pub struct App {
     setup_adding: bool,
     /// `/key` sent a new key and waits for it to be stored.
     rekeying: bool,
+    signing_in: Option<String>,
     /// Where each provider's key is read from, as last listed.
     key_sources: BTreeMap<String, KeySource>,
     /// `/setup` opened on its own once this run, because no model was ready.
@@ -691,6 +693,7 @@ impl App {
             mode_before_yolo: String::new(),
             sandbox_off: false,
             clipboard: None,
+            browser: None,
             session_title: None,
             skills: Vec::new(),
             custom: Vec::new(),
@@ -701,6 +704,7 @@ impl App {
             prompt: None,
             setup_adding: false,
             rekeying: false,
+            signing_in: None,
             key_sources: BTreeMap::new(),
             setup_offered: false,
             trust: None,
@@ -720,6 +724,10 @@ impl App {
 
     pub fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
+    }
+
+    pub fn take_browser(&mut self) -> Option<String> {
+        self.browser.take()
     }
 
     pub fn take_clipboard(&mut self) -> Option<String> {
@@ -1138,6 +1146,28 @@ impl App {
             Event::ServersDetected { servers } => {
                 self.setup.local = modal::Scan::Found(servers);
                 self.refresh_setup();
+            }
+            Event::SignInUrl { id, url } if self.signing_in.as_deref() == Some(&id) => {
+                self.modal = Some(modal::sign_in(&id, Some(&url), &self.theme));
+                self.browser = Some(url);
+            }
+            Event::SignInResult { id, error } if self.signing_in.as_deref() == Some(&id) => {
+                self.signing_in = None;
+                self.browser = None;
+                if let Some(error) = error {
+                    self.setup.sign_in_error = Some((id.clone(), error.clone()));
+                    self.open_hosted_setup();
+                    if let Some(service) = self.setup.services.iter().flatten().find(|s| s.id == id)
+                        && let Some(modal) = self.modal.take()
+                    {
+                        self.modal = Some(modal.with_filter(&service.name));
+                    }
+                    self.note(format!("Sign-in failed: {error}"));
+                } else {
+                    self.ops.push(Op::ListServices);
+                    self.note(format!("Signed in to {id}. Choose a model to finish setup."));
+                    self.execute(&format!("/setup models {id}"));
+                }
             }
             Event::Services { services } => {
                 self.key_sources.extend(
@@ -1702,7 +1732,18 @@ impl App {
         if let Some(modal) = &mut self.modal {
             match modal.on_key(key) {
                 ModalOutcome::None => {}
-                ModalOutcome::Close => self.modal = None,
+                ModalOutcome::Close => {
+                    self.modal = None;
+                    if self.signing_in.take().is_some() {
+                        self.browser = None;
+                        self.ops.push(Op::SignIn { id: None });
+                        self.open_hosted_setup();
+                    }
+                }
+                ModalOutcome::Copy(text) => {
+                    self.copied = Some((self.frame, text.chars().count()));
+                    self.clipboard = Some(text);
+                }
                 ModalOutcome::Insert(text) => {
                     self.modal = None;
                     self.input.set(&text);
@@ -1986,6 +2027,13 @@ impl App {
         self.ops.push(Op::ListServices);
     }
 
+    fn open_hosted_setup(&mut self) {
+        self.open_setup();
+        if let Some(modal) = self.modal.take() {
+            self.modal = Some(modal.with_tab(1));
+        }
+    }
+
     /// Redraw an open `/setup` with new findings, keeping the user's place.
     fn refresh_setup(&mut self) {
         if self.modal.as_ref().is_some_and(|m| m.title == "Setup") {
@@ -2137,6 +2185,12 @@ impl App {
     }
 
     fn ctrl_c(&mut self) {
+        if self.signing_in.take().is_some() {
+            self.browser = None;
+            self.ops.push(Op::SignIn { id: None });
+            self.open_hosted_setup();
+            return;
+        }
         if self.modal.take().is_some() {
             return;
         }
@@ -2534,6 +2588,14 @@ impl App {
                     }),
                     _ => self.note("pick a server and model from /setup".into()),
                 }
+            }
+            "setup" if args.starts_with("login ") => {
+                let id = args["login ".len()..].trim().to_owned();
+                self.signing_in = Some(id.clone());
+                self.setup.sign_in_error = None;
+                self.browser = None;
+                self.modal = Some(modal::sign_in(&id, None, &self.theme));
+                self.ops.push(Op::SignIn { id: Some(id) });
             }
             "setup" if args == "url" => self.prompt = Some(Prompt::server_url()),
             "setup" if args.starts_with("key ") => {
@@ -3859,6 +3921,7 @@ mod tests {
                     inherit_env: None,
                     cwd: String::new(),
                     timeout_secs: 10,
+                    full_context: false,
                     on_error: Default::default(),
                 })
             } else {

@@ -100,10 +100,25 @@ Both APIs return reasoning that must go back unchanged for the model to keep it:
 - Until signed in, `/models` and `doctor` show "run `quack login chatgpt`", and nothing is sent: the token is looked up before any request (`tests/login.rs`).
 - No new crates: the SHA-256, RSA and random number generator come from `aws-lc-rs`, already built for reqwest's TLS on every OS. Base64url and form encoding are a few lines each.
 
+### Subscription setup (2026-11-10)
+
+Both `/setup` and `quack setup` include `[auth]` providers under Hosted services. Selecting
+an unsigned subscription starts the existing browser flow, then offers its models. A saved
+sign-in is ready only when it has refresh credentials and plan consent; missing, corrupt,
+signed-out or consent-denied credentials offer sign-in again. Access-token expiry alone does
+not require another browser sign-in because requests refresh it normally.
+
+The TUI sends `Op::SignIn`, receives `SignInUrl` and `SignInResult`, and opens the browser
+from the client. The pending modal can copy the URL for manual opening; Escape or Ctrl-C
+cancels the callback listener. Sign-in errors return to setup for retry, while success
+refreshes service status and opens the model picker. The URL never enters input history or
+the session transcript. The existing `quack login` and `quack logout` commands remain.
+Provider ids and issuers still come entirely from configuration; API-key services retain
+their existing setup flow. Tests use mock issuers and callback clients, with no live calls.
+
 ### Not done yet
 
 - None of this has been run against the live APIs; everything is checked against mock servers and the published docs. A first live run should confirm the beta headers, `reasoning.context`, and that the plan route accepts `prompt_cache_key` and `reasoning.summary`.
-- `quack setup` lists `anthropic` and `openai` (they have keys) but not `chatgpt`; it says nothing about `quack login`.
 - Server tools (web search) and Anthropic's mid-conversation system messages are not used. Images are: see [Vision](#vision-2026-10-24).
 
 ## Provider file schema

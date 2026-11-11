@@ -165,6 +165,9 @@ async fn event_loop(
             }
             title = want;
         }
+        if let Some(url) = app.take_browser() {
+            quack_core::setup::open_sign_in_browser(&url);
+        }
         if let Some(text) = app.take_clipboard() {
             copy(terminal, &text)?;
         }

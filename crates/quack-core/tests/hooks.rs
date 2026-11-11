@@ -636,3 +636,200 @@ async fn an_untrusted_projects_hooks_do_not_run() {
     assert!(!bodies(&server).await[0].contains("INJECTED"));
     engine.shutdown().await;
 }
+
+/// Exercise each forge's shipped URL matcher, REST routes and context through the engine.
+#[tokio::test]
+async fn shipped_forge_review_hook_uses_forge_rest_endpoints() {
+    if !has_python() {
+        return;
+    }
+    let model = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse_text("ok"))
+        .mount(&model)
+        .await;
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("defaults")
+        .join("hooks.d");
+    for (kind, link_path, api_path, diff_suffix, accept) in [
+        (
+            "github",
+            "/org/repo/pull/12/files",
+            "/repos/org/repo/pulls/12",
+            "",
+            "application/vnd.github.diff",
+        ),
+        (
+            "gitlab",
+            "/group/sub/repo/-/merge_requests/12/diffs",
+            "/projects/group%2Fsub%2Frepo/merge_requests/12",
+            "/raw_diffs",
+            "text/plain",
+        ),
+        (
+            "gitea",
+            "/org/repo/pulls/12",
+            "/repos/org/repo/pulls/12",
+            ".diff",
+            "text/plain",
+        ),
+        (
+            "bitbucket",
+            "/org/repo/pull-requests/12",
+            "/repositories/org/repo/pullrequests/12",
+            "/diff",
+            "text/plain",
+        ),
+        (
+            "bitbucket-server",
+            "/projects/ORG/repos/repo/pull-requests/12/overview",
+            "/projects/ORG/repos/repo/pull-requests/12",
+            ".diff",
+            "text/plain",
+        ),
+    ] {
+        let forge = MockServer::start().await;
+        let endpoint = format!("/prefix/api{api_path}");
+        Mock::given(method("GET"))
+            .and(path(&endpoint))
+            .and(header("accept", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "title": format!("Review on {kind}"),
+                "body": "Fix <retry> & ordering",
+                "description": "Fix <retry> & ordering",
+                "head": {"ref": "fix", "sha": "abcdef"},
+                "source_branch": "fix",
+                "diff_refs": {"head_sha": "abcdef"},
+                "source": {"branch": {"name": "fix"}, "commit": {"hash": "abcdef"}},
+                "fromRef": {"id": "fix", "latestCommit": "abcdef"}
+            })))
+            .expect(1)
+            .mount(&forge)
+            .await;
+        let diff_path = format!("{endpoint}{diff_suffix}");
+        let diff_path = if kind == "bitbucket" {
+            let redirected = "/prefix/api/repositories/org/repo/diff/head..base";
+            Mock::given(method("GET"))
+                .and(path(&diff_path))
+                .respond_with(ResponseTemplate::new(302).insert_header("location", redirected))
+                .expect(1)
+                .mount(&forge)
+                .await;
+            redirected.to_owned()
+        } else {
+            diff_path
+        };
+        let mut diff = "diff --git a/f b/f\n-old\n+<fixed> & tested\n".to_owned();
+        if kind == "github" {
+            diff.push_str(&"+changed line\n".repeat(90_000));
+        }
+        diff.push_str("END_OF_FULL_DIFF\n");
+        Mock::given(method("GET"))
+            .and(path(diff_path))
+            .and(header("accept", accept))
+            .respond_with(ResponseTemplate::new(200).set_body_string(diff))
+            .expect(1)
+            .mount(&forge)
+            .await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hooks = tmp.path().join("user").join("hooks.d");
+        std::fs::create_dir_all(hooks.join("forge-review")).expect("mkdir");
+        std::fs::copy(
+            shipped.join("forge-review").join("review.py"),
+            hooks.join("forge-review").join("review.py"),
+        )
+        .expect("copy script");
+        let config =
+            std::fs::read_to_string(shipped.join("forge-review.toml")).expect("shipped hook");
+        let mut config: toml::Value = toml::from_str(&config).expect("valid hook TOML");
+        config["enabled"] = toml::Value::Boolean(true);
+        config["command"] = toml::Value::try_from(vec![
+            "{python}".to_owned(),
+            "{dir}/forge-review/review.py".to_owned(),
+            "--host".to_owned(),
+            kind.to_owned(),
+            format!("{}/prefix", forge.uri()),
+            format!("{}/prefix/api", forge.uri()),
+            "-".to_owned(),
+        ])
+        .expect("command");
+        std::fs::write(
+            hooks.join("forge-review.toml"),
+            toml::to_string(&config).expect("serialize"),
+        )
+        .expect("write hook");
+        let loaded = common::workspace(
+            tmp.path(),
+            &model.uri(),
+            r#"[{ id = "tiny", context_window = 2000000 }]"#,
+            "",
+        );
+        let mut engine = Engine::spawn(Arc::new(loaded));
+        let link = format!("{}/prefix{link_path}", forge.uri());
+        let events = run_turn(
+            &mut engine,
+            &format!("Review ({link}?secret=hide#fragment), and {link}"),
+        )
+        .await;
+        assert!(
+            events.iter().any(|event| matches!(event,
+                Event::HookRan { id, outcome, .. }
+                if id == "forge-review" && outcome == "context"
+            )),
+            "{kind}: {events:?}"
+        );
+        let sent = bodies(&model).await;
+        let body = sent.last().expect("model request");
+        assert!(body.contains(&format!("Review on {kind}")), "{body}");
+        assert!(body.contains("Fix &lt;retry&gt; &amp; ordering"), "{body}");
+        assert!(body.contains("+&lt;fixed&gt; &amp; tested"), "{body}");
+        assert!(body.contains("abcdef"), "{body}");
+        assert!(
+            body.contains("END_OF_FULL_DIFF"),
+            "diff tail missing for {kind}"
+        );
+        if kind == "github" {
+            assert!(body.len() > 1024 * 1024, "full stdout must survive capture");
+            assert!(events.iter().any(|event| matches!(event,
+                Event::Warning { message } if message.contains("full context was retained")
+            )));
+            assert!(events.iter().any(|event| matches!(event,
+                Event::HookRan { message: Some(message), .. }
+                if message.contains("Warning: diff") && message.contains("full diff was retained")
+            )));
+        }
+        forge.verify().await;
+        engine.shutdown().await;
+    }
+}
+
+#[test]
+fn shipped_forge_review_hook_handles_auth_redirects_and_limits() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tests = root.join("tests").join("common").join("forge_review.py");
+    let script = root
+        .join("..")
+        .join("..")
+        .join("defaults")
+        .join("hooks.d")
+        .join("forge-review")
+        .join("review.py");
+    for python in ["python3", "python", "py"] {
+        if let Ok(output) = std::process::Command::new(python)
+            .arg("-B")
+            .arg(&tests)
+            .arg(&script)
+            .output()
+        {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+    }
+}

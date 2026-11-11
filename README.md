@@ -46,7 +46,7 @@ quack
 On first launch, the interactive `/setup` wizard helps you configure a model in seconds:
 - **Local servers**: Automatically detects running instances of Ollama, llama.cpp, vLLM, or LM Studio.
 - **Hosted providers**: Configure API keys for OpenRouter, DeepSeek, Fireworks, and others (securely saved in your OS keyring; on headless Linux such as WSL, where no Secret Service runs, in a file only your user can read instead).
-- **ChatGPT**: Run `quack login chatgpt` to sign in via your browser.
+- **Subscriptions**: In **Hosted services**, choose **ChatGPT plan** to sign in through your browser, allow plan usage, and pick a model. This also works in `quack setup`; `quack login chatgpt` remains available for standalone sign-in.
 - **Custom endpoints**: Connect any OpenAI-compatible server URL.
 
 ### 3. Common Commands
@@ -148,7 +148,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 
 - **Model Context Protocol (MCP)**: Supports stdio and streamable HTTP MCP servers configured as simple TOML files.
 - **Deferred discovery**: Large tool surfaces are indexed and searched dynamically (`tool_search`), avoiding context bloat.
-- **Event hooks**: Run custom scripts on session events (`session_start`, `user_prompt`, `pre_tool`, `post_tool`, `turn_end`) configured in `hooks.d/`; `/hooks` lists them and enables the shipped examples with a keypress.
+- **Event hooks**: Run custom scripts on session events (`session_start`, `user_prompt`, `pre_tool`, `post_tool`, `turn_end`) configured in `hooks.d/`; `/hooks` lists them and enables the shipped examples with a keypress. Examples load linked Jira issues and GitHub, GitLab, Gitea/Forgejo or Bitbucket code reviews into context, with self-hosted setup in [defaults/hooks.d](defaults/hooks.d/README.md).
 - **Custom slash commands**: Place markdown prompt templates in `commands/` (e.g. `commands/git/pr.md` becomes `/git:pr`).
 - **Bundles**: Group skills, commands, MCP servers, and hooks into shareable directory bundles.
 
@@ -157,7 +157,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 - **Full-screen Ratatui TUI**: Markdown formatting, syntax-highlighted code blocks, tables, and optional ASCII mode (`--ascii`).
 - **Window title**: The terminal's title shows the duck and what the session is about (`_(•)> fix the login bug`), and marks when a turn runs or quack needs you. If `[model] small` is configured, quack makes one background request to title the session from the first message. The title also appears in `/resume`. The first line serves as the fallback, and `/title` sets it manually. `ui.terminal_title = false` turns it off.
 - **Smooth scrolling and selection**: Mouse wheel scrolling, click-to-position cursor, and OSC 52 terminal copy integration.
-- **Interactive pickers**: Fast, fuzzy-filtered modals for `/models`, `/providers`, `/config`, `/context`, `/stats`, `/doctor`, and `/help`.
+- **Interactive pickers**: Fast, fuzzy-filtered modals for `/models`, `/providers`, `/config`, `/context`, `/stats`, `/doctor`, and `/help`. In `/config` → Layers, inspect each layer’s status and file path, then press Enter to copy the selected path.
 - **Status bar**: Real-time indicators for active permission mode, context window utilization, model generation speed, and background tasks.
 
 ### Editor Integration (ACP)
@@ -476,6 +476,7 @@ and confirms the hook is active. Turning a hook off lists its id in `[hooks] dis
 | `match.tool`, `match.pattern` | `""` | Tool name glob and argument pattern matchers |
 | `match.prompt` | `""` | Regular expression for `user_prompt` events |
 | `timeout_secs` | `10` | Maximum hook execution duration |
+| `full_context` | `false` | Preserve full stdout and added context, warning above 8,000 estimated tokens |
 | `on_error` | `"warn"` | Failure behavior: `warn`, `allow` (silent continue), or `deny` |
 
 ---

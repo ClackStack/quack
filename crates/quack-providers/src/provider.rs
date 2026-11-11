@@ -204,11 +204,39 @@ impl Provider {
         self.login.as_deref()
     }
 
+    /// Whether a saved subscription sign-in allows plan usage, without network access.
+    pub fn subscription_ready(&self) -> bool {
+        #[cfg(feature = "auth-chatgpt")]
+        if let Some(login) = &self.login {
+            return login
+                .load()
+                .is_some_and(|c| c.signed_in() && c.plan_granted());
+        }
+        false
+    }
+
+    /// Sign in through the configured issuer. The callback receives the browser URL.
+    pub async fn sign_in(&self, open: impl FnOnce(&str)) -> Result<(), String> {
+        #[cfg(feature = "auth-chatgpt")]
+        if let Some(login) = &self.login {
+            let done = login.sign_in(false, open).await?;
+            return if done.plan {
+                Ok(())
+            } else {
+                Err("The account did not allow plan usage. Sign in again and allow it.".into())
+            };
+        }
+        let _ = open;
+        Err("This provider has no supported subscription sign-in.".into())
+    }
+
     /// Why this provider can't be used yet, without contacting it: a sign-in not done.
     pub fn not_ready(&self) -> Option<String> {
         #[cfg(feature = "auth-chatgpt")]
         if let Some(login) = &self.login
-            && !login.load().is_some_and(|c| c.signed_in())
+            && !login
+                .load()
+                .is_some_and(|c| c.signed_in() && c.plan_granted())
         {
             return Some(format!(
                 "run `quack login {}` to use this provider",

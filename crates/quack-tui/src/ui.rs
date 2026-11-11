@@ -2011,6 +2011,47 @@ mod tests {
     }
 
     #[test]
+    fn config_layers_spacing_and_copy() {
+        use crossterm::event::{Event as TerminalEvent, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = started_app();
+        let path = "/home/developer/projects/a-long-workspace-name/.quack/config.toml";
+        let files = vec![
+            (
+                "defaults".into(),
+                "loaded\n/usr/share/quack/defaults/config.toml".into(),
+            ),
+            (
+                "system".into(),
+                "no config.toml\n/etc/quack/config.toml".into(),
+            ),
+            (
+                "user".into(),
+                "failed to parse (see config check)\n/home/developer/.config/quack/config.toml"
+                    .into(),
+            ),
+            (
+                "project".into(),
+                format!("skipped: not trusted yet\n{path}"),
+            ),
+            ("env".into(), "loaded".into()),
+        ];
+        app.modal = Some(crate::modal::config(&[], &files, &app.theme).with_tab(1));
+        insta::assert_snapshot!("config_layers_100x30", render(&app, 100, 30));
+        insta::assert_snapshot!("config_layers_60x20", render(&app, 60, 20));
+        let key = |code| TerminalEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        for _ in 0..3 {
+            app.on_terminal(key(KeyCode::Down));
+        }
+        insta::assert_snapshot!("config_layers_long_path_60x20", render(&app, 60, 20));
+        app.on_terminal(key(KeyCode::Enter));
+        assert_eq!(app.take_clipboard().as_deref(), Some(path));
+        assert!(app.modal.is_some());
+        app.on_terminal(key(KeyCode::Down));
+        app.on_terminal(key(KeyCode::Enter));
+        assert_eq!(app.take_clipboard(), None);
+    }
+
+    #[test]
     fn help_modal_narrow_60x20() {
         let mut app = started_app();
         app.modal = Some(crate::modal::help(&app.theme));
@@ -2616,6 +2657,116 @@ mod tests {
         assert!(s_rm.contains("~~~~~~~~~~"));
     }
 
+    fn subscription_setup() -> App {
+        let mut app = App::new(test_info());
+        app.on_engine(Event::StartupComplete);
+        app.take_ops();
+        app.on_engine(Event::Services {
+            services: vec![quack_protocol::ServiceInfo {
+                id: "plan".into(),
+                name: "Test subscription".into(),
+                group: "Hosted".into(),
+                base_url: "https://plan.example/v1".into(),
+                env: None,
+                key: None,
+                subscription: true,
+                ready: false,
+            }],
+        });
+        key(
+            &mut app,
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app
+    }
+
+    #[test]
+    fn setup_subscription_sign_in_copies_url_and_continues_to_models() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use quack_protocol::Op;
+        let mut app = subscription_setup();
+        assert!(render(&app, 100, 30).contains("needs sign-in"));
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SignIn {
+                id: Some("plan".into())
+            }]
+        );
+        assert!(
+            app.prompt.is_none(),
+            "subscriptions never ask for an API key"
+        );
+        let url = "https://issuer.example/authorize?state=private-state";
+        app.on_engine(Event::SignInUrl {
+            id: "plan".into(),
+            url: url.into(),
+        });
+        assert_eq!(app.take_browser().as_deref(), Some(url));
+        let shown = render(&app, 100, 30);
+        assert!(shown.contains("copy URL"), "{shown}");
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.take_clipboard().as_deref(), Some(url));
+        assert!(app.modal.is_some() && app.input.is_empty());
+        app.on_engine(Event::SignInResult {
+            id: "plan".into(),
+            error: None,
+        });
+        assert_eq!(app.take_ops(), vec![Op::ListServices, Op::ListModels]);
+        assert_eq!(app.modal.as_ref().map(|m| m.title.as_str()), Some("Models"));
+        assert!(!render(&app, 100, 30).contains("private-state"));
+    }
+
+    #[test]
+    fn setup_subscription_cancel_ignores_late_events_and_failure_allows_retry() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use quack_protocol::Op;
+        for cancel in [
+            (KeyCode::Esc, KeyModifiers::NONE),
+            (KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            let mut app = subscription_setup();
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            app.take_ops();
+            key(&mut app, cancel.0, cancel.1);
+            assert_eq!(
+                app.take_ops(),
+                vec![Op::SignIn { id: None }, Op::ListServices]
+            );
+            app.on_engine(Event::SignInUrl {
+                id: "plan".into(),
+                url: "https://late.example".into(),
+            });
+            app.on_engine(Event::SignInResult {
+                id: "plan".into(),
+                error: None,
+            });
+            assert!(app.take_browser().is_none());
+            assert!(app.take_ops().is_empty());
+            assert_eq!(app.modal.as_ref().map(|m| m.title.as_str()), Some("Setup"));
+        }
+        let mut app = subscription_setup();
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        app.take_ops();
+        app.on_engine(Event::SignInResult {
+            id: "plan".into(),
+            error: Some("Plan usage was declined.".into()),
+        });
+        assert_eq!(app.take_ops(), vec![Op::ListServices]);
+        assert_eq!(app.modal.as_ref().map(|m| m.title.as_str()), Some("Setup"));
+        assert!(app.prompt.is_none());
+        let shown = render(&app, 100, 30);
+        assert!(shown.contains("Plan usage was declined."), "{shown}");
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SignIn {
+                id: Some("plan".into())
+            }]
+        );
+    }
+
     #[test]
     fn first_run_offers_setup_and_adds_a_server_by_url() {
         use crossterm::event::{KeyCode, KeyModifiers};
@@ -2628,6 +2779,7 @@ mod tests {
         assert_eq!(app.take_ops(), vec![Op::ListServices]);
         app.on_engine(Event::Services {
             services: vec![ServiceInfo {
+                subscription: false,
                 id: "example".into(),
                 name: "Example".into(),
                 group: "Hosted".into(),
@@ -2756,6 +2908,7 @@ mod tests {
         key(&mut app, KeyCode::Enter, none);
         app.on_engine(Event::Services {
             services: vec![ServiceInfo {
+                subscription: false,
                 id: "hosted".into(),
                 name: "Hosted".into(),
                 group: "Hosted".into(),

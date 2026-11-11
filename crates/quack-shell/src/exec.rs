@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::Tree;
 
-/// Output kept per stream; the rest is dropped.
+/// Default output kept per stream; the rest is dropped.
 const MAX_CAPTURE: usize = 1024 * 1024;
 
 #[derive(Debug)]
@@ -21,6 +21,8 @@ pub struct ExecOptions {
     /// The whole environment: nothing else is inherited.
     pub env: BTreeMap<String, OsString>,
     pub stdin: Vec<u8>,
+    /// Preserve all stdout, for hooks that explicitly request full context.
+    pub full_stdout: bool,
     pub timeout: Duration,
     pub cancel: CancellationToken,
 }
@@ -64,8 +66,15 @@ pub async fn exec(
             let _ = stdin.shutdown().await;
         });
     }
-    let out = child.stdout.take().map(|r| tokio::spawn(capture(r)));
-    let err = child.stderr.take().map(|r| tokio::spawn(capture(r)));
+    let stdout_limit = (!opts.full_stdout).then_some(MAX_CAPTURE);
+    let out = child
+        .stdout
+        .take()
+        .map(|r| tokio::spawn(capture(r, stdout_limit)));
+    let err = child
+        .stderr
+        .take()
+        .map(|r| tokio::spawn(capture(r, Some(MAX_CAPTURE))));
 
     let (mut status, mut timed_out, mut cancelled) = (None, false, false);
     tokio::select! {
@@ -99,14 +108,14 @@ pub async fn exec(
     })
 }
 
-async fn capture(mut r: impl AsyncRead + Unpin) -> Vec<u8> {
+async fn capture(mut r: impl AsyncRead + Unpin, limit: Option<usize>) -> Vec<u8> {
     let mut kept = Vec::new();
     let mut buf = vec![0u8; 8192];
     loop {
         match r.read(&mut buf).await {
             Ok(0) | Err(_) => return kept,
             Ok(n) => {
-                let room = MAX_CAPTURE.saturating_sub(kept.len());
+                let room = limit.map_or(n, |limit| limit.saturating_sub(kept.len()));
                 kept.extend_from_slice(&buf[..n.min(room)]);
             }
         }
@@ -117,11 +126,22 @@ async fn capture(mut r: impl AsyncRead + Unpin) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn capture_limits_are_optional() {
+        let bytes = vec![b'x'; MAX_CAPTURE + 8192];
+        assert_eq!(capture(bytes.as_slice(), None).await, bytes);
+        assert_eq!(
+            capture(bytes.as_slice(), Some(MAX_CAPTURE)).await,
+            bytes[..MAX_CAPTURE]
+        );
+    }
+
     fn opts(stdin: &str, timeout_ms: u64) -> ExecOptions {
         ExecOptions {
             cwd: std::env::temp_dir(),
             env: crate::inherited_env(None),
             stdin: stdin.as_bytes().to_vec(),
+            full_stdout: false,
             timeout: Duration::from_millis(timeout_ms),
             cancel: CancellationToken::new(),
         }

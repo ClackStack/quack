@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::session::{self, SharedLog};
 
-/// Context one hook may add, in estimated tokens; the rest is cut.
+/// Default context limit, or the warning threshold for full-context hooks.
 const MAX_CONTEXT_TOKENS: u32 = 8_000;
 
 /// The session's hooks, read from `hooks.d` at startup and on `/reload`.
@@ -239,7 +239,22 @@ impl Hooks {
             let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let (outcome, message, tokens) = match result {
                 Ok(None) => continue, // interrupted
-                Ok(Some(reply)) => out.apply(hook, event, reply, &mut fields),
+                Ok(Some(reply)) => {
+                    if hook.file.full_context
+                        && let Some(text) = reply.context.as_ref().filter(|_| event.takes_context())
+                        && tokens::estimate(text) > MAX_CONTEXT_TOKENS
+                    {
+                        (sink.emit)(Event::Warning {
+                            message: format!(
+                                "Hook `{}` added about {} tokens, exceeding {MAX_CONTEXT_TOKENS}; \
+                                 full context was retained.",
+                                hook.id,
+                                tokens::estimate(text),
+                            ),
+                        });
+                    }
+                    out.apply(hook, event, reply, &mut fields)
+                }
                 Err(e) => {
                     let message = format!("hook `{}` failed: {e}", hook.id);
                     tracing::warn!(id = %hook.id, error = %e, "hook failed");
@@ -285,6 +300,7 @@ impl Hooks {
             cwd: prepared.cwd.clone(),
             env: prepared.env.clone(),
             stdin: serde_json::to_vec(input).unwrap_or_default(),
+            full_stdout: hook.file.full_context,
             timeout: Duration::from_secs(hook.file.timeout_secs),
             cancel: cancel.child_token(),
         };
@@ -354,7 +370,11 @@ impl Outcome {
         let mut label = "ok";
         let mut tokens_added = 0;
         if let Some(text) = reply.context.filter(|_| event.takes_context()) {
-            let text = cap(&text, MAX_CONTEXT_TOKENS);
+            let text = if hook.file.full_context {
+                text
+            } else {
+                cap(&text, MAX_CONTEXT_TOKENS)
+            };
             tokens_added = tokens::estimate(&text);
             self.context.push(text);
             label = "context";

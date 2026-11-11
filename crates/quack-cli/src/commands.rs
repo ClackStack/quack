@@ -333,7 +333,7 @@ pub(crate) async fn login(
             "Continue with ChatGPT in your browser. If it does not open, visit:\n\n  {url}\n"
         );
         if !no_browser {
-            open_browser(url);
+            quack_core::setup::open_sign_in_browser(url);
         }
     };
     match login.sign_in(fresh, open).await {
@@ -395,30 +395,6 @@ pub(crate) async fn logout(loaded: &Loaded, id: Option<String>) -> i32 {
             exit::CONFIG_ERROR
         }
     }
-}
-
-/// Open a URL in the default browser; the caller has printed it too.
-#[cfg(feature = "auth-chatgpt")]
-fn open_browser(url: &str) {
-    let mut cmd = if cfg!(windows) {
-        // `start` in cmd would read the `&`s in the URL as command separators.
-        let mut c = std::process::Command::new("rundll32");
-        c.args(["url.dll,FileProtocolHandler", url]);
-        c
-    } else if cfg!(target_os = "macos") {
-        let mut c = std::process::Command::new("open");
-        c.arg(url);
-        c
-    } else {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(url);
-        c
-    };
-    let _ = cmd
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
 }
 
 /// Read one line without echo from a terminal, or all of stdin when piped.

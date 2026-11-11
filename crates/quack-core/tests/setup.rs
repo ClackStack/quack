@@ -394,3 +394,115 @@ fn add_server_without_a_secret_service_writes_the_key_file() {
             .contains("the key is stored in")
     );
 }
+
+/// A subscription stays in Hosted services even when its issuer is a loopback test server.
+fn subscription_config(root: &std::path::Path, issuer: &str) -> quack_config::Loaded {
+    let config = common::workspace(root, issuer, "[]", "");
+    let dir = root.join("user").join("providers.d");
+    std::fs::remove_file(dir.join("mock.toml")).expect("remove mock");
+    std::fs::write(
+        dir.join("plan.toml"),
+        format!(
+            "name = \"Test plan\"\napi = \"openai-responses\"\nbase_url = \"{issuer}/v1\"\n\
+         auth = {{ type = \"chatgpt\", issuer = \"{issuer}\" }}\nmodels = [\"coder\"]\n"
+        ),
+    )
+    .expect("provider");
+    config
+}
+
+#[test]
+fn subscription_readiness_requires_refresh_credentials_and_plan_consent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = subscription_config(tmp.path(), "https://plan.example");
+    // Core-only builds can omit Responses and subscription support.
+    if let Err(error) = quack_core::setup::sign_in_provider(&config, "plan") {
+        assert!(error.contains("this build has no"), "{error}");
+        return;
+    }
+    let services = quack_core::setup::service_infos(&config);
+    assert_eq!(services.len(), 1);
+    assert!(services[0].subscription);
+    assert!(!services[0].ready);
+    assert!(services[0].key.is_none() && services[0].env.is_none());
+    let auth = config.dirs.user_data.join("auth");
+    std::fs::create_dir_all(&auth).expect("auth dir");
+    for (refresh, scopes, ready) in [
+        ("refresh", vec!["openid"], false),
+        ("refresh", vec!["chatgpt.tokens.use.direct"], true),
+        ("", vec!["chatgpt.tokens.use.direct"], false),
+    ] {
+        // An expired access token is usable when its refresh token and consent remain.
+        std::fs::write(
+            auth.join("plan.json"),
+            serde_json::json!({
+                "client_id": "test-app", "subject": "user", "email": "test@example.com",
+                "refresh_token": refresh, "expires_at": 0, "scopes": scopes,
+            })
+            .to_string(),
+        )
+        .expect("credentials");
+        assert_eq!(quack_core::setup::service_infos(&config)[0].ready, ready);
+    }
+    std::fs::write(auth.join("plan.json"), "broken JSON").expect("corrupt credentials");
+    assert!(!quack_core::setup::service_infos(&config)[0].ready);
+}
+
+#[tokio::test]
+async fn subscription_sign_in_reports_decline_and_cancellation_closes_the_listener() {
+    use quack_providers::reqwest;
+    let server = MockServer::start().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = subscription_config(tmp.path(), &server.uri());
+    if let Err(error) = quack_core::setup::sign_in_provider(&config, "plan") {
+        assert!(error.contains("this build has no"), "{error}");
+        return;
+    }
+    let mut engine = Engine::spawn(Arc::new(config));
+    next_matching(&mut engine, |e| matches!(e, Event::StartupComplete)).await;
+    for cancel in [false, true] {
+        engine
+            .submit(Op::SignIn {
+                id: Some("plan".into()),
+            })
+            .await;
+        let Event::SignInUrl { id, url } =
+            next_matching(&mut engine, |e| matches!(e, Event::SignInUrl { .. })).await
+        else {
+            unreachable!()
+        };
+        assert_eq!(id, "plan");
+        let url = reqwest::Url::parse(&url).expect("authorize URL");
+        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        let mut back = reqwest::Url::parse(&query["redirect_uri"]).expect("callback URL");
+        if cancel {
+            engine.submit(Op::SignIn { id: None }).await;
+            // The next operation is answered after the sign-in task has been dropped.
+            engine.submit(Op::ListServices).await;
+            next_matching(&mut engine, |e| matches!(e, Event::Services { .. })).await;
+            assert!(
+                reqwest::get(back).await.is_err(),
+                "cancel must close the callback listener"
+            );
+        } else {
+            back.query_pairs_mut()
+                .append_pair("state", &query["state"])
+                .append_pair("error", "access_denied");
+            reqwest::get(back).await.expect("mock browser callback");
+            let result =
+                next_matching(&mut engine, |e| matches!(e, Event::SignInResult { .. })).await;
+            assert!(
+                matches!(result, Event::SignInResult { error: Some(e), .. } if e.contains("declined"))
+            );
+        }
+    }
+    engine.shutdown().await;
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty(),
+        "no token exchange or inference"
+    );
+}

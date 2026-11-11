@@ -1,0 +1,31 @@
+#:schema ../schemas/hook.json
+enabled = false
+description = "Pull and merge requests linked in the prompt"
+event = "user_prompt"
+match = { prompt = 'https?://[^\s<>"`]+/(?:pull|pulls|pull-requests|merge_requests)/[0-9][^\s<>"`]*' }
+command = [
+    "{python}", "{dir}/forge-review/review.py",
+    # Each --host takes: forge, web base, API base, token variable (or "-" for anonymous).
+    "--host", "github", "https://github.com", "https://api.github.com", "GITHUB_TOKEN",
+    "--host", "gitlab", "https://gitlab.com", "https://gitlab.com/api/v4", "GITLAB_TOKEN",
+    "--host", "gitea", "https://gitea.com", "https://gitea.com/api/v1", "GITEA_TOKEN",
+    "--host", "gitea", "https://codeberg.org", "https://codeberg.org/api/v1", "CODEBERG_TOKEN",
+    "--host", "bitbucket", "https://bitbucket.org", "https://api.bitbucket.org/2.0", "BITBUCKET_TOKEN",
+    # "--host", "gitlab", "https://git.example.com/team", "https://git.example.com/team/api/v4", "WORK_GITLAB_TOKEN",
+    # "--host", "bitbucket-server", "https://bitbucket.example.com", "https://bitbucket.example.com/rest/api/latest", "WORK_BITBUCKET_TOKEN",
+    # "--host", "gitea", "https://forge.example.com", "https://forge.example.com/api/v1", "WORK_FORGE_TOKEN",
+]
+timeout_secs = 25
+full_context = true
+on_error = "warn"
+
+[env]
+# Uncomment only the credentials you use. Keyring entries work here too.
+# GITHUB_TOKEN = { env = "GITHUB_TOKEN" }
+# GITLAB_TOKEN = { env = "GITLAB_TOKEN" }
+# GITEA_TOKEN = { env = "GITEA_TOKEN" }
+# CODEBERG_TOKEN = { env = "CODEBERG_TOKEN" }
+# BITBUCKET_TOKEN = { env = "BITBUCKET_TOKEN" }
+# BITBUCKET_TOKEN_USER = "you@example.com" # Set for Bitbucket Cloud API token Basic auth.
+# WORK_GITLAB_TOKEN = { keyring = "work-gitlab" }
+# WORK_FORGE_TOKEN = { keyring = "work-forge" }
