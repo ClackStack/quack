@@ -29,7 +29,7 @@ async fn open(
 ) {
     let loaded = common::workspace(root, &server.uri());
     let session_cwd = loaded.dirs.workspace_root.display().to_string();
-    let mut registry = Registry::with_parts(fixed_loader(loaded), root.join("gui-data"));
+    let registry = Registry::with_parts(fixed_loader(loaded), root.join("gui-data"));
     let (sink, mut rx) = collecting_sink();
     let tab = registry
         .open(ws_of(root), Resume::New, sink)
@@ -136,7 +136,7 @@ async fn approval_round_trip_over_send_op() {
         .await;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (mut registry, tab, mut rx) = open(tmp.path(), &server).await;
+    let (registry, tab, mut rx) = open(tmp.path(), &server).await;
     registry
         .send_op(
             tab,
@@ -196,7 +196,7 @@ async fn refuses_a_second_engine_on_the_same_session() {
         .mount(&server)
         .await;
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (mut registry, tab, mut rx) = open(tmp.path(), &server).await;
+    let (registry, tab, mut rx) = open(tmp.path(), &server).await;
 
     let (_seen, configured) =
         collect_until(&mut rx, |e| matches!(e, Event::SessionConfigured { .. })).await;
@@ -249,7 +249,7 @@ async fn refuses_a_second_engine_on_the_same_session() {
 async fn close_announces_and_stops_the_engine() {
     let server = MockServer::start().await;
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (mut registry, tab, mut rx) = open(tmp.path(), &server).await;
+    let (registry, tab, mut rx) = open(tmp.path(), &server).await;
     assert!(!registry.is_empty());
     registry.close(tab).await;
     let msg = until(&mut rx, |m| matches!(&m.payload, Payload::Closed { .. })).await;
@@ -280,8 +280,14 @@ async fn opens_without_a_ready_model_even_when_latest_was_requested() {
     let server = MockServer::start().await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let loaded = common::workspace(tmp.path(), &server.uri());
-    std::fs::remove_file(tmp.path().join("user/providers.d/mock.toml")).expect("remove provider");
-    let mut registry = Registry::with_parts(fixed_loader(loaded), tmp.path().join("gui-data"));
+    std::fs::remove_file(
+        tmp.path()
+            .join("user")
+            .join("providers.d")
+            .join("mock.toml"),
+    )
+    .expect("remove provider");
+    let registry = Registry::with_parts(fixed_loader(loaded), tmp.path().join("gui-data"));
     let (sink, mut rx) = collecting_sink();
     let tab = tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -298,7 +304,7 @@ async fn opens_without_a_ready_model_even_when_latest_was_requested() {
 async fn workspace_ownership_survives_new_session_and_releases_on_close() {
     let server = MockServer::start().await;
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (mut registry, tab, mut rx) = open(tmp.path(), &server).await;
+    let (registry, tab, mut rx) = open(tmp.path(), &server).await;
     collect_until(&mut rx, |ev| matches!(ev, Event::StartupComplete)).await;
     let (sink, _rx2) = collecting_sink();
     assert!(
@@ -322,4 +328,111 @@ async fn workspace_ownership_survives_new_session_and_releases_on_close() {
         .await
         .expect("workspace ownership released");
     registry.close_all().await;
+}
+
+#[tokio::test]
+async fn first_run_setup_adds_a_server_and_selects_a_model_through_ipc() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "org/tiny"}]})),
+        )
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = common::workspace(tmp.path(), &server.uri());
+    std::fs::remove_file(
+        tmp.path()
+            .join("user")
+            .join("providers.d")
+            .join("mock.toml"),
+    )
+    .expect("remove provider");
+    let registry = Registry::with_parts(fixed_loader(loaded), tmp.path().join("gui-data"));
+    let (sink, mut rx) = collecting_sink();
+    let tab = registry
+        .open(ws_of(tmp.path()), Resume::New, sink)
+        .await
+        .expect("open");
+    collect_until(&mut rx, |e| matches!(e, Event::StartupComplete)).await;
+    registry
+        .send_op(
+            tab,
+            serde_json::json!({
+                "op": "add_server", "base_url": format!("{}/v1", server.uri())
+            }),
+        )
+        .await
+        .expect("add server");
+    let (_, catalog) = collect_until(&mut rx, |e| matches!(e, Event::ModelCatalog { .. })).await;
+    let Event::ModelCatalog { providers, .. } = catalog else {
+        unreachable!()
+    };
+    let provider = providers.first().expect("the connected provider");
+    assert!(provider.available, "{provider:?}");
+    assert_eq!(provider.models[0].id, "org/tiny");
+    registry
+        .send_op(
+            tab,
+            serde_json::json!({
+                "op": "set_model", "provider": provider.id, "model": "org/tiny"
+            }),
+        )
+        .await
+        .expect("select model");
+    let (_, configured) =
+        collect_until(&mut rx, |e| matches!(e, Event::SessionConfigured { .. })).await;
+    let Event::SessionConfigured { session } = configured else {
+        unreachable!()
+    };
+    assert_eq!(session.model, Some(format!("{}/org/tiny", provider.id)));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .iter()
+            .all(|r| r.method == "GET")
+    );
+    registry.close(tab).await;
+}
+
+#[tokio::test]
+async fn project_trust_choices_round_trip_through_ipc_and_reload_the_snapshot() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project = ws_of(tmp.path()).join(".quack");
+    std::fs::create_dir_all(&project).expect("project config dir");
+    std::fs::write(project.join("config.toml"), "[ui]\ntheme = \"dark\"\n")
+        .expect("project settings");
+    let loaded = common::workspace(tmp.path(), &server.uri());
+    let registry = Registry::with_parts(fixed_loader(loaded), tmp.path().join("gui-data"));
+    let (sink, mut rx) = collecting_sink();
+    let tab = registry
+        .open(ws_of(tmp.path()), Resume::New, sink)
+        .await
+        .expect("open");
+    let (seen, _) = collect_until(&mut rx, |e| matches!(e, Event::StartupComplete)).await;
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, Event::ProjectTrust { changed: false, .. }))
+    );
+    registry
+        .send_op(
+            tab,
+            serde_json::json!({
+                "op": "trust_project", "decision": "settings-only"
+            }),
+        )
+        .await
+        .expect("trust settings");
+    collect_until(&mut rx, |e| matches!(e, Event::ConfigReloaded)).await;
+    let message = until(&mut rx, |m| matches!(m.payload, Payload::Info { .. })).await;
+    let Payload::Info { info } = message.payload else {
+        unreachable!()
+    };
+    assert_eq!(info.ui.theme, "dark");
+    registry.close(tab).await;
 }

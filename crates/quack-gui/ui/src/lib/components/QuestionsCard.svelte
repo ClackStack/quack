@@ -3,9 +3,11 @@
 
 	let {
 		questions,
-		onAnswer
+		onAnswer,
+		busy = false
 	}: {
 		questions: Question[];
+		busy?: boolean;
 		onAnswer: (answers: { picked?: number; text?: string }[]) => void;
 	} = $props();
 
@@ -19,6 +21,7 @@
 	);
 
 	function submit() {
+		if (busy || !ready) return;
 		onAnswer(
 			questions.map((q, i) =>
 				options(q).length > 0 ? { picked: picks[i] } : { text: texts[i] ?? '' }
@@ -39,6 +42,7 @@
 							<input
 								type="radio"
 								name={`q${i}`}
+								disabled={busy}
 								checked={picks[i] === j}
 								onchange={() => (picks[i] = j)}
 							/>
@@ -50,7 +54,9 @@
 			{:else}
 				<input
 					class="text"
+					disabled={busy}
 					type="text"
+					aria-label={question.question}
 					placeholder="Your answer…"
 					bind:value={texts[i]}
 					onkeydown={(e) => {
@@ -61,7 +67,7 @@
 		</div>
 	{/each}
 	<div class="actions">
-		<button class="btn btn-primary" disabled={!ready} onclick={submit}>Answer</button>
+		<button class="btn btn-primary" disabled={!ready || busy} onclick={submit}>Answer</button>
 	</div>
 </section>
 

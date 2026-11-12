@@ -182,11 +182,32 @@ export function devTransport(): Transport {
 					}
 					break;
 				case 'set_model':
+					send(tab, { event: 'session_configured', session: { ...SESSION, model: `${op.provider}/${op.model}` } });
 					send(tab, {
 						event: 'model_catalog',
 						...catalog(),
 						current: `${op.provider}/${op.model}`
 					});
+					break;
+				case 'list_models':
+					send(tab, { event: 'model_catalog', ...catalog() });
+					break;
+				case 'list_services':
+					send(tab, { event: 'services', services: [] });
+					break;
+				case 'detect_servers':
+					send(tab, { event: 'servers_detected', servers: [] });
+					break;
+				case 'add_server':
+				case 'set_provider_key':
+					send(tab, { event: 'error', error: { kind: 'config', message: 'The browser demo does not save providers. Open the desktop app to connect a provider.' } });
+					break;
+				case 'new_session':
+					send(tab, { event: 'session_title', title: undefined });
+					send(tab, { event: 'session_configured', session: { ...SESSION, id: `dev-session-${Date.now()}` } });
+					break;
+				case 'resume_session':
+					send(tab, { event: 'warning', message: 'The browser demo has no saved sessions.' });
 					break;
 				case 'list_sessions':
 					send(tab, { event: 'session_list', sessions: [] });

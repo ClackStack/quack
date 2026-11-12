@@ -3,10 +3,11 @@
 //! the engines through these commands and one `tauri::ipc::Channel` per tab:
 //!
 //! ```text
-//! invoke("open_folder", { cwd, resume, events }) → tab
-//! invoke("send_op",     { tab, op })             // op is the tagged JSON of a protocol Op
-//! invoke("close_tab",   { tab })                 // awaits the engine's shutdown
-//! invoke("recent_folders", { limit })
+//! invoke("connect") → client                    // retires the previous UI's engines
+//! invoke("open_folder", { client, cwd, resume, events }) → tab
+//! invoke("send_op", { client, tab, op })         // the tagged JSON of a protocol Op
+//! invoke("close_tab", { client, tab })           // awaits engine shutdown
+//! invoke("recent_folders", { client, limit })
 //! ```
 
 use std::sync::Arc;
@@ -49,21 +50,23 @@ impl Sink for ChannelSink {
     }
 }
 
-/// A tokio mutex because commands hold the guard across `await`s (opens wait for the
-/// engine's session to come up).
-type RegistryState = tokio::sync::Mutex<Registry>;
+#[tauri::command]
+async fn connect(state: State<'_, Registry>) -> Result<u64, String> {
+    state.connect().await
+}
 
 #[tauri::command]
 async fn open_folder(
-    state: State<'_, RegistryState>,
+    state: State<'_, Registry>,
+    client: u64,
     cwd: String,
     resume: Option<ResumeDto>,
     events: Channel<TabMessage>,
 ) -> Result<u64, OpenError> {
     let resume = resume.map(Into::into).unwrap_or(Resume::New);
-    let mut registry = state.lock().await;
-    registry
-        .open(
+    state
+        .open_for(
+            client,
             std::path::PathBuf::from(cwd),
             resume,
             Arc::new(ChannelSink(events)),
@@ -73,28 +76,27 @@ async fn open_folder(
 
 #[tauri::command]
 async fn send_op(
-    state: State<'_, RegistryState>,
+    state: State<'_, Registry>,
+    client: u64,
     tab: u64,
     op: serde_json::Value,
 ) -> Result<(), String> {
-    state.lock().await.send_op(tab, op).await
+    state.send_op_for(client, tab, op).await
 }
 
 #[tauri::command]
-async fn close_tab(state: State<'_, RegistryState>, tab: u64) -> Result<(), String> {
-    state.lock().await.close(tab).await;
-    Ok(())
+async fn close_tab(state: State<'_, Registry>, client: u64, tab: u64) -> Result<(), String> {
+    state.close_for(client, tab).await
 }
 
 #[tauri::command]
 async fn recent_folders(
-    state: State<'_, RegistryState>,
+    state: State<'_, Registry>,
+    client: u64,
     limit: Option<u32>,
 ) -> Result<Vec<quack_gui::RecentFolder>, String> {
-    Ok(state
-        .lock()
-        .await
-        .recent_folders(limit.unwrap_or(10).max(1) as usize))
+    state.check_client(client)?;
+    Ok(state.recent_folders(limit.unwrap_or(10).max(1) as usize))
 }
 
 fn main() {
@@ -112,8 +114,21 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
-        .manage(RegistryState::new(Registry::new()))
+        .setup(|app| {
+            let resource_dir = app.path().resource_dir()?;
+            app.manage(Registry::with_resource_dir(resource_dir));
+            Ok(())
+        })
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && payload.event() == tauri::webview::PageLoadEvent::Started
+                && let Some(registry) = webview.try_state::<Registry>()
+            {
+                registry.disconnect();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            connect,
             open_folder,
             send_op,
             close_tab,
@@ -125,9 +140,9 @@ fn main() {
             if let RunEvent::Exit = event {
                 // Engines must finish their shutdown: child processes, MCP/LSP servers
                 // and session_end hooks.
-                let state: State<RegistryState> = app.state();
+                let state: State<Registry> = app.state();
                 tauri::async_runtime::block_on(async {
-                    state.lock().await.close_all().await;
+                    state.close_all().await;
                 });
             }
         });

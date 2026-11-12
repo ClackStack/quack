@@ -22,12 +22,23 @@
 
 <div class="transcript" bind:this={scroller} onscroll={onScroll}>
 	{#if session.starting}
-		<div class="starting">starting the engine…</div>
+		<div class="starting">
+			<pre aria-hidden="true">   __
+&lt;(o )___
+ ( ._&gt; /
+  `---'
+~~~~~~~~~~</pre>
+			<p>starting the engine…</p>
+		</div>
 	{:else if session.items.length === 0}
 		<div class="empty">
-			<pre aria-hidden="true">  ( o&lt;   ask quack to do something in this folder
-  /|_|\
-  _/ \_</pre>
+			<pre aria-hidden="true">   __
+&lt;(o )___
+ ( ._&gt; /
+  `---'
+~~~~~~~~~~
+
+ask quack to do something in this folder</pre>
 		</div>
 	{:else}
 		{#each session.items as item (item.id)}
@@ -93,11 +104,18 @@
 		text-align: center;
 	}
 
+	.starting pre,
 	.empty pre {
 		display: inline-block;
 		text-align: left;
 		color: var(--beak-ink);
-		line-height: 1.3;
+		line-height: 1.25;
+		margin: 0;
+	}
+
+	.starting p {
+		margin: var(--sp-xs) 0 0;
+		color: var(--ink-3);
 	}
 
 	.user-row {

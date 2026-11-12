@@ -17,7 +17,7 @@
 </script>
 
 <svelte:head>
-	<title>quack</title>
+	<title>_(•)&gt; quack</title>
 </svelte:head>
 
 {#if active}

@@ -11,12 +11,15 @@
       "icons/icon.icns",
       "icons/icon.ico",
       "icons/icon.png"
-    ]
+    ],
+    "resources": {
+      "../../defaults/": "defaults/"
+    }
   },
   "build": {
-    "beforeDevCommand": "npm --prefix ui run dev",
+    "beforeDevCommand": "pnpm --dir ui run dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npm --prefix ui run build",
+    "beforeBuildCommand": "pnpm --dir ui run build",
     "frontendDist": "ui/build"
   },
   "app": {

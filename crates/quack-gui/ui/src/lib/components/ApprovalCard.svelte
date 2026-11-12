@@ -3,9 +3,11 @@
 
 	let {
 		approval,
-		onAnswer
+		onAnswer,
+		busy = false
 	}: {
 		approval: { callId: string; request: ApprovalRequest; always: string[] };
+		busy?: boolean;
 		onAnswer: (decision: 'allow_once' | 'allow_session' | 'deny') => void;
 	} = $props();
 
@@ -18,6 +20,14 @@
 	);
 
 	function onKeydown(event: KeyboardEvent) {
+		if (
+			busy ||
+			event.defaultPrevented ||
+			event.repeat ||
+			(event.target instanceof HTMLElement &&
+				event.target.closest('button, input, textarea, select'))
+		)
+			return;
 		if (event.key === 'Enter') onAnswer('allow_once');
 		else if (event.key === 'Escape') onAnswer('deny');
 	}
@@ -31,7 +41,9 @@
 		<span class="what">
 			{#if approval.request.kind === 'shell'}
 				run <code>{approval.request.command}</code>
-				{#if approval.request.outside_sandbox}<span class="outside"> · outside the sandbox</span>{/if}
+				{#if approval.request.outside_sandbox}<span class="outside">
+						· outside the sandbox</span
+					>{/if}
 			{:else if approval.request.kind === 'edit'}
 				edit <code>{approval.request.path}</code>
 			{:else}
@@ -41,22 +53,35 @@
 	</div>
 
 	{#if approval.request.kind === 'edit'}
-		<pre class="diff">{#each approval.request.diff.split('\n') as line, i (i)}<span class="line {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : line.startsWith('+++') || line.startsWith('---') ? 'meta' : 'ctx'}">{line}
+		<pre class="diff">{#each approval.request.diff.split('\n') as line, i (i)}<span
+					class="line {line.startsWith('+')
+						? 'add'
+						: line.startsWith('-')
+							? 'del'
+							: line.startsWith('+++') || line.startsWith('---')
+								? 'meta'
+								: 'ctx'}"
+					>{line}
 </span>{/each}</pre>
 	{:else if approval.request.kind === 'tool'}
 		<pre class="args">{approval.request.arguments}</pre>
 	{/if}
 
 	<div class="actions">
-		<button class="btn btn-primary" onclick={() => onAnswer('allow_once')}>
+		<button class="btn btn-primary" disabled={busy} onclick={() => onAnswer('allow_once')}>
 			Allow <span class="kbd kbd-invert">⏎</span>
 		</button>
 		{#if approval.always.length > 0}
-			<button class="btn" onclick={() => onAnswer('allow_session')} title={approval.always.join('\n')}>
+			<button
+				class="btn"
+				disabled={busy}
+				onclick={() => onAnswer('allow_session')}
+				title={approval.always.join('\n')}
+			>
 				Allow for this session
 			</button>
 		{/if}
-		<button class="btn btn-danger" onclick={() => onAnswer('deny')}>
+		<button class="btn btn-danger" disabled={busy} onclick={() => onAnswer('deny')}>
 			Deny <span class="kbd">esc</span>
 		</button>
 	</div>

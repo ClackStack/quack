@@ -14,6 +14,10 @@ import type {
  * the shell streams coalesced bridge messages through it (docs/plan/15-desktop-client.md#the-bridge).
  */
 export function tauriTransport(): Transport {
+	// One connection per UI document. Reconnecting retires discarded channels and
+	// awaits their engines before any new tab can acquire the same workspace.
+	let connection: Promise<number> | undefined;
+	const connect = () => connection ??= invoke<number>('connect');
 	const listeners = new Set<(message: TabMessage) => void>();
 	const fan = (message: TabMessage) => {
 		for (const listener of listeners) listener(message);
@@ -29,6 +33,7 @@ export function tauriTransport(): Transport {
 		},
 
 		async openFolder(cwd: string, resume: ResumeRequest): Promise<OpenedTab> {
+			const client = await connect();
 			const channel = new Channel<TabMessage>();
 			// The AppInfo snapshot is the bridge's first message on the channel; capture it
 			// for the caller and fan everything out to the listeners from the start.
@@ -41,6 +46,7 @@ export function tauriTransport(): Transport {
 			const resumeArg =
 				resume.resume === 'id' ? { resume: 'id', id: resume.id } : { resume: resume.resume };
 			const tab = await invoke<number>('open_folder', {
+				client,
 				cwd,
 				resume: resumeArg,
 				events: channel
@@ -49,15 +55,15 @@ export function tauriTransport(): Transport {
 		},
 
 		async sendOp(tab: number, op: Op): Promise<void> {
-			await invoke('send_op', { tab, op });
+			await invoke('send_op', { client: await connect(), tab, op });
 		},
 
 		async closeTab(tab: number): Promise<void> {
-			await invoke('close_tab', { tab });
+			await invoke('close_tab', { client: await connect(), tab });
 		},
 
 		async recentFolders(limit = 10): Promise<RecentFolder[]> {
-			return await invoke<RecentFolder[]>('recent_folders', { limit });
+			return await invoke<RecentFolder[]>('recent_folders', { client: await connect(), limit });
 		},
 
 		listen(listener: (message: TabMessage) => void): () => void {

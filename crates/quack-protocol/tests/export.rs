@@ -352,6 +352,11 @@ fn export_protocol_ts() {
         "Event::Agent recurses through Box"
     );
 
+    // ts-rs can put a space before embedded documentation newlines.
+    let out: String = out
+        .lines()
+        .map(|line| format!("{}\n", line.trim_end()))
+        .collect();
     let path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../quack-gui/ui/src/lib/protocol.ts");
     let dir = path

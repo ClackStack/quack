@@ -4,14 +4,14 @@ The desktop SPA (SvelteKit 3, Svelte 5 runes, adapter-static SPA mode) that the 
 shell in `..` serves from `build/` — docs/plan/15-desktop-client.md.
 
 ```sh
-npm ci
-npm run dev        # vite dev server; runs against the scripted dev transport
-npm run check      # svelte-check
-npm test           # vitest
-npm run build      # static bundle into build/ (what tauri.conf.json embeds)
+pnpm install
+pnpm dev          # vite dev server; runs against the scripted dev transport
+pnpm check        # svelte-check
+pnpm test         # vitest
+pnpm build        # static bundle into build/ (what tauri.conf.json embeds)
 ```
 
-Without the Tauri shell (`npm run dev` in a plain browser) the UI drives a scripted
+Without the Tauri shell (`pnpm dev` in a plain browser) the UI drives a scripted
 demo session through the same `Transport` seam — nothing renders that the real
 bridge does not send.
 

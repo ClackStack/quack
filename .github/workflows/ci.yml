@@ -87,6 +87,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: install pnpm
+        run: npm i -g pnpm@11.1.3
       - name: install webkit2gtk (linux)
         if: runner.os == 'Linux'
         run: |
@@ -95,10 +97,10 @@ jobs:
       - name: SPA checks and build
         working-directory: crates/quack-gui/ui
         run: |
-          npm ci --no-audit --no-fund
-          npm run check
-          npm test
-          npm run build
+          pnpm install --frozen-lockfile
+          pnpm run check
+          pnpm test
+          pnpm run build
       # protocol.ts is generated; a diff means the checked-in file is stale.
       - name: protocol.ts is up to date
         if: matrix.name == 'linux-x64'

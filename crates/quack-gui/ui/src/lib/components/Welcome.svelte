@@ -1,5 +1,7 @@
 <script lang="ts">
 	import type { Transport, ResumeRequest } from '#lib/transport';
+	import logoUrl from '#lib/assets/logo.png';
+	import ThemeToggle from '#lib/components/ThemeToggle.svelte';
 
 	let {
 		transport,
@@ -37,11 +39,15 @@
 </script>
 
 <div class="welcome">
+	<div class="welcome-top">
+		<ThemeToggle showLabels />
+	</div>
 	<header>
-		<pre class="duck" aria-hidden="true">   __
-  ( o&lt;   quack
-  /|_|\
-  _/ \_</pre>
+		<div class="logo-pond">
+			<span class="pond-ripple ripple-1" aria-hidden="true"></span>
+			<span class="pond-ripple ripple-2" aria-hidden="true"></span>
+			<img src={logoUrl} alt="quack" class="welcome-logo" />
+		</div>
 		<h1>A terminal coding agent,<br />in a window.</h1>
 		<p class="lede">
 			Open a folder to start a session. The engine runs locally; quack only talks to
@@ -94,6 +100,7 @@
 
 <style>
 	.welcome {
+		position: relative;
 		min-height: 100vh;
 		display: grid;
 		place-content: center;
@@ -104,6 +111,13 @@
 		padding: var(--sp-lg);
 	}
 
+	.welcome-top {
+		position: absolute;
+		top: var(--sp-md);
+		right: var(--sp-md);
+		z-index: 10;
+	}
+
 	header {
 		text-align: center;
 		display: grid;
@@ -111,12 +125,88 @@
 		gap: var(--sp-md);
 	}
 
-	.duck {
-		margin: 0;
-		font-family: var(--font-mono);
-		font-size: 15px;
-		line-height: 1.25;
-		color: var(--beak-ink);
+	.logo-pond {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 16px 24px;
+		border-radius: 24px;
+		background: radial-gradient(
+			ellipse 85% 75% at 40% 35%,
+			#82e4fa 0%,
+			#4ec4e9 45%,
+			#1d9ac5 100%
+		);
+		border: 1px solid rgba(255, 255, 255, 0.6);
+		box-shadow:
+			0 12px 32px -4px rgba(8, 106, 134, 0.28),
+			0 4px 10px -2px rgba(8, 106, 134, 0.16),
+			inset 0 1px 1px rgba(255, 255, 255, 0.8),
+			inset 0 -2px 6px rgba(8, 106, 134, 0.2);
+		overflow: hidden;
+		user-select: none;
+	}
+
+	:root[data-theme='dark'] .logo-pond {
+		background: radial-gradient(
+			ellipse 85% 75% at 40% 35%,
+			#2a83a5 0%,
+			#1b617c 50%,
+			#103f53 100%
+		);
+		border: 1px solid rgba(122, 212, 236, 0.28);
+		box-shadow:
+			0 12px 32px -4px rgba(0, 0, 0, 0.5),
+			0 4px 10px -2px rgba(0, 0, 0, 0.35),
+			inset 0 1px 1px rgba(255, 255, 255, 0.18),
+			inset 0 -2px 6px rgba(0, 0, 0, 0.4);
+	}
+
+	.pond-ripple {
+		position: absolute;
+		border-radius: 50%;
+		border: 1.5px solid rgba(255, 255, 255, 0.3);
+		pointer-events: none;
+		transform: translate(-50%, -50%);
+	}
+
+	.ripple-1 {
+		left: 28%;
+		top: 62%;
+		width: 120px;
+		height: 48px;
+	}
+
+	.ripple-2 {
+		left: 28%;
+		top: 62%;
+		width: 190px;
+		height: 76px;
+		border-color: rgba(255, 255, 255, 0.18);
+	}
+
+	:root[data-theme='dark'] .ripple-1 {
+		border-color: rgba(255, 255, 255, 0.18);
+	}
+
+	:root[data-theme='dark'] .ripple-2 {
+		border-color: rgba(255, 255, 255, 0.1);
+	}
+
+	.welcome-logo {
+		width: min(340px, 75vw);
+		height: auto;
+		display: block;
+		margin: 0 auto;
+		position: relative;
+		z-index: 1;
+		user-select: none;
+		filter: drop-shadow(0 2px 6px rgba(8, 106, 134, 0.35));
+	}
+
+	:root[data-theme='dark'] .welcome-logo {
+		filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
 	}
 
 	h1 {

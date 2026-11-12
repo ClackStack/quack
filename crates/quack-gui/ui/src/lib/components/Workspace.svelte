@@ -1,6 +1,9 @@
 <script lang="ts">
 	import type { Session } from '#lib/session.svelte';
+	import { theme } from '#lib/theme.svelte';
 	import Header from './Header.svelte';
+	import SetupPanel from './SetupPanel.svelte';
+	import TrustPanel from './TrustPanel.svelte';
 	import Sidebar from './Sidebar.svelte';
 	import Transcript from './Transcript.svelte';
 	import ApprovalCard from './ApprovalCard.svelte';
@@ -23,16 +26,16 @@
 		onNewTab: () => void;
 	} = $props();
 
+	let sidebarOpen = $state(false);
+
 	const planReady = $derived(
 		session.mode === 'plan' && session.plan.trim().length > 0 && !session.streaming
 	);
 
 	$effect(() => {
-		const theme = session.info?.ui.theme ?? 'auto';
-		const dark =
-			theme === 'dark' ||
-			(theme === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-		document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+		if (session.info?.ui.theme) {
+			theme.initFromSession(session.info.ui.theme);
+		}
 	});
 </script>
 
@@ -40,38 +43,73 @@
 	<Header {session} />
 	<div class="tabs" aria-label="Workspaces">
 		{#each sessions as tab, i (tab.tab)}
-			<button class="tab" aria-current={i === activeIndex ? 'page' : undefined} onclick={() => onSelectTab(i)}>{tab.info?.cwd ?? 'Workspace'}</button>
-			<button class="tab ghost" aria-label={`Close ${tab.info?.cwd ?? 'workspace'}`} onclick={() => onCloseTab(i)}>×</button>
+			<button
+				class="tab"
+				aria-current={i === activeIndex ? 'page' : undefined}
+				onclick={() => onSelectTab(i)}>{tab.info?.cwd ?? 'Workspace'}</button
+			>
+			<button
+				class="tab ghost"
+				aria-label={`Close ${tab.info?.cwd ?? 'workspace'}`}
+				onclick={() => onCloseTab(i)}>×</button
+			>
 		{/each}
 		<button class="tab ghost" aria-label="Open folder" onclick={onNewTab}>+</button>
+		<button
+			class="tab sidebar-toggle"
+			aria-expanded={sidebarOpen}
+			aria-controls="workspace-sidebar"
+			onclick={() => (sidebarOpen = !sidebarOpen)}>Sessions</button
+		>
 	</div>
 
 	<div class="body">
 		<main>
-			<Transcript {session} />
-			{#if planReady}
-				<div class="plan-bar">
-					<span class="pill pill-live">Plan ready</span>
-					<p>{session.plan}</p>
-					<div class="grow"></div>
-					<button class="btn btn-primary" onclick={() => session.acceptPlan()}>
-						Carry out the plan
-					</button>
-					<button class="btn" onclick={() => session.setMode('ask')}>Back to Ask</button>
+			{#if session.actionError}
+				<div class="action-error" role="alert">
+					<span>{session.actionError}</span><button
+						class="btn"
+						onclick={() => (session.actionError = null)}>Dismiss</button
+					>
 				</div>
 			{/if}
-			{#if session.approval}
-				<ApprovalCard approval={session.approval} onAnswer={(d) => session.answerApproval(d)} />
+			{#if session.trust}
+				<TrustPanel {session} />
+			{:else if session.setupOpen}
+				{#key session.tab}<SetupPanel {session} />{/key}
+			{:else}
+				<Transcript {session} />
+				{#if planReady}
+					<div class="plan-bar">
+						<span class="pill pill-live">Plan ready</span>
+						<p>{session.plan}</p>
+						<div class="grow"></div>
+						<button class="btn btn-primary" onclick={() => session.acceptPlan()}>
+							Carry out the plan
+						</button>
+						<button class="btn" onclick={() => session.setMode('ask')}>Back to Ask</button>
+					</div>
+				{/if}
+				{#if session.approval}
+					<ApprovalCard
+						approval={session.approval}
+						busy={session.sending}
+						onAnswer={(d) => void session.answerApproval(d)}
+					/>
+				{/if}
+				{#if session.questions}
+					{#key session.questions.callId}
+						<QuestionsCard
+							questions={session.questions.questions}
+							busy={session.sending}
+							onAnswer={(a) => void session.answerQuestions(a)}
+						/>
+					{/key}
+				{/if}
+				<Composer {session} />
 			{/if}
-			{#if session.questions}
-				<QuestionsCard
-					questions={session.questions.questions}
-					onAnswer={(a) => session.answerQuestions(a)}
-				/>
-			{/if}
-			<Composer {session} />
 		</main>
-		<Sidebar {session} />
+		<div id="workspace-sidebar" class="sidebar" class:open={sidebarOpen}><Sidebar {session} /></div>
 	</div>
 </div>
 
@@ -79,11 +117,25 @@
 	.workspace {
 		height: 100vh;
 		display: grid;
-		grid-template-rows: auto auto 1fr;
+		grid-template-rows: auto auto auto minmax(0, 1fr);
 		overflow: hidden;
 	}
 
+	.action-error {
+		display: flex;
+		align-items: center;
+		gap: 16px;
+		padding: 12px 24px;
+		color: var(--fail);
+		background: var(--fail-soft);
+		overflow-wrap: anywhere;
+	}
+	.action-error span {
+		flex: 1;
+	}
+
 	.tabs {
+		overflow-x: auto;
 		display: flex;
 		align-items: center;
 		gap: var(--sp-xs);
@@ -105,6 +157,14 @@
 		background: none;
 		border-style: dashed;
 		color: var(--ink-2);
+	}
+
+	.sidebar {
+		min-height: 0;
+		display: grid;
+	}
+	.sidebar-toggle {
+		display: none;
 	}
 
 	.body {
@@ -148,7 +208,22 @@
 
 	@media (max-width: 900px) {
 		.body {
-			grid-template-columns: 1fr;
+			position: relative;
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.sidebar-toggle {
+			display: block;
+			margin-left: auto;
+		}
+		.sidebar {
+			display: none;
+		}
+		.sidebar.open {
+			display: grid;
+			position: absolute;
+			inset: 0 0 0 auto;
+			width: var(--sidebar-w);
+			z-index: 20;
 		}
 	}
 </style>

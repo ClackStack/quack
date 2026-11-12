@@ -1,6 +1,9 @@
 import type {
 	ApprovalRequest,
 	ContextSegment,
+	DetectedServer,
+	Op,
+	ServiceInfo,
 	Event,
 	ProviderModels,
 	Question,
@@ -75,8 +78,10 @@ export class Session {
 	tab = $state(0);
 	info = $state<AppInfo | null>(null);
 	title = $state('');
+	draft = $state('');
 	items = $state<Item[]>([]);
 	streaming = $state(false);
+	turnPending = $state(false);
 	speed = $state<SpeedState | null>(null);
 	lastUsage = $state<{ prompt: number; completion: number; cached: number | null } | null>(null);
 	approval = $state<{ callId: string; request: ApprovalRequest; always: string[] } | null>(null);
@@ -96,6 +101,34 @@ export class Session {
 	resumed = $state(false);
 	starting = $state(true);
 	closed = $state(false);
+	sessionId = $state<string | null>(null);
+	switching = $state(false);
+	sending = $state(false);
+	actionError = $state<string | null>(null);
+	trust = $state<{ path: string; summary: string; changed: boolean } | null>(null);
+	trustSaving = $state(false);
+	setupOpen = $state(false);
+	setupWorking = $state(false);
+	setupNotice = $state('');
+	services = $state<ServiceInfo[]>([]);
+	detectedServers = $state<DetectedServer[] | null>(null);
+	detecting = $state(false);
+
+	get canSubmit() {
+		return (
+			!this.closed &&
+			!this.starting &&
+			!this.switching &&
+			!this.sending &&
+			!this.setupWorking &&
+			!this.streaming &&
+			!this.turnPending &&
+			!this.approval &&
+			!this.questions &&
+			!this.trust &&
+			!!this.currentModel
+		);
+	}
 
 	#transport: Transport;
 
@@ -111,14 +144,31 @@ export class Session {
 	onEvent(ev: Event) {
 		switch (ev.event) {
 			case 'session_configured':
-				this.starting = false;
+				if (this.sessionId !== null && this.sessionId !== ev.session.id) this.#resetConversation();
+				this.sessionId = ev.session.id;
+				this.switching = false;
 				this.currentModel = ev.session.model ?? null;
+				if (this.currentModel) {
+					this.setupWorking = false;
+					this.setupOpen = false;
+				}
 				break;
 			case 'startup_complete':
 				this.starting = false;
+				this.trustSaving = false;
+				if (!this.currentModel) void this.openSetup();
+				break;
+			case 'config_reloaded':
+				this.trust = null;
+				this.starting = true;
+				break;
+			case 'project_trust':
+				this.trust = { path: ev.path, summary: ev.summary, changed: ev.changed };
 				break;
 			case 'session_resumed':
-				this.starting = false;
+				this.#resetConversation();
+				this.sessionId = ev.session.id;
+				this.switching = false;
 				this.resumed = true;
 				for (const item of ev.items) this.#pushReplay(item);
 				break;
@@ -151,16 +201,14 @@ export class Session {
 				});
 				break;
 			case 'tool_call_output_delta': {
-				const tool = this.items.findLast(
-					(i) => i.kind === 'tool' && i.callId === ev.call_id
-				) as Extract<Item, { kind: 'tool' }> | undefined;
+				const tool = this.items.findLast((i) => i.kind === 'tool' && i.callId === ev.call_id) as
+					Extract<Item, { kind: 'tool' }> | undefined;
 				if (tool) tool.output += ev.chunk;
 				break;
 			}
 			case 'tool_call_end': {
-				const tool = this.items.findLast(
-					(i) => i.kind === 'tool' && i.callId === ev.call_id
-				) as Extract<Item, { kind: 'tool' }> | undefined;
+				const tool = this.items.findLast((i) => i.kind === 'tool' && i.callId === ev.call_id) as
+					Extract<Item, { kind: 'tool' }> | undefined;
 				if (tool) {
 					tool.ok = ev.result.ok;
 					tool.summary = ev.result.summary || tool.summary;
@@ -175,9 +223,11 @@ export class Session {
 				this.questions = { callId: ev.call_id, questions: ev.questions };
 				break;
 			case 'turn_started':
+				this.turnPending = false;
 				this.streaming = true;
 				break;
 			case 'turn_complete':
+				this.turnPending = false;
 				this.streaming = false;
 				this.#sealStreams();
 				this.approval = null;
@@ -189,11 +239,17 @@ export class Session {
 				};
 				break;
 			case 'turn_aborted':
+				this.turnPending = false;
 				this.streaming = false;
 				this.#sealStreams();
 				this.approval = null;
 				this.questions = null;
-				this.items.push({ kind: 'system', id: nextId(), tone: 'warning', text: `Interrupted: ${ev.reason}` });
+				this.items.push({
+					kind: 'system',
+					id: nextId(),
+					tone: 'warning',
+					text: `Interrupted: ${ev.reason}`
+				});
 				break;
 			case 'speed':
 				this.speed = { ttftMs: ev.ttft_ms, tokensPerSec: ev.tokens_per_sec ?? null };
@@ -223,8 +279,22 @@ export class Session {
 				this.sandboxOff = ev.off;
 				break;
 			case 'model_catalog':
-				this.providers = ev.providers;
-				this.currentModel = ev.current ?? null;
+				// Key/URL setup returns only that provider; retain the other entries.
+				this.providers = [
+					...this.providers.filter((p) => !ev.providers.some((next) => next.id === p.id)),
+					...ev.providers
+				];
+				this.setupWorking = false;
+				break;
+			case 'services':
+				this.services = ev.services;
+				break;
+			case 'servers_detected':
+				this.detectedServers = ev.servers;
+				this.detecting = false;
+				break;
+			case 'provider_added':
+				this.setupNotice = ev.note ?? 'Provider saved. Choose a model to continue.';
 				break;
 			case 'session_list':
 				this.sessions = ev.sessions;
@@ -272,17 +342,29 @@ export class Session {
 				});
 				break;
 			case 'notice':
+				this.#sealStreams();
 				this.items.push({ kind: 'system', id: nextId(), tone: 'notice', text: ev.message });
 				break;
 			case 'warning':
+				this.#sealStreams();
+				this.turnPending = false;
+				if (this.switching || this.setupWorking) this.actionError = ev.message;
+				this.switching = false;
+				this.setupWorking = false;
 				this.items.push({ kind: 'system', id: nextId(), tone: 'warning', text: ev.message });
 				break;
 			case 'error':
+				this.#sealStreams();
+				this.turnPending = false;
+				this.actionError = ev.error.message;
+				this.switching = false;
+				this.setupWorking = false;
+				this.trustSaving = false;
 				this.items.push({
 					kind: 'system',
 					id: nextId(),
 					tone: 'error',
-					text: `${ev.error.message} · check the provider's api_key if this keeps happening`
+					text: ev.error.message
 				});
 				this.streaming = false;
 				break;
@@ -295,12 +377,31 @@ export class Session {
 
 	onClosed(reason: string | null) {
 		this.closed = true;
+		this.turnPending = false;
+		this.switching = false;
+		this.setupWorking = false;
+		this.trustSaving = false;
+		this.detecting = false;
 		this.starting = false;
 		this.streaming = false;
 		this.#sealStreams();
 		this.approval = null;
 		this.questions = null;
 		if (reason) this.items.push({ kind: 'system', id: nextId(), tone: 'error', text: reason });
+	}
+
+	#resetConversation() {
+		this.items = [];
+		this.draft = '';
+		this.plan = '';
+		this.agents = [];
+		this.context = null;
+		this.contextReport = null;
+		this.speed = null;
+		this.lastUsage = null;
+		this.approval = null;
+		this.questions = null;
+		this.resumed = false;
 	}
 
 	#pushReplay(item: ReplayItem) {
@@ -336,7 +437,9 @@ export class Session {
 		}
 	}
 
-	#openStreaming(kind: 'assistant' | 'reasoning'): (Extract<Item, { kind: 'assistant' }> | Extract<Item, { kind: 'reasoning' }>) | undefined {
+	#openStreaming(
+		kind: 'assistant' | 'reasoning'
+	): (Extract<Item, { kind: 'assistant' }> | Extract<Item, { kind: 'reasoning' }>) | undefined {
 		const last = this.items[this.items.length - 1];
 		return last && last.kind === kind && last.streaming ? last : undefined;
 	}
@@ -350,11 +453,30 @@ export class Session {
 
 	// ---- actions ----
 
+	/** IPC success means queued; engine events acknowledge the resulting state. */
+	async #send(op: Op): Promise<boolean> {
+		if (this.closed) {
+			this.actionError = 'This workspace has stopped · close and reopen the folder.';
+			return false;
+		}
+		if (!op.op.startsWith('list_') && !op.op.startsWith('get_')) this.actionError = null;
+		try {
+			await this.#transport.sendOp(this.tab, op);
+			return true;
+		} catch (error) {
+			this.actionError = `${error instanceof Error ? error.message : String(error)} · try again.`;
+			return false;
+		}
+	}
+
 	async submit(text: string, files: string[] = [], images: string[] = []) {
-		if (this.closed) throw new Error('This workspace has stopped · close and reopen the folder');
+		if (!this.canSubmit) return false;
+		this.sending = true;
 		this.#sealStreams();
-		this.items.push({ kind: 'user', id: nextId(), text, files, images });
-		await this.#transport.sendOp(this.tab, {
+		this.turnPending = true;
+		const id = nextId();
+		this.items.push({ kind: 'user', id, text, files, images });
+		const sent = await this.#send({
 			op: 'user_turn',
 			items: [
 				...(text ? [{ type: 'text' as const, text }] : []),
@@ -363,17 +485,23 @@ export class Session {
 			],
 			overrides: {}
 		});
+		if (!sent) {
+			this.items = this.items.filter((item) => item.id !== id);
+			this.turnPending = false;
+		}
+		this.sending = false;
+		return sent;
 	}
 
 	async interrupt() {
-		await this.#transport.sendOp(this.tab, { op: 'interrupt' });
+		return this.#send({ op: 'interrupt' });
 	}
 
 	async answerApproval(decision: 'allow_once' | 'allow_session' | 'deny', feedback?: string) {
 		const callId = this.approval?.callId;
-		this.approval = null;
-		if (!callId) return;
-		await this.#transport.sendOp(this.tab, {
+		if (!callId || this.sending) return false;
+		this.sending = true;
+		const sent = await this.#send({
 			op: 'approval_response',
 			call_id: callId,
 			decision:
@@ -381,79 +509,134 @@ export class Session {
 					? { decision: 'deny_with_feedback', feedback }
 					: { decision }
 		});
+		if (sent && this.approval?.callId === callId) this.approval = null;
+		this.sending = false;
+		return sent;
 	}
 
 	async answerQuestions(answers: { picked?: number; text?: string; skipped?: boolean }[]) {
 		const callId = this.questions?.callId;
-		this.questions = null;
-		if (!callId) return;
-		await this.#transport.sendOp(this.tab, {
+		if (!callId || this.sending) return false;
+		this.sending = true;
+		const sent = await this.#send({
 			op: 'answer_questions',
 			call_id: callId,
 			answers: answers.map((a) =>
-				a.skipped ? { answer: 'skipped' } : a.picked !== undefined ? { answer: 'picked', index: a.picked } : { answer: 'text', text: a.text ?? '' }
+				a.skipped
+					? { answer: 'skipped' }
+					: a.picked !== undefined
+						? { answer: 'picked', index: a.picked }
+						: { answer: 'text', text: a.text ?? '' }
 			),
 			stop_asking: false
 		});
+		if (sent && this.questions?.callId === callId) this.questions = null;
+		this.sending = false;
+		return sent;
 	}
 
 	async setModel(providerModel: string) {
+		if (this.setupWorking || this.switching || this.streaming || this.turnPending) return false;
 		const slash = providerModel.indexOf('/');
-		const provider = providerModel.slice(0, slash);
-		const model = providerModel.slice(slash + 1);
-		if (slash < 1) return;
-		if (!provider || !model) return;
-		await this.#transport.sendOp(this.tab, { op: 'set_model', provider, model });
+		if (slash < 1 || slash === providerModel.length - 1) return false;
+		this.setupWorking = true;
+		const sent = await this.#send({
+			op: 'set_model',
+			provider: providerModel.slice(0, slash),
+			model: providerModel.slice(slash + 1)
+		});
+		if (!sent) this.setupWorking = false;
+		return sent;
 	}
 
 	async setMode(mode: PermissionMode) {
-		await this.#transport.sendOp(this.tab, { op: 'set_permission_mode', mode });
+		return this.#send({ op: 'set_permission_mode', mode });
 	}
-
 	async acceptPlan() {
-		await this.#transport.sendOp(this.tab, { op: 'accept_plan', mode: 'auto-edit' });
-		this.mode = 'auto-edit';
-		this.plan = '';
+		return this.#send({ op: 'accept_plan', mode: 'auto-edit' });
 	}
-
 	async refreshContext() {
-		await this.#transport.sendOp(this.tab, { op: 'get_context' });
+		return this.#send({ op: 'get_context' });
 	}
-
 	async compact(focus?: string) {
-		await this.#transport.sendOp(this.tab, { op: 'compact', ...(focus ? { focus } : {}) });
+		return this.#send({ op: 'compact', ...(focus ? { focus } : {}) });
 	}
-
 	async listModels() {
-		await this.#transport.sendOp(this.tab, { op: 'list_models' });
+		return this.#send({ op: 'list_models' });
 	}
-
 	async listSessions() {
-		await this.#transport.sendOp(this.tab, { op: 'list_sessions' });
+		return this.#send({ op: 'list_sessions' });
 	}
 
 	async newSession() {
-		this.items = [];
-		this.title = '';
-		this.plan = '';
-		this.agents = [];
-		this.resumed = false;
-		this.starting = true;
-		await this.#transport.sendOp(this.tab, { op: 'new_session' });
-		await this.listSessions();
+		return this.#switchSession({ op: 'new_session' });
 	}
-
 	async resumeSession(id: string) {
-		this.items = [];
-		this.title = '';
-		this.plan = '';
-		this.agents = [];
-		this.resumed = false;
-		this.starting = true;
-		await this.#transport.sendOp(this.tab, { op: 'resume_session', id });
+		if (id === this.sessionId) return false;
+		return this.#switchSession({ op: 'resume_session', id });
+	}
+	async #switchSession(op: Op) {
+		if (
+			this.switching ||
+			this.setupWorking ||
+			this.streaming ||
+			this.turnPending ||
+			this.starting ||
+			this.trust ||
+			!this.currentModel
+		)
+			return false;
+		this.switching = true;
+		if (!(await this.#send(op))) {
+			this.switching = false;
+			return false;
+		}
+		await this.listSessions();
+		return true;
+	}
+	async undo() {
+		return this.#send({ op: 'undo', checkpoint: null, force: false });
 	}
 
-	async undo() {
-		await this.#transport.sendOp(this.tab, { op: 'undo', checkpoint: null, force: false });
+	async trustProject(decision: 'trusted' | 'settings-only' | 'ignored') {
+		if (this.trustSaving) return false;
+		this.trustSaving = true;
+		const sent = await this.#send({ op: 'trust_project', decision });
+		if (!sent) this.trustSaving = false;
+		return sent;
+	}
+
+	async openSetup() {
+		this.setupOpen = true;
+		this.setupNotice = '';
+		await this.#send({ op: 'list_services' });
+	}
+	async detectServers() {
+		if (this.detecting) return;
+		this.detecting = true;
+		if (!(await this.#send({ op: 'detect_servers' }))) this.detecting = false;
+	}
+	async connectServer(baseUrl: string, key: string) {
+		return this.#setup({ op: 'add_server', base_url: baseUrl.trim(), ...(key ? { key } : {}) });
+	}
+	async saveProviderKey(id: string, key: string) {
+		return this.#setup({ op: 'set_provider_key', id, key });
+	}
+	async useDetectedServer(server: DetectedServer, model: string) {
+		return this.#setup({
+			op: 'add_provider',
+			id: server.id,
+			base_url: server.base_url,
+			api: server.api,
+			model
+		});
+	}
+	async #setup(op: Op) {
+		if (this.setupWorking) return false;
+		this.setupWorking = true;
+		this.setupNotice = '';
+		const sent = await this.#send(op);
+		if (!sent) this.setupWorking = false;
+		return sent;
 	}
 }

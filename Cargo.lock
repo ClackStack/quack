@@ -3945,6 +3945,7 @@ dependencies = [
 name = "quack-gui"
 version = "0.1.0"
 dependencies = [
+ "nix 0.31.3",
  "quack-config",
  "quack-context",
  "quack-core",

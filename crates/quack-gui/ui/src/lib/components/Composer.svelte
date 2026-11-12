@@ -3,7 +3,6 @@
 
 	let { session }: { session: Session } = $props();
 
-	let text = $state('');
 	let editor: HTMLTextAreaElement | undefined = $state();
 
 	function autogrow() {
@@ -13,15 +12,17 @@
 	}
 
 	async function send() {
-		const body = text.trim();
-		if (!body || session.approval || session.closed) return;
-		text = '';
-		autogrow();
-		await session.submit(body);
+		const draft = session.draft;
+		const body = draft.trim();
+		if (!body || !session.canSubmit) return;
+		if (await session.submit(body)) {
+			if (session.draft === draft) session.draft = '';
+			autogrow();
+		}
 	}
 
 	function onKeydown(event: KeyboardEvent) {
-		if (event.key === 'Enter' && !event.shiftKey) {
+		if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
 			event.preventDefault();
 			void send();
 		}
@@ -30,7 +31,7 @@
 	// Keep the composer focused while nothing else asks for the keyboard; approvals
 	// answer with Enter from anywhere.
 	$effect(() => {
-		if (!session.approval && !session.questions) editor?.focus();
+		if (!session.approval && !session.questions && !session.switching) editor?.focus();
 	});
 </script>
 
@@ -38,23 +39,29 @@
 	<div class="box">
 		<textarea
 			bind:this={editor}
-			bind:value={text}
+			bind:value={session.draft}
 			rows={1}
-			placeholder={session.streaming ? 'quack is working — interrupt or wait…' : 'Ask quack to do something in this folder…'}
+			placeholder={session.streaming || session.turnPending
+				? 'quack is working — interrupt or wait…'
+				: 'Ask quack to do something in this folder…'}
 			onkeydown={onKeydown}
 			oninput={autogrow}
 			aria-label="Message"
-			disabled={session.closed}
+			disabled={session.closed || session.sending || session.switching || session.starting}
 		></textarea>
 		<div class="row">
 			<span class="hint">
-				{#if session.streaming}
+				{#if session.streaming || session.turnPending}
 					<button class="btn stop" onclick={() => session.interrupt()}>Interrupt</button>
 				{:else}
 					<span><span class="kbd">⏎</span> send · <span class="kbd">⇧⏎</span> newline</span>
 				{/if}
 			</span>
-			<button class="btn btn-primary" onclick={() => void send()} disabled={!text.trim() || session.approval !== null || session.closed}>
+			<button
+				class="btn btn-primary"
+				onclick={() => void send()}
+				disabled={!session.draft.trim() || !session.canSubmit}
+			>
 				Send
 			</button>
 		</div>

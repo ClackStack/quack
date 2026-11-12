@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { MODES, type PermissionMode, type Session } from '#lib/session.svelte';
+	import iconUrl from '#lib/assets/icon.png';
+	import ThemeToggle from '#lib/components/ThemeToggle.svelte';
 
 	let { session }: { session: Session } = $props();
 
@@ -30,17 +32,30 @@
 		}
 	}
 
+	const disabled = $derived(
+		session.closed ||
+			session.starting ||
+			!!session.trust ||
+			session.switching ||
+			session.setupWorking ||
+			session.streaming ||
+			session.turnPending
+	);
+
 	const providers = $derived(session.providers.filter((p) => p.models.length > 0));
 </script>
 
 <svelte:window onclick={closeMenus} />
 
 <header>
-	<div class="wordmark" title={`quack ${session.info?.version ?? ''}`}>quack<span aria-hidden="true">🦆</span></div>
+	<div class="wordmark" title={`_(•)> quack ${session.info?.version ?? ''}`}>
+		<img src={iconUrl} class="app-icon" alt="" width="22" height="22" />
+		<span>quack</span>
+	</div>
 
 	<div class="menu-anchor">
 		<button
-			class="pill"
+			class="pill model-picker"
 			class:pill-live={session.streaming}
 			onclick={() => {
 				showModels = !showModels;
@@ -64,7 +79,7 @@
 							<button
 								class="model"
 								role="menuitem"
-								disabled={!provider.available}
+								disabled={!provider.available || disabled}
 								onclick={() => {
 									void session.setModel(`${provider.id}/${model.id}`);
 									showModels = false;
@@ -76,8 +91,17 @@
 						{/each}
 					</div>
 				{/each}
+				<button
+					class="model"
+					role="menuitem"
+					{disabled}
+					onclick={() => {
+						showModels = false;
+						void session.openSetup();
+					}}>Connect a provider…</button
+				>
 				{#if providers.length === 0}
-					<div class="empty">no providers ready · run setup</div>
+					<div class="empty">No providers ready.</div>
 				{/if}
 			</div>
 		{/if}
@@ -116,6 +140,7 @@
 		{/if}
 	</div>
 
+	<button class="btn" {disabled} onclick={() => session.openSetup()}>Providers</button>
 	<div class="grow"></div>
 
 	<div class="menu-anchor">
@@ -156,11 +181,15 @@
 						<span class="note">summarize older history</span>
 					</button>
 				{:else}
-					<div class="empty">{session.context ? `${session.context.used} tokens in use` : 'no context report yet'}</div>
+					<div class="empty">
+						{session.context ? `${session.context.used} tokens in use` : 'no context report yet'}
+					</div>
 				{/if}
 			</div>
 		{/if}
 	</div>
+
+	<ThemeToggle />
 </header>
 
 <!-- The signature move: the website's water line, carrying data. It fills toward the
@@ -180,6 +209,13 @@
 		background: var(--bg-panel);
 	}
 
+	.model-picker {
+		max-width: min(38vw, 360px);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		display: block;
+	}
+
 	.wordmark {
 		font-family: var(--font-mono);
 		font-weight: 700;
@@ -187,12 +223,17 @@
 		letter-spacing: -0.02em;
 		display: inline-flex;
 		align-items: center;
-		gap: 6px;
+		gap: 8px;
 		margin-right: var(--sp-sm);
+		user-select: none;
 	}
 
-	.wordmark span {
-		font-size: 13px;
+	.wordmark .app-icon {
+		width: 22px;
+		height: 22px;
+		object-fit: contain;
+		display: block;
+		border-radius: var(--r-sm);
 	}
 
 	.grow {
@@ -304,7 +345,9 @@
 		height: 100%;
 		width: calc(var(--fill, 0) * 100%);
 		background: var(--sky);
-		transition: width 400ms ease-out, background-color 400ms ease-out;
+		transition:
+			width 400ms ease-out,
+			background-color 400ms ease-out;
 	}
 
 	.water.nearing {

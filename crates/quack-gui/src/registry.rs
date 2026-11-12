@@ -9,16 +9,15 @@
 //! `session_end` hooks finish.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use quack_config::LoadOptions;
 use quack_core::{Engine, EngineHandle, Resume};
 use quack_protocol::{Event, Op, SessionId};
 use serde::Serialize;
-use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::appinfo::AppInfo;
 use crate::coalesce::DeltaCoalescer;
@@ -123,29 +122,57 @@ impl std::error::Error for OpenError {}
 /// inject an explicit variable map so they never read the developer's real config.
 pub type Loader = Arc<dyn Fn(LoadOptions) -> Result<quack_config::Loaded, String> + Send + Sync>;
 
-/// One open tab: the ops half of its engine, a stop signal for the forwarder, and the
-/// forwarder itself (which owns the engine and awaits its shutdown at the end).
+/// A reserved workspace remains owned while starting, running, or shutting down.
+/// The task owns its engine independently of the command that opened it.
 struct Tab {
-    session: watch::Receiver<SessionId>,
+    session: watch::Receiver<Option<SessionId>>,
     cwd: PathBuf,
     workspace: PathBuf,
     ops: mpsc::Sender<Op>,
-    stop: mpsc::UnboundedSender<()>,
-    forwarder: JoinHandle<()>,
+    stop: watch::Sender<bool>,
+    done: watch::Receiver<bool>,
 }
 
-/// The open tabs, one engine each.
+impl Tab {
+    fn finished(&self) -> bool {
+        *self.done.borrow() || self.done.has_changed().is_err()
+    }
+
+    fn stop(&self) {
+        self.stop.send_replace(true);
+    }
+
+    async fn stopped(&self) {
+        let mut done = self.done.clone();
+        while !*done.borrow_and_update() {
+            if done.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct Tabs {
+    entries: HashMap<TabId, Arc<Tab>>,
+    next: TabId,
+    client: u64,
+}
+
+/// The open tabs, one engine each. The map lock covers bookkeeping only; config
+/// loading, startup, channel backpressure and shutdown never hold it across awaits.
 pub struct Registry {
-    tabs: HashMap<TabId, Tab>,
-    next_tab: TabId,
+    tabs: Mutex<Tabs>,
     load: Loader,
-    recent: RecentFolders,
+    recent: Mutex<RecentFolders>,
 }
 
 impl std::fmt::Debug for Registry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tabs = self.tabs.lock().expect("tab map lock");
         f.debug_struct("Registry")
-            .field("tabs", &self.tabs.keys().collect::<Vec<_>>())
+            .field("tabs", &tabs.entries.keys().collect::<Vec<_>>())
+            .field("client", &tabs.client)
             .finish_non_exhaustive()
     }
 }
@@ -158,166 +185,234 @@ impl Registry {
         Self::with_loader(load)
     }
 
+    /// Load defaults shipped in the native resource directory. An explicit
+    /// QUACK_DEFAULTS_DIR (including `none`) still takes precedence.
+    pub fn with_resource_dir(resource_dir: PathBuf) -> Self {
+        let load: Loader = Arc::new(move |opts| {
+            load_from_resources(&opts, &resource_dir, &|key| std::env::var_os(key))
+        });
+        Self::with_loader(load)
+    }
+
     /// A registry with a custom config loader (tests).
     pub fn with_loader(load: Loader) -> Self {
         Self {
-            tabs: HashMap::new(),
-            next_tab: 0,
+            tabs: Mutex::default(),
             load,
-            recent: RecentFolders::load(),
+            recent: Mutex::new(RecentFolders::load()),
         }
     }
 
-    /// A registry with a custom loader *and* a custom home for the recent-folders
-    /// file, so tests never read or write the developer's real user data dir.
+    /// Isolate both config and recent-folder persistence from the real user data.
     pub fn with_parts(load: Loader, recent_dir: PathBuf) -> Self {
         Self {
-            tabs: HashMap::new(),
-            next_tab: 0,
+            tabs: Mutex::default(),
             load,
-            recent: RecentFolders::at(recent_dir),
+            recent: Mutex::new(RecentFolders::at(recent_dir)),
         }
     }
 
     /// Recently opened folders, most recent first.
     pub fn recent_folders(&self, limit: usize) -> Vec<crate::recent::RecentFolder> {
-        self.recent.list(limit)
+        self.recent.lock().expect("recent folders lock").list(limit)
     }
 
-    /// Load `cwd`'s config, spawn its engine, and stream its events into `sink` from
-    /// now on. The first [`Payload::Info`] message carries the `AppInfo` snapshot; the
-    /// events seen while opening replay first.
+    /// Start a new webview connection. Invalidates stale commands immediately,
+    /// invalidates pending opens and awaits all previous engines before returning.
+    pub async fn connect(&self) -> Result<u64, String> {
+        let (client, tabs) = self.retire();
+        for tab in tabs {
+            tab.stopped().await;
+        }
+        self.check_client(client)?;
+        Ok(client)
+    }
+
+    /// A full webview navigation discarded its channels. Stop tasks immediately;
+    /// the next connection (or app exit) awaits their completed shutdown.
+    pub fn disconnect(&self) {
+        self.retire();
+    }
+
+    /// Reject commands from a discarded UI document.
+    pub fn check_client(&self, client: u64) -> Result<(), String> {
+        if self.tabs.lock().expect("tab map lock").client == client {
+            Ok(())
+        } else {
+            Err("This desktop connection was replaced · reload the window".to_owned())
+        }
+    }
+
+    /// Open using the current connection (headless bridge callers).
     pub async fn open(
-        &mut self,
+        &self,
         cwd: PathBuf,
         resume: Resume,
         sink: Arc<dyn Sink>,
     ) -> Result<TabId, OpenError> {
-        self.tabs.retain(|_, t| !t.forwarder.is_finished());
+        let client = self.tabs.lock().expect("tab map lock").client;
+        self.open_for(client, cwd, resume, sink).await
+    }
+
+    /// Load and reserve a workspace, then await its task's first session snapshot.
+    /// Stale config loads cannot publish an engine after a webview reconnect.
+    pub async fn open_for(
+        &self,
+        client: u64,
+        cwd: PathBuf,
+        resume: Resume,
+        sink: Arc<dyn Sink>,
+    ) -> Result<TabId, OpenError> {
+        self.check_client(client).map_err(OpenError::Engine)?;
         let opts = LoadOptions::new(cwd.clone());
         let load = self.load.clone();
         let loaded = tokio::task::spawn_blocking(move || load(opts))
             .await
             .map_err(|e| OpenError::Config(e.to_string()))?
             .map_err(OpenError::Config)?;
-        // One live engine per workspace: session switching must never create two
-        // writers to the same log (or competing edits to the same working tree).
-        // Check BEFORE spawning: resume appends a record as part of startup.
         let workspace = workspace_key(&loaded.dirs.workspace_root);
-        if let Some((&tab, _)) = self.tabs.iter().find(|(_, t)| t.workspace == workspace) {
-            return Err(OpenError::AlreadyOpen { tab });
-        }
-        let mut engine = Engine::spawn_with(Arc::new(loaded), resume);
-        let mut startup = Vec::new();
-        // The initial session is always announced, even when no model is ready.
-        // Forward resume/replay asynchronously; do not wait for a warning's wording
-        // or for a second SessionConfigured that may never arrive.
-        let opened = tokio::time::timeout(OPEN_TIMEOUT, async {
-            loop {
-                match engine.events.recv().await {
-                    Ok(ev) => {
-                        if let Event::SessionConfigured { session } = &ev {
-                            let session = session.clone();
-                            startup.push(ev);
-                            break Ok(session);
-                        }
-                        startup.push(ev);
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        break Err(format!("lost {n} startup events · reopen the folder"));
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        break Err("the engine stopped".to_owned());
-                    }
+        // A closing tab keeps its reservation until shutdown has finished. Reopen
+        // waits here without blocking operations on unrelated tabs.
+        let (id, tab, started) = loop {
+            let closing = {
+                let mut tabs = self.tabs.lock().expect("tab map lock");
+                if tabs.client != client {
+                    return Err(OpenError::Engine(
+                        "This desktop connection was replaced · reopen the folder".to_owned(),
+                    ));
                 }
-            }
-        })
-        .await
-        .unwrap_or_else(|_| Err("the session did not open within a minute".to_owned()));
-        let session = match opened {
-            Ok(session) => session,
-            Err(e) => {
-                engine.shutdown().await;
-                return Err(OpenError::Engine(e));
+                tabs.entries.retain(|_, tab| !tab.finished());
+                if let Some((&id, tab)) = tabs
+                    .entries
+                    .iter()
+                    .find(|(_, tab)| tab.workspace == workspace)
+                {
+                    if !*tab.stop.borrow() {
+                        return Err(OpenError::AlreadyOpen { tab: id });
+                    }
+                    Some(tab.clone())
+                } else {
+                    let id = tabs.next;
+                    tabs.next += 1;
+                    let (tab, started) =
+                        spawn_tab(id, Arc::new(loaded), resume, sink, cwd.clone(), workspace);
+                    tabs.entries.insert(id, tab.clone());
+                    break (id, tab, started);
+                }
+            };
+            if let Some(tab) = closing {
+                tab.stopped().await;
             }
         };
-        if let Some(existing) = self.tab_of(&session.id) {
-            engine.shutdown().await;
-            return Err(OpenError::AlreadyOpen { tab: existing });
+        if let Err(error) = started
+            .await
+            .unwrap_or_else(|_| Err("the engine startup task stopped".to_owned()))
+        {
+            tab.stop();
+            tab.stopped().await;
+            return Err(OpenError::Engine(error));
         }
-        let tab = self.next_tab;
-        self.next_tab += 1;
-        sink.send(TabMessage::info(
-            tab,
-            AppInfo::from_config(&engine.config()),
-        ));
-        let (session_tx, session_rx) = watch::channel(session.id);
-        let (forwarder, ops, stop) = spawn_forwarder(tab, engine, sink, startup, session_tx);
-        self.tabs.insert(
-            tab,
-            Tab {
-                session: session_rx,
-                cwd: cwd.clone(),
-                workspace,
-                ops,
-                stop,
-                forwarder,
-            },
-        );
-        self.recent.touch(cwd);
-        Ok(tab)
+        self.check_client(client).map_err(OpenError::Engine)?;
+        self.recent.lock().expect("recent folders lock").touch(cwd);
+        Ok(id)
     }
 
-    /// Send a serialized [`Op`] to a tab's engine; `Err` says why not, as a message for
-    /// the webview.
+    /// Send a serialized Op without holding the registry lock over backpressure.
     pub async fn send_op(&self, tab: TabId, op: serde_json::Value) -> Result<(), String> {
+        let client = self.tabs.lock().expect("tab map lock").client;
+        self.send_op_for(client, tab, op).await
+    }
+
+    pub async fn send_op_for(
+        &self,
+        client: u64,
+        tab: TabId,
+        op: serde_json::Value,
+    ) -> Result<(), String> {
         let op: Op = serde_json::from_value(op)
             .map_err(|e| format!("not a protocol op: {e} · regenerate protocol.ts"))?;
-        let ops = self
-            .tabs
-            .get(&tab)
-            .map(|t| t.ops.clone())
+        let tab_state = self
+            .get_tab(client, tab)?
             .ok_or_else(|| format!("no open tab {tab}"))?;
-        ops.send(op)
-            .await
-            .map_err(|_| format!("tab {tab} has stopped"))?;
+        if *tab_state.stop.borrow() || tab_state.finished() {
+            return Err(format!("tab {tab} has stopped"));
+        }
+        let mut stop = tab_state.stop.subscribe();
+        tokio::select! {
+            biased;
+            _ = stopping(&mut stop) => Err(format!("tab {tab} has stopped")),
+            result = tab_state.ops.send(op) => result.map_err(|_| format!("tab {tab} has stopped")),
+        }
+    }
+
+    fn get_tab(&self, client: u64, tab: TabId) -> Result<Option<Arc<Tab>>, String> {
+        let tabs = self.tabs.lock().expect("tab map lock");
+        if tabs.client != client {
+            return Err("This desktop connection was replaced · reload the window".to_owned());
+        }
+        Ok(tabs.entries.get(&tab).cloned())
+    }
+
+    /// The tab showing this session, including session switches within a workspace.
+    pub fn tab_of(&self, session: &SessionId) -> Option<TabId> {
+        self.tabs
+            .lock()
+            .expect("tab map lock")
+            .entries
+            .iter()
+            .find(|(_, tab)| !tab.finished() && tab.session.borrow().as_ref() == Some(session))
+            .map(|(id, _)| *id)
+    }
+
+    pub fn cwd(&self, tab: TabId) -> Option<PathBuf> {
+        self.tabs
+            .lock()
+            .expect("tab map lock")
+            .entries
+            .get(&tab)
+            .map(|t| t.cwd.clone())
+    }
+
+    /// Close a tab and await engine shutdown. The reservation remains until done.
+    pub async fn close(&self, tab: TabId) {
+        let client = self.tabs.lock().expect("tab map lock").client;
+        let _ = self.close_for(client, tab).await;
+    }
+
+    pub async fn close_for(&self, client: u64, tab: TabId) -> Result<(), String> {
+        if let Some(tab) = self.get_tab(client, tab)? {
+            tab.stop();
+            tab.stopped().await;
+        }
         Ok(())
     }
 
-    /// The tab showing `session`, to refuse a second engine on the same JSONL log.
-    pub fn tab_of(&self, session: &SessionId) -> Option<TabId> {
-        self.tabs
-            .iter()
-            .find(|(_, t)| *t.session.borrow() == *session)
-            .map(|(tab, _)| *tab)
-    }
-
-    /// The folder a tab was opened on.
-    pub fn cwd(&self, tab: TabId) -> Option<&PathBuf> {
-        self.tabs.get(&tab).map(|t| &t.cwd)
-    }
-
-    /// Close a tab: stop its forwarder, which flushes pending deltas and awaits
-    /// `engine.shutdown()` (MCP/LSP servers and `session_end` hooks included)
-    /// before announcing [`Payload::Closed`].
-    pub async fn close(&mut self, tab: TabId) {
-        if let Some(t) = self.tabs.remove(&tab) {
-            drop(t.ops);
-            drop(t.stop);
-            let _ = t.forwarder.await;
+    /// Invalidate opens and signal every task before waiting for any shutdown.
+    fn retire(&self) -> (u64, Vec<Arc<Tab>>) {
+        let mut tabs = self.tabs.lock().expect("tab map lock");
+        tabs.client += 1;
+        tabs.entries.retain(|_, tab| !tab.finished());
+        let closing: Vec<_> = tabs.entries.values().cloned().collect();
+        for tab in &closing {
+            tab.stop();
         }
+        (tabs.client, closing)
     }
 
-    /// Close every tab, awaiting each engine's shutdown; the app quit path calls this.
-    pub async fn close_all(&mut self) {
-        let ids: Vec<TabId> = self.tabs.keys().copied().collect();
-        for tab in ids {
-            self.close(tab).await;
+    pub async fn close_all(&self) {
+        let (_, tabs) = self.retire();
+        for tab in tabs {
+            tab.stopped().await;
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tabs.is_empty()
+        self.tabs
+            .lock()
+            .expect("tab map lock")
+            .entries
+            .values()
+            .all(|tab| tab.finished())
     }
 }
 
@@ -327,92 +422,216 @@ impl Default for Registry {
     }
 }
 
-/// Own the engine, replay the events seen while opening, and stream coalesced events
-/// into the sink until the tab is closed or the engine stops. Returns the forwarder
-/// task, a clone of its ops channel, and the stop signal.
-fn spawn_forwarder(
+impl Drop for Registry {
+    fn drop(&mut self) {
+        // Dropping a bridge must not leave detached engines waiting on owned senders.
+        for tab in self.tabs.get_mut().expect("tab map lock").entries.values() {
+            tab.stop();
+        }
+    }
+}
+
+fn spawn_tab(
+    id: TabId,
+    loaded: Arc<quack_config::Loaded>,
+    resume: Resume,
+    sink: Arc<dyn Sink>,
+    cwd: PathBuf,
+    workspace: PathBuf,
+) -> (Arc<Tab>, oneshot::Receiver<Result<(), String>>) {
+    let (ops, ops_rx) = mpsc::channel(16);
+    let (stop, stop_rx) = watch::channel(false);
+    let (done, done_rx) = watch::channel(false);
+    let (session, session_rx) = watch::channel(None);
+    let (started, started_rx) = oneshot::channel();
+    let tab = Arc::new(Tab {
+        session: session_rx,
+        cwd,
+        workspace,
+        ops,
+        stop,
+        done: done_rx,
+    });
+    tokio::spawn(async move {
+        let engine = Engine::spawn_with(loaded, resume);
+        run_tab(id, engine, sink, ops_rx, stop_rx, session, started).await;
+        done.send_replace(true);
+    });
+    (tab, started_rx)
+}
+
+/// Return no watch borrow, so callers can select on this more than once.
+async fn stopping(stop: &mut watch::Receiver<bool>) {
+    let _ = stop.wait_for(|stop| *stop).await;
+}
+
+/// The task owns startup and shutdown, even if an IPC command is cancelled.
+async fn run_tab(
     tab: TabId,
     mut engine: EngineHandle,
     sink: Arc<dyn Sink>,
-    startup: Vec<Event>,
-    session: watch::Sender<SessionId>,
-) -> (JoinHandle<()>, mpsc::Sender<Op>, mpsc::UnboundedSender<()>) {
-    let (ops, mut ops_rx) = mpsc::channel::<Op>(16);
-    let (stop_tx, mut stop_rx) = mpsc::unbounded_channel::<()>();
-    let task = tokio::spawn(async move {
-        let mut coalescer = DeltaCoalescer::default();
-        for ev in startup {
-            sink.send(TabMessage::event(tab, ev));
-        }
-        let mut tick = tokio::time::interval(FLUSH_TICK);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    mut ops: mpsc::Receiver<Op>,
+    mut stop: watch::Receiver<bool>,
+    session: watch::Sender<Option<SessionId>>,
+    started: oneshot::Sender<Result<(), String>>,
+) {
+    let mut startup = Vec::new();
+    let opening = tokio::time::timeout(OPEN_TIMEOUT, async {
         loop {
             tokio::select! {
-                _ = tick.tick() => {
-                    for ev in coalescer.flush() {
-                        sink.send(TabMessage::event(tab, ev));
+                biased;
+                _ = stopping(&mut stop) => return Err("the tab closed while opening".to_owned()),
+                event = engine.events.recv() => match event {
+                    Ok(event) => {
+                        if let Event::SessionConfigured { session: info } = &event {
+                            session.send_replace(Some(info.id.clone()));
+                            startup.push(event);
+                            return Ok(());
+                        }
+                        startup.push(event);
                     }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => return Err(format!("lost {n} startup events · reopen the folder")),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Err("the engine stopped".to_owned()),
                 }
-                _ = stop_rx.recv() => break,
-                op = ops_rx.recv() => match op {
-                    Some(op) => {
-                        if matches!(op, Op::Shutdown) {
-                            break;
-                        }
-                        let _ = engine.submit(op).await;
-                    }
-                    None => break,
-                },
-                ev = engine.events.recv() => match ev {
-                    Ok(ev) => {
-                        if let Event::SessionConfigured { session: info }
-                            | Event::SessionResumed { session: info, .. } = &ev
-                        {
-                            session.send_replace(info.id.clone());
-                        }
-                        // StartupComplete also follows Op::ReloadConfig, and by then
-                        // engine.config() is the fresh one; ConfigReloaded fires before.
-                        if matches!(ev, Event::StartupComplete) {
-                            let info = AppInfo::from_config(&engine.config());
-                            sink.send(TabMessage::info(tab, info));
-                        }
-                        if coalescer.on(&ev) {
-                            for merged in coalescer.flush() {
-                                sink.send(TabMessage::event(tab, merged));
-                            }
-                            sink.send(TabMessage::event(tab, ev));
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        for merged in coalescer.flush() {
-                            sink.send(TabMessage::event(tab, merged));
-                        }
-                        engine.shutdown().await;
-                        sink.send(TabMessage::closed(tab, Some(format!(
-                            "Lost {n} engine events · reopen the folder to restore the session"
-                        ))));
-                        return;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                },
             }
         }
-        for merged in coalescer.flush() {
-            sink.send(TabMessage::event(tab, merged));
-        }
+    }).await.unwrap_or_else(|_| Err("the session did not open within a minute".to_owned()));
+    if let Err(error) = opening {
         engine.shutdown().await;
-        sink.send(TabMessage::closed(tab, None));
-    });
-    (task, ops, stop_tx)
+        let _ = started.send(Err(error));
+        return;
+    }
+    sink.send(TabMessage::info(
+        tab,
+        AppInfo::from_config(&engine.config()),
+    ));
+    for event in startup {
+        sink.send(TabMessage::event(tab, event));
+    }
+    if started.send(Ok(())).is_err() {
+        engine.shutdown().await;
+        sink.send(TabMessage::closed(
+            tab,
+            Some("the open request was cancelled".to_owned()),
+        ));
+        return;
+    }
+    let mut coalescer = DeltaCoalescer::default();
+    let mut tick = tokio::time::interval(FLUSH_TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut reason = None;
+    loop {
+        tokio::select! {
+            _ = stopping(&mut stop) => break,
+            _ = tick.tick() => {
+                for event in coalescer.flush() { sink.send(TabMessage::event(tab, event)); }
+            }
+            op = ops.recv() => match op {
+                Some(Op::Shutdown) | None => break,
+                Some(op) => {
+                    // A full engine queue must not prevent close/quit/reconnect.
+                    tokio::select! {
+                        biased;
+                        _ = stopping(&mut stop) => break,
+                        accepted = engine.submit(op) => if !accepted { break; },
+                    }
+                }
+            },
+            event = engine.events.recv() => match event {
+                Ok(event) => {
+                    if let Event::SessionConfigured { session: info }
+                        | Event::SessionResumed { session: info, .. } = &event {
+                        session.send_replace(Some(info.id.clone()));
+                    }
+                    if matches!(event, Event::StartupComplete) {
+                        sink.send(TabMessage::info(tab, AppInfo::from_config(&engine.config())));
+                    }
+                    if coalescer.on(&event) {
+                        for merged in coalescer.flush() { sink.send(TabMessage::event(tab, merged)); }
+                        sink.send(TabMessage::event(tab, event));
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    reason = Some(format!("Lost {n} engine events · reopen the folder to restore the session"));
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    }
+    for merged in coalescer.flush() {
+        sink.send(TabMessage::event(tab, merged));
+    }
+    engine.shutdown().await;
+    sink.send(TabMessage::closed(tab, reason));
 }
 
 /// Resolve symlinks before comparing workspace ownership; compare case-insensitively
 /// on the platforms where workspace paths are normally case-insensitive.
-fn workspace_key(path: &std::path::Path) -> PathBuf {
+fn workspace_key(path: &Path) -> PathBuf {
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if cfg!(any(windows, target_os = "macos")) {
         PathBuf::from(path.to_string_lossy().to_lowercase())
     } else {
         path
+    }
+}
+
+/// Keep native resource resolution local to this client, with no process-wide
+/// environment mutation and the same override/reload behavior as other clients.
+fn load_from_resources(
+    opts: &LoadOptions,
+    resource_dir: &Path,
+    env: quack_config::Env<'_>,
+) -> Result<quack_config::Loaded, String> {
+    let defaults = resource_dir.join("defaults");
+    quack_config::load_with(
+        &|key| {
+            env(key).filter(|value| !value.is_empty()).or_else(|| {
+                (key == "QUACK_DEFAULTS_DIR" && defaults.is_dir())
+                    .then(|| defaults.clone().into_os_string())
+            })
+        },
+        opts,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_resources_load_without_overriding_an_explicit_defaults_choice() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let resources = tmp.path().join("resources");
+        let defaults = resources.join("defaults");
+        std::fs::create_dir_all(&defaults).expect("defaults");
+        std::fs::write(defaults.join("config.toml"), "[ui]\ntheme = \"dark\"\n")
+            .expect("default settings");
+        let opts = LoadOptions::new(tmp.path().join("workspace"));
+        let vars = |key: &str| match key {
+            "QUACK_CONFIG_DIR" => Some(tmp.path().join("user").into_os_string()),
+            "QUACK_SYSTEM_DIR" => Some(tmp.path().join("system").into_os_string()),
+            "QUACK_DATA_DIR" => Some(tmp.path().join("data").into_os_string()),
+            "QUACK_CACHE_DIR" => Some(tmp.path().join("cache").into_os_string()),
+            _ => None,
+        };
+        let loaded = load_from_resources(&opts, &resources, &vars).expect("load resources");
+        assert_eq!(loaded.dirs.defaults, Some(defaults));
+        assert_eq!(loaded.settings.ui.theme, "dark");
+        let disabled = load_from_resources(&opts, &resources, &|key| {
+            if key == "QUACK_DEFAULTS_DIR" {
+                Some("none".into())
+            } else {
+                vars(key)
+            }
+        })
+        .expect("load without defaults");
+        assert_eq!(disabled.dirs.defaults, None);
+        assert_eq!(
+            loaded.reload().expect("reload resources").settings.ui.theme,
+            "dark"
+        );
     }
 }

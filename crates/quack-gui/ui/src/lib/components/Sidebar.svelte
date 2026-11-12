@@ -15,6 +15,17 @@
 		});
 	});
 
+	const disabled = $derived(
+		session.closed ||
+			session.starting ||
+			session.switching ||
+			session.setupWorking ||
+			session.streaming ||
+			session.turnPending ||
+			!!session.trust ||
+			!session.currentModel
+	);
+
 	const doneCount = $derived(planItems.filter((p) => p.state === 'x').length);
 </script>
 
@@ -23,10 +34,19 @@
 		<h3>Session</h3>
 		<p class="title">{session.title || 'New session'}</p>
 		<div class="row">
-			<button class="btn slim" onclick={() => void session.newSession()}>New</button>
-			<button class="btn slim" onclick={() => void session.listSessions()}>Refresh</button>
+			<button class="btn slim" {disabled} onclick={() => void session.newSession()}
+				>{session.switching ? 'Switching…' : 'New'}</button
+			>
+			<button class="btn slim" disabled={session.closed} onclick={() => void session.listSessions()}
+				>Refresh</button
+			>
 			{#if session.items.length > 0}
-				<button class="btn slim" onclick={() => void session.undo()} title="Undo the last edit call">Undo</button>
+				<button
+					class="btn slim"
+					{disabled}
+					onclick={() => void session.undo()}
+					title="Undo the last edit call">Undo</button
+				>
 			{/if}
 		</div>
 		{#if session.speed}
@@ -45,7 +65,13 @@
 				{#each session.agents as run (run.id)}
 					<li class="agent">
 						<div class="head">
-							<span class="marker" class:running={run.ok === null} class:ok={run.ok === true} class:fail={run.ok === false} aria-hidden="true"></span>
+							<span
+								class="marker"
+								class:running={run.ok === null}
+								class:ok={run.ok === true}
+								class:fail={run.ok === false}
+								aria-hidden="true"
+							></span>
 							<span class="name">{run.id}</span>
 							<span class="note">{run.description}</span>
 						</div>
@@ -67,7 +93,12 @@
 			<ul class="plan">
 				{#each planItems as item, i (i)}
 					<li>
-						<span class="box" class:done={item.state === 'x'} class:doing={item.state === '~'} aria-hidden="true"></span>
+						<span
+							class="box"
+							class:done={item.state === 'x'}
+							class:doing={item.state === '~'}
+							aria-hidden="true"
+						></span>
 						<span>{item.text}</span>
 					</li>
 				{/each}
@@ -82,6 +113,7 @@
 				<li>
 					<button
 						class="saved"
+						disabled={disabled || saved.current}
 						class:current={saved.current}
 						onclick={() => void session.resumeSession(saved.id)}
 					>

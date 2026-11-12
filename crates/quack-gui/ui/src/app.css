@@ -109,6 +109,49 @@
 	--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme='light']) {
+		--bg: #1d2a3a;
+		--bg-soft: #16212e;
+		--bg-panel: #223146;
+		--bg-raised: #283951;
+		--ink: #dde7f0;
+		--ink-2: #b7c6d5;
+		--ink-3: #8fa2b5;
+		--rule: #3a4c61;
+		--rule-soft: #2e3f53;
+
+		--duck-soft: #3a3313;
+		--duck-ink: #ffd60a;
+		--sky-soft: #14384a;
+		--sky-ink: #7ad4ec;
+		--beak-soft: #3f2c14;
+		--beak-ink: #ffb25e;
+
+		--ok: #8fd694;
+		--ok-soft: #1d3327;
+		--fail: #ff8fab;
+		--fail-soft: #3c1d28;
+		--warn: #e3b341;
+
+		--selection: rgba(94, 200, 229, 0.32);
+		--user-row: #243347;
+
+		--term: #10151c;
+		--term-text: #d8dee9;
+		--term-dim: #8a94a6;
+
+		--focus: #7ad4ec;
+
+		--shadow-pop: 0 6px 24px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
+		--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
+	}
+
+	:root:not([data-theme='light']) .btn-primary {
+		color: #10151c;
+	}
+}
+
 @media (prefers-reduced-motion: reduce) {
 	*,
 	*::before,
