@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use quack_config::{
-    ItemState, LayerKind, Loaded, ProviderFile, Secret, is_loopback, load_providers,
+    Item, ItemState, LayerKind, Loaded, ProviderFile, Secret, is_loopback, load_providers,
 };
 use quack_protocol::{DetectedServer, KeySource, ModelInfo, ProviderModels};
 use quack_providers::Provider;
@@ -218,9 +218,9 @@ pub struct KeySaved {
     pub note: Option<String>,
 }
 
-/// Store `key` for provider `id` in `store`. A provider already reading the key from a
-/// file keeps its file; otherwise its provider file (copied to the user layer) is
-/// pointed at the key.
+/// Store `key` for provider `id` in `store`. A bundled provider gets a minimal override
+/// in the user layer (see [`override_text`]); a provider already in a writable layer is
+/// pointed at the key in its own file; one reading the key from a file keeps its file.
 pub fn save_key_at(
     config: &Loaded,
     id: &str,
@@ -275,7 +275,7 @@ pub fn save_key_at_with(
         }
         (KeyStore::Keyring, _) => {
             ring(id, key)?;
-            let path = point_at_keyring(config, id, &item.path)?;
+            let path = point_at_keyring(config, id, item)?;
             Ok(KeySaved {
                 key: None,
                 path: Some(path),
@@ -294,7 +294,7 @@ pub fn save_key_at_with(
         }
         (KeyStore::File(dest), _) => {
             write_key_file(dest, key)?;
-            let path = point_at_file(config, id, &item.path, dest)?;
+            let path = point_at_file(config, id, item, dest)?;
             Ok(KeySaved {
                 key: Some(dest.clone()),
                 path: Some(path),
@@ -304,17 +304,64 @@ pub fn save_key_at_with(
     }
 }
 
-fn point_at_keyring(config: &Loaded, id: &str, path: &Path) -> Result<PathBuf, String> {
-    let text = read_provider(path)?;
-    let text = quack_config::provider::with_keyring_key(&text, id)?;
-    write_pointed(config, id, path, &text)
+/// The text of a minimal user-layer override for a bundled provider: `base_url` (so the
+/// file still stands alone if the bundle is gone) and `api_key`. Every other field, the
+/// model list above all, comes from the bundled file beneath, so a bundle update reaches
+/// it; setting a field here overrides the bundle's.
+fn override_text(id: &str, file: &ProviderFile, key_line: &str) -> String {
+    let quote = |s: &str| serde_json::Value::from(s).to_string();
+    let mut text = format!(
+        "# {id}, keyed by quack setup. Fields this file leaves out, the model list\n\
+         # above all, come from the defaults bundle's providers.d/{id}.toml, so an\n\
+         # update still reaches them; set a field here to override it.\n"
+    );
+    text.push_str(&format!("base_url = {}\n", quote(&file.base_url)));
+    if file.api != "openai-chat" {
+        text.push_str(&format!("api = {}\n", quote(&file.api)));
+    }
+    text.push_str(key_line);
+    text
 }
 
-fn point_at_file(config: &Loaded, id: &str, path: &Path, key: &Path) -> Result<PathBuf, String> {
-    let text = read_provider(path)?;
-    let shown = key.display().to_string();
-    let text = quack_config::provider::with_file_key(&text, &shown)?;
-    write_pointed(config, id, path, &text)
+fn point_at_keyring(
+    config: &Loaded,
+    id: &str,
+    item: &Item<ProviderFile>,
+) -> Result<PathBuf, String> {
+    let text = match item.layer {
+        LayerKind::Defaults => {
+            let file = item.loaded().expect("the caller checked the item loads");
+            let quoted = serde_json::Value::from(id).to_string();
+            override_text(id, file, &format!("api_key = {{ keyring = {quoted} }}\n"))
+        }
+        _ => {
+            let text = read_provider(&item.path)?;
+            quack_config::provider::with_keyring_key(&text, id)?
+        }
+    };
+    write_pointed(config, id, &item.path, &text)
+}
+
+fn point_at_file(
+    config: &Loaded,
+    id: &str,
+    item: &Item<ProviderFile>,
+    key: &Path,
+) -> Result<PathBuf, String> {
+    let text = match item.layer {
+        LayerKind::Defaults => {
+            let file = item.loaded().expect("the caller checked the item loads");
+            let shown = key.display().to_string();
+            let quoted = serde_json::Value::from(shown.as_str()).to_string();
+            override_text(id, file, &format!("api_key = {{ file = {quoted} }}\n"))
+        }
+        _ => {
+            let text = read_provider(&item.path)?;
+            let shown = key.display().to_string();
+            quack_config::provider::with_file_key(&text, &shown)?
+        }
+    };
+    write_pointed(config, id, &item.path, &text)
 }
 
 fn read_provider(path: &Path) -> Result<String, String> {

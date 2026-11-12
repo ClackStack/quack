@@ -42,6 +42,25 @@ Users or companies remove a capability in one of three ways:
 
 `quack defaults list` shows which defaults are active and which are overridden or disabled, and where each comes from.
 
+### How updates reach the user (2026-11-11)
+
+A full install replaces the defaults folder as a whole (see the release artifacts section),
+and nothing is ever merged into the user's folders: layering is the merge. Provider files
+are the one item kind whose fields merge across layers
+([01](01-configuration.md#merge-rules)): a user-layer file with the same id overrides only
+the fields it sets, and every field it leaves out — the model list above all, where churn
+is constant — still comes from the bundled file beneath. Setup relies on this: keying a
+bundled service writes a minimal override (`base_url` and the `api_key` line), so a new
+bundle's models reach existing installs with no migration at all. The plucked flavour is
+the same mechanism with a smaller bundle.
+
+As a backstop for overrides written before this (full copies, which pin the model list)
+and for hand-made ones, drift detection compares any provider file above the bundle that
+declares its own `models` with the bundled file it overrides: `quack doctor` flags each
+one whose list moved on (Warn, naming what the bundle adds and drops), and `/models` says
+so in the provider's note. The fix it names is to edit the file, or remove its `models`
+list to follow the bundle's. Files without a `models` list never drift.
+
 ## First-run experience
 
 When no provider is configured:
@@ -58,7 +77,7 @@ When no provider is configured:
 
 - `quack setup` asks one question at a time and reads plain lines, so it can also be scripted through stdin. It offers three choices:
   1. **Look for servers on this machine.** It probes 127.0.0.1 on ports 11434, 8080, 8000, 1234 and 30000, waiting 1.5 s on each. A server counts only when it answers with a model list.
-  2. **Use a hosted service** from the configured ones (out of the box, the bundle's open-model services and model makers' APIs and coding plans), grouped by each file's `group`. A service whose key is set is used as is. Otherwise the key goes into the OS credential store and the file is copied to the user layer with `api_key = { keyring = "<id>" }`, or the wizard offers a key file or says which variable to set.
+  2. **Use a hosted service** from the configured ones (out of the box, the bundle's open-model services and model makers' APIs and coding plans), grouped by each file's `group`. A service whose key is set is used as is. Otherwise the key goes into the OS credential store and a **minimal override** is written to the user layer (`base_url` and `api_key = { keyring = "<id>" }` only), or the wizard offers a key file or says which variable to set.
   3. **Add a server by URL.** An optional key is stored in the credential store, or in a key file where no Secret Service runs.
 
   It then lists the provider's models and saves the chosen one as `model.default`.

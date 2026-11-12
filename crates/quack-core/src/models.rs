@@ -59,7 +59,29 @@ pub(crate) async fn catalog_of(config: Arc<Loaded>, only: Option<&str>) -> Vec<P
     }
     // Usable providers first, each group in file order.
     out.sort_by_key(|(order, p)| (!p.available, *order));
-    out.into_iter().map(|(_, p)| p).collect()
+    let mut entries: Vec<ProviderModels> = out.into_iter().map(|(_, p)| p).collect();
+    // A provider whose file pins a model list the bundle moved on from says so here,
+    // where the model list is what the user is looking at.
+    let cfg = config.clone();
+    let drift: std::collections::HashMap<String, quack_config::ProviderDrift> =
+        tokio::task::spawn_blocking(move || quack_config::provider_drift(&cfg))
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| (d.id.clone(), d))
+            .collect();
+    for p in &mut entries {
+        if let Some(d) = drift.get(&p.id)
+            && p.available
+        {
+            p.note = format!(
+                "{} · your file pins a model list the bundle moved on from: {}",
+                p.note,
+                d.describe()
+            );
+        }
+    }
+    entries
 }
 
 fn unavailable(id: &str, note: String) -> ProviderModels {

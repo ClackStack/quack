@@ -79,6 +79,22 @@ pub async fn run(config: Arc<Loaded>) -> Vec<DoctorCheck> {
         );
     }
     let cfg = config.clone();
+    let drift = tokio::task::spawn_blocking(move || quack_config::provider_drift(&cfg))
+        .await
+        .unwrap_or_default();
+    for d in &drift {
+        checks.push(check(
+            &format!("  {} (override)", d.id),
+            CheckStatus::Warn,
+            format!(
+                "{} pins a model list the bundled file moved on from · {} · edit it, or \
+                 remove its `models` list to follow the bundle",
+                d.path.display(),
+                d.describe()
+            ),
+        ));
+    }
+    let cfg = config.clone();
     let usable: Vec<String> = providers
         .iter()
         .filter(|p| p.available)

@@ -2,6 +2,21 @@
 
 Milestones are ordered by dependency and value. Each has **exit criteria** that must pass on **Linux, macOS and Windows** in CI before moving on. Dates are left out on purpose; scope is what's fixed.
 
+## Provider defaults propagate beneath user overrides — 2026-11-11
+
+Model lists churn constantly, and until now keying a bundled service copied its whole
+provider file into the user layer, pinning that list until the user re-keyed. Provider
+files are now the one item kind that merges field by field across layers (the
+`config.toml` rules: `[section]` tables merge, inline values and arrays replace,
+`models.append` extends), and `quack setup` writes a minimal override — `base_url` plus
+the `api_key` line — so every bundle update's models reach existing installs through
+layering, with nothing to merge or migrate at launch ([01](01-configuration.md#merge-rules),
+[14](14-packaging-and-distribution.md#how-updates-reach-the-user-2026-11-11)). As a
+backstop for full copies (old installs, hand-made files), `quack doctor` warns when a
+provider override pins a `models` list that differs from the bundled file's, and `/models`
+carries the same note in the provider row. No live calls; merging and drift tests in
+`quack-config`, minimal-override and doctor tests in `quack-core`.
+
 ## Step-limit pause and continue — 2026-11-11
 
 `agent.max_steps` (default 100) no longer ends a turn outright in the TUI: the turn pauses at the limit and offers a numbered choice bar (keep going for another `max_steps` calls, stop here, or type a redirect, which stops the turn and sends the message). The engine asks with `Event::StepLimitReached` and waits for `Op::ContinueTurn` or an interrupt; each decision is a `step_limit` session record. Headless clients (`quack exec`, evals, ACP) answer stop, so unattended runs behave as before; sub-agents still stop at their own `agents.d` limits and report back. The default stays 100: with the pause it is a checkpoint cadence, not a ceiling, and every model call re-sends the whole context. Engine regressions in `core/tests/readiness.rs`; TUI snapshot and key tests beside the plan-review bar's.

@@ -361,7 +361,7 @@ The hosted services come in two groups: open-model services (OpenRouter, Synthet
 How the bundled providers behave:
 
 - **Hosted, no key:** never contacted. `/models` leaves them out, and `/providers`, `doctor` and the wizard show them as "not set up" or "offered" rather than as errors.
-- **Hosted, key set:** listed and usable, but never auto-selected. The user picks a model, since a paid service shouldn't start by itself. When setup stores a key in the credential store, it copies the file to the user layer with `api_key = { keyring = "<id>" }`, keeping its comments.
+- **Hosted, key set:** listed and usable, but never auto-selected. The user picks a model, since a paid service shouldn't start by itself. When setup stores a key in the credential store, it writes a minimal override to the user layer — `base_url` and `api_key = { keyring = "<id>" }` — and every field that file leaves out, the model list above all, still comes from the bundled file beneath ([01](01-configuration.md#merge-rules)), so a bundle update's new models arrive with nothing to migrate.
 - **Local:** probed only on loopback, and auto-selected (after the user's own providers) when no default model is set. So a running llama.cpp or Ollama works with no setup at all.
 
 Restricting them is covered in `defaults/providers.d/README.md`. `[policy.providers] hosts = [...]` in the system layer disables every provider whose `base_url` host doesn't match, which an id allow-list can't do, since a user could reuse an allowed id. `[policy.mcp] hosts` does the same for remote MCP servers. `doctor`'s `network` line lists every host the configuration can reach.

@@ -31,6 +31,12 @@ Only `base_url` is required. Models are discovered from the server's `/models`
 endpoint. Every other option has a working default; the full list is in
 `../schemas/provider.json` (editors with taplo complete it).
 
+A user's file with the same name merges over one here field by field (a `[section]`
+table merges, an inline value replaces), so `quack setup` writes only the key and the
+URL, and the model list in this folder keeps reaching the user across updates. Setting
+`models` in a user file pins that list instead, which `quack doctor` flags once the two
+move apart.
+
 ## For a company
 
 - **Remove what you don't want.** Delete files here, or ship the bundle without

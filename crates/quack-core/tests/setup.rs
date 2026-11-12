@@ -294,6 +294,65 @@ fn a_new_key_replaces_a_stored_one_or_moves_the_key_to_the_store() {
 }
 
 #[test]
+fn keying_a_bundled_service_writes_a_minimal_override_and_models_follow_the_bundle() {
+    use quack_core::setup::set_provider_key_with;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // The bundle holds the whole provider: models above all.
+    let defaults = tmp.path().join("defaults");
+    std::fs::create_dir_all(defaults.join("providers.d")).expect("mkdir");
+    std::fs::write(
+        defaults.join("providers.d").join("charm.toml"),
+        "name = \"Charm\"\ngroup = \"Hosted\"\nbase_url = \"https://hyper.example/v1\"\n\
+         api_key = { env = \"QUACK_TEST_UNSET_KEY\" }\n\
+         [[models]]\nid = \"glm-5.3\"\n[[models]]\nid = \"kimi-k3\"\n",
+    )
+    .expect("bundle file");
+    let loaded = common::workspace_in(
+        tmp.path(),
+        "http://127.0.0.1:9/v1",
+        "[]",
+        "",
+        Some(&defaults),
+    );
+    let providers_d = tmp.path().join("user").join("providers.d");
+    let mut stored = Vec::new();
+    let ring = |name: &str, key: &str| {
+        stored.push((name.to_owned(), key.to_owned()));
+        Ok(())
+    };
+
+    let out = set_provider_key_with(&loaded, "charm", "k1", ring).expect("stored");
+    assert_eq!(stored, [("charm".to_owned(), "k1".to_owned())]);
+    let path = providers_d.join("charm.toml");
+    assert_eq!(out.path, Some(path.clone()));
+    let text = std::fs::read_to_string(&path).expect("file");
+    assert!(
+        text.contains("base_url = \"https://hyper.example/v1\""),
+        "stands alone without the bundle: {text}"
+    );
+    assert!(text.contains("api_key = { keyring = \"charm\" }"), "{text}");
+    assert!(
+        !text.contains("models") && !text.contains("Charm"),
+        "only what setup decided, so the bundle still supplies the rest: {text}"
+    );
+
+    // The loaded provider merges: the user's key over the bundle's models.
+    let items = quack_config::load_providers(&loaded);
+    let item = items.iter().find(|i| i.id == "charm").expect("charm");
+    assert_eq!(item.layer, quack_config::LayerKind::User);
+    let file = item.loaded().expect("loads");
+    assert_eq!(
+        file.api_key,
+        Some(quack_config::Secret::Keyring {
+            keyring: "charm".into()
+        })
+    );
+    assert_eq!(file.name, "Charm");
+    let ids: Vec<&str> = file.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["glm-5.3", "kimi-k3"]);
+}
+
+#[test]
 fn a_key_without_a_secret_service_goes_into_a_file_the_provider_points_at() {
     use quack_core::setup::{KeyStore, save_key_at_with};
     let tmp = tempfile::tempdir().expect("tempdir");
