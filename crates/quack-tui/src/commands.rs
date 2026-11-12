@@ -41,6 +41,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         None,
     ),
     c(
+        "thinking",
+        &["think"],
+        "[level|default|show|hide]",
+        "Choose how much the current model thinks; default restores its configured level",
+        None,
+    ),
+    c(
         "providers",
         &[],
         "",
@@ -107,7 +114,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         "plan",
         &[],
         "[task|accept|off]",
-        "Plan mode: look around without changing anything, then accept or revise the plan",
+        "Read/search and propose changes plus tests for review; accept or keep planning",
         None,
     ),
     c("title", &[], "<text>", "Rename the session", None),
@@ -147,10 +154,17 @@ pub(crate) const COMMANDS: &[Command] = &[
         None,
     ),
     c(
+        "edit",
+        &[],
+        "[task]",
+        "Switch to Edit, keeping approvals; optionally send a task",
+        None,
+    ),
+    c(
         "permissions",
         &[],
-        "[mode]",
-        "Switch the permission mode; see the allow/ask/deny rules",
+        "[ask|allow]",
+        "Set ask/allow approvals without changing Plan/Edit; see permission rules",
         None,
     ),
     c(
@@ -202,7 +216,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         "Memory notes: read them, delete with ^s",
         None,
     ),
-    c("hooks", &[], "", "Hooks and their recent runs", None),
+    c(
+        "hooks",
+        &[],
+        "[configure|test|toggle <id>]",
+        "Configure hook connections and credentials",
+        None,
+    ),
     c(
         "instructions",
         &[],
@@ -268,13 +288,6 @@ pub(crate) const COMMANDS: &[Command] = &[
         None,
     ),
     c(
-        "thinking",
-        &["think"],
-        "[show|hide]",
-        "Show or hide the model's thinking, when it sends any (Ctrl-T)",
-        None,
-    ),
-    c(
         "copy",
         &[],
         "[code]",
@@ -306,8 +319,15 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("/", "Slash commands; Tab completes"),
     ("@", "Mention a file in the workspace; Tab completes"),
     ("Ctrl-P", "Command palette (/help)"),
-    ("Shift-Tab", "Cycle mode: ask → auto-edit → plan"),
+    ("Shift-Tab", "Toggle Plan/Edit, keeping approvals"),
     ("Tab (in modal)", "Switch tab"),
+    ("Tab / Shift-Tab (hook setup)", "Move between fields"),
+    ("Ctrl-S / Ctrl-E (hook setup)", "Save / Save and enable"),
+    ("Ctrl-T (hook setup)", "Check access using unsaved settings"),
+    (
+        "Ctrl-R / Ctrl-X (hook secret)",
+        "Remove credential / choose external source",
+    ),
     (
         "Ctrl-S (in modal)",
         "Secondary action, e.g. save as default in /models",

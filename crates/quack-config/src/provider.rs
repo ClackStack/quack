@@ -337,6 +337,9 @@ pub struct Reasoning {
     /// Default comes from the profile.
     pub preserve_in_history: Option<bool>,
     pub effort: String,
+    /// Supported effort values, in picker order. Empty means no selectable levels.
+    /// `effort` remains the model's default when the user resets their selection.
+    pub efforts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -450,6 +453,20 @@ mod tests {
             out,
             "# A service.\nbase_url = \"https://x/v1\"\n\
              api_key = { file = \"~/.config/quack/keys/x.key\" }\n"
+        );
+    }
+
+    #[test]
+    fn file_key_with_a_windows_path_stays_valid_toml() {
+        let text = "base_url = \"https://x/v1\"\napi_key = { env = \"X_KEY\" }\n";
+        let path = "C:\\Users\\someone\\.config\\quack\\keys\\x.key";
+        let out = with_file_key(text, path).expect("edit");
+        let parsed: ProviderFile = toml::from_str(&out).expect("parses back");
+        assert_eq!(
+            parsed.api_key,
+            Some(Secret::File {
+                file: path.to_owned()
+            })
         );
     }
 

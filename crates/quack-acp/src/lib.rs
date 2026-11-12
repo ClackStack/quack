@@ -164,19 +164,27 @@ impl Server {
                     Ok(r) => r,
                     Err(e) => return now(Err(e)),
                 };
-                if r.config_id != session::MODEL_OPTION {
+                if r.config_id != session::MODEL_OPTION && r.config_id != session::APPROVALS_OPTION
+                {
                     return now(Err(RpcError::invalid(format!(
                         "unknown option `{}`",
                         r.config_id
                     ))));
                 }
                 let Some(value) = r.value.as_str() else {
-                    return now(Err(RpcError::invalid("the model option takes a model id")));
+                    return now(Err(RpcError::invalid("the option takes a string value")));
                 };
                 let (tx, rx) = oneshot::channel();
-                let cmd = Cmd::Model {
-                    value: value.to_owned(),
-                    reply: tx,
+                let cmd = if r.config_id == session::APPROVALS_OPTION {
+                    Cmd::Approvals {
+                        value: value.to_owned(),
+                        reply: tx,
+                    }
+                } else {
+                    Cmd::Model {
+                        value: value.to_owned(),
+                        reply: tx,
+                    }
                 };
                 if let Err(e) = self.send(&r.session_id, cmd) {
                     return now(Err(e));
@@ -238,7 +246,13 @@ impl Server {
 
     async fn new_session(&mut self, r: wire::NewSession) -> Result<Value, RpcError> {
         let mut engine = self.spawn(r.cwd, Resume::New, r.mcp_servers)?;
-        let mode = engine.config().settings.permissions.mode.label().to_owned();
+        let mode = engine
+            .config()
+            .settings
+            .permissions
+            .work_mode
+            .label()
+            .to_owned();
         let mut startup = Startup::default();
         let id = session::wait_for(&mut engine, &mut startup, |e| match e {
             Event::SessionConfigured { session } => Some(session.id.0.clone()),
@@ -257,7 +271,13 @@ impl Server {
             old.close().await;
         }
         let mut engine = self.spawn(r.cwd, Resume::Id(id.clone()), r.mcp_servers)?;
-        let mode = engine.config().settings.permissions.mode.label().to_owned();
+        let mode = engine
+            .config()
+            .settings
+            .permissions
+            .work_mode
+            .label()
+            .to_owned();
         let mut startup = Startup::default();
         let loaded = session::wait_for(&mut engine, &mut startup, |e| match e {
             Event::SessionResumed { items, .. } => Some(Ok(items.clone())),

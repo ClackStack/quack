@@ -173,7 +173,7 @@ The system prompt and context templates use `minijinja` and these variables:
 | `generic` | Unknown models; our own house style | Original. Short prompt, our native tool names |
 | `qwen-code` | Qwen3-Coder, Qwen3.5/3.6 | QwenLM/qwen-code (Apache-2.0); verify licence at time of derivation |
 | `kimi-code` | Kimi K3 (and K2) | MoonshotAI kimi-cli; verify licence |
-| `codex` | gpt-oss | openai/codex prompts and `apply_patch` (Apache-2.0) |
+| `codex` | Sol, Astra, Luna, Terra automatically; gpt-oss opt-in | Original prompt text; tool conventions and `apply_patch` follow openai/codex (Apache-2.0), not a copy of its current Lite/code-mode harness |
 | `cc-style` | MiniMax, MiMo (GLM and DeepSeek moved to their own profiles) | Original prompt text written by us. Only the tool *names and shapes* follow Claude-Code conventions. Claude Code's prompt is not openly licensed, so it is **not** copied |
 | `zcode` | GLM-5.x | Original prompt text. Tool names and shapes follow zai-org/ZCode (Apache-2.0), Z.ai's own Claude-Code-shaped harness |
 | `dsh` | DeepSeek V4.x | Original prompt text. Tool names and shapes follow deepseek-ai/deepseek-harness (MIT): lowercase, literal-replacement `edit`, `todo_write`, bash-first |
@@ -188,9 +188,9 @@ Profiles are judged by measurement, not opinion. The eval suite ([13](13-testing
 
 ## As implemented (2026-10-18)
 
-- **Shipped**: `generic`, plus `qwen-code`, `cc-style`, `kimi-code`, `codex`, `zcode`, `dsh` and `vibe`. `zcode` (`*glm-5*`) and `dsh` (`*deepseek-v4*`, `deepseek-flash`) are auto-selected for their families since the 2026-10-20 eval. `vibe` joined them on 2026-11-09 (`*mistral-large-4*`, `*mistral-medium-3*`, `*mistral-medium-2604*`, `*codestral*`, `*devstral*`): its single 2026-10-21 hard pass on mistral-large-4-0 tied `generic`'s pass rate with clearly fewer steps, cost and prompt tokens, zero parse failures, and the shipped names still match the public harness; its `--repeat 3` confirmation is still owed, and it is recorded as promising rather than proven ([roadmap](roadmap.md)). The remaining family profiles have empty `[match]` lists, so they are used only when chosen: `profile = "<id>"` on a model, `--profile <id>`, or `[model] profile` for every model in the session. Each unchosen profile's `profile.toml` has the proposed globs in a comment, to enable once `quack eval` shows the profile at least matches `generic` for that family.
+- **Shipped**: `generic`, plus `qwen-code`, `cc-style`, `kimi-code`, `codex`, `zcode`, `dsh` and `vibe`. `zcode` (`*glm-5*`) and `dsh` (`*deepseek-v4*`, `deepseek-flash`) are auto-selected for their families since the 2026-10-20 eval. `vibe` joined them on 2026-11-09 (`*mistral-large-4*`, `*mistral-medium-3*`, `*mistral-medium-2604*`, `*codestral*`, `*devstral*`): its single 2026-10-21 hard pass on mistral-large-4-0 tied `generic`'s pass rate with clearly fewer steps, cost and prompt tokens, zero parse failures, and the shipped names still match the public harness; its `--repeat 3` confirmation is still owed, and it is recorded as promising rather than proven ([roadmap](roadmap.md)). The other family profiles have empty `[match]` lists, except `codex`, which gained exact Sol/Astra/Luna matches on 2026-11-11 by explicit user approval after a Sol comparison and upstream source review; Terra (`gpt-6.1-terra`) joined the exact matches on request the same day. This is an exception to the usual promotion rule: Luna/Terra are unmeasured, Astra has a single smoke pass, and only CSV had three repeats on Sol. See the [comparison and remaining gaps](../../evals/results/2026-11-11/codex-comparison.md). Unmatched profiles are used only when chosen: `profile = "<id>"` on a model, `--profile <id>`, or `[model] profile` for every model in the session. Each unchosen profile's `profile.toml` has the proposed globs in a comment, to enable once `quack eval` shows the profile at least matches `generic` for that family.
 - **Prompts** are original text written for this project; only tool names and parameter shapes follow each family's harness, and each `source` says which. `swe-agent` is not built: it needs a text-only tool mode that does not exist yet.
-- **Tool surface**: `[[tools]]` renames tools and parameters and may replace descriptions (inline, or a `.md` file in the profile directory). Internal tools a profile does not list are still offered under their internal names, unless the profile sets `exclusive = true` (the `codex` profile does: shell, apply_patch, update_plan, memory, skill). A mapping onto a tool that is merely off this session (`lsp` without servers, `skill` without skills, another edit format's tool) is skipped without a warning.
+- **Tool surface**: `[[tools]]` renames tools and parameters and may replace descriptions (inline, or a `.md` file in the profile directory). Internal tools a profile does not list are still offered under their internal names, unless the profile sets `exclusive = true` (the `codex` profile does: shell, tracked read, apply_patch, update_plan, task, vision-gated view_image, ask_user, memory, skill). A mapping onto a tool that is merely off this session (`lsp` without servers, `skill` without skills, another edit format's tool) is skipped without a warning.
 - **Parameters**: `transform` is `abs_to_workspace`, `zero_to_one_based`, `one_to_zero_based`, `join_lines` (an array of lines becomes one string; shown to the model as an array) or `argv` (an argument list becomes one command line; `["bash", "-lc", script]` gives the script). `default` fills a parameter the model left out and makes it optional in the schema; `[tools.fixed]` sends internal parameters with a fixed value and hides them.
 - **Defaults**: `[defaults] edit_format` picks the edit tool when `[tools] edit_format = "auto"` (the default). The shipped profiles set **no sampling**: a profile covers a whole model family, and in the first eval (qwen3.8-flash on `qwen-code`, 2026-10-19) Qwen's coder-model values (temperature 0.7, top_k 20, ...) cost extra steps and a failed edit compared with the server's defaults. Sampling belongs on a model entry (`models = [{ id = ..., sampling = { ... } }]`), which overrides a profile's. `[defaults] sampling` stays available for user profiles.
 - **`context.md`** (2026-10-19): the per-session part of the prompt, which is the workspace root, git branch, date, top-level files, AGENTS.md instructions, skills and memory index. It is rendered once at session start and put at the start of the first user message of every request, in a `<context>` block (`turn::with_session_context`). The history and the session log keep what the user typed. `system.md` keeps only what is the same in every project on a machine: the guidance, the tool names, the OS and the shell. Chat templates render the tool definitions after the system prompt, so a workspace path in the system prompt used to end the server's cached prefix early (about 256 of 1,907 tokens cached on a new session's first request in the 2026-10-19 eval), and the tools were sent at full price every session. Now the system prompt and tools are byte-identical across sessions and projects (`core/tests/prefix.rs`, `system_prompt_and_tools_are_the_same_in_every_workspace`). A profile without `context.md` renders everything in `system.md`, as before; this replaces the proposed `env.md` and `env_placement`.
@@ -198,6 +198,39 @@ Profiles are judged by measurement, not opinion. The eval suite ([13](13-testing
 - **`/profiles`**: every installed profile rendered for the current model (system prompt, tool names, edit format), with the one `auto` would pick marked. Enter switches the session (`Op::SetProfile`; the same model, rebuilt like a model switch, and kept through `/reload`), `auto` goes back to each model's own choice, Ctrl-S saves `[model] profile`.
 - Not built yet: `system_role`, `[messages]` shaping, `result_format`, `extends`, `quack profile render`.
 - **Tests**: `core/tests/profiles.rs` starts every shipped profile, checks that it loads without warnings, names its source, offers its tools with their parameters and renders without leftover template syntax; it also runs a Codex `shell` call given as an argument list. `core/tests/prefix.rs` runs a whole session for each.
+
+## Tracked-read audit (2026-11-11)
+
+All eight shipped profiles have a reachable tracked reader and editor under their
+own defaults. Their dedicated readers are `read` (generic, codex, dsh), `Read`
+(cc-style, zcode), `read_file` (qwen-code, vibe), and `ReadFile` (kimi-code).
+Shell inspection and ordinary grep matches are useful for exploration, but do not
+replace a tracked file read before changing or overwriting an existing file.
+Read-before-edit and stale-read guards remain enforced.
+
+- `core/tests/profiles.rs` scripts the actual shipped mappings for every profile:
+  a blind existing-file edit is rejected, its advertised reader returns content,
+  and retrying the edit succeeds. The regression exercises parameter aliases and
+  Qwen's zero-based line offset rather than bypassing profile transforms.
+- The same tests check all five explicit edit formats across the seven
+  nonexclusive profiles (35 combinations): each offers its mapped reader, active
+  editor and writer, hides inactive editors, and names the active editor in its
+  rendered prompt. This surface check is separate from the default-format edit
+  execution regression.
+- DSH and Qwen prompts now distinguish exploration from tracked reads. DSH, Vibe
+  and ZCode editing instructions refer to the selected tool's documented syntax
+  instead of assuming every override is string replacement.
+- An exclusive profile declaring file-edit tools must expose the dedicated editor
+  for its resolved format. Codex only supports `auto` / `apply_patch`; incompatible
+  overrides now report which editor is missing and suggest
+  `tools.edit_format=auto` or a compatible profile, rather than leaving a session
+  with no usable editor. Validation precedes permission/plan filtering; deliberate
+  read-only profiles remain valid. `core/tests/edit_formats.rs` checks the format
+  combinations across permission modes without model calls.
+- Prefix stability is still tested for every shipped profile under its default;
+  hashline prefix checks apply only to profiles whose surface supports hashline.
+
+No live evaluations were needed or run for this audit.
 
 ## Open questions
 

@@ -12,8 +12,26 @@ use tokio_util::sync::CancellationToken;
 
 use crate::Tree;
 
-/// Output kept per stream; the rest is dropped.
+/// Default output kept per stream; the rest is dropped.
 const MAX_CAPTURE: usize = 1024 * 1024;
+
+/// A dropped execution future must also stop grandchildren (kill_on_drop stops only
+/// the immediate child on Unix).
+struct KillOnDrop(Option<Tree>);
+
+impl KillOnDrop {
+    fn kill(&mut self) {
+        if let Some(tree) = self.0.take() {
+            tree.kill();
+        }
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
 
 #[derive(Debug)]
 pub struct ExecOptions {
@@ -21,6 +39,8 @@ pub struct ExecOptions {
     /// The whole environment: nothing else is inherited.
     pub env: BTreeMap<String, OsString>,
     pub stdin: Vec<u8>,
+    /// Preserve all stdout, for hooks that explicitly request full context.
+    pub full_stdout: bool,
     pub timeout: Duration,
     pub cancel: CancellationToken,
 }
@@ -55,7 +75,7 @@ pub async fn exec(
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
     let mut child = cmd.spawn()?;
-    let tree = Tree::new(&child);
+    let mut tree = KillOnDrop(Some(Tree::new(&child)));
     // A program that never reads its input must not block the write.
     if let Some(mut stdin) = child.stdin.take() {
         let input = opts.stdin;
@@ -64,8 +84,15 @@ pub async fn exec(
             let _ = stdin.shutdown().await;
         });
     }
-    let out = child.stdout.take().map(|r| tokio::spawn(capture(r)));
-    let err = child.stderr.take().map(|r| tokio::spawn(capture(r)));
+    let stdout_limit = (!opts.full_stdout).then_some(MAX_CAPTURE);
+    let out = child
+        .stdout
+        .take()
+        .map(|r| tokio::spawn(capture(r, stdout_limit)));
+    let err = child
+        .stderr
+        .take()
+        .map(|r| tokio::spawn(capture(r, Some(MAX_CAPTURE))));
 
     let (mut status, mut timed_out, mut cancelled) = (None, false, false);
     tokio::select! {
@@ -99,14 +126,14 @@ pub async fn exec(
     })
 }
 
-async fn capture(mut r: impl AsyncRead + Unpin) -> Vec<u8> {
+async fn capture(mut r: impl AsyncRead + Unpin, limit: Option<usize>) -> Vec<u8> {
     let mut kept = Vec::new();
     let mut buf = vec![0u8; 8192];
     loop {
         match r.read(&mut buf).await {
             Ok(0) | Err(_) => return kept,
             Ok(n) => {
-                let room = MAX_CAPTURE.saturating_sub(kept.len());
+                let room = limit.map_or(n, |limit| limit.saturating_sub(kept.len()));
                 kept.extend_from_slice(&buf[..n.min(room)]);
             }
         }
@@ -117,11 +144,22 @@ async fn capture(mut r: impl AsyncRead + Unpin) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn capture_limits_are_optional() {
+        let bytes = vec![b'x'; MAX_CAPTURE + 8192];
+        assert_eq!(capture(bytes.as_slice(), None).await, bytes);
+        assert_eq!(
+            capture(bytes.as_slice(), Some(MAX_CAPTURE)).await,
+            bytes[..MAX_CAPTURE]
+        );
+    }
+
     fn opts(stdin: &str, timeout_ms: u64) -> ExecOptions {
         ExecOptions {
             cwd: std::env::temp_dir(),
             env: crate::inherited_env(None),
             stdin: stdin.as_bytes().to_vec(),
+            full_stdout: false,
             timeout: Duration::from_millis(timeout_ms),
             cancel: CancellationToken::new(),
         }
@@ -150,6 +188,40 @@ mod tests {
         assert!(r.timed_out);
         assert_eq!(r.exit_code, None);
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_execution_stops_grandchildren() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("quack-exec-drop-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&dir).expect("test directory");
+        let mut options = opts("", 5000);
+        options.cwd = dir.clone();
+        let task = tokio::spawn(async move {
+            exec(Path::new("/bin/sh"),&["-c".into(),"sh -c 'while test ! -f go; do sleep 0.02; done; touch done' & touch ready; wait".into()],options).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !dir.join("ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child started");
+        task.abort();
+        let _ = task.await;
+        std::fs::write(dir.join("go"), "").expect("release grandchild if alive");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let survived = dir.join("done").exists();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(
+            !survived,
+            "grandchildren must stop when the execution future is dropped"
+        );
     }
 
     /// `findstr` reads stdin and prints the lines that match; a missing file goes to stderr.

@@ -52,6 +52,8 @@ pub(crate) struct Modal {
     filter: String,
     filtered: Vec<usize>,
     selected: usize,
+    /// Tab whose item actions copy text while keeping the modal open.
+    copy_tab: Option<usize>,
     footer: Vec<(&'static str, &'static str)>,
 }
 
@@ -62,6 +64,7 @@ const ALT_KEY: &str = "^s";
 pub(crate) enum ModalOutcome {
     None,
     Close,
+    Copy(String),
     /// Close and put this text in the input.
     Insert(String),
     /// Close and run this command.
@@ -77,6 +80,7 @@ impl Modal {
             filter: String::new(),
             filtered: Vec::new(),
             selected: 0,
+            copy_tab: None,
             footer: vec![
                 ("↑↓", "move"),
                 ("tab", "switch tab"),
@@ -179,7 +183,9 @@ impl Modal {
                         run,
                         ..
                     }) => {
-                        if *run {
+                        if self.copy_tab == Some(self.tab) {
+                            ModalOutcome::Copy(text.clone())
+                        } else if *run {
                             ModalOutcome::Run(text.clone())
                         } else {
                             ModalOutcome::Insert(text.clone())
@@ -276,14 +282,21 @@ impl Modal {
             filter_area.y,
         ));
 
+        let copying = self.copy_tab == Some(self.tab);
         let (list_area, detail_area) = if narrow {
-            let [l, d] = Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .areas(body);
+            let [l, d] = Layout::vertical([
+                Constraint::Percentage(if copying { 45 } else { 60 }),
+                Constraint::Percentage(if copying { 55 } else { 40 }),
+            ])
+            .areas(body);
             (l, d)
         } else {
-            let [l, d] =
-                Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
-                    .areas(body);
+            let [l, d] = Layout::horizontal([
+                Constraint::Percentage(if copying { 35 } else { 45 }),
+                Constraint::Percentage(if copying { 65 } else { 55 }),
+            ])
+            .spacing(u16::from(copying && !narrow))
+            .areas(body);
             (l, d)
         };
         self.draw_list(f, list_area, gap, theme, glyphs);
@@ -293,7 +306,15 @@ impl Modal {
             .footer
             .iter()
             .filter(|(k, _)| *k != "tab" || self.tabs.len() > 1)
-            .copied()
+            .map(|&(key, label)| {
+                if copying && self.title.starts_with("Sign in:") && key == "⏎" {
+                    (key, "copy URL")
+                } else if copying && key == "⏎" {
+                    (key, "copy path")
+                } else {
+                    (key, label)
+                }
+            })
             .collect();
         f.render_widget(Paragraph::new(crate::ui::key_hints(theme, &keys)), footer);
     }
@@ -367,6 +388,18 @@ impl Modal {
         let inner = block.inner(area);
         f.render_widget(block, area);
         match self.selected_item() {
+            Some(i) if self.copy_tab == Some(self.tab) => {
+                let lines: Vec<Line<'_>> = i
+                    .detail
+                    .iter()
+                    .flat_map(|line| {
+                        crate::wrap::wrap(&line.to_string(), usize::from(inner.width))
+                            .into_iter()
+                            .map(|text| Line::styled(text, line.style))
+                    })
+                    .collect();
+                f.render_widget(Paragraph::new(lines), inner);
+            }
             Some(i) => crate::charts::draw_detail(f, inner, &i.detail, &i.charts, theme),
             None => f.render_widget(Paragraph::new(Line::styled("no matches", theme.dim)), inner),
         }
@@ -456,6 +489,80 @@ pub(crate) fn help(theme: &Theme) -> Modal {
     )
 }
 
+/// The current model's declared thinking levels, plus a reset to its configured default.
+pub(crate) fn thinking(
+    model: Option<&str>,
+    levels: &[String],
+    current: Option<&str>,
+    theme: &Theme,
+) -> Modal {
+    let mut items = Vec::new();
+    if model.is_some() && !levels.is_empty() {
+        for level in std::iter::once("default").chain(levels.iter().map(String::as_str)) {
+            let description = if level == "default" {
+                "Restore the level configured in the model's provider file."
+            } else {
+                "Use this thinking level for this model in the current session."
+            };
+            items.push(ModalItem {
+                label: level.to_owned(),
+                hint: if current == Some(level) || (current.is_none() && level == "default") {
+                    "current".into()
+                } else {
+                    String::new()
+                },
+                detail: vec![
+                    Line::styled(model.unwrap_or_default().to_owned(), theme.accent),
+                    Line::raw(""),
+                    Line::raw(description),
+                    Line::raw(""),
+                    Line::raw("Lower levels favor speed and fewer reasoning tokens."),
+                    Line::raw("Higher levels allow more time for difficult tasks."),
+                    Line::raw("Changes apply between turns and are saved with the session."),
+                ],
+                action: Some(if level == "default" {
+                    "/thinking default".into()
+                } else {
+                    // Names such as `off` may also be visibility commands.
+                    format!("/thinking level {level}")
+                }),
+                run: true,
+                alt: None,
+                charts: Vec::new(),
+            });
+        }
+    } else {
+        items.push(ModalItem {
+            label: "No selectable thinking levels".into(),
+            hint: String::new(),
+            detail: vec![Line::raw(match model {
+                Some(model) => format!(
+                    "{model} does not declare thinking levels. Add reasoning.efforts to its model entry in the provider file."
+                ),
+                None => "Select a model with /models first.".into(),
+            })],
+            action: None,
+            run: false,
+            alt: None,
+            charts: Vec::new(),
+        });
+    }
+    let mut modal = Modal::new(
+        "Thinking",
+        vec![ModalTab {
+            title: "Levels".into(),
+            items,
+        }],
+    );
+    modal.footer.retain(|(key, _)| *key != "tab");
+    if let Some(level) = current
+        && let Some(index) = levels.iter().position(|e| e == level)
+    {
+        modal.selected = index + 1;
+    }
+    modal
+}
+
 /// The `/models` modal. `catalog` is `None` while the engine is still listing models.
 pub(crate) fn models(
     catalog: Option<&[quack_protocol::ProviderModels]>,
@@ -530,6 +637,9 @@ pub(crate) fn models(
                     if let Some(price) = &m.price {
                         detail.push(field("price", price.clone()));
                     }
+                    if !m.reasoning_efforts.is_empty() {
+                        detail.push(field("thinking", m.reasoning_efforts.join(" · ")));
+                    }
                     detail.push(Line::raw(""));
                     let mut charts = Vec::new();
                     if let Some(c) = m.context_window.filter(|_| widest > 0) {
@@ -557,6 +667,16 @@ pub(crate) fn models(
                     } else {
                         Line::styled("⏎ switch to this model for the session", theme.dim)
                     });
+                    if !m.reasoning_efforts.is_empty() {
+                        detail.push(Line::styled(
+                            if is_current {
+                                "/thinking reopens the level picker"
+                            } else {
+                                "quack then asks for a thinking level (speed vs cost)"
+                            },
+                            theme.dim,
+                        ));
+                    }
                     detail.push(Line::styled(
                         "^s save as the default model (user config.toml)",
                         theme.dim,
@@ -815,21 +935,40 @@ pub(crate) fn config(
         .collect();
     let layers = files
         .iter()
-        .map(|(layer, status)| ModalItem {
-            label: layer.clone(),
-            hint: String::new(),
-            detail: vec![
+        .map(|(layer, report)| {
+            let (status, path) = report
+                .split_once('\n')
+                .map_or((report.as_str(), None), |(status, path)| {
+                    (status, Some(path))
+                });
+            let (hint, style) = match status {
+                "loaded" => ("loaded", theme.ok),
+                "no config.toml" => ("missing", theme.dim),
+                s if s.starts_with("failed") => ("failed", theme.warn),
+                _ => ("skipped", theme.dim),
+            };
+            let mut detail = vec![
                 Line::styled(layer.clone(), theme.accent),
+                Line::styled(status.to_owned(), style),
                 Line::raw(""),
-                Line::raw(status.clone()),
-            ],
-            action: None,
-            run: false,
-            alt: None,
-            charts: Vec::new(),
+            ];
+            if let Some(path) = path {
+                detail.push(Line::raw(path.to_owned()));
+            } else {
+                detail.push(Line::styled("No file path for this layer", theme.dim));
+            }
+            ModalItem {
+                label: layer.clone(),
+                hint: hint.into(),
+                detail,
+                action: path.map(str::to_owned),
+                run: false,
+                alt: None,
+                charts: Vec::new(),
+            }
         })
         .collect();
-    Modal::new(
+    let mut modal = Modal::new(
         "Config",
         vec![
             ModalTab {
@@ -841,7 +980,9 @@ pub(crate) fn config(
                 items: layers,
             },
         ],
-    )
+    );
+    modal.copy_tab = Some(1);
+    modal
 }
 
 /// Detail lines with charts set between them.
@@ -1613,34 +1754,16 @@ pub(crate) fn memory(
     .with_alt("delete")
 }
 
-/// The `/permissions` modal: modes to switch to, and the configured rules.
+/// The `/permissions` modal: Ask/Allow approvals and the configured rules.
 pub(crate) fn permissions(current: &str, rules: &[(String, String)], theme: &Theme) -> Modal {
     const MODES: &[(&str, &str)] = &[
         (
-            "read-only",
-            "Reads only. Edits are refused; commands run only when an allow rule matches.",
-        ),
-        (
-            "plan",
-            "Look around and propose a plan. Edits are refused; read-only commands run.",
-        ),
-        (
             "ask",
-            "Reads in the workspace run; edits and commands ask first.",
+            "Ask before unapproved tools. Plan/Edit stays as selected; Plan only reads and searches.",
         ),
         (
-            "auto-edit",
-            "Edits inside the workspace run; commands ask first.",
-        ),
-        (
-            "full-auto",
-            "Everything runs without asking, inside the sandbox when it is on, except the \
-             built-in deny list and deny rules. Leaving the sandbox still asks.",
-        ),
-        (
-            "yolo",
-            "Nothing asks and the sandbox is off. Only the built-in deny list (rm -rf /, \
-             disk wipes, …) and your deny rules still apply.",
+            "allow",
+            "Automatically approve tools within the current work mode and sandbox. Explicit ask/deny rules still apply; leaving the sandbox asks.",
         ),
     ];
     let modes = MODES
@@ -1659,9 +1782,9 @@ pub(crate) fn permissions(current: &str, rules: &[(String, String)], theme: &The
                 Line::raw(""),
                 Line::styled(
                     if *name == current {
-                        "the current mode"
+                        "the current approval policy"
                     } else {
-                        "⏎ switch to it for this session"
+                        "⏎ select approvals, keeping Plan/Edit"
                     },
                     theme.dim,
                 ),
@@ -1691,7 +1814,7 @@ pub(crate) fn permissions(current: &str, rules: &[(String, String)], theme: &The
                     field(theme, "list", list.clone()),
                     Line::raw(""),
                     Line::styled(
-                        "Order: built-in deny list, deny, session approvals, allow, ask, then the mode.",
+                        "Order: Plan restrictions, built-in deny list, deny, ask, session approvals/allow, then the approval default.",
                         theme.dim,
                     ),
                 ],
@@ -1706,7 +1829,11 @@ pub(crate) fn permissions(current: &str, rules: &[(String, String)], theme: &The
         "Permissions",
         vec![
             ModalTab {
-                title: "Mode".into(),
+                title: match current {
+                    "ask" | "allow" => "Approvals".into(),
+                    "yolo" => "Approvals · yolo".into(),
+                    _ => format!("Approvals · {current} (legacy)"),
+                },
                 items: modes,
             },
             ModalTab {
@@ -2228,7 +2355,7 @@ pub(crate) fn hooks(
                     runs.iter().filter(|r| r.id == h.id).collect();
                 let last = hook_runs.last().copied();
                 let mut detail = Vec::new();
-                let (hint, can_toggle, enabled) = match &h.state {
+                let (hint, can_toggle, _enabled) = match &h.state {
                     ItemState::Loaded(f) if f.enabled => {
                         detail.push(Line::styled(h.id.clone(), theme.ok));
                         detail.push(Line::raw(""));
@@ -2275,23 +2402,14 @@ pub(crate) fn hooks(
                         ("failed".into(), false, false)
                     }
                 };
-                let action = if !can_toggle {
-                    String::new()
-                } else if enabled {
-                    "⏎ turn it off (saved to [hooks] disabled in your config.toml)".into()
-                } else {
-                    match &h.state {
-                        ItemState::Disabled(why) if why.starts_with("disabled by ") => {
-                            "⏎ enable it (removes that override)".into()
-                        }
-                        ItemState::Disabled(why) if why == "listed in `disabled`" => {
-                            "⏎ enable it and clear its disabled setting".into()
-                        }
-                        _ if h.layer == LayerKind::Defaults => {
-                            "⏎ enable it (copied into your config folder)".into()
-                        }
-                        _ => "⏎ enable it (sets `enabled = true` in its file)".into(),
+                let action = if can_toggle {
+                    if matches!(&h.state, ItemState::Loaded(f) if f.setup.is_none()) {
+                        "Enter or Ctrl-S enables or disables this hook.".to_owned()
+                    } else {
+                        "Enter configures the hook; Ctrl-S enables or disables it.".to_owned()
                     }
+                } else {
+                    String::new()
                 };
                 detail.push(field(theme, "layer", h.layer.label().into()));
                 detail.push(field(theme, "file", h.path.display().to_string()));
@@ -2322,9 +2440,19 @@ pub(crate) fn hooks(
                     label: h.id.clone(),
                     hint,
                     detail,
-                    action: can_toggle.then(|| format!("/hooks toggle {}", h.id)),
+                    action: can_toggle.then(|| {
+                        format!(
+                            "/hooks {} {}",
+                            if matches!(&h.state, ItemState::Loaded(f) if f.setup.is_none()) {
+                                "toggle"
+                            } else {
+                                "configure"
+                            },
+                            h.id
+                        )
+                    }),
                     run: can_toggle,
-                    alt: None,
+                    alt: can_toggle.then(|| format!("/hooks toggle {}", h.id)),
                     charts: Vec::new(),
                 }
             })
@@ -2337,6 +2465,7 @@ pub(crate) fn hooks(
             items,
         }],
     )
+    .with_alt("enable/disable")
 }
 
 pub(crate) fn skills(skills: &[quack_protocol::SkillInfo], theme: &Theme) -> Modal {
@@ -2768,6 +2897,8 @@ pub(crate) struct SetupView {
     pub local: Scan,
     /// The hosted services in providers.d; `None` while listing.
     pub services: Option<Vec<quack_protocol::ServiceInfo>>,
+    /// The last subscription sign-in failure, shown beside that service for retry.
+    pub sign_in_error: Option<(String, String)>,
     /// The settings when `/setup` opened, for the opt-in checks.
     pub settings: Vec<quack_config::SettingRow>,
 }
@@ -2781,7 +2912,7 @@ pub(crate) enum Scan {
     Found(Vec<quack_protocol::DetectedServer>),
 }
 
-/// The `/setup` modal: servers on this machine, hosted services that take a key, and any
+/// The `/setup` modal: local servers, hosted API keys and subscriptions, and any
 /// server by its URL.
 pub(crate) fn setup(view: &SetupView, theme: &Theme) -> Modal {
     const ELSEWHERE: &str = "For a hosted service, or a server on another machine or \
@@ -2886,7 +3017,7 @@ pub(crate) fn setup(view: &SetupView, theme: &Theme) -> Modal {
         )],
         Some([]) => vec![placeholder(
             "no hosted services configured",
-            "providers.d has no hosted services that take a key. The defaults bundle ships \
+            "providers.d has no hosted services with a subscription or API key. The defaults bundle ships \
              a list of them; an install without it (quack-plucked) has none. Add a service \
              under Any server with its OpenAI-compatible URL instead.",
             theme,
@@ -2902,6 +3033,33 @@ pub(crate) fn setup(view: &SetupView, theme: &Theme) -> Modal {
                     field(theme, "url", s.base_url.clone()),
                     Line::raw(""),
                 ];
+                if s.subscription {
+                    if let Some((id, error)) = &view.sign_in_error
+                        && id == &s.id
+                    {
+                        detail.push(Line::styled(error.clone(), theme.warn));
+                        detail.push(Line::raw("Press Enter to try signing in again."));
+                        detail.push(Line::raw(""));
+                    }
+                    detail.push(Line::styled(
+                        if s.ready {
+                            "Signed in with plan usage allowed."
+                        } else {
+                            "Sign in with your subscription in the browser. Allow plan usage to continue."
+                        }, theme.dim,
+                    ));
+                    detail.push(Line::raw("Credentials are saved privately in your data folder."));
+                    detail.push(Line::raw("⏎ continue · ^s sign in again"));
+                    let failed = view.sign_in_error.as_ref().is_some_and(|(id, _)| id == &s.id);
+                    let next = if s.ready && !failed { "models" } else { "login" };
+                    return ModalItem {
+                        alt: Some(format!("/setup login {}", s.id)),
+                        ..item(
+                            &s.name, if s.ready { "ready" } else { "needs sign-in" }, detail,
+                            Some(format!("/setup {next} {}", s.id)),
+                        )
+                    };
+                }
                 let action = if s.ready {
                     detail.push(Line::styled(
                         match &s.key {
@@ -3087,6 +3245,41 @@ fn setup_checks(settings: &[quack_config::SettingRow], theme: &Theme) -> Vec<Mod
             })
         })
         .collect()
+}
+
+/// The URL remains copyable when no browser is available. Leaving cancels the listener.
+pub(crate) fn sign_in(id: &str, url: Option<&str>, theme: &Theme) -> Modal {
+    let link = ModalItem {
+        label: if url.is_some() {
+            "copy sign-in URL"
+        } else {
+            "starting sign-in…"
+        }
+        .into(),
+        hint: "waiting for browser".into(),
+        detail: vec![
+            Line::styled(
+                "Continue in your browser and allow plan usage.",
+                theme.accent,
+            ),
+            Line::raw("If it did not open, copy this URL into your browser:"),
+            Line::raw(url.unwrap_or("Waiting for a sign-in URL…").to_owned()),
+            Line::raw("Press Enter to copy the URL, or Escape to cancel sign-in."),
+        ],
+        action: url.map(str::to_owned),
+        run: false,
+        alt: None,
+        charts: Vec::new(),
+    };
+    let mut modal = Modal::new(
+        format!("Sign in: {id}"),
+        vec![ModalTab {
+            title: "Browser".into(),
+            items: vec![link],
+        }],
+    );
+    modal.copy_tab = Some(0);
+    modal
 }
 
 #[cfg(test)]

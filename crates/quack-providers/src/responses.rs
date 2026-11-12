@@ -149,6 +149,7 @@ pub(crate) fn build_body(req: &ChatRequest, route: Route) -> Value {
         "input": input,
         "stream": true,
         "store": false,
+        "include": ["reasoning.encrypted_content"],
     });
     if let Some(i) = instructions {
         body["instructions"] = json!(i);
@@ -176,9 +177,6 @@ pub(crate) fn build_body(req: &ChatRequest, route: Route) -> Value {
             }]),
         };
     }
-    if let Some(e) = &req.reasoning_effort {
-        body["reasoning"] = json!({ "effort": e });
-    }
     if let Some(k) = &req.cache_key {
         body["prompt_cache_key"] = json!(k);
     }
@@ -196,6 +194,12 @@ pub(crate) fn build_body(req: &ChatRequest, route: Route) -> Value {
         }
     }
     merge(&mut body, &req.extra_body);
+    if let Some(e) = &req.reasoning_effort {
+        if !body["reasoning"].is_object() {
+            body["reasoning"] = json!({});
+        }
+        body["reasoning"]["effort"] = json!(e);
+    }
     body
 }
 
@@ -375,6 +379,62 @@ impl EventParser {
 mod tests {
     use super::*;
     use crate::types::{ResponseBuilder, ToolCall, ToolSpec};
+
+    #[test]
+    fn stateless_requests_include_encrypted_reasoning_on_both_routes() {
+        let req = ChatRequest::default();
+        for route in [Route::Api, Route::ChatgptPlan] {
+            let body = build_body(&req, route);
+            assert_eq!(body["store"], false, "{route:?}");
+            assert_eq!(
+                body["include"],
+                json!(["reasoning.encrypted_content"]),
+                "{route:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_body_can_override_include_on_both_routes() {
+        let req = ChatRequest {
+            extra_body: [(
+                "include".to_owned(),
+                json!(["message.output_text.logprobs"]),
+            )]
+            .into_iter()
+            .collect(),
+            ..ChatRequest::default()
+        };
+        for route in [Route::Api, Route::ChatgptPlan] {
+            let body = build_body(&req, route);
+            assert_eq!(
+                body["include"],
+                json!(["message.output_text.logprobs"]),
+                "{route:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_effort_preserves_other_reasoning_options_on_both_routes() {
+        let req = ChatRequest {
+            reasoning_effort: Some("high".into()),
+            extra_body: serde_json::from_value(json!({
+                "reasoning": { "effort": "low", "summary": "auto", "context": "all_turns" }
+            }))
+            .expect("extra body"),
+            ..ChatRequest::default()
+        };
+        for route in [Route::Api, Route::ChatgptPlan] {
+            let body = build_body(&req, route);
+            assert_eq!(
+                body["reasoning"],
+                json!({
+                    "effort": "high", "summary": "auto", "context": "all_turns"
+                })
+            );
+        }
+    }
 
     #[test]
     fn history_becomes_input_items() {
@@ -605,6 +665,7 @@ mod tests {
 
         // The ChatGPT plan route: tools in a namespace, no cap or sampling.
         let plan = build_body(&req, Route::ChatgptPlan);
+        assert_eq!(plan["input"][1], api["input"][1]);
         assert_eq!(plan["tools"][0]["type"], "namespace");
         assert_eq!(plan["tools"][0]["tools"][0]["name"], "read");
         assert_eq!(plan["input"][3]["namespace"], NAMESPACE);

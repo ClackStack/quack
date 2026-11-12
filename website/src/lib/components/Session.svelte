@@ -13,7 +13,7 @@
 			id: 'fix',
 			label: 'Fix a failing test',
 			caption: 'Every change shows its diff, and commands ask first unless you allow them.',
-			status: [['badge-ask', ' ask '], ['dim', '  charm/glm-5.3 · 12.3k/104k'], ['spacer', ''], ['warn', 'waiting for approval']],
+			status: [['badge-edit', ' edit '], ['badge-ask', ' ask '], ['dim', ' charm/glm-5.3 · 12.3k/104k'], ['spacer', ''], ['warn', 'waiting for approval']],
 			lines: [
 				[['dim', ' › '], ['', 'the date parser test fails on leap years, fix it']],
 				[],
@@ -34,31 +34,34 @@
 		},
 		{
 			id: 'plan',
-			label: 'Plan, then build',
-			caption: 'Plan mode looks around, asks about the big decisions, then keeps a checklist the model sees at every step.',
-			status: [['badge-auto', ' auto-edit '], ['dim', '  charm/qwen3.8-flash · 70k/104k · 48 t/s']],
+			label: 'Plan before editing',
+			caption: 'Plan + Allow reads and searches automatically, then lists proposed changes and tests for review. Accepting starts implementation with the same approvals.',
+			status: [['badge-plan', ' plan '], ['badge-allow', ' allow '], ['dim', ' charm/qwen3.8-flash · 70k/104k · 48 t/s']],
 			lines: [
 				[['dim', ' › '], ['', 'make the parser faster']],
 				[],
-				[['ok', ' ✓ '], ['', 'plan 1/3 done '], ['dim', '· profile the hot loop']],
-				[['ok', '     ✓ '], ['dim', 'read the parser']],
-				[['accent', '     ▶ '], ['', 'profile the hot loop']],
-				[['dim', '     · cache token lookups']],
-				[['err', ' ✗ '], ['tool-read', 'shell'], ['', ' cargo bench '], ['dim', '· exit 101']],
-				[['dim', '     error: no bench target']],
+				[['ok', ' ✓ '], ['tool-read', 'grep'], ['', ' token_lookup '], ['dim', '· 4 matches in 2 files']],
+				[['ok', ' ✓ '], ['tool-read', 'read'], ['', ' src/parser.rs:40-96']],
 				[],
-				[...duck, ['', 'There is no bench target yet; adding one.']],
+				[...duck, ['', 'Token lookups repeat inside the hot loop.']],
+				[['', '   I propose caching them, then running:']],
 				[],
-				[['dim', '   ── 14s · 2 tools · 1.2k tokens out · 48 t/s ────────']],
+				[['accent', '   cargo test parser::']],
+				[['dim', '     Verify parsing and error cases still pass.']],
+				[['accent', '   cargo bench --bench parser']],
+				[['dim', '     Compare throughput with the baseline.']],
 				[],
-				[['dim', '  plan  '], ['warn', '▰▱▱'], ['dim', ' 1/3  '], ['accent', '▶'], ['', ' profile the hot loop']]
+				[['dim', '   No changes made; tests proposed for review.']],
+				[],
+				[['accent', '   › Implement plan · allow approvals']],
+				[['dim', '     Keep planning']]
 			]
 		},
 		{
 			id: 'models',
 			label: 'Switch models',
 			caption: 'Every model of every provider in one picker. Switch mid-conversation and keep the history.',
-			status: [['badge-ask', ' ask '], ['dim', '  ollama/qwen3-coder:30b · 8.1k/32k']],
+			status: [['badge-edit', ' edit '], ['badge-ask', ' ask '], ['dim', ' ollama/qwen3-coder:30b · 8.1k/32k']],
 			lines: [
 				[['box', ' ╭ models ─────────────────────────────────── 24 ╮']],
 				[['box', ' │ '], ['accent', '› '], ['', 'ollama/qwen3-coder:30b       '], ['dim', 'local · 32k'], ['box', '   │']],
@@ -97,7 +100,7 @@
 
 		<div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,2.2fr)] gap-8 items-start">
 			<div class="flex flex-wrap lg:flex-col gap-2" role="tablist" aria-label="Example sessions">
-				{#each scenes as s}
+				{#each scenes as s (s.id)}
 					<button
 						type="button"
 						role="tab"
@@ -120,13 +123,13 @@
 						<span>⎇ main</span>
 					</div>
 					<div class="screen px-1 pt-2 pb-4 min-h-[24.5em] overflow-x-auto" role="tabpanel">
-						{#each current.lines as line}
-							<div class="whitespace-pre leading-[1.55]">{#each line as [cls, text]}<span class={cls}>{text}</span>{/each}&nbsp;</div>
+						{#each current.lines as line (line)}
+							<div class="whitespace-pre leading-[1.55]">{#each line as run (run)}<span class={run[0]}>{run[1]}</span>{/each}&nbsp;</div>
 						{/each}
 					</div>
 					<div class="mx-2 mb-1 rounded-md border border-term-dim/50 px-2 py-1 text-[14px]"><span class="text-sky">›</span><span class="caret">▏</span></div>
 					<div class="flex flex-wrap gap-x-2 gap-y-1 px-2 py-1.5 text-[11px] sm:text-[13px] whitespace-pre">
-						{#each current.status as [cls, text]}<span class={cls}>{text}</span>{/each}
+						{#each current.status as run (run)}<span class={run[0]}>{run[1]}</span>{/each}
 						<span class="ml-auto text-term-dim">/help</span>
 					</div>
 				</div>
@@ -162,7 +165,9 @@
 	.term :global(.gutter) { color: var(--color-term-dim); }
 	.term :global(.box) { color: #6f7b8f; }
 	.term :global(.badge-ask) { background: var(--color-sky); color: #0b1a24; font-weight: 700; }
-	.term :global(.badge-auto) { background: var(--color-duck); color: #1d1a05; font-weight: 700; }
+	.term :global(.badge-edit) { background: #7ee08a; color: #0b1a24; font-weight: 700; }
+	.term :global(.badge-plan),
+	.term :global(.badge-allow) { background: var(--color-duck); color: #1d1a05; font-weight: 700; }
 	.term :global(.spacer) { flex: 1; }
 	.caret {
 		color: var(--color-term-text);

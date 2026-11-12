@@ -1,0 +1,85 @@
+{
+  "harness": "quack 0.1.0",
+  "date": "2026-11-11",
+  "suite": "hard",
+  "model": "chatgpt/sol",
+  "profile": "codex",
+  "sampling": {},
+  "results": [
+    {
+      "task": "log-parser",
+      "category": "fix-test",
+      "passed": true,
+      "changed": [
+        "logsum/parse.py"
+      ],
+      "steps": 5,
+      "tool_calls": 5,
+      "tool_errors": 1,
+      "parse_failures": 0,
+      "edit_failures": 0,
+      "prompt_tokens": 20889,
+      "cached_tokens": 0,
+      "completion_tokens": 1196,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 5688,
+      "seconds": 37.060258265
+    },
+    {
+      "task": "migrate-fetch",
+      "category": "refactor",
+      "passed": true,
+      "changed": [
+        "scripts/backfill.py",
+        "tests/test_callers.py",
+        "tests/test_net.py",
+        "weather/alerts.py",
+        "weather/cache.py",
+        "weather/forecast.py",
+        "weather/net.py",
+        "weather/sources.py",
+        "weather/stations.py"
+      ],
+      "steps": 11,
+      "tool_calls": 18,
+      "tool_errors": 1,
+      "parse_failures": 0,
+      "edit_failures": 0,
+      "prompt_tokens": 57130,
+      "cached_tokens": 2432,
+      "completion_tokens": 2694,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 8060,
+      "seconds": 87.662548864
+    },
+    {
+      "task": "partial-shipment",
+      "category": "feature",
+      "passed": true,
+      "changed": [
+        "config/settings.json",
+        "orderly/inventory.py",
+        "orderly/notifications.py",
+        "orderly/orders.py",
+        "orderly/serialize.py",
+        "orderly/shop.py",
+        "tests/test_shop.py",
+        "tests/test_storage.py"
+      ],
+      "steps": 15,
+      "tool_calls": 25,
+      "tool_errors": 2,
+      "parse_failures": 0,
+      "edit_failures": 0,
+      "prompt_tokens": 155005,
+      "cached_tokens": 5248,
+      "completion_tokens": 4552,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 19369,
+      "seconds": 145.0955389
+    }
+  ]
+}

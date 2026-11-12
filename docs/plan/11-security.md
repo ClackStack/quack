@@ -13,30 +13,33 @@
 
 ## Permission engine
 
-### Modes (`[permissions] mode`, cycled with Shift-Tab)
+### Work mode and approvals
 
-| Mode | Reads | Edits in workspace | Shell | Outside workspace |
-|---|---|---|---|---|
-| `read-only` | allow | deny | read-only commands only | deny |
-| `plan` | allow | deny | read-only commands only | deny |
-| `ask` (default) | allow | ask | ask unless allow-listed | ask |
-| `auto-edit` | allow | allow | ask unless allow-listed | ask |
-| `full-auto` | allow | allow | allow (sandboxed if available) | ask |
+See the [user guide](../modes.md) for the matrix, commands and migration.
 
-Policy can cap the maximum mode (`policy.max_permission_mode = "auto-edit"`).
+`[permissions] work_mode = "plan" | "edit"` controls whether changes may happen. `mode = "ask" | "allow"` controls approvals independently; Shift-Tab toggles only work mode. The TUI shows both. `--mode plan --approvals allow` is autonomous investigation with changes and test execution blocked.
+
+| Work mode | Reads/searches | Edits, tests, builds, scripts, mutating MCP/agents |
+|---|---|---|
+| Plan | Allowed subjects follow the approval policy | Denied before rules or session approvals |
+| Edit | Follow the approval policy | Follow the approval policy |
+
+`ask` allows workspace reads and read-only planning shell commands; other calls ask unless allowed. `allow` automatically approves eligible calls while retaining the configured sandbox, explicit ask rules, deny rules and approval for leaving the sandbox. These are the only standard approval choices. `full-auto` is a compatibility alias for `allow`. Older `auto-edit` and `read-only` settings still load with their existing restrictions but are omitted from the choices: use Ask with scoped edit allow rules or Plan, respectively. `/yolo` and `--yolo` additionally bypass ask rules and disable the sandbox, but cannot bypass Plan restrictions or denies.
+
+Policy caps approvals (`policy.max_permission_mode`, including the legacy names). It can separately lock `permissions.work_mode = "plan"`; a Plan lock also prevents acceptance. See [04](04-agent-loop-and-tools.md#plan-mode) for review, test proposals and persistence.
 
 ### Rules
 
 ```toml
 [permissions]
-allow = ["shell:git status*", "shell:cargo test*", "edit:src/**", "mcp:github:get_*"]
+allow = ["shell:git status*", "shell:cargo test*", "edit:src/**", "mcp:github/get_*"]
 ask   = ["shell:git push*"]
 deny  = ["shell:rm -rf *", "shell:curl *", "edit:.env*", "read:~/.ssh/**"]
 ```
 
-- Subjects are `shell:<pattern>`, `edit:<glob>`, `read:<glob>`, `mcp:<server>:<tool>`, `lsp:rename`, and `tool:<name>`.
+- Subjects are `shell:<pattern>`, `edit:<glob>`, `read:<glob>`, `mcp:<server>/<tool>`, `lsp:rename`, and `tool:<name>`.
 - A compiled-in **deny floor** (`rm -rf /`, `rm -rf ~`, `mkfs*`, `format <drive>:`, `dd of=/dev/*`, fork bombs) always applies and can only be extended, never removed (decided 2026-10-17).
-- Evaluation order: **deny > ask > allow > mode default**. Rules from all layers are combined, and policy-locked denies can't be removed.
+- Evaluation order: **work-mode restrictions and deny floor > deny > ask > session grants / allow > approval default**. Rules from all layers are combined, and policy-locked denies can't be removed.
 - Approval dialog choices: *Allow once*, *Allow for session*, *Always allow (writes rule to project or user config via toml_edit; [as implemented](#always-allow-2026-10-25))*, *Deny*, *Deny with feedback* (the text goes to the model).
 
 ### Shell command analysis (tree-sitter)
@@ -44,19 +47,19 @@ deny  = ["shell:rm -rf *", "shell:curl *", "edit:.env*", "read:~/.ssh/**"]
 This follows maki's approach: parse the command with **tree-sitter-bash** (Unix shells) or **tree-sitter-powershell** (Windows; verify grammar quality during M3) and split it into simple commands:
 
 - `git diff && rm -rf build` → `[git diff] [rm -rf build]`. **Every** sub-command must be allowed.
-- Pipelines, subshells, `$(…)`, backticks, `eval`, `bash -c "…"`, `Invoke-Expression`, and `iex` are analysed recursively where possible. Anything that can't be analysed (dynamic strings into eval) → **ask**.
+- Pipelines, subshells, `$(…)`, backticks, `eval`, `bash -c "…"`, `Invoke-Expression`, and `iex` are analysed recursively where possible. Plan refuses commands it cannot classify as read-only. In Edit, opaque commands follow the approval policy and cannot match allow rules.
 - Redirections that write files (`>`, `>>`, `Out-File`, `Set-Content`) are treated as edits to those paths.
-- A small built-in classifier marks known read-only commands (`ls`, `cat`, `git status/diff/log`, `rg`, `Get-ChildItem`, `Get-Content`, …) as safe to auto-allow in `ask` mode. The list is overridable in TOML.
-- Parse failure → **ask**, never allow.
+- A built-in classifier checks known read-only commands and their arguments (`ls`, `cat`, `git status/diff/log`, `rg`, `Get-ChildItem`, `Get-Content`, …). Allow rules cannot make a mutating or unrecognized command eligible in Plan.
+- Parse failures cannot match allow rules; Plan refuses them, while Edit follows the approval policy.
 
 #### As implemented (2026-10-18, ahead of M3)
 
 A small hand-written splitter (`quack-tools/src/shell_split.rs`, no new crates) handles the forms models actually write before tree-sitter is added: quotes, escapes, line continuations, `;` `&&` `||` `|` `|&` `&`, newlines, `$(…)` (its commands are checked too) and redirections.
 
-- **Deny rules and the deny floor** match the whole line or any one command in it. `full-auto` with `deny = ["shell:rm *"]` now refuses `git status && rm -rf x`. Before this, it allowed it, because rules only saw the whole string.
+- **Deny rules and the deny floor** match the whole line or any one command in it. `allow` with `deny = ["shell:rm *"]` now refuses `git status && rm -rf x`. Before this, it allowed it, because rules only saw the whole string.
 - **Allow rules** apply only when every command is allowed: by a rule, or because it only reads, provided at least one command matched a rule. So `cargo test 2>&1 | tail -50` runs under `shell:cargo test*`, while `cat a | head` still asks, as `cat a` does.
-- **Redirection to a file** (`>`, `>>`, `&>`; not `/dev/null`, `NUL` or `2>&1`) means no allow rule applies, and plan mode refuses it.
-- **Opaque lines get no allow rule** but are still checked against deny rules as a whole: backticks, subshells `( )`, `{ }`, heredocs, `<( )`, `$(( ))`, `if`/`for`/`while`/`case`, and comments. They ask, or run in `full-auto`.
+- **Redirection to a file** (`>`, `>>`, `&>`; not `/dev/null`, `NUL` or `2>&1`) means no allow rule applies, and Plan refuses it.
+- **Opaque lines get no allow rule** but are still checked against deny rules as a whole: backticks, subshells `( )`, `{ }`, heredocs, `<( )`, `$(( ))`, `if`/`for`/`while`/`case`, and comments. They ask, or run in `allow`.
 - **Not yet:** `bash -c "…"`, `eval` and `Invoke-Expression` are not looked into, so deny rules don't see inside them. Redirect targets aren't treated as edits to those paths. There is no PowerShell-specific reading; a PowerShell backtick escape makes the line opaque, which only ever asks more.
 
 #### tree-sitter-bash (2026-10-21)
@@ -126,13 +129,13 @@ When a command fails because of the sandbox (EPERM/EACCES patterns, network erro
 - **Config**: `[sandbox] mode = "auto" | "off" | "workspace-write" | "workspace-write-net" | "read-only"`. The default `auto` is `workspace-write` where the OS supports it; where it doesn't (Windows, kernels without Landlock) commands run unsandboxed with a startup warning, rather than every command asking. A mode set explicitly fails closed and `writable = [...]` for extra folders (`~` allowed; relative to the workspace root). Writable by default: the workspace root and the temp folders. `[policy] locked = ["sandbox.mode"]` locks it like any other key.
 - **Linux**: Landlock handles every write right (create, remove, rename/link, truncate, …) and allows them beneath the writable paths and a few devices (`/dev/null`, `/dev/tty`, `/dev/shm`, …); reads and execution are not restricted. A seccomp filter refuses `socket()` for every family except `AF_UNIX`, refuses `io_uring_setup`, and refuses system calls from other ABIs (x32, foreign architectures) so they can't get around it. The ruleset is built in the parent; the child only calls `PR_SET_NO_NEW_PRIVS`, `landlock_restrict_self` and `PR_SET_SECCOMP` in `pre_exec`, so there is no helper binary and no new crate (`libc` was already in the tree). No `bwrap` fallback: on kernels without Landlock the sandbox is reported unavailable.
 - **macOS**: `sandbox-exec` with a generated profile: `(allow default)`, `file-write*` denied outside the writable paths (passed as `-D` parameters, canonicalized because Seatbelt sees `/private/tmp`), and IP network denied unless `workspace-write-net`. Written without a Mac to hand; the CI macOS job runs the same tests as Linux.
-- **Windows**: not implemented. When a mode is set, the startup panel and `quack doctor` say the sandbox is unavailable, and **every** shell command asks first, whatever the permission mode (fail closed).
-- **Leaving the sandbox**: the shell tool takes `sandbox: false`. Such a call (and every call when the sandbox is unavailable) is `Subject::ShellOutsideSandbox`: deny rules and the deny floor still apply, allow rules and `full-auto` do not; it always asks unless allowed for the session, and in plan and read-only modes only read-only commands may ask. The approval box says "outside the sandbox". A sandboxed command that fails with sandbox-like output gets a note telling the model it can retry that way.
+- **Windows**: not implemented. When a mode is set, the startup panel and `quack doctor` say the sandbox is unavailable, and **every** shell command asks first, with Ask/Allow approvals when sandboxing was explicitly configured (fail closed).
+- **Leaving the sandbox**: the shell tool takes `sandbox: false`. Such a call (and every call when the sandbox is unavailable) is `Subject::ShellOutsideSandbox`: deny rules and the deny floor still apply, allow rules and `allow` do not; it always asks unless allowed for the session, and in Plan (or with legacy Read-only approvals) only read-only commands may ask. The approval box says "outside the sandbox". A sandboxed command that fails with sandbox-like output gets a note telling the model it can retry that way.
 - **Servers**: `sandbox = true` in an `mcp.d` (local) or `lsp.d` file runs that server under the configured mode, or `workspace-write` when the mode is `off`; if the sandbox is unavailable, the server does not start.
-- **Permissions are unchanged by the sandbox**: a sandboxed command still asks in `ask` mode. The sandbox limits what an approved or `full-auto` command can do.
-- **`yolo` mode** (2026-10-18; `/yolo` toggles it and returns to the previous mode, `--yolo`, `--permission-mode yolo`, `/permissions yolo`; the status bar shows YOLO): every call is allowed without asking, including ask rules and running outside the sandbox, and shell commands run unsandboxed. The built-in deny floor and `[permissions] deny` rules still apply, plan mode still overrides it, and `[policy] max_permission_mode` can cap below it (it is the most permissive mode). It is not in the Shift-Tab cycle.
-- **`/sandbox`** (2026-10-20; `/sandbox`, `/sandbox off|on`, `Op::SetSandbox`): turns the sandbox off for the rest of the session without changing the permission mode, so plan, read-only, ask and full-auto keep their approvals while shell commands run unsandboxed (as with `mode = "off"`, nothing is `ShellOutsideSandbox`). It lives on `Permissions.sandbox_off`, so it carries over `/reload`, session switches and sub-agents. `[policy] locked = ["sandbox.mode"]` (or `"sandbox"`) refuses it, and a reload that adds the lock turns it back on. `/sandbox on` returns to `[sandbox] mode`, and says so when that mode is `off` or unavailable. The status bar shows "no sandbox" outside yolo. Tests: `quack-core/tests/sandbox.rs`.
-- **Tests**: `quack-sandbox/tests/sandbox.rs` (writes inside/outside, temp, reads, a loopback TCP connection blocked and then allowed), `quack-core/tests/sandbox.rs` (a `full-auto` session can't write outside the workspace; leaving the sandbox asks even in `full-auto`), sandboxed MCP and LSP servers. `cargo build` works under `workspace-write` with nothing extra writable.
+- **Permissions are unchanged by the sandbox**: a sandboxed command still asks in `ask` mode. The sandbox limits what an approved or `allow` command can do.
+- **Yolo shortcut** (2026-10-18; `/yolo` toggles it and returns to the previous approvals, or start with `--yolo`; the status bar shows YOLO): every call is allowed without asking, including ask rules and running outside the sandbox, and shell commands run unsandboxed. Plan remains read/search only. The built-in deny floor and `[permissions] deny` rules still apply, plan mode still overrides it, and `[policy] max_permission_mode` can cap below it (it is the most permissive mode). It is not in the Shift-Tab cycle.
+- **`/sandbox`** (2026-10-20; `/sandbox`, `/sandbox off|on`, `Op::SetSandbox`): turns the sandbox off for the rest of the session without changing work mode or approvals; Plan stays read/search-only, and Ask/Allow keep their approval behavior while shell commands run unsandboxed (as with `mode = "off"`, nothing is `ShellOutsideSandbox`). It lives on `Permissions.sandbox_off`, so it carries over `/reload`, session switches and sub-agents. `[policy] locked = ["sandbox.mode"]` (or `"sandbox"`) refuses it, and a reload that adds the lock turns it back on. `/sandbox on` returns to `[sandbox] mode`, and says so when that mode is `off` or unavailable. The status bar shows "no sandbox" outside yolo. Tests: `quack-core/tests/sandbox.rs`.
+- **Tests**: `quack-sandbox/tests/sandbox.rs` (writes inside/outside, temp, reads, a loopback TCP connection blocked and then allowed), `quack-core/tests/sandbox.rs` (an Allow session can't write outside the workspace; leaving the sandbox asks even with Allow), sandboxed MCP and LSP servers. `cargo build` works under `workspace-write` with nothing extra writable.
 
 ## Network egress policy
 
@@ -176,6 +179,16 @@ on_error = "deny"                  # deny | allow | warn
 - Hooks from the project layer require trust. System-layer hooks can't be disabled by users (enterprise enforcement).
 
 ### Enabling (2026-11-09)
+
+The shipped examples remain disabled. `/hooks` now opens bundle-defined connection
+forms for credentials and service settings ([16](16-hook-setup.md)). Save preserves
+the enabled state; Save and enable activates after a running turn without restarting
+other services or contacting an API. Credentials use user credential storage even
+when a trusted project definition is edited. Explicit checks share the normal
+Python handler's parsing, authentication and REST routes, run under cancellation
+and a deadline, and add no model/session context. They validate the selected web
+scope before resolving its credential. The original direct toggle remains available
+through `/hooks toggle <id>` and Ctrl-S in the list.
 
 The shipped examples are `enabled = false`. `/hooks` turns one on with `Op::EnableHook`
 (`quack-config/src/enable.rs`): a defaults hook is copied into the user layer's `hooks.d/`
@@ -227,13 +240,28 @@ activation. The engine confirms success after loading the hook from the updated 
   - `turn_end`, `session_end`: notification only; `turn_end` runs in the background.
 - **Order.** The hooks for one event run in id order, one after another; a later
   `pre_tool` hook sees the arguments an earlier one changed, and a denial stops the rest.
-  A hook's context is capped at about 8,000 tokens.
+  A hook's context is capped at about 8,000 tokens by default. `full_context = true`
+  preserves full stdout and context and emits a warning above that token threshold.
 - **Reporting.** `Event::HookRan` (id, event, outcome, time, message, context tokens); the
   TUI shows a line when a hook added context, decided or said something. Each run is a
   `hook` record in the session log. `/doctor` has a hooks row: each file loads and its
   program and `{dir}` files exist (nothing runs, no secrets are resolved).
 - **Tests.** `crates/quack-core/tests/hooks.rs`, with Python hooks against the mock model,
   including the shipped `defaults/hooks.d/jira.toml` against a mock Jira.
+
+### Linked code reviews (2026-11-10)
+
+The disabled `forge-review` example loads REST metadata and unified diffs for
+GitHub, GitLab, Gitea/Forgejo and Bitbucket Cloud/Data Center review links.
+Explicit web/API base pairs support self-hosted installations, URL prefixes and
+per-instance credentials. It deduplicates reviews, constrains redirects
+to the API origin and requires HTTPS for credentials. Local mock integration tests
+exercise every adapter, with script regressions for authentication and limits.
+Hook subprocess requests are outside the in-process egress gate. Enabling this
+hook authorizes its configured APIs. Diffs are loaded in full with a user-visible
+size warning above 9,000 bytes, using `full_context = true` to retain the complete
+output through the process runner and engine. Setup and endpoint references are in
+[the hook documentation](../../defaults/hooks.d/README.md).
 
 ## Audit log (enterprise)
 

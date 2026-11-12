@@ -58,8 +58,7 @@ fn display_name(id: &str, f: &ProviderFile) -> String {
     }
 }
 
-/// A configured provider on another machine that takes a key: what setup's hosted step
-/// lists.
+/// A configured hosted provider using an API key or subscription sign-in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Service {
     pub id: String,
@@ -69,10 +68,12 @@ pub struct Service {
     pub base_url: String,
     /// The variable its key is read from, for `api_key = { env = ... }`.
     pub env: Option<String>,
-    /// Its key can be read now: the variable is set, or the key comes from elsewhere.
+    /// Its key is configured, or its saved sign-in allows plan usage.
     pub ready: bool,
     /// Where its key is read from.
-    pub key: KeySource,
+    pub key: Option<KeySource>,
+    /// Uses browser sign-in instead of an API key.
+    pub subscription: bool,
     /// The file it is configured in.
     pub path: PathBuf,
 }
@@ -91,7 +92,8 @@ pub fn service_infos(config: &Loaded) -> Vec<quack_protocol::ServiceInfo> {
             base_url: s.base_url,
             env: s.env,
             ready: s.ready,
-            key: Some(s.key),
+            key: s.key,
+            subscription: s.subscription,
         })
         .collect()
 }
@@ -103,12 +105,16 @@ pub fn services(config: &Loaded) -> Vec<Service> {
         .into_iter()
         .filter_map(|i| {
             let f = i.loaded()?;
-            if is_loopback(&f.base_url) {
+            if is_loopback(&f.base_url) && f.auth.is_none() {
                 return None;
             }
-            let key = f.api_key.as_ref()?;
+            let subscription = f.auth.is_some();
+            let key = f.api_key.as_ref().filter(|_| !subscription);
+            if !subscription && key.is_none() {
+                return None;
+            }
             let env = match key {
-                Secret::Env { env, .. } => Some(env.clone()),
+                Some(Secret::Env { env, .. }) => Some(env.clone()),
                 _ => None,
             };
             Some(Service {
@@ -119,9 +125,14 @@ pub fn services(config: &Loaded) -> Vec<Service> {
                     f.group.clone()
                 },
                 base_url: f.base_url.clone(),
-                ready: env.as_ref().is_none_or(|e| std::env::var_os(e).is_some()),
+                ready: if subscription {
+                    sign_in_provider(config, &i.id).is_ok_and(|p| p.subscription_ready())
+                } else {
+                    env.as_ref().is_none_or(|e| std::env::var_os(e).is_some())
+                },
                 env,
-                key: key_source(key),
+                key: key.map(key_source),
+                subscription,
                 id: i.id.clone(),
                 path: i.path.clone(),
             })
@@ -399,6 +410,7 @@ async fn probe(
                 alias: None,
                 context_window: m.context_window,
                 price: None,
+                reasoning_efforts: Vec::new(),
             })
             .collect(),
         configured: None,
@@ -700,6 +712,51 @@ pub async fn provider_models(config: Arc<Loaded>, id: &str) -> Option<ProviderMo
         .await
         .into_iter()
         .next()
+}
+
+/// Build a subscription provider using this run's resolved credential directory.
+pub fn sign_in_provider(config: &Loaded, id: &str) -> Result<Provider, String> {
+    let items = load_providers(config);
+    let file = items
+        .iter()
+        .find(|i| i.id == id)
+        .and_then(|i| i.loaded())
+        .ok_or_else(|| format!("Provider `{id}` is not configured."))?;
+    if file.auth.is_none() {
+        return Err(format!("Provider `{id}` has no subscription sign-in."));
+    }
+    Provider::new(id, file.clone(), &config.settings.network, &|key| {
+        if key == "QUACK_DATA_DIR" {
+            Some(config.dirs.user_data.clone().into_os_string())
+        } else {
+            std::env::var_os(key)
+        }
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// Open an explicitly requested sign-in in the default browser. The URL is also shown
+/// by the client so headless machines can open it manually.
+pub fn open_sign_in_browser(url: &str) {
+    let mut cmd = if cfg!(windows) {
+        // Avoid shell parsing: OAuth URLs contain ampersands.
+        let mut c = std::process::Command::new("rundll32");
+        c.args(["url.dll,FileProtocolHandler", url]);
+        c
+    } else {
+        let mut c = std::process::Command::new(if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        });
+        c.arg(url);
+        c
+    };
+    let _ = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 #[cfg(test)]

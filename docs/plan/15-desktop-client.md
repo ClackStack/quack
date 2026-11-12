@@ -120,7 +120,7 @@ Instead of cloning the TUI's 23 terminal modals one-for-one, the GUI groups ever
    - Launching from an icon reopens the last open workspace tabs (persisted in `user_data_dir`), or shows a Welcome view with *Open Folder…* and recent folders (`quack-gui [path]` opens that folder directly).
    - When startup finishes with no model ready, the setup flow opens automatically (matching the TUI's `/setup`: local server detection via `Op::DetectServers`, hosted services via `Op::ListServices` + `Op::SetProviderKey`, or custom URL via `Op::AddServer`).
 2. **Header, Composer & Context Inspector:**
-   - **Header / composer bar:** model selector dropdown (`Op::ListModels` + inline provider status and key entry), permission mode pill (`Ask` · `Auto-edit` · `Plan` · `Yolo` + sandbox indicator), and a live context meter pill.
+   - **Header / composer bar:** model selector dropdown (`Op::ListModels` + inline provider status and key entry), separate work-mode (`Plan` / `Edit`) and approval (`Ask` / `Allow`) controls (`SetWorkMode`, `SetApprovalPolicy`, `ModeChanged`) plus the sandbox indicator, and a live context meter pill. Legacy policies load for compatibility and remain visible only while active; they are omitted from the choices.
    - **Composer:** multi-line editor, `@` workspace file autocomplete (`InputItem::File`), image/file drag-drop and picker (`InputItem::Image`), `/skill` and custom command autocomplete.
    - **Context & Stats popover:** clicking the context pill opens the `/context` segment breakdown (`Op::GetContext`), `/stats` SVG charts (`Op::GetStats`, from the same data as the TUI's `charts.rs`) and a *Compact now* action (`Op::Compact`).
 3. **Sidebar (Workspaces, Sessions, Plan & Sub-agents):**

@@ -8,10 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::list::{self, ListOrAppend};
 
+pub use quack_protocol::{ApprovalPolicy as PermissionMode, WorkMode};
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub model: ModelSettings,
+    pub agent: AgentSettings,
     pub ui: UiSettings,
     pub context: ContextSettings,
     pub tools: ToolSettings,
@@ -38,6 +41,21 @@ pub struct Settings {
     pub keys: BTreeMap<String, String>,
     /// Only honoured in the system layer.
     pub policy: Policy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentSettings {
+    /// Maximum model calls in one user turn. Sub-agents have their own limits.
+    pub max_steps: std::num::NonZeroU32,
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            max_steps: std::num::NonZeroU32::new(100).expect("100 is positive"),
+        }
+    }
 }
 
 impl Settings {
@@ -110,6 +128,9 @@ pub struct UiSettings {
     /// Set the terminal's window title to the duck and the session title, restoring the
     /// old one on exit.
     pub terminal_title: bool,
+    /// Show session details in a right sidebar on terminals at least 140 columns wide
+    /// and 24 rows tall.
+    pub sidebar: bool,
 }
 
 impl Default for UiSettings {
@@ -122,6 +143,7 @@ impl Default for UiSettings {
             mouse: true,
             reduced_motion: false,
             terminal_title: true,
+            sidebar: true,
         }
     }
 }
@@ -137,7 +159,8 @@ pub enum ShowReasoning {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum StartupPanel {
-    /// Show only when something needs attention or startup is slow (over half a second).
+    /// Show the startup diagnostics in the sidebar until the first turn; without room for
+    /// one, show the transcript panel only when something needs attention.
     Auto,
     Always,
     Never,
@@ -218,7 +241,9 @@ pub enum EditFormat {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct PermissionSettings {
+    /// Approval defaults, independent of whether the agent is planning or editing.
     pub mode: PermissionMode,
+    pub work_mode: WorkMode,
     #[serde(deserialize_with = "list::de")]
     #[schemars(with = "ListOrAppend")]
     pub allow: Vec<String>,
@@ -228,33 +253,6 @@ pub struct PermissionSettings {
     #[serde(deserialize_with = "list::de")]
     #[schemars(with = "ListOrAppend")]
     pub deny: Vec<String>,
-}
-
-/// Ordered from least to most permissive, so policy can cap with `min`.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
-)]
-#[serde(rename_all = "kebab-case")]
-pub enum PermissionMode {
-    ReadOnly,
-    #[default]
-    Ask,
-    AutoEdit,
-    FullAuto,
-    /// No approvals and no sandbox. Only the built-in deny list and `deny` rules apply.
-    Yolo,
-}
-
-impl PermissionMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::ReadOnly => "read-only",
-            Self::Ask => "ask",
-            Self::AutoEdit => "auto-edit",
-            Self::FullAuto => "full-auto",
-            Self::Yolo => "yolo",
-        }
-    }
 }
 
 /// The OS sandbox for shell commands (docs/plan/11-security.md#os-sandboxing).

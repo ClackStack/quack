@@ -6,7 +6,7 @@ use quack_config::settings::CacheStrategy;
 use quack_context::compact;
 use quack_context::prune::{self, Access};
 use quack_protocol::{ContextReport, ContextSegment, Event, PruneReport};
-use quack_providers::{Message, StreamEvent, ToolCall, tokens};
+use quack_providers::{FinishReason, Message, ResponseBuilder, ToolCall, tokens};
 use quack_tools::Subject;
 use serde_json::{Value, json};
 
@@ -238,22 +238,37 @@ pub(crate) async fn compact_now(
 /// Stream a request with no tools and return its text.
 async fn summarize(ctx: &TurnCtx, req: quack_providers::ChatRequest) -> Result<String, String> {
     let s = &ctx.setup;
+    ctx.start_request();
     let mut rx = s
         .provider
         .stream(req, turn::reasoning_format(s), ctx.cancel.child_token());
-    let mut text = String::new();
-    loop {
-        let item = tokio::select! {
-            () = ctx.cancel.cancelled() => return Err("interrupted".into()),
-            item = rx.recv() => item,
-        };
-        match item {
-            None => break,
-            Some(Ok(StreamEvent::TextDelta(t))) => text.push_str(&t),
-            Some(Ok(_)) => {}
-            Some(Err(e)) => return Err(format!("{}: {e}", s.provider.id)),
+    let mut response = ResponseBuilder::default();
+    let sent = std::time::Instant::now();
+    let result = async {
+        loop {
+            let item = tokio::select! {
+                () = ctx.cancel.cancelled() => return Err("interrupted".into()),
+                item = rx.recv() => item,
+            };
+            match item {
+                None => break,
+                Some(Ok(event)) => response.push(&event),
+                Some(Err(e)) => return Err(format!("{}: {e}", s.provider.id)),
+            }
         }
+        Ok(())
     }
+    .await;
+    ctx.record_request(response.usage.as_ref(), sent.elapsed());
+    result?;
+    match &response.finish {
+        Some(FinishReason::Stop) => {}
+        Some(reason) => return Err(format!("the summary did not finish: {reason:?}")),
+        None => return Err("the summary stream ended without a finish reason".into()),
+    }
+    let Message::Assistant { content: text, .. } = response.into_message() else {
+        return Err("the provider returned no summary".into());
+    };
     let text = text.trim();
     if text.is_empty() {
         return Err("the model returned an empty summary".into());

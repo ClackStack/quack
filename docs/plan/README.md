@@ -14,6 +14,8 @@ A fast, context-efficient coding agent for **self-hosted and open-weight models*
 
 ## Documents
 
+User documentation: [Work modes and approvals](../modes.md), [Company rollout](../enterprise.md).
+
 | # | Document | Scope |
 |---|---|---|
 | 00 | [Architecture](00-architecture.md) | Workspace layout, crates, engine protocol, async model, dependency choices |
@@ -32,6 +34,7 @@ A fast, context-efficient coding agent for **self-hosted and open-weight models*
 | 13 | [Testing & evals](13-testing-and-evals.md) | Unit/snapshot/fixture tests, invariants, model compatibility matrix, perf budgets |
 | 14 | [Packaging & distribution](14-packaging-and-distribution.md) | Defaults bundle, release artifacts, enterprise and air-gapped builds |
 | 15 | [Desktop client](15-desktop-client.md) | Tauri + SvelteKit GUI client over Tauri IPC |
+| 16 | [Hook setup](16-hook-setup.md) | TUI configuration, credentials, self-hosted connections and access checks |
 | — | [Roadmap](roadmap.md) | Milestones M0–M6 with exit criteria |
 
 ## Decisions log

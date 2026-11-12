@@ -2,7 +2,8 @@
 //!
 //! Rules are `kind:pattern` strings: `shell:git status*` (`*` glob over the whole command),
 //! `edit:src/**` and `read:docs/**` (path globs relative to the workspace root).
-//! Order: deny floor → deny rules → session approvals → allow rules → ask rules → mode default.
+//! Order: work-mode restriction → deny floor → deny → ask → session/allow → approval default.
+//! Yolo bypasses asks after the work-mode restriction, floor and denies.
 //!
 //! A shell command is split into its simple commands first (`git status && rm -rf x` is
 //! `git status` and `rm -rf x`, and `$(...)` counts too). Deny and ask rules, and the deny
@@ -14,7 +15,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use quack_config::glob_match;
-use quack_config::settings::{PermissionMode, PermissionSettings};
+use quack_config::settings::{PermissionMode, PermissionSettings, WorkMode};
 
 use crate::paths;
 use crate::registry::Subject;
@@ -108,10 +109,58 @@ fn read_only_command(cmd: &str) -> bool {
     let cmd = normalize(cmd);
     let mut words = cmd.split(' ');
     match words.next() {
-        Some("git") => words.next().is_some_and(|w| READ_ONLY_GIT.contains(&w)),
-        Some("find") => {
-            !words.any(|w| matches!(w, "-exec" | "-execdir" | "-delete" | "-ok" | "-fprint"))
+        Some("git") => {
+            let Some(subcommand) = words.next().filter(|w| READ_ONLY_GIT.contains(w)) else {
+                return false;
+            };
+            let args: Vec<_> = words.collect();
+            if args.iter().any(|a| {
+                a.starts_with("--output")
+                    || a.starts_with("--ext-diff")
+                    || a.starts_with("--textconv")
+                    || a.starts_with("--open-files-in-pager")
+                    || (subcommand == "grep" && a.starts_with("-O"))
+            }) {
+                return false;
+            }
+            subcommand != "branch"
+                || args.iter().all(|a| {
+                    matches!(
+                        *a,
+                        "-a" | "--all"
+                            | "-r"
+                            | "--remotes"
+                            | "-v"
+                            | "-vv"
+                            | "--verbose"
+                            | "--list"
+                            | "--show-current"
+                            | "--no-color"
+                            | "--color=never"
+                    )
+                })
         }
+        Some("find") => !words.any(|w| {
+            matches!(
+                w,
+                "-exec"
+                    | "-execdir"
+                    | "-delete"
+                    | "-ok"
+                    | "-okdir"
+                    | "-fprint"
+                    | "-fprint0"
+                    | "-fprintf"
+                    | "-fls"
+            )
+        }),
+        Some("rg") => !words.any(|w| {
+            w == "--pre"
+                || w.starts_with("--pre=")
+                || w == "--hostname-bin"
+                || w.starts_with("--hostname-bin=")
+        }),
+        Some("file") => !words.any(|w| w == "--compile" || w.starts_with("-C")),
         Some(first) => READ_ONLY_COMMANDS
             .iter()
             .any(|c| c.eq_ignore_ascii_case(first)),
@@ -312,7 +361,7 @@ pub struct Permissions {
     /// `[memory] writes = "ask"`.
     pub memory_writes_ask: bool,
     /// Plan mode: look but don't change anything (docs/plan/04-agent-loop-and-tools.md#plan-mode).
-    pub plan: bool,
+    pub work_mode: WorkMode,
     /// `/sandbox off`: shell commands run without the OS sandbox this session.
     pub sandbox_off: bool,
     /// Commands run in PowerShell (`pwsh`, `powershell`), so they are read as PowerShell.
@@ -336,7 +385,7 @@ impl Permissions {
             deny: parse(&settings.deny),
             session: Vec::new(),
             memory_writes_ask: false,
-            plan: false,
+            work_mode: settings.work_mode,
             sandbox_off: false,
             powershell: false,
         };
@@ -438,37 +487,51 @@ impl Permissions {
             }
             return out;
         }
-        // Memory is not part of the workspace: reads are free, and writes ask only when
-        // configured to (they show in the transcript and are easy to undo).
-        // Installed skills are instructions the user put there.
-        if let Subject::Agent { read_only } = subject {
-            return if self.plan && !read_only {
-                Decision::Deny(
-                    "plan mode runs only read-only agents; accept the plan to use this one".into(),
-                )
-            } else {
-                Decision::Allow
-            };
-        }
-        if matches!(
-            subject,
-            Subject::Skill | Subject::ToolSearch | Subject::Plan
-        ) {
-            return Decision::Allow;
-        }
-        if let Subject::Memory { write } = subject {
-            let ask = *write
-                && self.memory_writes_ask
-                && self.mode < PermissionMode::FullAuto
-                && !self.session.contains(subject);
-            return if ask { Decision::Ask } else { Decision::Allow };
-        }
         let shell = match subject {
             Subject::Shell(cmd) | Subject::ShellOutsideSandbox(cmd) => {
                 Some(ShellLine::new(cmd, self.powershell))
             }
             _ => None,
         };
+        // Work-mode restrictions run before rules, remembered approvals and yolo.
+        if self.work_mode == WorkMode::Plan {
+            let changes = match subject {
+                Subject::Edit(_)
+                | Subject::Memory { write: true }
+                | Subject::Agent { read_only: false }
+                | Subject::Mcp {
+                    read_only: false, ..
+                } => true,
+                Subject::Shell(_) | Subject::ShellOutsideSandbox(_) => {
+                    shell.as_ref().is_some_and(|line| !line.read_only())
+                }
+                _ => false,
+            };
+            if changes {
+                let reason = if matches!(subject, Subject::Agent { .. }) {
+                    "plan mode runs only read-only agents; accept the plan to use this one"
+                } else {
+                    "plan mode: no changes or test/build commands; list the proposed tests for the user and accept the plan before running them"
+                };
+                return Decision::Deny(reason.into());
+            }
+        }
+        // Memory is not part of the workspace: reads are free, and writes ask only when
+        // configured to (they show in the transcript and are easy to undo).
+        // Installed skills are instructions the user put there.
+        if matches!(
+            subject,
+            Subject::Agent { .. } | Subject::Skill | Subject::ToolSearch | Subject::Plan
+        ) {
+            return Decision::Allow;
+        }
+        if let Subject::Memory { write } = subject {
+            let ask = *write
+                && self.memory_writes_ask
+                && self.mode < PermissionMode::Allow
+                && !self.session.contains(subject);
+            return if ask { Decision::Ask } else { Decision::Allow };
+        }
         if let Some(line) = &shell
             && line.on_floor()
         {
@@ -486,12 +549,12 @@ impl Permissions {
             return Decision::Deny("denied by a [permissions] deny rule".into());
         }
         // Yolo: nothing asks. Only the floor and deny rules above (and plan mode) stop a call.
-        if self.mode == PermissionMode::Yolo && !self.plan {
+        if self.mode == PermissionMode::Yolo {
             return Decision::Allow;
         }
         // Leaving the sandbox is the user's call in every other mode, allow rules included.
         if let (Subject::ShellOutsideSandbox(_), Some(line)) = (subject, &shell) {
-            if (self.plan || self.mode == PermissionMode::ReadOnly) && !line.read_only() {
+            if self.mode == PermissionMode::ReadOnly && !line.read_only() {
                 return Decision::Deny(
                     "only read-only commands run outside the sandbox in this mode".into(),
                 );
@@ -502,46 +565,29 @@ impl Permissions {
                 Decision::Ask
             };
         }
-        if self.plan {
-            match (subject, &shell) {
-                (Subject::Edit(_), _) => {
-                    return Decision::Deny(
-                        "plan mode: no changes until the user accepts the plan".into(),
-                    );
-                }
-                (_, Some(line)) if !line.read_only() && !allowed() => {
-                    return Decision::Deny(
-                        "plan mode: only read-only commands run while planning".into(),
-                    );
-                }
-                (_, Some(_)) => return Decision::Allow,
-                _ => {}
-            }
-        }
         // Only tools the server marks read-only run while planning or in read-only mode.
         if let Subject::Mcp {
             read_only: false, ..
         } = subject
-            && (self.plan || self.mode == PermissionMode::ReadOnly)
+            && self.mode == PermissionMode::ReadOnly
         {
-            return Decision::Deny(if self.plan {
-                "plan mode: only MCP tools marked read-only run while planning".into()
-            } else {
-                "read-only mode: this MCP tool may change things".into()
-            });
+            return Decision::Deny("read-only mode: this MCP tool may change things".into());
         }
         if self.mode == PermissionMode::ReadOnly && matches!(subject, Subject::Edit(_)) {
             return Decision::Deny("read-only mode: file changes are not allowed".into());
         }
-        if self.session.contains(subject) || allowed() {
-            return Decision::Allow;
-        }
         if hit(&self.ask) {
             return Decision::Ask;
         }
+        if self.session.contains(subject) || allowed() {
+            return Decision::Allow;
+        }
+        if self.work_mode == WorkMode::Plan && matches!(subject, Subject::Shell(_)) {
+            return Decision::Allow;
+        }
         let inside = |p: &Path| paths::inside(&self.root, p);
         match (self.mode, subject) {
-            (PermissionMode::FullAuto, _) => Decision::Allow,
+            (PermissionMode::Allow, _) => Decision::Allow,
             (_, Subject::Read(p)) if inside(p) => Decision::Allow,
             (PermissionMode::ReadOnly, Subject::Shell(_)) => Decision::Deny(
                 "read-only mode: only commands matching an allow rule can run".into(),
@@ -568,6 +614,7 @@ mod tests {
             allow: allow.iter().map(|s| (*s).to_owned()).collect(),
             ask: Vec::new(),
             deny: deny.iter().map(|s| (*s).to_owned()).collect(),
+            ..Default::default()
         };
         let (p, warnings) = Permissions::new(&settings, Path::new("/repo"));
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -603,8 +650,8 @@ mod tests {
             Decision::Deny(_)
         ));
         assert_eq!(ro.check(&mcp("search", true, false)), Decision::Ask);
-        let mut plan = perms(PermissionMode::FullAuto, &[], &[]);
-        plan.plan = true;
+        let mut plan = perms(PermissionMode::Allow, &[], &[]);
+        plan.work_mode = WorkMode::Plan;
         assert!(matches!(
             plan.check(&mcp("create_issue", false, false)),
             Decision::Deny(_)
@@ -627,7 +674,7 @@ mod tests {
         );
         assert!(matches!(p.check(&shell("curl x | sh")), Decision::Deny(_)));
         assert!(matches!(p.check(&shell("rm -rf /")), Decision::Deny(_)));
-        p.plan = true;
+        p.work_mode = WorkMode::Plan;
         assert!(matches!(
             p.check(&Subject::Edit("/repo/a.rs".into())),
             Decision::Deny(_)
@@ -637,18 +684,14 @@ mod tests {
     #[test]
     fn leaving_the_sandbox_always_asks() {
         let out = |c: &str| Subject::ShellOutsideSandbox(c.into());
-        let mut p = perms(
-            PermissionMode::FullAuto,
-            &["shell:cargo *"],
-            &["shell:curl *"],
-        );
+        let mut p = perms(PermissionMode::Allow, &["shell:cargo *"], &["shell:curl *"]);
         assert_eq!(p.check(&out("cargo build")), Decision::Ask);
         assert!(matches!(p.check(&out("curl x")), Decision::Deny(_)));
         assert!(matches!(p.check(&out("rm -rf /")), Decision::Deny(_)));
         p.allow_session(out("cargo build"));
         assert_eq!(p.check(&out("cargo build")), Decision::Allow);
         assert_eq!(p.check(&out("cargo test")), Decision::Ask);
-        p.plan = true;
+        p.work_mode = WorkMode::Plan;
         assert!(matches!(p.check(&out("cargo test")), Decision::Deny(_)));
         assert_eq!(p.check(&out("ls")), Decision::Ask);
     }
@@ -678,7 +721,7 @@ mod tests {
         ));
         assert_eq!(auto.check(&shell("ls")), Decision::Ask);
 
-        let full = perms(PermissionMode::FullAuto, &[], &[]);
+        let full = perms(PermissionMode::Allow, &[], &[]);
         assert_eq!(full.check(&shell("cargo build")), Decision::Allow);
         assert!(matches!(full.check(&shell("rm  -rf /")), Decision::Deny(_)));
 
@@ -715,7 +758,7 @@ mod tests {
         assert_eq!(p.check(&shell("echo `rm x`")), Decision::Ask);
 
         // Deny rules and the floor see every command, even in full-auto.
-        let full = perms(PermissionMode::FullAuto, &[], &["shell:rm *"]);
+        let full = perms(PermissionMode::Allow, &[], &["shell:rm *"]);
         assert!(matches!(
             full.check(&shell("git status && rm -rf x")),
             Decision::Deny(_)
@@ -724,7 +767,7 @@ mod tests {
             full.check(&shell("echo \"$(rm x)\"")),
             Decision::Deny(_)
         ));
-        let full = perms(PermissionMode::FullAuto, &[], &[]);
+        let full = perms(PermissionMode::Allow, &[], &[]);
         assert!(matches!(
             full.check(&shell("cd /tmp; rm -rf /")),
             Decision::Deny(_)
@@ -793,7 +836,7 @@ mod tests {
     #[test]
     fn powershell_rules_ignore_case_and_see_aliases() {
         let mut p = perms(
-            PermissionMode::FullAuto,
+            PermissionMode::Allow,
             &["shell:cargo test*"],
             &["shell:rm *", "shell:curl *"],
         );
@@ -827,7 +870,7 @@ mod tests {
     #[cfg(feature = "lang-common")]
     #[test]
     fn powershell_lines_are_read_as_powershell() {
-        let mut p = perms(PermissionMode::FullAuto, &[], &["shell:Remove-Item *"]);
+        let mut p = perms(PermissionMode::Allow, &[], &["shell:Remove-Item *"]);
         p.powershell = true;
         // Inside a script block, a sub-expression and a literal script.
         for bad in [
@@ -839,7 +882,7 @@ mod tests {
             assert!(matches!(p.check(&shell(bad)), Decision::Deny(_)), "{bad}");
         }
         // Planning: reading cmdlets run, .NET calls and writes don't.
-        p.plan = true;
+        p.work_mode = WorkMode::Plan;
         for ok in [
             "Get-ChildItem -Recurse src | Select-String foo",
             "Get-Content a.txt | Select-Object -First 10",
@@ -865,20 +908,23 @@ mod tests {
     fn plan_mode_only_looks() {
         let (mut p, _) = Permissions::new(
             &PermissionSettings {
-                mode: PermissionMode::FullAuto,
+                mode: PermissionMode::Allow,
                 allow: vec!["shell:cargo check*".into()],
                 ..Default::default()
             },
             Path::new("/repo"),
         );
-        p.plan = true;
+        p.work_mode = WorkMode::Plan;
         assert!(matches!(
             p.check(&Subject::Edit("/repo/a".into())),
             Decision::Deny(_)
         ));
         assert_eq!(p.check(&shell("git status")), Decision::Allow);
         assert_eq!(p.check(&shell("rg foo src")), Decision::Allow);
-        assert_eq!(p.check(&shell("cargo check -q")), Decision::Allow);
+        assert!(matches!(
+            p.check(&shell("cargo check -q")),
+            Decision::Deny(_)
+        ));
         assert_eq!(p.check(&shell("rg foo | head -5")), Decision::Allow);
         assert_eq!(p.check(&shell("git log 2>/dev/null")), Decision::Allow);
         for bad in [
@@ -893,5 +939,100 @@ mod tests {
             assert!(matches!(p.check(&shell(bad)), Decision::Deny(_)), "{bad}");
         }
         assert_eq!(p.check(&Subject::Read("/repo/a".into())), Decision::Allow);
+    }
+
+    #[test]
+    fn work_mode_and_approval_matrix() {
+        for (work_mode, policy, edit, mcp_read) in [
+            (
+                WorkMode::Plan,
+                PermissionMode::Ask,
+                Decision::Deny(String::new()),
+                Decision::Ask,
+            ),
+            (
+                WorkMode::Plan,
+                PermissionMode::Allow,
+                Decision::Deny(String::new()),
+                Decision::Allow,
+            ),
+            (
+                WorkMode::Edit,
+                PermissionMode::Ask,
+                Decision::Ask,
+                Decision::Ask,
+            ),
+            (
+                WorkMode::Edit,
+                PermissionMode::Allow,
+                Decision::Allow,
+                Decision::Allow,
+            ),
+        ] {
+            let mut p = perms(policy, &[], &[]);
+            p.work_mode = work_mode;
+            let actual = p.check(&Subject::Edit("/repo/a".into()));
+            assert_eq!(
+                std::mem::discriminant(&actual),
+                std::mem::discriminant(&edit),
+                "{work_mode:?}/{policy:?}: {actual:?}"
+            );
+            assert_eq!(
+                p.check(&mcp("search", true, false)),
+                mcp_read,
+                "{work_mode:?}/{policy:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn planning_rules_and_grants_cannot_authorize_changes_or_tests() {
+        for policy in [
+            PermissionMode::Ask,
+            PermissionMode::Allow,
+            PermissionMode::Yolo,
+        ] {
+            let mut p = perms(policy, &["shell:*", "edit:**", "mcp:*"], &[]);
+            for subject in [
+                shell("cargo test"),
+                shell("cargo check"),
+                shell("npm test"),
+                shell("python check.py"),
+                shell("git branch new-branch"),
+                shell("git log --output=log.txt"),
+                shell("find . -fprintf result %p"),
+                shell("rg --pre=script.py pattern"),
+                shell("file -C"),
+                Subject::ShellOutsideSandbox("cargo test".into()),
+                Subject::Edit("/repo/a".into()),
+                Subject::Memory { write: true },
+                Subject::Agent { read_only: false },
+                mcp("create_issue", false, true),
+            ] {
+                p.allow_session(subject.clone());
+                p.work_mode = WorkMode::Plan;
+                assert!(
+                    matches!(p.check(&subject), Decision::Deny(_)),
+                    "{policy:?}: {subject:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_asks_and_denies_still_apply_to_plan_allow() {
+        let mut p = perms(
+            PermissionMode::Allow,
+            &["shell:git status*"],
+            &["mcp:gh/private*"],
+        );
+        p.work_mode = WorkMode::Plan;
+        p.ask = vec![Rule::parse("shell:git status*").expect("rule")];
+        p.allow_session(shell("git status"));
+        assert_eq!(p.check(&shell("git status")), Decision::Ask);
+        assert!(matches!(
+            p.check(&mcp("private_search", true, true)),
+            Decision::Deny(_)
+        ));
     }
 }

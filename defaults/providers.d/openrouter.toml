@@ -9,24 +9,29 @@ api_key = { env = "OPENROUTER_API_KEY" }
 # Prices: US dollars per million tokens. The rest of the catalog also arrives
 # through /models discovery; entries here pin context limits and the prices
 # quack costs evals with (DeepSeek's is the peak weekday rate; OpenRouter
-# halves it on weekends and off-peak UTC hours).
+# halves it on weekends and off-peak UTC hours). Thinking levels follow what
+# OpenRouter accepts per model, and each `effort` is the model maker's default;
+# Mistral's own none/high mapping does not apply on this route.
 
 [[models]]
 id = "z-ai/glm-5.3-flash"
 context_window = 1048576
 max_output = 943718
+reasoning = { effort = "max", efforts = ["low", "high", "max"] }
 cost = { input = 0.047, output = 0.12, cached_input = 0.006 }
 
 [[models]]
 id = "deepseek/deepseek-v4.1-flash-1017"
 context_window = 1048576
 max_output = 393216
+reasoning = { effort = "high", efforts = ["none", "low", "high", "max"] }
 cost = { input = 0.3, output = 1.2, cached_input = 0.006 }
 
 [[models]]
 id = "mistralai/mistral-large-4-0"
 context_window = 1048576
 max_output = 262144
+reasoning = { efforts = ["low", "medium", "high"] }
 cost = { input = 1.36, output = 4.18, cached_input = 0.14 }
 
 # Muse Spark's model card recommends temperature 1.0, top_p 1.0, top_k off,
@@ -36,4 +41,5 @@ id = "meta/muse-spark-open"
 context_window = 1048576
 max_output = 943718
 sampling = { temperature = 1.0, top_p = 1.0 }
+reasoning = { effort = "xhigh", efforts = ["low", "medium", "high", "xhigh"] }
 cost = { input = 1.25, output = 4.25, cached_input = 0.15 }

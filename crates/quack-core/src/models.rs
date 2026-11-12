@@ -33,6 +33,7 @@ pub(crate) async fn catalog_of(config: Arc<Loaded>, only: Option<&str>) -> Vec<P
     for (order, item) in items.enumerate() {
         let network = config.settings.network.clone();
         let catalogs = catalogs.clone();
+        let data_dir = config.dirs.user_data.clone();
         tasks.spawn(async move {
             let bundled = item.layer == LayerKind::Defaults;
             let key = item
@@ -41,7 +42,9 @@ pub(crate) async fn catalog_of(config: Arc<Loaded>, only: Option<&str>) -> Vec<P
                 .and_then(|f| f.api_key.as_ref())
                 .map(crate::setup::key_source);
             let mut entry = match item.state {
-                ItemState::Loaded(file) => probe(&item.id, file, network, &catalogs).await,
+                ItemState::Loaded(file) => {
+                    probe(&item.id, file, network, &catalogs, data_dir).await
+                }
                 ItemState::Disabled(why) => unavailable(&item.id, why),
                 ItemState::Failed(d) => unavailable(&item.id, d.one_line()),
             };
@@ -94,8 +97,10 @@ async fn probe(
     file: ProviderFile,
     network: quack_config::settings::NetworkSettings,
     catalogs: &Catalogs,
+    data_dir: std::path::PathBuf,
 ) -> ProviderModels {
-    if let Some(quack_config::Secret::Env { env, .. }) = &file.api_key
+    if file.auth.is_none()
+        && let Some(quack_config::Secret::Env { env, .. }) = &file.api_key
         && std::env::var_os(env).is_none()
     {
         return unavailable(id, format!("set {env} to use this provider"));
@@ -108,13 +113,20 @@ async fn probe(
             alias: m.alias.clone(),
             context_window: m.context_window,
             price: m.cost.as_ref().map(price),
+            reasoning_efforts: m.reasoning.efforts.clone(),
         })
         .collect();
     let include = file.discovery.include.clone();
     let described = file.clone();
     let pid = id.to_owned();
     let built = tokio::task::spawn_blocking(move || {
-        Provider::new(&pid, file, &network, &|k| std::env::var_os(k))
+        Provider::new(&pid, file, &network, &|k| {
+            if k == "QUACK_DATA_DIR" {
+                Some(data_dir.clone().into_os_string())
+            } else {
+                std::env::var_os(k)
+            }
+        })
     })
     .await;
     let provider = match built {
@@ -146,6 +158,9 @@ async fn probe(
                 alias: None,
                 context_window: d.context_window,
                 price: d.cost.as_ref().map(price),
+                // The models endpoint cannot say which efforts a model supports; only the
+                // provider file can.
+                reasoning_efforts: Vec::new(),
             }),
         }
     }

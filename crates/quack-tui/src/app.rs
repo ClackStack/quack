@@ -10,12 +10,13 @@ use quack_config::{LayerStatus, Loaded, SettingRow};
 use quack_protocol::{
     Answer, ApprovalDecision, ApprovalRequest, CallId, Event, ExportFormat, InputItem, KeySource,
     LoadState, ModelId, Op, ProviderId, Question, ReplayItem, SecretText, SessionId, Subsystem,
-    TurnOverrides, WriteScope,
+    TurnOverrides, WorkMode, WriteScope,
 };
 use ratatui::layout::Rect;
 
 use crate::commands::{self, COMMANDS, Command};
 use crate::fuzzy;
+use crate::hook_form::{Action as HookAction, HookForm};
 use crate::input::Input;
 use crate::modal::{self, Modal, ModalOutcome};
 use crate::select::{self, Pane, Selection};
@@ -27,9 +28,6 @@ const DOUBLE_ESC: Duration = Duration::from_millis(600);
 const SPIN_EVERY: u64 = 5;
 /// Welcome duck advances animation every N frames (16 ms each).
 const DUCK_ANIM_EVERY: u64 = 8;
-/// `startup_panel = "auto"`: frames (16 ms each) a clean startup gets before the panel
-/// shows, so a fast start never flashes it. Problems show it at once.
-const PANEL_GRACE: u64 = 30;
 /// Transcript rows one mouse-wheel notch scrolls.
 const WHEEL_ROWS: usize = 3;
 /// Frames (16 ms each) the status bar says a selection was copied.
@@ -45,6 +43,7 @@ pub struct AppInfo {
     pub model: Option<String>,
     pub profile: String,
     pub permission_mode: String,
+    pub work_mode: WorkMode,
     pub ui: UiSettings,
     pub no_color: bool,
     /// Effective settings for `/config`.
@@ -87,6 +86,7 @@ impl AppInfo {
             model: Some(config.settings.model.default.clone()).filter(|m| !m.is_empty()),
             profile: "empty".into(),
             permission_mode: config.settings.permissions.mode.label().to_owned(),
+            work_mode: config.settings.permissions.work_mode,
             ui: config.settings.ui.clone(),
             no_color: std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
             settings: config.setting_rows(),
@@ -146,7 +146,7 @@ pub(crate) fn turns_left(growth: &[u32], room: u32) -> Option<u32> {
 
 /// The branch in `.git/HEAD` of `dir` or a parent; worktrees and submodules point at
 /// their git dir with a `gitdir:` file.
-fn git_branch(dir: &std::path::Path) -> Option<String> {
+pub(crate) fn git_branch(dir: &std::path::Path) -> Option<String> {
     let git = dir
         .ancestors()
         .map(|d| d.join(".git"))
@@ -368,7 +368,6 @@ impl Asking {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReviewChoice {
     Accept,
-    AcceptAutoEdit,
     KeepPlanning,
 }
 
@@ -540,6 +539,8 @@ pub(crate) struct Attachment {
 #[derive(Debug)]
 pub struct App {
     pub(crate) info: AppInfo,
+    pub(crate) reasoning_effort: Option<String>,
+    pub(crate) reasoning_efforts: Vec<String>,
     pub(crate) theme: Theme,
     pub(crate) glyphs: Glyphs,
     pub(crate) startup: Vec<(Subsystem, LoadState)>,
@@ -594,21 +595,21 @@ pub struct App {
     pub(crate) plan_expanded: bool,
     /// Sub-agent runs in this session, oldest first (`/tasks`).
     pub(crate) agents: Vec<AgentRun>,
-    panel_collapsed: bool,
-    /// The frame startup (or the last `/reload`) began on, for `PANEL_GRACE`.
-    startup_frame: u64,
+    /// The user started working (sent a turn, resumed a session, accepted a plan), so the
+    /// startup diagnostics step aside: the sidebar returns to session details and the
+    /// panel in the transcript area goes.
+    startup_dismissed: bool,
     /// A `/resume` is in flight: clear the transcript when it lands.
     resuming: bool,
-    /// The mode to go back to when plan mode ends.
-    mode_before_plan: String,
     /// The mode `/yolo` turns back to.
     mode_before_yolo: String,
     /// `/sandbox off`: shell commands run without the OS sandbox this session.
     pub(crate) sandbox_off: bool,
     /// Text for the terminal's clipboard (OSC 52), written by the event loop.
     clipboard: Option<String>,
-    /// The session title, for the terminal window's title.
-    session_title: Option<String>,
+    browser: Option<String>,
+    /// The session title, for the terminal window and the sidebar.
+    pub(crate) session_title: Option<String>,
     /// Installed skills, runnable as `/<name>`.
     skills: Vec<quack_protocol::SkillInfo>,
     /// Custom slash commands, minus any that a built-in command's name hides.
@@ -619,6 +620,11 @@ pub struct App {
     files: Vec<String>,
     /// Hook runs recorded this session (`/hooks`).
     pub(crate) hook_runs: Vec<HookRun>,
+    pub(crate) hook_form: Option<HookForm>,
+    hook_request: u64,
+    hook_inspect: Option<u64>,
+    hook_reapply: Option<Vec<quack_protocol::HookConnectionDraft>>,
+    hook_test_after_inspect: bool,
     /// What `/setup` has found so far.
     setup: modal::SetupView,
     /// A question from `/setup`, drawn over everything else.
@@ -627,8 +633,14 @@ pub struct App {
     setup_adding: bool,
     /// `/key` sent a new key and waits for it to be stored.
     rekeying: bool,
+    signing_in: Option<String>,
     /// Where each provider's key is read from, as last listed.
     key_sources: BTreeMap<String, KeySource>,
+    /// The model catalog as last listed, to know a chosen model's thinking levels.
+    catalog: Vec<quack_protocol::ProviderModels>,
+    /// A `/models <provider>/<model>` selection whose thinking-level picker is still owed
+    /// once the engine confirms the switch.
+    pick_thinking: Option<String>,
     /// `/setup` opened on its own once this run, because no model was ready.
     setup_offered: bool,
     /// A `.quack/` waiting for a trust decision.
@@ -646,6 +658,8 @@ impl App {
     pub fn new(info: AppInfo) -> Self {
         let input = Input::with_history(info.history.clone());
         Self {
+            reasoning_effort: None,
+            reasoning_efforts: Vec::new(),
             theme: Theme::resolve(&info.ui.theme, info.no_color),
             glyphs: Glyphs::new(info.ui.ascii),
             startup: Subsystem::ALL
@@ -684,24 +698,31 @@ impl App {
             plan: Vec::new(),
             plan_expanded: false,
             agents: Vec::new(),
-            panel_collapsed: false,
-            startup_frame: 0,
+            startup_dismissed: false,
             resuming: false,
-            mode_before_plan: String::new(),
             mode_before_yolo: String::new(),
             sandbox_off: false,
             clipboard: None,
+            browser: None,
             session_title: None,
             skills: Vec::new(),
             custom: Vec::new(),
             mcp_prompts: Vec::new(),
             files: Vec::new(),
             hook_runs: Vec::new(),
+            hook_form: None,
+            hook_request: 0,
+            hook_inspect: None,
+            hook_reapply: None,
+            hook_test_after_inspect: false,
             setup: modal::SetupView::default(),
             prompt: None,
             setup_adding: false,
             rekeying: false,
+            signing_in: None,
             key_sources: BTreeMap::new(),
+            catalog: Vec::new(),
+            pick_thinking: None,
             setup_offered: false,
             trust: None,
             frame: 0,
@@ -722,8 +743,20 @@ impl App {
         std::mem::take(&mut self.dirty)
     }
 
+    pub fn take_browser(&mut self) -> Option<String> {
+        self.browser.take()
+    }
+
     pub fn take_clipboard(&mut self) -> Option<String> {
         self.clipboard.take()
+    }
+
+    /// Git metadata is read off-thread by the event loop, including external checkouts.
+    pub(crate) fn set_branch(&mut self, branch: Option<String>) {
+        if self.info.branch != branch {
+            self.info.branch = branch;
+            self.dirty = true;
+        }
     }
 
     /// Chars in the selection just copied, while the status bar says so.
@@ -780,17 +813,25 @@ impl App {
             .count()
     }
 
+    /// The sidebar's startup section: shown from the first frame until the user starts
+    /// working, so the diagnostics never flash in and out. While it is up, the panel in
+    /// the transcript area stays away.
+    pub(crate) fn startup_status_visible(&self) -> bool {
+        match self.info.ui.startup_panel {
+            StartupPanel::Always => true,
+            StartupPanel::Never => false,
+            StartupPanel::Auto => !self.startup_dismissed,
+        }
+    }
+
+    /// The panel above the transcript: narrow terminals have no sidebar, so only real
+    /// problems earn its rows. It never appears just because startup is slow, and it
+    /// stays until the user starts working.
     pub(crate) fn panel_visible(&self) -> bool {
         match self.info.ui.startup_panel {
             StartupPanel::Always => true,
             StartupPanel::Never => false,
-            StartupPanel::Auto => {
-                // Show problems at once, a slow start after the grace period, and a fast
-                // clean start never.
-                let slow = !self.startup_done
-                    && self.frame.wrapping_sub(self.startup_frame) >= PANEL_GRACE;
-                !self.panel_collapsed && (self.startup_issues() > 0 || slow)
-            }
+            StartupPanel::Auto => !self.startup_dismissed && self.startup_issues() > 0,
         }
     }
 
@@ -900,10 +941,6 @@ impl App {
         {
             self.dirty = true;
         }
-        // A slow startup's panel appears once the grace period ends.
-        if !self.startup_done && self.frame.wrapping_sub(self.startup_frame) == PANEL_GRACE {
-            self.dirty = true;
-        }
         // The welcome duck animates on startup while the transcript is empty.
         if self.transcript.is_empty()
             && !self.info.ui.reduced_motion
@@ -990,8 +1027,7 @@ impl App {
             }
             Event::ConfigReloaded => {
                 self.startup_done = false;
-                self.panel_collapsed = false;
-                self.startup_frame = self.frame;
+                self.startup_dismissed = false;
                 self.trust = None;
                 self.note("config reloaded".into());
                 if self.modal.as_ref().is_some_and(|m| m.title == "Hooks") {
@@ -1024,10 +1060,23 @@ impl App {
             Event::SessionConfigured { session } => {
                 self.info.model = session.model;
                 self.info.profile = session.profile;
+                self.reasoning_effort = session.reasoning_effort;
+                self.reasoning_efforts = session.reasoning_efforts;
+                if self.modal.as_ref().is_some_and(|m| m.title == "Thinking") {
+                    self.open_thinking();
+                }
+                // Selecting a model that declares thinking levels asks for one right away:
+                // the level changes both how the model works and what it costs.
+                if let Some(expected) = self.pick_thinking.take()
+                    && self.info.model.as_deref() == Some(expected.as_str())
+                    && !self.reasoning_efforts.is_empty()
+                    && self.modal.is_none()
+                {
+                    self.open_thinking();
+                }
             }
             Event::SessionTitle { title } => {
                 self.session_title = title;
-                self.dirty = false;
             }
             Event::ModelCatalog { providers, current }
                 if self.modal.as_ref().is_some_and(|m| m.title == "Providers") =>
@@ -1037,6 +1086,7 @@ impl App {
                     current.as_deref(),
                     &self.theme,
                 ));
+                self.catalog = providers;
             }
             Event::ModelCatalog { providers, current } => {
                 // Only refresh a /models modal that is still open.
@@ -1051,6 +1101,7 @@ impl App {
                         .keep_place(self.modal.as_ref()),
                     );
                 }
+                self.catalog = providers;
             }
             Event::Instructions { files } => {
                 if self.modal.as_ref().is_some_and(|m| m.title == "Instructions") {
@@ -1139,6 +1190,28 @@ impl App {
                 self.setup.local = modal::Scan::Found(servers);
                 self.refresh_setup();
             }
+            Event::SignInUrl { id, url } if self.signing_in.as_deref() == Some(&id) => {
+                self.modal = Some(modal::sign_in(&id, Some(&url), &self.theme));
+                self.browser = Some(url);
+            }
+            Event::SignInResult { id, error } if self.signing_in.as_deref() == Some(&id) => {
+                self.signing_in = None;
+                self.browser = None;
+                if let Some(error) = error {
+                    self.setup.sign_in_error = Some((id.clone(), error.clone()));
+                    self.open_hosted_setup();
+                    if let Some(service) = self.setup.services.iter().flatten().find(|s| s.id == id)
+                        && let Some(modal) = self.modal.take()
+                    {
+                        self.modal = Some(modal.with_filter(&service.name));
+                    }
+                    self.note(format!("Sign-in failed: {error}"));
+                } else {
+                    self.ops.push(Op::ListServices);
+                    self.note(format!("Signed in to {id}. Choose a model to finish setup."));
+                    self.execute(&format!("/setup models {id}"));
+                }
+            }
             Event::Services { services } => {
                 self.key_sources.extend(
                     services
@@ -1220,6 +1293,53 @@ impl App {
                 path,
                 note,
             } => self.on_setting_saved(&key, &value, &path, note),
+            Event::HookSetup { request, info } => {
+                if self.hook_inspect == Some(request) && self.modal.as_ref().is_some_and(|m| m.title == "Hook setup") {
+                    self.hook_inspect = None;
+                    self.modal = None;
+                    let mut form = HookForm::new(info);
+                    if let Some(drafts) = self.hook_reapply.take() { form.restore_drafts(drafts); }
+                    if self.hook_test_after_inspect {
+                        if form.drafts.len() == 1 { form.key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)); }
+                        else { form.status = "Select a connection, then press Ctrl-T to check a review or issue URL.".into(); }
+                    }
+                    self.hook_form = Some(form);
+                }
+            }
+            Event::HookSetupSaved { request, info, note } => {
+                if self.hook_form.as_ref().is_some_and(|f| f.pending == Some(request)) {
+                    let enabled = info.enabled;
+                    let problem = info.problem.clone();
+                    let mut form = HookForm::new(info);
+                    form.status = if let Some(problem) = problem {
+                        format!("Settings saved, but the hook needs attention: {problem}")
+                    } else {
+                        let state = if enabled { "Saved and applied. The next prompt uses these settings." }
+                            else { "Saved. The hook remains disabled; Ctrl-E enables it." };
+                        note.map_or_else(|| state.to_owned(), |note| format!("{state} {note}"))
+                    };
+                    self.hook_form = Some(form);
+                }
+            }
+            Event::HookSetupPending { request } => {
+                if let Some(form) = self.hook_form.as_mut().filter(|f| f.pending == Some(request)) {
+                    form.status = "Saving… Applies after any running turn finishes.".into();
+                }
+            }
+            Event::HookSetupFailed { request, message } => {
+                if let Some(form) = self.hook_form.as_mut().filter(|f| f.pending == Some(request)) {
+                    form.result("Could not save", message);
+                } else if self.hook_inspect == Some(request) {
+                    self.hook_inspect = None;
+                    self.modal = Some(modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme));
+                    self.note(message);
+                }
+            }
+            Event::HookCheckResult { request, status, message } => {
+                if let Some(form) = self.hook_form.as_mut().filter(|f| f.pending == Some(request)) {
+                    form.result(&status.replace('_', " "), message);
+                }
+            }
             Event::HookPayloadChoice { id, path } => {
                 self.modal = Some(modal::hook_payload(&id, &path, &self.theme));
             }
@@ -1238,7 +1358,7 @@ impl App {
                     self.context = None;
                     self.growth.clear();
                 }
-                self.panel_collapsed = true;
+                self.startup_dismissed = true;
                 let short: String = session.id.0.chars().take(12).collect();
                 self.note(format!("resumed session {short} ({} entries)", items.len()));
                 for item in items {
@@ -1428,23 +1548,25 @@ impl App {
                     self.transcript.push(Entry::TurnSummary(parts.join(" · ")));
                 }
                 self.asking = None;
-                if self.info.permission_mode == "plan" {
+                if self.info.work_mode == WorkMode::Plan {
                     self.review = Some(0);
                 }
             }
-            Event::PermissionMode { mode } => {
-                if mode == "plan" && self.info.permission_mode != "plan" {
-                    self.note("plan mode: the model looks around, asks about big decisions and proposes a plan; nothing changes until you accept it (/plan off leaves)".into());
+            Event::ModeChanged { work_mode, approvals } => {
+                if work_mode == WorkMode::Plan && self.info.work_mode != WorkMode::Plan {
+                    self.note("plan mode: read and search only; the model will propose changes and list tests for your review before running them · /edit leaves".into());
                 }
+                let mode = approvals.label();
                 if mode == "yolo" && self.info.permission_mode != "yolo" {
-                    self.note("yolo: nothing asks and the sandbox is off; only the built-in deny list and your deny rules still apply · /yolo turns it off".into());
+                    self.note("yolo: approvals are automatic and the sandbox is off; work-mode restrictions and deny rules still apply · /yolo turns it off".into());
                 } else if mode != "yolo" && self.info.permission_mode == "yolo" {
-                    self.note(format!("yolo off · {mode} mode"));
+                    self.note(format!("yolo off · {mode} approvals"));
                 }
-                if mode != "plan" {
+                if work_mode != WorkMode::Plan {
                     self.review = None;
                 }
-                self.info.permission_mode = mode;
+                self.info.work_mode = work_mode;
+                self.info.permission_mode = mode.to_owned();
             }
             Event::Sandbox { off } => {
                 if off && !self.sandbox_off {
@@ -1530,7 +1652,9 @@ impl App {
             TermEvent::Key(key) if key.kind != KeyEventKind::Release => self.on_key(key),
             TermEvent::Paste(text) => {
                 self.selection = None;
-                if let Some(p) = &mut self.prompt {
+                if let Some(form) = &mut self.hook_form {
+                    form.paste(&text);
+                } else if let Some(p) = &mut self.prompt {
                     p.text
                         .push_str(text.lines().next().unwrap_or_default().trim());
                     p.error = None;
@@ -1552,7 +1676,8 @@ impl App {
                 self.selection = None;
                 self.dirty = true;
             }
-            TermEvent::Mouse(m) if self.modal.is_none() => match m.kind {
+            TermEvent::Mouse(m) if self.modal.is_none() && self.hook_form.is_none() => match m.kind
+            {
                 MouseEventKind::ScrollUp => self.scroll_up(WHEEL_ROWS),
                 MouseEventKind::ScrollDown => self.scroll_down(WHEEL_ROWS),
                 MouseEventKind::Down(MouseButton::Left) => self.press(m.column, m.row),
@@ -1680,8 +1805,83 @@ impl App {
         (first + usize::from(y - area.y), col)
     }
 
+    fn open_hook_setup(&mut self, id: &str) {
+        self.hook_request += 1;
+        self.hook_inspect = Some(self.hook_request);
+        self.hook_form = None;
+        self.hook_reapply = None;
+        self.hook_test_after_inspect = false;
+        self.modal = Some(Modal::new("Hook setup", Vec::new()));
+        self.ops.push(Op::InspectHookSetup {
+            id: id.into(),
+            request: self.hook_request,
+        });
+    }
+
+    fn on_hook_key(&mut self, key: KeyEvent) {
+        let Some(mut form) = self.hook_form.take() else {
+            return;
+        };
+        let key = if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
+        {
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+        } else {
+            key
+        };
+        match form.key(key) {
+            HookAction::None => {}
+            HookAction::Close => {
+                self.modal = Some(modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme));
+                return;
+            }
+            HookAction::Reload => {
+                self.hook_reapply = None;
+                self.open_hook_setup(&form.info.id);
+                return;
+            }
+            HookAction::ReloadDraft => {
+                let drafts = form.drafts;
+                self.open_hook_setup(&form.info.id);
+                self.hook_reapply = Some(drafts);
+                return;
+            }
+            HookAction::Cancel(request) => self.ops.push(Op::CancelHookCheck { request }),
+            HookAction::Save {
+                enable,
+                replace_payload,
+            } => {
+                self.hook_request += 1;
+                self.ops.push(Op::SaveHookSetup {
+                    id: form.info.id.clone(),
+                    request: self.hook_request,
+                    revision: form.info.revision.clone(),
+                    connections: form.drafts.clone(),
+                    enable,
+                    replace_payload,
+                });
+                form.waiting(self.hook_request, false);
+            }
+            HookAction::Check { connection, url } => {
+                self.hook_request += 1;
+                self.ops.push(Op::CheckHookSetup {
+                    id: form.info.id.clone(),
+                    request: self.hook_request,
+                    revision: form.info.revision.clone(),
+                    connection,
+                    url,
+                });
+                form.waiting(self.hook_request, true);
+            }
+        }
+        self.hook_form = Some(form);
+    }
+
     fn on_key(&mut self, key: KeyEvent) {
         self.dirty = true;
+        if self.hook_form.is_some() {
+            self.on_hook_key(key);
+            return;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // Any key lets go of a selection. Ctrl-C, out of habit, copies it again rather than
         // interrupting or quitting.
@@ -1704,7 +1904,18 @@ impl App {
         if let Some(modal) = &mut self.modal {
             match modal.on_key(key) {
                 ModalOutcome::None => {}
-                ModalOutcome::Close => self.modal = None,
+                ModalOutcome::Close => {
+                    self.modal = None;
+                    if self.signing_in.take().is_some() {
+                        self.browser = None;
+                        self.ops.push(Op::SignIn { id: None });
+                        self.open_hosted_setup();
+                    }
+                }
+                ModalOutcome::Copy(text) => {
+                    self.copied = Some((self.frame, text.chars().count()));
+                    self.clipboard = Some(text);
+                }
                 ModalOutcome::Insert(text) => {
                     self.modal = None;
                     self.input.set(&text);
@@ -1981,11 +2192,24 @@ impl App {
         self.setup_offered = true;
     }
 
+    /// Tests: the user has started working, so the startup diagnostics have stepped aside.
+    #[cfg(test)]
+    pub(crate) fn dismiss_startup(&mut self) {
+        self.startup_dismissed = true;
+    }
+
     /// Open `/setup` with what is known, and list the hosted services again.
     fn open_setup(&mut self) {
         self.setup.settings = self.info.settings.clone();
         self.modal = Some(modal::setup(&self.setup, &self.theme));
         self.ops.push(Op::ListServices);
+    }
+
+    fn open_hosted_setup(&mut self) {
+        self.open_setup();
+        if let Some(modal) = self.modal.take() {
+            self.modal = Some(modal.with_tab(1));
+        }
     }
 
     /// Redraw an open `/setup` with new findings, keeping the user's place.
@@ -2072,25 +2296,15 @@ impl App {
         }
     }
 
-    /// The choices the plan review bar offers. Auto-edit is offered only when it would
-    /// allow more than the mode plan mode started from.
+    /// Implementing preserves approvals; the review never broadens permissions.
     pub(crate) fn review_choices(&self) -> Vec<(ReviewChoice, String)> {
-        let back = match self.mode_before_plan.as_str() {
-            "" | "plan" => "ask",
-            m => m,
-        };
-        let mut out = vec![(
-            ReviewChoice::Accept,
-            format!("Yes, carry it out ({back} mode)"),
-        )];
-        if matches!(back, "ask" | "read-only") {
-            out.push((
-                ReviewChoice::AcceptAutoEdit,
-                "Yes, and allow edits without asking (auto-edit)".into(),
-            ));
-        }
-        out.push((ReviewChoice::KeepPlanning, "Not yet, keep planning".into()));
-        out
+        vec![
+            (
+                ReviewChoice::Accept,
+                format!("Implement plan · {} approvals", self.info.permission_mode),
+            ),
+            (ReviewChoice::KeepPlanning, "Keep planning".into()),
+        ]
     }
 
     /// Keys for the plan review bar. Returns whether it used the key; typing goes on to
@@ -2123,8 +2337,7 @@ impl App {
         };
         self.review = None;
         match choices[pick].0 {
-            ReviewChoice::Accept => self.accept_plan(None),
-            ReviewChoice::AcceptAutoEdit => self.accept_plan(Some("auto-edit")),
+            ReviewChoice::Accept => self.accept_plan(),
             ReviewChoice::KeepPlanning => {
                 self.note("still planning · say what to change, or /plan off to leave".into());
             }
@@ -2139,6 +2352,12 @@ impl App {
     }
 
     fn ctrl_c(&mut self) {
+        if self.signing_in.take().is_some() {
+            self.browser = None;
+            self.ops.push(Op::SignIn { id: None });
+            self.open_hosted_setup();
+            return;
+        }
         if self.modal.take().is_some() {
             return;
         }
@@ -2209,7 +2428,7 @@ impl App {
 
     fn send(&mut self, text: String, attachments: Vec<Attachment>) {
         self.review = None;
-        self.panel_collapsed = true;
+        self.startup_dismissed = true;
         let shown = if text.trim().is_empty() {
             format!(
                 "attached: {}",
@@ -2259,12 +2478,17 @@ impl App {
     }
 
     fn set_mode(&mut self, mode: &str) {
-        if mode == "plan" && self.info.permission_mode != "plan" {
-            self.mode_before_plan = self.info.permission_mode.clone();
+        match mode {
+            "plan" => self.ops.push(Op::SetWorkMode {
+                mode: WorkMode::Plan,
+            }),
+            "edit" => self.ops.push(Op::SetWorkMode {
+                mode: WorkMode::Edit,
+            }),
+            _ => self.ops.push(Op::SetPermissionMode {
+                mode: mode.to_owned(),
+            }),
         }
-        self.ops.push(Op::SetPermissionMode {
-            mode: mode.to_owned(),
-        });
     }
 
     /// `/yolo`: switch to yolo, or back to the mode it was turned on from.
@@ -2303,47 +2527,34 @@ impl App {
         self.ops.push(Op::SetSandbox { off });
     }
 
-    /// Leave plan mode for the mode it was entered from.
+    /// Leave planning without submitting an implementation turn.
     fn end_plan(&mut self) {
-        let back = match self.mode_before_plan.as_str() {
-            "" | "plan" => "ask".to_owned(),
-            m => m.to_owned(),
-        };
-        self.set_mode(&back);
+        self.set_mode("edit");
     }
 
-    /// Carry out the plan in `mode`, or in the mode plan mode was entered from. The engine
-    /// leaves plan mode and sends the turn (with a planner model, as a handoff brief).
-    fn accept_plan(&mut self, mode: Option<&str>) {
-        let back = match (mode, self.mode_before_plan.as_str()) {
-            (Some(m), _) => m.to_owned(),
-            (None, "" | "plan") => "ask".to_owned(),
-            (None, m) => m.to_owned(),
-        };
-        self.mode_before_plan.clear();
+    /// The engine preserves approvals and performs any planner handoff.
+    fn accept_plan(&mut self) {
         self.review = None;
-        self.panel_collapsed = true;
+        self.startup_dismissed = true;
         self.transcript
             .push(Entry::User("Carry out the plan above.".into()));
-        self.ops.push(Op::AcceptPlan { mode: back });
+        self.ops.push(Op::AcceptPlan {
+            mode: String::new(),
+        });
     }
 
-    /// Shift-Tab: ask → auto-edit → plan → ask. Other modes join the cycle at `ask`.
+    /// Shift-Tab changes the work mode without changing approvals.
     fn cycle_mode(&mut self) {
-        let next = match self.info.permission_mode.as_str() {
-            "ask" => "auto-edit",
-            "auto-edit" => "plan",
-            "plan" => {
-                self.mode_before_plan.clear();
-                "ask"
-            }
-            _ => "ask",
-        };
-        self.set_mode(next);
+        self.set_mode(match self.info.work_mode {
+            WorkMode::Edit => "plan",
+            WorkMode::Plan => "edit",
+        });
     }
 
     /// Run a `/command args` line.
     pub(crate) fn execute(&mut self, text: &str) {
+        // Any command counts as starting work: the startup diagnostics step aside.
+        self.startup_dismissed = true;
         let rest = text.trim().trim_start_matches('/');
         let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
         match commands::find(name) {
@@ -2371,6 +2582,18 @@ impl App {
             "models" if !args.is_empty() => match args.split_once('/') {
                 Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
                     self.note(format!("switching to {args}…"));
+                    // A model that declares thinking levels asks for one once switched.
+                    self.pick_thinking = self
+                        .catalog
+                        .iter()
+                        .find(|p| p.id == provider)
+                        .and_then(|p| {
+                            p.models
+                                .iter()
+                                .find(|m| m.alias.as_deref().unwrap_or(&m.id) == model)
+                        })
+                        .filter(|m| !m.reasoning_efforts.is_empty())
+                        .map(|_| args.to_owned());
                     self.ops.push(Op::SetModel {
                         provider: ProviderId(provider.to_owned()),
                         model: ModelId(model.to_owned()),
@@ -2404,6 +2627,20 @@ impl App {
                     &self.theme,
                 ));
                 self.ops.push(Op::ListModels);
+            }
+            "thinking" if args.is_empty() => self.open_thinking(),
+            "thinking" if args.starts_with("level ") => {
+                self.ops.push(Op::SetReasoningEffort {
+                    effort: Some(args["level ".len()..].trim().to_owned()),
+                });
+            }
+            "thinking" if matches!(args, "show" | "on" | "hide" | "off") => {
+                self.toggle_reasoning(Some(matches!(args, "show" | "on")));
+            }
+            "thinking" => {
+                self.ops.push(Op::SetReasoningEffort {
+                    effort: (args != "default").then(|| args.to_owned()),
+                });
             }
             "resume" if !args.is_empty() => {
                 self.resuming = true;
@@ -2537,6 +2774,14 @@ impl App {
                     _ => self.note("pick a server and model from /setup".into()),
                 }
             }
+            "setup" if args.starts_with("login ") => {
+                let id = args["login ".len()..].trim().to_owned();
+                self.signing_in = Some(id.clone());
+                self.setup.sign_in_error = None;
+                self.browser = None;
+                self.modal = Some(modal::sign_in(&id, None, &self.theme));
+                self.ops.push(Op::SignIn { id: Some(id) });
+            }
             "setup" if args == "url" => self.prompt = Some(Prompt::server_url()),
             "setup" if args.starts_with("key ") => {
                 let id = args["key ".len()..].trim();
@@ -2621,12 +2866,6 @@ impl App {
                 self.modal = Some(modal::doctor(None, &self.theme));
                 self.ops.push(Op::RunDoctor);
             }
-            "thinking" => match args {
-                "" => self.toggle_reasoning(None),
-                "show" | "on" => self.toggle_reasoning(Some(true)),
-                "hide" | "off" => self.toggle_reasoning(Some(false)),
-                _ => self.note("usage: /thinking [show|hide]".into()),
-            },
             "copy" => {
                 let last = self.transcript.iter().rev().find_map(|e| match e {
                     Entry::Assistant(t) if !t.trim().is_empty() => Some(t.clone()),
@@ -2656,15 +2895,22 @@ impl App {
                 ));
             }
             "permissions" => self.set_mode(args),
+            "edit" => {
+                self.set_mode("edit");
+                if !args.is_empty() {
+                    let attachments = std::mem::take(&mut self.attachments);
+                    self.send(args.to_owned(), attachments);
+                }
+            }
             "yolo" => self.toggle_yolo(args),
             "sandbox" => self.toggle_sandbox(args),
             "plan" => match args {
                 "" => self.set_mode("plan"),
                 "accept" | "go" => {
-                    if self.info.permission_mode != "plan" {
+                    if self.info.work_mode != WorkMode::Plan {
                         return self.note("not in plan mode; /plan starts it".into());
                     }
-                    self.accept_plan(None);
+                    self.accept_plan();
                 }
                 "off" | "exit" => self.end_plan(),
                 task => {
@@ -2732,6 +2978,12 @@ impl App {
             },
             "hooks" if args.is_empty() => {
                 self.modal = Some(modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme));
+            }
+            "hooks" if args.starts_with("configure ") || args.starts_with("test ") => {
+                if let Some((action, id)) = args.split_once(' ') {
+                    self.open_hook_setup(id.trim());
+                    self.hook_test_after_inspect = action == "test";
+                }
             }
             "hooks"
                 if args.starts_with("keep-payload ") || args.starts_with("replace-payload ") =>
@@ -2813,9 +3065,30 @@ impl App {
         self.ops.push(Op::ListRewindPoints);
     }
 
+    fn open_thinking(&mut self) {
+        self.modal = Some(modal::thinking(
+            self.info.model.as_deref(),
+            &self.reasoning_efforts,
+            self.reasoning_effort.as_deref(),
+            &self.theme,
+        ));
+    }
+
+    pub(crate) fn thinking_label(&self) -> Option<String> {
+        self.info.model.as_ref()?;
+        match self.reasoning_effort.as_deref() {
+            Some(effort) => Some(format!("{effort} thinking")),
+            None if !self.reasoning_efforts.is_empty() => Some("default thinking".into()),
+            None => None,
+        }
+    }
+
     /// Settings from a reloaded config. What the engine reports (model, profile, mode)
     /// stays as it is until the engine says otherwise.
     pub fn reconfigure(&mut self, info: AppInfo) {
+        if info.ui.sidebar != self.info.ui.sidebar {
+            self.selection = None;
+        }
         if info.ui.show_reasoning != self.info.ui.show_reasoning {
             self.show_reasoning = info.ui.show_reasoning;
         }
@@ -2823,12 +3096,14 @@ impl App {
             self.info.model.take(),
             std::mem::take(&mut self.info.profile),
             std::mem::take(&mut self.info.permission_mode),
+            self.info.work_mode,
         );
         self.info = info;
         (
             self.info.model,
             self.info.profile,
             self.info.permission_mode,
+            self.info.work_mode,
         ) = keep;
         self.theme = Theme::resolve(&self.info.ui.theme, self.info.no_color);
         self.glyphs = Glyphs::new(self.info.ui.ascii);
@@ -2867,6 +3142,11 @@ impl App {
             }
             "ui.terminal_title" => {
                 self.info.ui.terminal_title = value == "true";
+                true
+            }
+            "ui.sidebar" => {
+                self.info.ui.sidebar = value == "true";
+                self.selection = None;
                 true
             }
             "ui.theme" => {
@@ -3024,6 +3304,7 @@ mod tests {
             model: None,
             profile: "empty".into(),
             permission_mode: "ask".into(),
+            work_mode: WorkMode::Edit,
             ui: UiSettings::default(),
             no_color: false,
             settings: Vec::new(),
@@ -3192,28 +3473,49 @@ mod tests {
     }
 
     #[test]
-    fn plan_mode_cycle_and_accept() {
+    fn work_mode_and_approvals_change_independently() {
         let mut app = App::new(info());
-        let mode = |m: &str| Op::SetPermissionMode { mode: m.into() };
         press(&mut app, KeyCode::BackTab);
-        assert_eq!(app.take_ops(), vec![mode("auto-edit")]);
-        app.on_engine(Event::PermissionMode {
-            mode: "auto-edit".into(),
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SetWorkMode {
+                mode: WorkMode::Plan
+            }]
+        );
+        app.on_engine(Event::ModeChanged {
+            work_mode: WorkMode::Plan,
+            approvals: quack_protocol::ApprovalPolicy::Ask,
         });
-        type_str(&mut app, "/plan");
-        press(&mut app, KeyCode::Enter);
-        assert_eq!(app.take_ops(), vec![mode("plan")]);
-        app.on_engine(Event::PermissionMode {
-            mode: "plan".into(),
+        app.execute("/permissions allow");
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SetPermissionMode {
+                mode: "allow".into()
+            }]
+        );
+        app.on_engine(Event::ModeChanged {
+            work_mode: WorkMode::Plan,
+            approvals: quack_protocol::ApprovalPolicy::Allow,
         });
-        type_str(&mut app, "/plan accept");
-        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.info.work_mode, WorkMode::Plan);
+        assert_eq!(app.info.permission_mode, "allow");
+        assert_eq!(
+            app.review_choices()[0].1,
+            "Implement plan · allow approvals"
+        );
+        app.execute("/plan accept");
         assert_eq!(
             app.take_ops(),
             vec![Op::AcceptPlan {
-                mode: "auto-edit".into()
-            }],
-            "back to the mode plan mode started from"
+                mode: String::new()
+            }]
+        );
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SetWorkMode {
+                mode: WorkMode::Edit
+            }]
         );
     }
 
@@ -3233,46 +3535,36 @@ mod tests {
     #[test]
     fn plan_review_bar_accepts_or_takes_a_revision() {
         let mut app = App::new(info());
-        let accept = |m: &str| vec![Op::AcceptPlan { mode: m.into() }];
-        let enter_plan = |app: &mut App| {
-            type_str(app, "/plan");
-            press(app, KeyCode::Enter);
-            app.on_engine(Event::PermissionMode {
-                mode: "plan".into(),
-            });
-            app.take_ops();
-            plan_turn_ends(app);
-            assert_eq!(app.review, Some(0), "the bar shows when a plan turn ends");
-        };
-
-        // The second choice: carry it out in auto-edit.
-        enter_plan(&mut app);
+        app.on_engine(Event::ModeChanged {
+            work_mode: WorkMode::Plan,
+            approvals: quack_protocol::ApprovalPolicy::Allow,
+        });
+        plan_turn_ends(&mut app);
+        assert_eq!(app.review, Some(0));
+        assert_eq!(app.review_choices().len(), 2);
+        // The second choice keeps planning without changing approvals.
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter);
-        assert_eq!(app.take_ops(), accept("auto-edit"));
-        assert_eq!(app.review, None);
-        app.on_engine(Event::PermissionMode { mode: "ask".into() });
-
-        // Typing is the revision; it is sent as a plan-mode turn.
-        enter_plan(&mut app);
+        assert!(app.take_ops().is_empty());
+        assert_eq!(app.info.permission_mode, "allow");
+        plan_turn_ends(&mut app);
         type_str(&mut app, "use sqlite instead");
-        assert_eq!(app.review, Some(0), "the bar stays while typing");
         press(&mut app, KeyCode::Enter);
-        let ops = app.take_ops();
-        assert_eq!(ops.len(), 1, "{ops:?}");
         assert!(
-            matches!(&ops[0], Op::UserTurn { items, .. } if items == &[InputItem::text("use sqlite instead")])
+            matches!(app.take_ops().as_slice(), [Op::UserTurn { items, .. }] if items == &[InputItem::text("use sqlite instead")])
         );
         assert_eq!(app.review, None);
-
-        // Esc keeps planning; `1` accepts in the mode plan mode started from.
         plan_turn_ends(&mut app);
         press(&mut app, KeyCode::Esc);
-        assert_eq!(app.review, None);
         assert!(app.take_ops().is_empty());
         plan_turn_ends(&mut app);
         press(&mut app, KeyCode::Char('1'));
-        assert_eq!(app.take_ops(), accept("ask"));
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::AcceptPlan {
+                mode: String::new()
+            }]
+        );
     }
 
     #[test]
@@ -3360,14 +3652,16 @@ mod tests {
     fn yolo_toggles_back_to_the_previous_mode() {
         let mut app = App::new(info());
         let mode = |m: &str| Op::SetPermissionMode { mode: m.into() };
-        app.on_engine(Event::PermissionMode {
-            mode: "auto-edit".into(),
+        app.on_engine(Event::ModeChanged {
+            work_mode: WorkMode::Edit,
+            approvals: quack_protocol::ApprovalPolicy::AutoEdit,
         });
         type_str(&mut app, "/yolo");
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.take_ops(), vec![mode("yolo")]);
-        app.on_engine(Event::PermissionMode {
-            mode: "yolo".into(),
+        app.on_engine(Event::ModeChanged {
+            work_mode: WorkMode::Edit,
+            approvals: quack_protocol::ApprovalPolicy::Yolo,
         });
         type_str(&mut app, "/yolo");
         press(&mut app, KeyCode::Enter);
@@ -3380,8 +3674,9 @@ mod tests {
     #[test]
     fn sandbox_toggles_without_changing_the_mode() {
         let mut app = App::new(info());
-        app.on_engine(Event::PermissionMode {
-            mode: "plan".into(),
+        app.on_engine(Event::ModeChanged {
+            work_mode: WorkMode::Plan,
+            approvals: quack_protocol::ApprovalPolicy::Ask,
         });
         type_str(&mut app, "/sandbox");
         press(&mut app, KeyCode::Enter);
@@ -3393,7 +3688,7 @@ mod tests {
         type_str(&mut app, "/sandbox off");
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.take_ops(), vec![Op::SetSandbox { off: true }]);
-        assert_eq!(app.info.permission_mode, "plan");
+        assert_eq!(app.info.work_mode, WorkMode::Plan);
     }
 
     #[test]
@@ -3524,12 +3819,14 @@ mod tests {
                             alias: None,
                             context_window: Some(1_000_000),
                             price: None,
+                            reasoning_efforts: Vec::new(),
                         },
                         ModelInfo {
                             id: "qwen3.8-flash".into(),
                             alias: None,
                             context_window: None,
                             price: None,
+                            reasoning_efforts: Vec::new(),
                         },
                     ],
                 },
@@ -3557,6 +3854,75 @@ mod tests {
     }
 
     #[test]
+    fn selecting_a_reasoning_model_opens_the_thinking_picker() {
+        use quack_protocol::{ModelInfo, ProviderModels, SessionId, SessionInfo};
+        let mut app = App::new(info());
+        type_str(&mut app, "/models");
+        press(&mut app, KeyCode::Enter);
+        app.take_ops();
+        app.on_engine(Event::ModelCatalog {
+            providers: vec![ProviderModels {
+                bundled: false,
+                key: None,
+                id: "charm".into(),
+                available: true,
+                note: "1 model".into(),
+                models: vec![ModelInfo {
+                    id: "glm-5.3".into(),
+                    alias: None,
+                    context_window: None,
+                    price: None,
+                    reasoning_efforts: vec!["low".into(), "medium".into(), "high".into()],
+                }],
+            }],
+            current: None,
+        });
+        type_str(&mut app, "glm");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SetModel {
+                provider: ProviderId("charm".into()),
+                model: ModelId("glm-5.3".into()),
+            }]
+        );
+        // No picker before the engine confirms the switch, and none for a model without
+        // levels.
+        assert!(app.modal.is_none());
+        app.on_engine(Event::SessionConfigured {
+            session: SessionInfo {
+                id: SessionId("test".into()),
+                cwd: String::new(),
+                model: Some("charm/glm-5.3".into()),
+                profile: "generic".into(),
+                reasoning_effort: Some("medium".into()),
+                reasoning_efforts: vec!["low".into(), "medium".into(), "high".into()],
+            },
+        });
+        let thinking = app.modal.as_ref().expect("picker open");
+        assert_eq!(thinking.title, "Thinking");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SetReasoningEffort {
+                effort: Some("medium".into())
+            }]
+        );
+        // The picker does not reopen on its own afterwards.
+        app.on_engine(Event::SessionConfigured {
+            session: SessionInfo {
+                id: SessionId("test".into()),
+                cwd: String::new(),
+                model: Some("charm/glm-5.3".into()),
+                profile: "generic".into(),
+                reasoning_effort: Some("medium".into()),
+                reasoning_efforts: vec!["low".into(), "medium".into(), "high".into()],
+            },
+        });
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
     fn models_modal_ctrl_s_saves_default() {
         use quack_protocol::{ModelInfo, ProviderModels};
         let mut app = App::new(info());
@@ -3575,6 +3941,7 @@ mod tests {
                     alias: None,
                     context_window: None,
                     price: None,
+                    reasoning_efforts: Vec::new(),
                 }],
             }],
             current: None,
@@ -3640,6 +4007,8 @@ mod tests {
                 cwd: String::new(),
                 model: None,
                 profile: "generic".into(),
+                reasoning_effort: None,
+                reasoning_efforts: Vec::new(),
             },
             items: vec![ReplayItem::User {
                 text: "fix it".into(),
@@ -3844,6 +4213,64 @@ mod tests {
     }
 
     #[test]
+    fn hook_setup_uses_engine_ops_and_keeps_pasted_secrets_out_of_the_composer() {
+        let mut app = App::new(info());
+        type_str(&mut app, "/hooks configure forge-review");
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            app.take_ops().as_slice(),
+            [Op::InspectHookSetup { request: 1, .. }]
+        ));
+        app.on_engine(Event::HookSetup {
+            request: 1,
+            info: crate::hook_form::example(),
+        });
+        assert!(app.hook_form.is_some());
+        press(&mut app, KeyCode::Enter);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Tab);
+        }
+        press(&mut app, KeyCode::Enter);
+        app.on_terminal(TermEvent::Paste("private-test-token".into()));
+        let mut released = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        released.kind = KeyEventKind::Release;
+        app.on_terminal(TermEvent::Key(released));
+        assert!(app.input.is_empty());
+        press(&mut app, KeyCode::Enter);
+        app.on_terminal(TermEvent::Key(KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+        )));
+        let ops = app.take_ops();
+        assert!(!format!("{ops:?}").contains("private-test-token"));
+        assert!(
+            matches!(ops.as_slice(),[Op::SaveHookSetup{enable:Some(true),connections,..}] if matches!(connections[0].credentials.get("token"),Some(quack_protocol::HookCredentialChange::Replace{value}) if value.0=="private-test-token"))
+        );
+        app.on_engine(Event::HookSetupFailed {
+            request: 999,
+            message: "wrong response".into(),
+        });
+        assert!(
+            !app.hook_form
+                .as_ref()
+                .expect("form")
+                .status
+                .contains("wrong response")
+        );
+        app.on_engine(Event::HookSetupFailed {
+            request: 2,
+            message: "Retry after unlocking the store.".into(),
+        });
+        assert!(
+            app.hook_form
+                .as_ref()
+                .expect("form")
+                .status
+                .contains("unlocking")
+        );
+    }
+
+    #[test]
     fn toggling_a_hook_off_lists_it_and_on_goes_through_the_engine() {
         let hook = |enabled: bool| quack_config::Item {
             id: "jira".into(),
@@ -3858,9 +4285,12 @@ mod tests {
                     matcher: Default::default(),
                     command: vec!["x".into()],
                     env: Default::default(),
+                    setup: None,
+                    connections: None,
                     inherit_env: None,
                     cwd: String::new(),
                     timeout_secs: 10,
+                    full_context: false,
                     on_error: Default::default(),
                 })
             } else {

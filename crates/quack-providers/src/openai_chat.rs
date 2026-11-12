@@ -177,6 +177,9 @@ pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
     }
     let mut body = Value::Object(body);
     merge(&mut body, &req.extra_body);
+    if let Some(effort) = effort {
+        body["reasoning_effort"] = json!(effort);
+    }
     body
 }
 
@@ -831,6 +834,24 @@ mod tests {
             reasoning_effort: Some("medium".into()),
             ..ChatRequest::default()
         }
+    }
+
+    #[test]
+    fn selected_effort_takes_precedence_over_extra_body_and_keeps_dialect_mapping() {
+        let req = ChatRequest {
+            reasoning_effort: Some("medium".into()),
+            extra_body: serde_json::from_value(json!({ "reasoning_effort": "low" }))
+                .expect("extra body"),
+            ..ChatRequest::default()
+        };
+        assert_eq!(
+            build_body(&req, Dialect::Standard)["reasoning_effort"],
+            "medium"
+        );
+        assert_eq!(
+            build_body(&req, Dialect::Mistral)["reasoning_effort"],
+            "high"
+        );
     }
 
     #[test]

@@ -180,6 +180,7 @@
           "$ref": "#/$defs/Reasoning",
           "default": {
             "effort": "",
+            "efforts": [],
             "format": "auto",
             "preserve_in_history": null
           }
@@ -244,6 +245,14 @@
         "effort": {
           "default": "",
           "type": "string"
+        },
+        "efforts": {
+          "default": [],
+          "description": "Supported effort values, in picker order. Empty means no selectable levels.\n`effort` remains the model's default when the user resets their selection.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "format": {
           "$ref": "#/$defs/ReasoningFormat",

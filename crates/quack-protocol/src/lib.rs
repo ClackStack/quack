@@ -4,12 +4,16 @@
 //! This crate has no async-runtime dependency so it can be used by ACP translation,
 //! headless output and tests without pulling in tokio.
 
+mod hooks;
 mod ids;
 pub mod image;
+mod modes;
 mod startup;
 
+pub use hooks::*;
 pub use ids::{CallId, CheckpointId, EventIndex, ModelId, ProviderId, SessionId, TurnId};
 pub use image::Image;
+pub use modes::{ApprovalPolicy, WorkMode};
 pub use startup::{LoadState, Subsystem};
 
 use serde::{Deserialize, Serialize};
@@ -40,6 +44,12 @@ pub enum Op {
     SetModel {
         provider: ProviderId,
         model: ModelId,
+    },
+    /// Select a declared reasoning effort for the active model. `None` restores its
+    /// configured default. Applies between turns, survives session resume, and is
+    /// remembered for the next start.
+    SetReasoningEffort {
+        effort: Option<String>,
     },
     /// Ask for the model catalogue; answered with `Event::ModelCatalog`.
     ListModels,
@@ -79,9 +89,16 @@ pub enum Op {
     GetContext,
     /// Ask for this session's usage so far; answered with `Event::Stats`.
     GetStats,
-    /// `read-only`, `ask`, `auto-edit`, `full-auto` (capped by policy), or `plan`.
+    /// Compatibility command: `plan`/`edit` changes work mode; other values change
+    /// approvals without changing work mode. Prefer the typed operations below.
     SetPermissionMode {
         mode: String,
+    },
+    SetWorkMode {
+        mode: WorkMode,
+    },
+    SetApprovalPolicy {
+        policy: ApprovalPolicy,
     },
     /// Run shell commands without the OS sandbox for the rest of the session (`off`), or
     /// go back to `[sandbox] mode`. Permission modes and approvals are unchanged. Refused
@@ -89,10 +106,13 @@ pub enum Op {
     SetSandbox {
         off: bool,
     },
-    /// Leave plan mode for `mode` and carry out the plan. When a `[model] planner` wrote
+    /// Switch to Edit and carry out the plan, preserving approvals when `mode` is empty.
+    /// When a `[model] planner` wrote
     /// it, the session's model gets the requests, the user's answers and the plan in one
     /// message instead of the planner's transcript.
     AcceptPlan {
+        /// Empty preserves the current approval policy; legacy callers may choose one.
+        #[serde(default)]
         mode: String,
     },
     /// Run the environment checks; answered with `Event::DoctorReport`.
@@ -121,9 +141,13 @@ pub enum Op {
         api: Option<String>,
         model: String,
     },
-    /// Ask for the hosted services in `providers.d` that take a key; answered with
+    /// Ask for the hosted services in `providers.d` using API keys or subscriptions; answered with
     /// `Event::Services`.
     ListServices,
+    /// Start a subscription sign-in, or cancel the pending sign-in with `id = None`.
+    SignIn {
+        id: Option<String>,
+    },
     /// Store a provider's API key: in the OS credential store when it is reachable,
     /// otherwise in a key file only this user can read. When its key is already read from
     /// the store, the entry is replaced and the provider file left alone
@@ -198,6 +222,30 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replace_payload: Option<bool>,
     },
+    /// Inspect a hook without resolving credentials or running its command.
+    InspectHookSetup {
+        id: String,
+        request: u64,
+    },
+    SaveHookSetup {
+        id: String,
+        request: u64,
+        revision: String,
+        connections: Vec<HookConnectionDraft>,
+        /// None keeps the current enabled state.
+        enable: Option<bool>,
+        replace_payload: Option<bool>,
+    },
+    CheckHookSetup {
+        id: String,
+        request: u64,
+        revision: String,
+        connection: HookConnectionDraft,
+        url: String,
+    },
+    CancelHookCheck {
+        request: u64,
+    },
     Shutdown,
 }
 
@@ -206,6 +254,27 @@ pub enum Op {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
+    HookSetup {
+        request: u64,
+        info: HookSetupInfo,
+    },
+    HookSetupSaved {
+        request: u64,
+        info: HookSetupInfo,
+        note: Option<String>,
+    },
+    HookSetupPending {
+        request: u64,
+    },
+    HookSetupFailed {
+        request: u64,
+        message: String,
+    },
+    HookCheckResult {
+        request: u64,
+        status: String,
+        message: String,
+    },
     // lifecycle
     StartupProgress {
         subsystem: Subsystem,
@@ -398,6 +467,15 @@ pub enum Event {
     Services {
         services: Vec<ServiceInfo>,
     },
+    /// A browser sign-in address, followed by a result when it completes.
+    SignInUrl {
+        id: String,
+        url: String,
+    },
+    SignInResult {
+        id: String,
+        error: Option<String>,
+    },
     /// A provider file was written (`path`), or an existing one reused (`path` is `None`).
     /// `note` says why the key is not in the OS credential store, when it is not.
     ProviderAdded {
@@ -430,6 +508,11 @@ pub enum Event {
     /// The session's permission mode, e.g. `ask` or `plan`.
     PermissionMode {
         mode: String,
+    },
+    /// Authoritative state of both controls; clients need not remember a previous mode.
+    ModeChanged {
+        work_mode: WorkMode,
+        approvals: ApprovalPolicy,
     },
     /// Whether the user turned the sandbox off for this session (`Op::SetSandbox`).
     Sandbox {
@@ -793,10 +876,13 @@ pub struct DetectedServer {
     pub configured: Option<String>,
 }
 
-/// A hosted service from `providers.d` that takes a key.
+/// A hosted service from `providers.d` using an API key or subscription.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ServiceInfo {
+    /// Uses browser sign-in instead of an API key.
+    #[serde(default)]
+    pub subscription: bool,
     pub id: String,
     pub name: String,
     /// Heading it is listed under.
@@ -806,7 +892,7 @@ pub struct ServiceInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub env: Option<String>,
-    /// Its key can be read now.
+    /// Its key is configured, or its saved sign-in allows plan usage.
     pub ready: bool,
     /// Where its key is read from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -862,6 +948,10 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub price: Option<String>,
+    /// Selectable thinking levels from the provider file's `reasoning.efforts`, in picker
+    /// order. Empty means the model declares none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1116,6 +1206,12 @@ pub struct SessionInfo {
     /// `<provider-id>/<model-id>`, if a model is selected.
     pub model: Option<String>,
     pub profile: String,
+    /// Effective effort, when the model has an explicit default or session selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Supported levels for the active model, in picker order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

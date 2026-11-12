@@ -1,0 +1,28 @@
+---
+source: crates/quack-tui/src/ui.rs
+expression: s
+---
+" quack 0.1.0                                                                                            │                                   "
+"                                                                                                        │  Session                          "
+"      __        quack  a coding agent for open-weight models                                            │  New session                      "
+"    <(o )___                                                                                            │                                   "
+"     ( ._> /    model mock/tiny · /models to switch                                                     │  Working folder                   "
+"      `---'     / commands  shift+tab modes  /plan plan first                                           │  ~/src/project                    "
+"   ~~~~~~~~~~   /help everything  esc esc rewind  /yolo no prompts                                      │  Git branch  main                 "
+"                                                                                                        │                                   "
+"                                                                                                        │  Model · high thinking            "
+"                                                                                                        │  mock/tiny                        "
+"                                                                                                        │  Profile  generic                 "
+"                                                                                                        │                                   "
+"                                                                                                        │  Context                          "
+"                                                                                                        │  Usage not reported yet           "
+"                                                                                                        │                                   "
+"                                                                                                        │                                   "
+"                                                                                                        │                                   "
+"                                                                                                        │                                   "
+"                                                                                                        │                                   "
+"                                                                                                        │                                   "
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────────╮│                                   "
+"│›                                                                                                     ││                                   "
+"╰──────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                   "
+"  edit   ask  mock/tiny · high thinking                                     ! 2 startup issue(s)  /help │                                   "

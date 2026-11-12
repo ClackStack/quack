@@ -1,0 +1,28 @@
+---
+source: crates/quack-tui/src/ui.rs
+expression: s
+---
+" quack 0.1.0                                                                                            │                                   "
+"                                                                                                        │  Startup                          "
+"      __        quack  a coding agent for open-weight models                                            │  ✓ config       2 config files ·  "
+"    <(o )___                                                                                            │                 1 providers · 3ms "
+"     ( ._> /    no model yet · /setup adds a provider                                                   │  – project      no .quack/ in     "
+"      `---'     / commands  shift+tab modes  /plan plan first                                           │                 this workspace    "
+"   ~~~~~~~~~~   /help everything  esc esc rewind  /yolo no prompts                                      │  ? provider     no model selected "
+"                                                                                                        │                 · set…            "
+"                                                                                                        │  ✓ profile      empty             "
+"                                                                                                        │                 (compiled-in)     "
+"                                                                                                        │  ⠋ tokenizer    selecting         "
+"                                                                                                        │                 tokenizer         "
+"                                                                                                        │  · instructions                   "
+"                                                                                                        │  · skills                         "
+"                                                                                                        │  · compat                         "
+"                                                                                                        │  · memory                         "
+"                                                                                                        │  · mcp                            "
+"                                                                                                        │  ✗ lsp          rust-analyzer:    "
+"                                                                                                        │                 not found on PATH "
+"                                                                                                        │                                   "
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────────╮│                                   "
+"│›                                                                                                     ││                                   "
+"╰──────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                   "
+"  edit   ask  no model                                                                ⠋ starting  /help │                                   "

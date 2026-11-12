@@ -1,5 +1,18 @@
 {
   "$defs": {
+    "AgentSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "max_steps": {
+          "default": 100,
+          "description": "Maximum model calls in one user turn. Sub-agents have their own limits.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "AllowList": {
       "additionalProperties": false,
       "properties": {
@@ -15,6 +28,17 @@
         }
       },
       "type": "object"
+    },
+    "ApprovalPolicy": {
+      "enum": [
+        "read-only",
+        "ask",
+        "auto-edit",
+        "allow",
+        "full-auto",
+        "yolo"
+      ],
+      "type": "string"
     },
     "CacheStrategy": {
       "enum": [
@@ -295,25 +319,6 @@
       },
       "type": "object"
     },
-    "PermissionMode": {
-      "description": "Ordered from least to most permissive, so policy can cap with `min`.",
-      "oneOf": [
-        {
-          "enum": [
-            "read-only",
-            "ask",
-            "auto-edit",
-            "full-auto"
-          ],
-          "type": "string"
-        },
-        {
-          "const": "yolo",
-          "description": "No approvals and no sandbox. Only the built-in deny list and `deny` rules apply.",
-          "type": "string"
-        }
-      ]
-    },
     "PermissionSettings": {
       "additionalProperties": false,
       "properties": {
@@ -330,8 +335,13 @@
           "default": []
         },
         "mode": {
-          "$ref": "#/$defs/PermissionMode",
-          "default": "ask"
+          "$ref": "#/$defs/ApprovalPolicy",
+          "default": "ask",
+          "description": "Approval defaults, independent of whether the agent is planning or editing."
+        },
+        "work_mode": {
+          "$ref": "#/$defs/WorkMode",
+          "default": "edit"
         }
       },
       "type": "object"
@@ -347,7 +357,7 @@
         "max_permission_mode": {
           "anyOf": [
             {
-              "$ref": "#/$defs/PermissionMode"
+              "$ref": "#/$defs/ApprovalPolicy"
             },
             {
               "type": "null"
@@ -489,7 +499,7 @@
         },
         {
           "const": "auto",
-          "description": "Show only when something needs attention or startup is slow (over half a second).",
+          "description": "Show the startup diagnostics in the sidebar until the first turn; without room for\none, show the transcript panel only when something needs attention.",
           "type": "string"
         }
       ]
@@ -555,6 +565,11 @@
           "$ref": "#/$defs/ShowReasoning",
           "default": "collapsed"
         },
+        "sidebar": {
+          "default": true,
+          "description": "Show session details in a right sidebar on terminals at least 140 columns wide\nand 24 rows tall.",
+          "type": "boolean"
+        },
         "startup_panel": {
           "$ref": "#/$defs/StartupPanel",
           "default": "auto"
@@ -588,11 +603,25 @@
         }
       },
       "type": "object"
+    },
+    "WorkMode": {
+      "description": "What the agent may do. Planning never authorizes changes or test execution.",
+      "enum": [
+        "plan",
+        "edit"
+      ],
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "agent": {
+      "$ref": "#/$defs/AgentSettings",
+      "default": {
+        "max_steps": 100
+      }
+    },
     "bundles": {
       "$ref": "#/$defs/ItemToggles",
       "default": {
@@ -694,7 +723,8 @@
         "allow": [],
         "ask": [],
         "deny": [],
-        "mode": "ask"
+        "mode": "ask",
+        "work_mode": "edit"
       }
     },
     "policy": {
@@ -765,6 +795,7 @@
         "mouse": true,
         "reduced_motion": false,
         "show_reasoning": "collapsed",
+        "sidebar": true,
         "startup_panel": "auto",
         "terminal_title": true,
         "theme": "auto"

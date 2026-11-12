@@ -17,6 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::secret::Secret;
+use quack_protocol::{HookConnection, HookDescriptor};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +39,13 @@ pub struct HookFile {
     /// Extra environment variables for the command; values may be secrets.
     #[serde(default)]
     pub env: BTreeMap<String, Secret>,
+    /// Declarative setup metadata. Parsed independently so newer forms do not disable a hook.
+    #[serde(default)]
+    #[schemars(with = "Option<HookDescriptor>")]
+    pub setup: Option<toml::Table>,
+    /// When present this list is authoritative, including when empty.
+    #[serde(default)]
+    pub connections: Option<Vec<HookBinding>>,
     /// Variables passed through from the harness's own environment. Default: a minimal set
     /// (`PATH`, `HOME`, temp and locale variables, proxies, and what Windows needs).
     #[serde(default)]
@@ -47,9 +55,92 @@ pub struct HookFile {
     pub cwd: String,
     #[serde(default = "timeout")]
     pub timeout_secs: u64,
+    /// Preserve stdout and added context in full. Warn above 8,000 estimated tokens.
+    #[serde(default)]
+    pub full_context: bool,
     /// What a failure (a crash, a timeout, unreadable output) means.
     #[serde(default)]
     pub on_error: OnError,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HookBinding {
+    pub connection: HookConnection,
+    #[serde(default)]
+    pub credentials: BTreeMap<String, Secret>,
+    /// Fields whose credential entries were created by setup. External references
+    /// never acquire ownership merely because they use the same name or directory.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub managed_credentials: std::collections::BTreeSet<String>,
+}
+
+impl std::fmt::Debug for HookBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HookBinding")
+            .field("connection", &self.connection)
+            .field(
+                "credential_fields",
+                &self.credentials.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl HookFile {
+    pub fn descriptor(&self) -> Result<HookDescriptor, String> {
+        let table = self
+            .setup
+            .clone()
+            .ok_or_else(|| "This hook has no setup form; edit its file directly.".to_owned())?;
+        let descriptor: HookDescriptor = toml::Value::Table(table)
+            .try_into()
+            .map_err(|_| "The hook's setup descriptor is invalid; check its fields.".to_owned())?;
+        if descriptor.version != 1 {
+            return Err("This setup form needs a different version of quack; update quack or edit the hook file directly.".into());
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for field in &descriptor.fields {
+            if field.id.is_empty()
+                || !field
+                    .id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                || !ids.insert(&field.id)
+                || !matches!(
+                    field.kind.as_str(),
+                    "text" | "url" | "integer" | "boolean" | "choice" | "secret"
+                )
+            {
+                return Err("The hook's setup form has an invalid or duplicate field.".into());
+            }
+        }
+        if !ids.contains(&descriptor.scope_field) {
+            return Err("The hook's setup form needs a valid scope_field.".into());
+        }
+        let mut presets = std::collections::BTreeSet::new();
+        if descriptor.presets.is_empty()
+            || descriptor
+                .presets
+                .iter()
+                .any(|p| p.id.is_empty() || !presets.insert(&p.id))
+        {
+            return Err("The hook's setup form needs unique service presets.".into());
+        }
+        for field in descriptor.fields.iter().filter(|f| f.kind == "secret") {
+            if !field.default.is_empty()
+                || descriptor
+                    .presets
+                    .iter()
+                    .any(|p| p.values.contains_key(&field.id))
+            {
+                return Err(
+                    "Secret fields cannot have plain defaults; use credential references instead."
+                        .into(),
+                );
+            }
+        }
+        Ok(descriptor)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -168,6 +259,7 @@ mod tests {
                 .expect("parse");
         assert_eq!(f.event, HookEvent::TurnEnd);
         assert_eq!(f.timeout_secs, 10);
+        assert!(!f.full_context);
         assert_eq!(f.on_error, OnError::Warn);
         assert_eq!(f.check(), Ok(()));
 

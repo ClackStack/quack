@@ -11,6 +11,7 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
+schemars.workspace = true
 # TypeScript bindings for the SPA (docs/plan/15-desktop-client.md). Only compiled for the
 # `ts` feature; `cargo test -p quack-protocol --features ts export` regenerates
 # crates/quack-gui/ui/src/lib/protocol.ts.

@@ -140,7 +140,7 @@ impl Theme {
         match mode {
             "read-only" => self.user,
             "auto-edit" => self.ok,
-            "full-auto" => self.warn,
+            "allow" | "full-auto" => self.warn,
             "plan" => self.magenta,
             "yolo" => self.error,
             _ => self.accent,

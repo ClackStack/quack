@@ -21,7 +21,7 @@ description = "Reads a file, with line numbers. Long files are clipped; when tha
 [[tools]]
 name = "write"
 maps_to = "write"
-description = "Creates a file (or replaces one entirely) with the given content."
+description = "Creates a file (or replaces one entirely) with the given content. Before overwriting an existing file, call `read` on it; shell inspection does not count."
 
 [[tools]]
 name = "edit"
@@ -31,7 +31,7 @@ description = "Replaces an exact literal string in a file: `old_string` must mat
 [[tools]]
 name = "bash"
 maps_to = "shell"
-description = "Runs a shell command in the workspace and returns its output with the exit status. Batch related file inspection into one command (grep -n, sed -n ranges, head/tail) instead of many small calls."
+description = "Runs a shell command in the workspace and returns its output with the exit status. Batch related exploration into one command (grep -n, sed -n ranges, head/tail) instead of many small calls. Before editing or overwriting an existing file, use `read` on it; shell output does not satisfy the tracked-read guard."
 
 [[tools]]
 name = "todo_write"

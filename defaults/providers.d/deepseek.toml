@@ -5,3 +5,19 @@ name = "DeepSeek API"
 group = "From the model makers"
 base_url = "https://api.deepseek.com"
 api_key = { env = "DEEPSEEK_API_KEY" }
+
+# Thinking mode is on by default with effort `high`; the API takes only `low`, `high` and
+# `max` (other OpenAI-style values are mapped onto those). Turning thinking off is a
+# separate `thinking.type` body field, not an effort, so `none` is not offered:
+# https://api-docs.deepseek.com/guides/thinking_mode
+[[models]]
+id = "deepseek-flash"
+reasoning = { effort = "high", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "deepseek-v4-flash"
+reasoning = { effort = "high", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "deepseek-v4-pro"
+reasoning = { effort = "high", efforts = ["low", "high", "max"] }

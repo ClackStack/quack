@@ -162,7 +162,7 @@ async fn leaving_plan_mode_goes_back_to_the_session_model() {
     let mode = |m: &str| Op::SetPermissionMode { mode: m.into() };
     engine.submit(mode("plan")).await;
     turn(&mut engine, "plan it").await;
-    engine.submit(mode("ask")).await;
+    engine.submit(mode("edit")).await;
     turn(&mut engine, "just talk").await;
     engine.shutdown().await;
 
@@ -172,4 +172,95 @@ async fn leaving_plan_mode_goes_back_to_the_session_model() {
         .map(|b| b["model"].clone())
         .collect();
     assert_eq!(models, ["big", "small"]);
+}
+
+#[tokio::test]
+async fn a_plan_resumed_after_reload_still_hands_the_editor_only_a_brief() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains(r#""model":"big""#))
+        .and(body_string_contains(r#""role":"tool""#))
+        .respond_with(sse_text("Proposed tests: cargo test verifies retries."))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains(r#""model":"big""#))
+        .respond_with(sse_call(
+            "inspect",
+            "read",
+            serde_json::json!({"path":"a.rs"}),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains(r#""model":"small""#))
+        .respond_with(sse_text("done"))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join("user")).expect("user dir");
+    std::fs::write(
+        tmp.path().join("user").join("config.toml"),
+        "[model]\ndefault = \"mock/small\"\nplanner = \"mock/big\"\n",
+    )
+    .expect("config");
+    let spawn = |resume| {
+        let loaded = common::workspace(tmp.path(), &server.uri(), r#"["small", "big"]"#, "");
+        std::fs::write(loaded.dirs.workspace_root.join("a.rs"), "fn retry() {}\n").expect("source");
+        Engine::spawn_with(Arc::new(loaded), resume)
+    };
+    let mut engine = spawn(Resume::New);
+    turn(&mut engine, "hello").await;
+    engine
+        .submit(Op::SetWorkMode {
+            mode: quack_core::protocol::WorkMode::Plan,
+        })
+        .await;
+    turn(&mut engine, "plan retries").await;
+    engine.submit(Op::ReloadConfig).await;
+    turn(&mut engine, "include retry limits").await;
+    engine.shutdown().await;
+
+    let mut resumed = spawn(Resume::Latest);
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), resumed.events.recv())
+            .await
+            .expect("planner ready")
+            .expect("open");
+        if let Event::SessionConfigured { session } = event
+            && session.model.as_deref() == Some("mock/big")
+        {
+            break;
+        }
+    }
+    resumed
+        .submit(Op::AcceptPlan {
+            mode: String::new(),
+        })
+        .await;
+    until_done(&mut resumed).await;
+    resumed.shutdown().await;
+
+    let bodies = chat_bodies(&server).await;
+    let small: Vec<_> = bodies.iter().filter(|b| b["model"] == "small").collect();
+    assert_eq!(small.len(), 2, "{bodies:#?}");
+    let before = messages(small[0]);
+    let after = messages(small[1]);
+    assert_eq!(after.len(), before.len() + 2, "{after:#?}");
+    assert_eq!(after[..before.len()], before[..]);
+    let brief = after.last().expect("brief")["content"]
+        .as_str()
+        .expect("text");
+    assert!(brief.contains("[Plan handoff] mock/big"), "{brief}");
+    assert!(
+        brief.contains("plan retries") && brief.contains("include retry limits"),
+        "{brief}"
+    );
+    assert!(brief.contains("cargo test verifies retries"), "{brief}");
+    assert!(
+        after
+            .iter()
+            .all(|m| m["role"] != "tool" && m.get("tool_calls").is_none()),
+        "{after:#?}"
+    );
 }

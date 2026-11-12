@@ -155,6 +155,7 @@ fn derive(base: &Setup, def: &AgentFile) -> Setup {
     Setup {
         provider: base.provider.clone(),
         model: base.model.clone(),
+        reasoning_effort: std::sync::RwLock::new(Some(base.reasoning_effort())),
         model_ref: base.model_ref.clone(),
         profile: base.profile.clone(),
         system,
@@ -209,7 +210,7 @@ async fn start(parent: &TurnCtx, call_key: &str, req: TaskRequest) -> TaskReport
         // Read-only agents get plan mode's rules on a copy of the session's permissions.
         Ok(p) if def.read_only => {
             let mut p = p.clone();
-            p.plan = true;
+            p.work_mode = quack_protocol::WorkMode::Plan;
             Arc::new(Mutex::new(p))
         }
         Ok(_) => parent.perms.clone(),

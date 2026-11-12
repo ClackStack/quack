@@ -30,7 +30,7 @@ locked = [
   "model.default", "network",
   "sandbox.mode", "permissions.deny",
 ]
-max_permission_mode = "full-auto"   # no yolo
+max_permission_mode = "allow"       # no yolo
 project_config = "trusted-only"
 
 [policy.providers]
@@ -66,7 +66,7 @@ export const layers: [string, string, string][] = [
 	['User', '`~/.config/quack/` · `%APPDATA%\\quack\\`', 'Your own files'],
 	['Project', '`.quack/` at the repository root', 'Loads only once you trust the repo'],
 	['Environment', '`QUACK_MODEL`', 'Picks the model, like `-m`'],
-	['Command line', '`-m`, `--profile`, `--permission-mode`, `-c key=value`', 'This run only']
+	['Command line', '`-m`, `--profile`, `--mode`, `--approvals`, `-c key=value`', 'This run only']
 ];
 
 export const folder = `config.toml          settings
@@ -99,9 +99,10 @@ export const reference: Group[] = [
 		title: 'Permissions',
 		file: 'config.toml [permissions]',
 		rows: [
-			['mode', '"ask"', '`read-only`, `ask`, `auto-edit`, `full-auto` (sandbox and deny rules still apply) or `yolo`'],
+			['work_mode', '"edit"', '`plan` reads/searches and proposes tests for review; `edit` may change files and run commands'],
+			['mode', '"ask"', 'Approvals: `ask` before unapproved actions, or `allow` within the selected work mode, sandbox and rules'],
 			['allow', '[]', 'Rules that run without asking: `shell:cargo test*`, `edit:src/**`, `mcp:github/get_*`'],
-			['ask', '[]', 'Rules that always ask, even in `full-auto`'],
+			['ask', '[]', 'Rules that always ask, even in `allow`; yolo bypasses asks'],
 			['deny', '[]', 'Rules that never run, in any mode. A built-in deny list always applies too']
 		]
 	},
@@ -128,7 +129,7 @@ export const reference: Group[] = [
 		file: 'config.toml [policy], system layer only',
 		rows: [
 			['locked', '[]', 'Dotted keys no other layer can change; a table locks all of it'],
-			['max_permission_mode', 'unset', 'The most permissive mode allowed, `--yolo` included'],
+			['max_permission_mode', 'unset', 'Approval ceiling: `allow` prevents yolo. Lock `permissions.work_mode` separately to enforce Plan'],
 			['project_config', '"trusted-only"', '`trusted-only`, `never` or `always`: whether a repo’s `.quack/` loads'],
 			['providers.allowed', '[]', 'Provider id globs that may load. Empty: all'],
 			['providers.hosts', '[]', 'Host globs a provider’s `base_url` must match. Empty: any'],
@@ -162,11 +163,12 @@ export const reference: Group[] = [
 		rows: [
 			['theme', '"auto"', '`dark` or `light`'],
 			['show_reasoning', '"collapsed"', '`collapsed`, `expanded` or `hidden`'],
-			['startup_panel', '"auto"', '`auto`, `always` or `never`'],
+			['startup_panel', '"auto"', 'Startup diagnostics: in the sidebar until the first turn; on narrow terminals only on problems. `always` or `never`'],
 			['ascii', 'false', 'ASCII instead of box-drawing glyphs'],
 			['mouse', 'true', '`false` leaves the mouse to the terminal'],
 			['reduced_motion', 'false', 'Static indicators instead of spinners'],
-			['terminal_title', 'true', 'Window title shows the duck and the session title. `false`: leave it alone']
+			['terminal_title', 'true', 'Window title shows the duck and the session title. `false`: leave it alone'],
+			['sidebar', 'true', 'Session details on the right at 140 columns × 24 rows and above, growing from 36 up to 48 columns on wider terminals. `false`: use the full width for the conversation']
 		]
 	},
 	{

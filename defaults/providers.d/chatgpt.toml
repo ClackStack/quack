@@ -13,17 +13,33 @@ auth = { type = "chatgpt", issuer = "https://auth.openai.com" }
 extra_body = { reasoning = { summary = "auto", context = "all_turns" } }
 
 # The models the account offers are also listed in /models.
+# Default context budgets (272k, Terra 500k) and image input follow the Codex catalog
+# reviewed 2026-11-11; larger account/route-specific windows require an explicit override.
+# Supported reasoning efforts: https://developers.openai.com/api/docs/guides/reasoning
 [[models]]
 id = "gpt-6.1-sol"
 alias = "sol"
-context_window = 1050000
+context_window = 272000
+vision = true
+reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
 
 [[models]]
 id = "gpt-6-astra"
 alias = "astra"
-context_window = 1050000
+context_window = 272000
+vision = true
+reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
 
 [[models]]
 id = "gpt-6-luna"
 alias = "luna"
-context_window = 1050000
+context_window = 272000
+vision = true
+reasoning = { effort = "medium", efforts = ["none", "low", "medium", "high", "xhigh", "max"] }
+
+[[models]]
+id = "gpt-6.1-terra"
+alias = "terra"
+context_window = 500000
+vision = true
+reasoning = { effort = "medium", efforts = ["none", "low", "medium", "high", "xhigh", "max"] }

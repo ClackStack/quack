@@ -30,6 +30,8 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) struct Setup {
     pub provider: Provider,
     pub model: ModelEntry,
+    /// Session selection; the model entry keeps the configured default intact.
+    pub reasoning_effort: std::sync::RwLock<Option<String>>,
     /// `<provider>/<model>` as shown to the user.
     pub model_ref: String,
     pub profile: Profile,
@@ -60,6 +62,20 @@ pub(crate) struct Setup {
     pub agents: Arc<Vec<(String, quack_config::AgentFile)>>,
     /// Offer the MCP servers' tools; off for sub-agents that do not list `mcp`.
     pub mcp_tools: bool,
+}
+
+impl Setup {
+    pub(crate) fn reasoning_effort(&self) -> String {
+        self.reasoning_effort
+            .read()
+            .ok()
+            .and_then(|effort| effort.clone())
+            .unwrap_or_else(|| self.model.reasoning.effort.clone())
+    }
+
+    pub(crate) fn reasoning_key(&self) -> String {
+        format!("{}/{}", self.provider.id, self.model.id)
+    }
 }
 
 /// Files read from the workspace and config folders that shape the prompt.
@@ -755,6 +771,10 @@ async fn build_setup(
         &tool_ctx,
         &vars,
     );
+    if let Err(error) = validate_edit_surface(&profile, &shaped) {
+        rep.send(LoadState::Failed { error });
+        return None;
+    }
     for w in shaped.warnings {
         warn(tx, w);
     }
@@ -780,13 +800,14 @@ async fn build_setup(
 
     rep.send(LoadState::Ready {
         detail: format!(
-            "{} · {} tools · {} mode",
+            "{} · {} tools · {} · {} approvals",
             match (&profile.dir, profile.id.as_str()) {
                 (Some(_), id) => id.to_owned(),
                 (None, "empty") => "empty (no prompt)".to_owned(),
                 (None, id) => format!("{id} (built in)"),
             },
             surface.tools.len(),
+            settings.work_mode.label(),
             settings.mode.label()
         ),
     });
@@ -797,6 +818,7 @@ async fn build_setup(
     Some(Setup {
         provider,
         model,
+        reasoning_effort: std::sync::RwLock::default(),
         model_ref,
         profile,
         system,
@@ -902,13 +924,7 @@ pub(crate) fn shape(
     let mut vars = vars.clone();
     vars.write_tool = surface.name_of("write").unwrap_or("write").to_owned();
     vars.edit_tool = surface
-        .name_of(match ctx.edit_format {
-            EditFormat::Hashline => "edit_hashline",
-            EditFormat::ApplyPatch => "apply_patch",
-            EditFormat::SearchReplaceBlocks => "edit_blocks",
-            EditFormat::WholeFile => "write",
-            EditFormat::StrReplace | EditFormat::Auto => "edit",
-        })
+        .name_of(edit_tool(ctx.edit_format))
         .unwrap_or("write")
         .to_owned();
     Shaped {
@@ -918,6 +934,42 @@ pub(crate) fn shape(
         surface,
         warnings,
     }
+}
+
+fn edit_tool(format: EditFormat) -> &'static str {
+    match format {
+        EditFormat::Hashline => "edit_hashline",
+        EditFormat::ApplyPatch => "apply_patch",
+        EditFormat::SearchReplaceBlocks => "edit_blocks",
+        EditFormat::WholeFile => "write",
+        EditFormat::StrReplace | EditFormat::Auto => "edit",
+    }
+}
+
+/// Check the configured surface, before permissions or plan mode intentionally remove tools.
+fn validate_edit_surface(profile: &Profile, shaped: &Shaped) -> Result<(), String> {
+    let editing = [
+        "edit",
+        "edit_hashline",
+        "apply_patch",
+        "edit_blocks",
+        "write",
+    ];
+    let declares_editing = profile
+        .file
+        .tools
+        .iter()
+        .any(|tool| editing.contains(&tool.maps_to.as_deref().unwrap_or(&tool.name)));
+    let required = edit_tool(shaped.edit_format);
+    // An exclusive profile with no editing mappings may deliberately be read-only.
+    if profile.file.exclusive && declares_editing && shaped.surface.name_of(required).is_none() {
+        return Err(format!(
+            "Profile `{}` does not offer `{required}` for tools.edit_format={} · choose tools.edit_format=auto or a compatible profile.",
+            profile.id,
+            serde_json::to_string(&shaped.edit_format).unwrap_or_default(),
+        ));
+    }
+    Ok(())
 }
 
 /// `[tools] edit_format`, else the profile's, else `str_replace`.

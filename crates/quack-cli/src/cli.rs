@@ -38,10 +38,18 @@ pub(crate) struct Global {
     /// Resume a saved session by id (or unique prefix); `quack sessions` lists them.
     #[arg(long, global = true, value_name = "ID")]
     pub resume: Option<String>,
-    /// Permission mode for this run; shorthand for -c permissions.mode=MODE.
-    #[arg(long, global = true, value_enum)]
+    /// Ask before unapproved actions, or allow them within the selected work mode and sandbox.
+    #[arg(
+        long = "approvals",
+        visible_alias = "permission-mode",
+        global = true,
+        value_enum
+    )]
     pub permission_mode: Option<PermissionModeArg>,
-    /// Shorthand for --permission-mode yolo: nothing asks, no sandbox.
+    /// Plan reads/searches and proposes tests; Edit may implement the task.
+    #[arg(long = "mode", global = true, value_enum)]
+    pub work_mode: Option<WorkModeArg>,
+    /// Allow actions without approval or sandboxing; Plan restrictions still apply.
     #[arg(long, global = true, conflicts_with = "permission_mode")]
     pub yolo: bool,
     /// Draw the first frame, write startup timings as JSON to FILE, and exit.
@@ -51,13 +59,19 @@ pub(crate) struct Global {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub(crate) enum PermissionModeArg {
+    #[value(hide = true)]
     ReadOnly,
     Ask,
+    #[value(hide = true)]
     AutoEdit,
+    Allow,
+    #[value(hide = true)]
     FullAuto,
     /// No approvals and no sandbox; only the built-in deny list and deny rules apply.
+    #[value(hide = true)]
     Yolo,
     /// Plan mode: look around and propose a plan; nothing changes until it is accepted.
+    #[value(hide = true)]
     Plan,
 }
 
@@ -67,9 +81,25 @@ impl PermissionModeArg {
             Self::ReadOnly => "read-only",
             Self::Ask => "ask",
             Self::AutoEdit => "auto-edit",
+            Self::Allow => "allow",
             Self::FullAuto => "full-auto",
             Self::Yolo => "yolo",
             Self::Plan => "plan",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum WorkModeArg {
+    Plan,
+    Edit,
+}
+
+impl WorkModeArg {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Edit => "edit",
         }
     }
 }
@@ -241,4 +271,59 @@ pub(crate) enum ConfigCmd {
     },
     /// Print the resolved directories.
     Paths,
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    #[test]
+    fn planning_and_automatic_approvals_can_be_selected_together() {
+        let cli = Cli::try_parse_from(["quack", "--mode", "plan", "--approvals", "allow"])
+            .expect("independent flags");
+        assert!(matches!(cli.global.work_mode, Some(WorkModeArg::Plan)));
+        assert!(matches!(
+            cli.global.permission_mode,
+            Some(PermissionModeArg::Allow)
+        ));
+        let cli = Cli::try_parse_from(["quack", "--mode", "plan", "--yolo"])
+            .expect("planning with legacy yolo");
+        assert!(cli.global.yolo);
+        assert!(matches!(cli.global.work_mode, Some(WorkModeArg::Plan)));
+    }
+
+    #[test]
+    fn old_permission_flags_still_parse() {
+        let cli = Cli::try_parse_from(["quack", "--permission-mode", "full-auto"])
+            .expect("legacy flag and policy");
+        assert!(matches!(
+            cli.global.permission_mode,
+            Some(PermissionModeArg::FullAuto)
+        ));
+        for legacy in ["auto-edit", "read-only", "plan", "yolo"] {
+            Cli::try_parse_from(["quack", "--permission-mode", legacy])
+                .expect("legacy policy still accepted");
+        }
+    }
+
+    #[test]
+    fn help_offers_only_ask_and_allow_for_approvals() {
+        use clap::CommandFactory;
+
+        let help = Cli::command().render_long_help().to_string();
+        let approvals = help
+            .split("--approvals")
+            .nth(1)
+            .expect("approval flag")
+            .split("--mode")
+            .next()
+            .expect("approval help");
+        assert!(
+            approvals.contains("ask") && approvals.contains("allow"),
+            "{approvals}"
+        );
+        for legacy in ["auto-edit", "read-only", "full-auto", "yolo", "plan"] {
+            assert!(!approvals.contains(legacy), "{approvals}");
+        }
+    }
 }

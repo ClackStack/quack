@@ -1,5 +1,89 @@
 {
   "$defs": {
+    "HookBinding": {
+      "properties": {
+        "connection": {
+          "$ref": "#/$defs/HookConnection"
+        },
+        "credentials": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Secret"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "managed_credentials": {
+          "description": "Fields whose credential entries were created by setup. External references\nnever acquire ownership merely because they use the same name or directory.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "connection"
+      ],
+      "type": "object"
+    },
+    "HookConnection": {
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "preset": {
+          "type": "string"
+        },
+        "values": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "preset"
+      ],
+      "type": "object"
+    },
+    "HookDescriptor": {
+      "properties": {
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/HookField"
+          },
+          "type": "array"
+        },
+        "presets": {
+          "items": {
+            "$ref": "#/$defs/HookPreset"
+          },
+          "type": "array"
+        },
+        "scope_field": {
+          "description": "Connection value containing the web base used to scope access checks.",
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "scope_field",
+        "fields",
+        "presets"
+      ],
+      "type": "object"
+    },
     "HookEvent": {
       "oneOf": [
         {
@@ -39,6 +123,64 @@
         }
       ]
     },
+    "HookField": {
+      "properties": {
+        "advanced": {
+          "default": false,
+          "type": "boolean"
+        },
+        "choices": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "credential_scope": {
+          "default": false,
+          "description": "Changing this value requires an explicit credential change.",
+          "type": "boolean"
+        },
+        "default": {
+          "default": "",
+          "type": "string"
+        },
+        "help": {
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "text, url, integer, boolean, choice, or secret.",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "type": "boolean"
+        },
+        "required_when": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "kind"
+      ],
+      "type": "object"
+    },
     "HookMatch": {
       "additionalProperties": false,
       "properties": {
@@ -58,6 +200,50 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "HookPreset": {
+      "properties": {
+        "choices": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "derived": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Field templates expanded from the connection values, e.g. {web_url}/api/v4.",
+          "type": "object"
+        },
+        "help": {
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "values": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
       "type": "object"
     },
     "OnError": {
@@ -155,6 +341,17 @@
       },
       "type": "array"
     },
+    "connections": {
+      "default": null,
+      "description": "When present this list is authoritative, including when empty.",
+      "items": {
+        "$ref": "#/$defs/HookBinding"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
     "cwd": {
       "default": "",
       "description": "Working directory; default: the workspace root.",
@@ -178,6 +375,11 @@
     },
     "event": {
       "$ref": "#/$defs/HookEvent"
+    },
+    "full_context": {
+      "default": false,
+      "description": "Preserve stdout and added context in full. Warn above 8,000 estimated tokens.",
+      "type": "boolean"
     },
     "id": {
       "default": null,
@@ -211,6 +413,18 @@
       "$ref": "#/$defs/OnError",
       "default": "warn",
       "description": "What a failure (a crash, a timeout, unreadable output) means."
+    },
+    "setup": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HookDescriptor"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Declarative setup metadata. Parsed independently so newer forms do not disable a hook."
     },
     "timeout_secs": {
       "default": 10,

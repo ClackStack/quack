@@ -1,0 +1,74 @@
+{
+  "harness": "quack 0.1.0",
+  "date": "2026-11-11",
+  "suite": "hard",
+  "model": "chatgpt/sol",
+  "profile": "generic",
+  "sampling": {},
+  "results": [
+    {
+      "task": "csv-export",
+      "category": "fix-symptom",
+      "passed": true,
+      "changed": [
+        "orderly/reports.py",
+        "tests/test_reports.py"
+      ],
+      "steps": 9,
+      "tool_calls": 15,
+      "tool_errors": 0,
+      "parse_failures": 0,
+      "edit_failures": 0,
+      "prompt_tokens": 62140,
+      "cached_tokens": 7168,
+      "completion_tokens": 1288,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 8740,
+      "seconds": 48.929920195
+    },
+    {
+      "task": "csv-export",
+      "category": "fix-symptom",
+      "passed": true,
+      "changed": [
+        "orderly/reports.py",
+        "tests/test_cli.py",
+        "tests/test_reports.py"
+      ],
+      "steps": 12,
+      "tool_calls": 19,
+      "tool_errors": 0,
+      "parse_failures": 0,
+      "edit_failures": 0,
+      "prompt_tokens": 88846,
+      "cached_tokens": 16128,
+      "completion_tokens": 1480,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 9471,
+      "seconds": 67.241552886
+    },
+    {
+      "task": "csv-export",
+      "category": "fix-symptom",
+      "passed": true,
+      "changed": [
+        "orderly/reports.py",
+        "tests/test_reports.py"
+      ],
+      "steps": 9,
+      "tool_calls": 15,
+      "tool_errors": 0,
+      "parse_failures": 0,
+      "edit_failures": 0,
+      "prompt_tokens": 65211,
+      "cached_tokens": 8960,
+      "completion_tokens": 1707,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 9443,
+      "seconds": 82.070872782
+    }
+  ]
+}

@@ -11,6 +11,7 @@ mod engine;
 mod env;
 mod export;
 mod handoff;
+mod hook_setup;
 mod hooks;
 mod lsp;
 mod mcp;

@@ -19,6 +19,8 @@ pub(crate) struct Io<'a> {
     pub out: &'a mut dyn Write,
     /// Reads a secret without echoing it.
     pub secret: &'a dyn Fn(&str) -> std::io::Result<String>,
+    /// Launches the browser; tests provide a mock browser instead.
+    pub browser: &'a dyn Fn(&str),
 }
 
 impl Io<'_> {
@@ -53,7 +55,7 @@ pub(crate) async fn run(config: Arc<Loaded>, io: &mut Io<'_>) -> i32 {
     }
     if !offers.is_empty() {
         io.say(&format!(
-            "  ({} more from the defaults bundle, ready once they run or have a key)",
+            "  ({} more from the defaults bundle, ready once they run, have a key, or you sign in)",
             offers.len()
         ));
     }
@@ -61,7 +63,7 @@ pub(crate) async fn run(config: Arc<Loaded>, io: &mut Io<'_>) -> i32 {
     loop {
         io.say("What would you like to do?");
         io.say("  1  look for model servers on this machine");
-        io.say("  2  use a hosted service with an API key");
+        io.say("  2  use a hosted service with a subscription or API key");
         io.say("  3  add an OpenAI-compatible server by its URL");
         io.say("  q  quit");
         let Some(choice) = io.ask("> ") else {
@@ -69,7 +71,7 @@ pub(crate) async fn run(config: Arc<Loaded>, io: &mut Io<'_>) -> i32 {
         };
         let added = match choice.as_str() {
             "1" => local(&config, io).await,
-            "2" => hosted(&config, io),
+            "2" => hosted(&config, io).await,
             "3" => by_url(&config, io),
             "q" | "Q" | "" => return exit::OK,
             _ => {
@@ -175,7 +177,7 @@ async fn local(config: &Arc<Loaded>, io: &mut Io<'_>) -> Result<Option<String>, 
 }
 
 /// A configured hosted service, with its key from a variable or the credential store.
-fn hosted(config: &Loaded, io: &mut Io<'_>) -> Result<Option<String>, String> {
+async fn hosted(config: &Loaded, io: &mut Io<'_>) -> Result<Option<String>, String> {
     let services = setup::services(config);
     if services.is_empty() {
         io.say("No hosted services are configured. Use option 3 with the service's URL.");
@@ -190,6 +192,7 @@ fn hosted(config: &Loaded, io: &mut Io<'_>) -> Result<Option<String>, String> {
         let state = match (&s.env, s.ready) {
             (_, true) => "ready".to_owned(),
             (Some(env), false) => format!("needs {env}"),
+            (None, false) if s.subscription => "sign in with your subscription".to_owned(),
             (None, false) => "needs a key".to_owned(),
         };
         io.say(&format!("  {:>4}  {:<28} {state}", i + 1, s.name));
@@ -199,6 +202,18 @@ fn hosted(config: &Loaded, io: &mut Io<'_>) -> Result<Option<String>, String> {
         return Ok(None);
     };
     if service.ready {
+        return Ok(Some(service.id.clone()));
+    }
+    if service.subscription {
+        let provider = setup::sign_in_provider(config, &service.id)?;
+        io.say("Continue in your browser. If it does not open, visit the URL below.");
+        provider
+            .sign_in(|url| {
+                io.say(url);
+                (io.browser)(url);
+            })
+            .await?;
+        io.say("Signed in. Choose a model to finish setup.");
         return Ok(Some(service.id.clone()));
     }
     let env = service.env.clone().unwrap_or_default();
@@ -458,6 +473,7 @@ mod tests {
             input: &mut input,
             out: &mut out,
             secret: &|_| Ok(String::new()),
+            browser: &|_| {},
         };
         let code = run(config, &mut io).await;
         let out = String::from_utf8_lossy(&out);
@@ -491,6 +507,7 @@ mod tests {
                 input: &mut input,
                 out: &mut out,
                 secret: &secret,
+                browser: &|_| {},
             };
             offer_checks(config, &mut io);
             String::from_utf8(out).expect("utf-8")
@@ -536,6 +553,7 @@ mod tests {
             input: &mut input,
             out: &mut out,
             secret: &|_| Ok(String::new()),
+            browser: &|_| {},
         };
         let code = run(config, &mut io).await;
         let out = String::from_utf8_lossy(&out);
@@ -545,5 +563,104 @@ mod tests {
         assert!(out.contains("export QUACK_TEST_UNSET_KEY="), "{out}");
         // Nothing is written for a key read from a variable.
         assert!(!tmp.path().join("user").join("providers.d").exists());
+    }
+    #[cfg(feature = "auth-chatgpt")]
+    fn subscription_config(root: &std::path::Path, issuer: &str) -> Loaded {
+        let config = isolated(root);
+        let dir = config.dirs.user_config.join("providers.d");
+        std::fs::create_dir_all(&dir).expect("providers");
+        std::fs::write(dir.join("plan.toml"), format!(
+            "name = \"Test subscription\"\napi = \"openai-responses\"\nbase_url = \"{issuer}/v1\"\n\
+             auth = {{ type = \"chatgpt\", issuer = \"{issuer}\" }}\nmodels = [\"coder\"]\n"
+        )).expect("provider");
+        config
+    }
+
+    #[cfg(feature = "auth-chatgpt")]
+    #[tokio::test]
+    async fn wizard_subscription_opens_browser_and_handles_declined_sign_in() {
+        use quack_providers::reqwest;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = Arc::new(subscription_config(tmp.path(), "https://plan.example"));
+        let mut input = "2\n1\nq\n".as_bytes();
+        let mut out = Vec::new();
+        let browser = |url: &str| {
+            let url = reqwest::Url::parse(url).expect("URL");
+            let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+            assert!(query["scope"].contains("chatgpt.tokens.use.direct"));
+            let mut back = reqwest::Url::parse(&query["redirect_uri"]).expect("redirect");
+            back.query_pairs_mut()
+                .append_pair("state", &query["state"])
+                .append_pair("error", "access_denied");
+            tokio::spawn(async move {
+                reqwest::get(back).await.expect("mock browser callback");
+            });
+        };
+        let mut io = Io {
+            input: &mut input,
+            out: &mut out,
+            secret: &|_| panic!("subscription must not ask for a key"),
+            browser: &browser,
+        };
+        assert_eq!(run(config, &mut io).await, exit::OK);
+        let out = String::from_utf8(out).expect("output");
+        assert!(out.contains("Test subscription"), "{out}");
+        assert!(out.contains("sign in with your subscription"), "{out}");
+        assert!(
+            out.contains("https://plan.example/api/accounts/authorize?"),
+            "{out}"
+        );
+        assert!(out.contains("declined in the browser"), "{out}");
+        assert!(!tmp.path().join("user").join("config.toml").exists());
+    }
+
+    #[cfg(feature = "auth-chatgpt")]
+    #[tokio::test]
+    async fn wizard_signed_in_subscription_selects_and_saves_a_model() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer test-access"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "coder"}]
+            })))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = Arc::new(subscription_config(tmp.path(), &server.uri()));
+        let dir = config.dirs.user_data.join("auth");
+        std::fs::create_dir_all(&dir).expect("auth");
+        std::fs::write(
+            dir.join("plan.json"),
+            serde_json::json!({
+                "client_id": "app", "subject": "user", "email": "test@example.com",
+                "access_token": "test-access", "refresh_token": "test-refresh",
+                "expires_at": u64::MAX, "scopes": ["chatgpt.tokens.use.direct"]
+            })
+            .to_string(),
+        )
+        .expect("credentials");
+        let mut input = "2\n1\n1\n".as_bytes();
+        let mut out = Vec::new();
+        let mut io = Io {
+            input: &mut input,
+            out: &mut out,
+            secret: &|_| panic!("subscription must not ask for a key"),
+            browser: &|_| panic!("a ready subscription must reuse its sign-in"),
+        };
+        assert_eq!(run(config.clone(), &mut io).await, exit::OK);
+        let saved =
+            std::fs::read_to_string(config.dirs.user_config.join("config.toml")).expect("config");
+        assert!(saved.contains("default = \"plan/coder\""), "{saved}");
+        let requests = server.received_requests().await.expect("requests");
+        assert!(!requests.is_empty());
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.method == "GET" && r.url.path() == "/v1/models"),
+            "setup must not call inference"
+        );
     }
 }
