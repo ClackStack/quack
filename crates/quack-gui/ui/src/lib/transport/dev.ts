@@ -23,6 +23,7 @@ const INFO: AppInfo = {
 	branch: 'main',
 	model: 'dev-local/tiny',
 	permission_mode: 'ask',
+	work_mode: 'edit',
 	ui: { theme: 'auto', reduced_motion: false },
 	settings: [],
 	layers: [{ layer: 'user', status: 'no config.toml', file: null }],
@@ -40,7 +41,9 @@ export function devTransport(): Transport {
 	};
 	const send = (tab: number, event: Event) => fan({ tab, event });
 	let nextTab = 0;
-	let mode = 'ask';
+	let workMode: import('#lib/protocol').WorkMode = 'edit';
+	let approvals: import('#lib/protocol').ApprovalPolicy = 'ask';
+	let effort: string | null = null;
 	let resolveApproval: (() => void) | null = null;
 
 	const catalog = () => ({
@@ -52,7 +55,12 @@ export function devTransport(): Transport {
 				bundled: false,
 				models: [
 					{ id: 'tiny', context_window: 32768, price: 'free (scripted)' },
-					{ id: 'large', context_window: 131072, price: 'free (scripted)' }
+					{
+						id: 'thinker',
+					context_window: 131072,
+					price: 'free (scripted)',
+					reasoning_efforts: ['low', 'medium', 'high']
+					}
 				]
 			}
 		],
@@ -143,7 +151,7 @@ export function devTransport(): Transport {
 				}
 			});
 			send(tab, { event: 'model_catalog', ...catalog() });
-			send(tab, { event: 'permission_mode', mode });
+			send(tab, { event: 'mode_changed', work_mode: workMode, approvals });
 			send(tab, {
 				event: 'session_list',
 				sessions: [
@@ -171,29 +179,83 @@ export function devTransport(): Transport {
 					resolveApproval?.();
 					resolveApproval = null;
 					break;
-				case 'set_permission_mode':
-					mode = op.mode;
-					send(tab, { event: 'permission_mode', mode });
-					if (mode === 'plan') {
+				case 'set_work_mode':
+					workMode = op.mode;
+					send(tab, { event: 'mode_changed', work_mode: workMode, approvals });
+					if (workMode === 'plan') {
 						send(tab, {
 							event: 'plan',
 							checklist: '[x] read the pond\n[ ] count the ducks\n[ ] export the census'
 						});
 					}
 					break;
-				case 'set_model':
-					send(tab, { event: 'session_configured', session: { ...SESSION, model: `${op.provider}/${op.model}` } });
+				case 'set_approval_policy':
+					approvals = op.policy;
+					send(tab, { event: 'mode_changed', work_mode: workMode, approvals });
+					break;
+				case 'set_reasoning_effort':
+					effort = op.effort ?? null;
+					send(tab, {
+						event: 'session_configured',
+						session: {
+							...SESSION,
+						model: 'dev-local/thinker',
+						reasoning_effort: effort,
+						reasoning_efforts: ['low', 'medium', 'high']
+					}
+				});
+					break;
+				case 'set_model': {
+					const model = `${op.provider}/${op.model}`;
+					if (model === 'dev-local/thinker')
+						send(tab, {
+							event: 'session_configured',
+						session: {
+							...SESSION,
+							model,
+							reasoning_effort: effort,
+							reasoning_efforts: ['low', 'medium', 'high']
+						}
+						});
+					else send(tab, { event: 'session_configured', session: { ...SESSION, model } });
 					send(tab, {
 						event: 'model_catalog',
 						...catalog(),
-						current: `${op.provider}/${op.model}`
+						current: model
 					});
 					break;
+				}
 				case 'list_models':
 					send(tab, { event: 'model_catalog', ...catalog() });
 					break;
 				case 'list_services':
-					send(tab, { event: 'services', services: [] });
+					send(tab, {
+						event: 'services',
+						services: [
+						{
+							subscription: true,
+							id: 'dev-plan',
+							name: 'Dev Plan (scripted)',
+							group: 'demo',
+							base_url: '',
+							ready: false
+						}
+						]
+					});
+					break;
+				case 'sign_in':
+					if (op.id) {
+						const id = op.id;
+						send(tab, {
+							event: 'sign_in_url',
+							id,
+							url: 'https://sign-in.example.dev/authorize?demo=1'
+							});
+						setTimeout(() => {
+							send(tab, { event: 'sign_in_result', id, error: null });
+							send(tab, { event: 'services', services: [] });
+						}, 4000);
+					}
 					break;
 				case 'detect_servers':
 					send(tab, { event: 'servers_detected', servers: [] });
@@ -237,6 +299,12 @@ export function devTransport(): Transport {
 
 		async closeTab(tab: number): Promise<void> {
 			fan({ tab, closed: { reason: null } });
+		},
+
+		async openUrl(url: string): Promise<void> {
+			// The demo runs in a plain browser; a popup is the honest stand-in for the
+			// desktop shell's system browser.
+			window.open(url, '_blank', 'noopener');
 		},
 
 		async recentFolders(_limit = 10): Promise<RecentFolder[]> {

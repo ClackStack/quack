@@ -47,6 +47,16 @@ export type Subsystem = "config" | "project" | "provider" | "profile" | "tokeniz
  */
 export type LoadState = { "state": "pending" } | { "state": "running", detail: string, } | { "state": "ready", detail: string, } | { "state": "needs_attention", detail: string, } | { "state": "failed", error: string, } | { "state": "disabled", reason: string, };
 /**
+ * What the agent may do. Planning never authorizes changes or test execution.
+ */
+export type WorkMode = "plan" | "edit";
+/**
+ * Approval defaults, ordered so the existing system policy can cap them.
+ * Read-only and auto-edit remain available for existing configurations.
+ */
+export type ApprovalPolicy = "read-only" | "ask" | "auto-edit" | "allow" | "yolo";
+export type HookCredentialChange = { "action": "keep" } | { "action": "remove" } | { "action": "replace", value: SecretText, } | { "action": "external", source: string, location: SecretText, };
+/**
  * Per-turn overrides of session settings.
  */
 export type TurnOverrides = { model?: string, profile?: string, };
@@ -96,6 +106,29 @@ export type ApprovalRequest = { "kind": "shell", command: string, cwd: string,
  * The sandbox is on, but this command would run outside it.
  */
 outside_sandbox?: boolean, } | { "kind": "edit", path: string, diff: string, } | { "kind": "tool", name: string, arguments: string, };
+export type HookField = { id: string, label: string,
+/**
+ * text, url, integer, boolean, choice, or secret.
+ */
+kind: string, required: boolean, default: string, help: string, choices: Array<string>, advanced: boolean,
+/**
+ * Changing this value requires an explicit credential change.
+ */
+credential_scope: boolean, required_when: { [key in string]: Array<string> }, };
+export type HookPreset = { id: string, label: string, help: string, values: { [key in string]: string }, choices: { [key in string]: Array<string> },
+/**
+ * Field templates expanded from the connection values, e.g. {web_url}/api/v4.
+ */
+derived: { [key in string]: string }, };
+export type HookDescriptor = { version: number,
+/**
+ * Connection value containing the web base used to scope access checks.
+ */
+scope_field: string, fields: Array<HookField>, presets: Array<HookPreset>, };
+export type HookConnection = { id: string, preset: string, enabled: boolean, values: { [key in string]: string }, };
+export type HookConnectionInfo = { connection: HookConnection, credentials: { [key in string]: KeySource }, };
+export type HookConnectionDraft = { connection: HookConnection, credentials: { [key in string]: HookCredentialChange }, };
+export type HookSetupInfo = { id: string, revision: string, descriptor: HookDescriptor, connections: Array<HookConnectionInfo>, enabled: boolean, source: string, writable: boolean, problem: string | null, };
 export type ToolCallInfo = { call_id: CallId, name: string,
 /**
  * One-line description for the transcript, e.g. `edit src/main.rs`.
@@ -169,7 +202,12 @@ export type ModelInfo = { id: string, alias?: string, context_window?: number,
 /**
  * For showing, e.g. `$0.30 in · $1.20 out per 1M tokens`.
  */
-price?: string, };
+price?: string,
+/**
+ * Selectable thinking levels from the provider file's `reasoning.efforts`, in picker
+ * order. Empty means the model declares none.
+ */
+reasoning_efforts?: Array<string>, };
 /**
  * Where a provider's `api_key` is read from.
  */
@@ -322,9 +360,13 @@ note?: string, models: Array<ModelInfo>,
  */
 configured?: string, };
 /**
- * A hosted service from `providers.d` that takes a key.
+ * A hosted service from `providers.d` using an API key or subscription.
  */
-export type ServiceInfo = { id: string, name: string,
+export type ServiceInfo = {
+/**
+ * Uses browser sign-in instead of an API key.
+ */
+subscription: boolean, id: string, name: string,
 /**
  * Heading it is listed under.
  */
@@ -334,7 +376,7 @@ group: string, base_url: string,
  */
 env?: string,
 /**
- * Its key can be read now.
+ * Its key is configured, or its saved sign-in allows plan usage.
  */
 ready: boolean,
 /**
@@ -345,7 +387,15 @@ export type SessionInfo = { id: SessionId, cwd: string,
 /**
  * `<provider-id>/<model-id>`, if a model is selected.
  */
-model: string | null, profile: string, };
+model: string | null, profile: string,
+/**
+ * Effective effort, when the model has an explicit default or session selection.
+ */
+reasoning_effort?: string | null,
+/**
+ * Supported levels for the active model, in picker order.
+ */
+reasoning_efforts?: Array<string>, };
 export type EngineError = { kind: EngineErrorKind, message: string, };
 export type ContextReport = {
 /**
@@ -451,7 +501,7 @@ export type InputItem = { "type": "text", text: string, } | { "type": "image", p
 /**
  * A notification from the engine to its clients.
  */
-export type Event = { "event": "startup_progress", subsystem: Subsystem, state: LoadState, } | { "event": "startup_complete" } | { "event": "session_configured", session: SessionInfo, } | { "event": "session_title", title?: string, } | { "event": "model_catalog", providers: Array<ProviderModels>,
+export type Event = { "event": "hook_setup", request: number, info: HookSetupInfo, } | { "event": "hook_setup_saved", request: number, info: HookSetupInfo, note: string | null, } | { "event": "hook_setup_pending", request: number, } | { "event": "hook_setup_failed", request: number, message: string, } | { "event": "hook_check_result", request: number, status: string, message: string, } | { "event": "startup_progress", subsystem: Subsystem, state: LoadState, } | { "event": "startup_complete" } | { "event": "session_configured", session: SessionInfo, } | { "event": "session_title", title?: string, } | { "event": "model_catalog", providers: Array<ProviderModels>,
 /**
  * `<provider>/<model>` in use, if any.
  */
@@ -480,7 +530,7 @@ tokens_per_sec?: number, } | { "event": "compacting", reason: string, } | { "eve
 /**
  * How full the memory index is, as a percentage of `memory.index_max_tokens`.
  */
-index_fill: number, } | { "event": "doctor_report", checks: Array<DoctorCheck>, } | { "event": "mcp_servers", servers: Array<McpServerInfo>, } | { "event": "lsp_servers", servers: Array<LspServerInfo>, } | { "event": "servers_detected", servers: Array<DetectedServer>, } | { "event": "services", services: Array<ServiceInfo>, } | { "event": "provider_added", id: string, path?: string, note?: string | null, } | { "event": "skills", skills: Array<SkillInfo>, } | { "event": "rewind_points", points: Array<RewindPoint>, } | { "event": "rewound", back: number, text: string, } | { "event": "files_restored", restored: Array<string>, conflicts: Array<string>, } | { "event": "permission_mode", mode: string, } | { "event": "sandbox", off: boolean, } | { "event": "compacted", summary_tokens: number,
+index_fill: number, } | { "event": "doctor_report", checks: Array<DoctorCheck>, } | { "event": "mcp_servers", servers: Array<McpServerInfo>, } | { "event": "lsp_servers", servers: Array<LspServerInfo>, } | { "event": "servers_detected", servers: Array<DetectedServer>, } | { "event": "services", services: Array<ServiceInfo>, } | { "event": "sign_in_url", id: string, url: string, } | { "event": "sign_in_result", id: string, error: string | null, } | { "event": "provider_added", id: string, path?: string, note?: string | null, } | { "event": "skills", skills: Array<SkillInfo>, } | { "event": "rewind_points", points: Array<RewindPoint>, } | { "event": "rewound", back: number, text: string, } | { "event": "files_restored", restored: Array<string>, conflicts: Array<string>, } | { "event": "permission_mode", mode: string, } | { "event": "mode_changed", work_mode: WorkMode, approvals: ApprovalPolicy, } | { "event": "sandbox", off: boolean, } | { "event": "compacted", summary_tokens: number,
 /**
  * History messages the summary replaced.
  */
@@ -508,4 +558,12 @@ summary: string, } | { "event": "plan", checklist: string, } | { "event": "diagn
 /**
  * A request from a client to the engine.
  */
-export type Op = { "op": "user_turn", items: Array<InputItem>, overrides: TurnOverrides, } | { "op": "interrupt" } | { "op": "approval_response", call_id: CallId, decision: ApprovalDecision, } | { "op": "answer_questions", call_id: CallId, answers: Array<Answer>, stop_asking?: boolean, } | { "op": "set_model", provider: ProviderId, model: ModelId, } | { "op": "list_models" } | { "op": "list_instructions" } | { "op": "list_profiles" } | { "op": "set_profile", id: string, } | { "op": "compact", focus?: string, } | { "op": "undo", checkpoint: CheckpointId | null, force: boolean, } | { "op": "resume_session", id: SessionId, } | { "op": "new_session" } | { "op": "list_sessions" } | { "op": "get_context" } | { "op": "get_stats" } | { "op": "set_permission_mode", mode: string, } | { "op": "set_sandbox", off: boolean, } | { "op": "accept_plan", mode: string, } | { "op": "run_doctor" } | { "op": "list_mcp" } | { "op": "restart_mcp", id: string, } | { "op": "list_lsp" } | { "op": "init_instructions" } | { "op": "detect_servers" } | { "op": "add_provider", id: string, base_url: string, api?: string, model: string, } | { "op": "list_services" } | { "op": "set_provider_key", id: string, key: SecretText, } | { "op": "add_server", base_url: string, key?: SecretText, } | { "op": "list_memory" } | { "op": "delete_memory", scope: string, name: string, } | { "op": "set_title", title: string, } | { "op": "save_setting", key: string, value: string, scope: WriteScope, } | { "op": "fork_session" } | { "op": "export", format: ExportFormat, path?: string, } | { "op": "list_rewind_points" } | { "op": "rewind", back: number, conversation: boolean, files: boolean, force: boolean, } | { "op": "reload_config" } | { "op": "trust_project", decision: string, } | { "op": "enable_hook", id: string, replace_payload?: boolean | null, } | { "op": "shutdown" };
+export type Op = { "op": "user_turn", items: Array<InputItem>, overrides: TurnOverrides, } | { "op": "interrupt" } | { "op": "approval_response", call_id: CallId, decision: ApprovalDecision, } | { "op": "answer_questions", call_id: CallId, answers: Array<Answer>, stop_asking?: boolean, } | { "op": "set_model", provider: ProviderId, model: ModelId, } | { "op": "set_reasoning_effort", effort: string | null, } | { "op": "list_models" } | { "op": "list_instructions" } | { "op": "list_profiles" } | { "op": "set_profile", id: string, } | { "op": "compact", focus?: string, } | { "op": "undo", checkpoint: CheckpointId | null, force: boolean, } | { "op": "resume_session", id: SessionId, } | { "op": "new_session" } | { "op": "list_sessions" } | { "op": "get_context" } | { "op": "get_stats" } | { "op": "set_permission_mode", mode: string, } | { "op": "set_work_mode", mode: WorkMode, } | { "op": "set_approval_policy", policy: ApprovalPolicy, } | { "op": "set_sandbox", off: boolean, } | { "op": "accept_plan",
+/**
+ * Empty preserves the current approval policy; legacy callers may choose one.
+ */
+mode: string, } | { "op": "run_doctor" } | { "op": "list_mcp" } | { "op": "restart_mcp", id: string, } | { "op": "list_lsp" } | { "op": "init_instructions" } | { "op": "detect_servers" } | { "op": "add_provider", id: string, base_url: string, api?: string, model: string, } | { "op": "list_services" } | { "op": "sign_in", id: string | null, } | { "op": "set_provider_key", id: string, key: SecretText, } | { "op": "add_server", base_url: string, key?: SecretText, } | { "op": "list_memory" } | { "op": "delete_memory", scope: string, name: string, } | { "op": "set_title", title: string, } | { "op": "save_setting", key: string, value: string, scope: WriteScope, } | { "op": "fork_session" } | { "op": "export", format: ExportFormat, path?: string, } | { "op": "list_rewind_points" } | { "op": "rewind", back: number, conversation: boolean, files: boolean, force: boolean, } | { "op": "reload_config" } | { "op": "trust_project", decision: string, } | { "op": "enable_hook", id: string, replace_payload?: boolean | null, } | { "op": "inspect_hook_setup", id: string, request: number, } | { "op": "save_hook_setup", id: string, request: number, revision: string, connections: Array<HookConnectionDraft>,
+/**
+ * None keeps the current enabled state.
+ */
+enable: boolean | null, replace_payload: boolean | null, } | { "op": "check_hook_setup", id: string, request: number, revision: string, connection: HookConnectionDraft, url: string, } | { "op": "cancel_hook_check", request: number, } | { "op": "shutdown" };

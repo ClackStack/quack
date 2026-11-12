@@ -5,7 +5,7 @@ import type { AppInfo, TabMessage, Transport } from './transport/types';
 
 const info: AppInfo = {
 	version: 'test', cwd: '/workspace', branch: null, model: 'mock/org/model',
-	permission_mode: 'ask', ui: { theme: 'auto', reduced_motion: false },
+	permission_mode: 'ask', work_mode: 'edit', ui: { theme: 'auto', reduced_motion: false },
 	settings: [], layers: [], rules: [], bundles: [], bundles_disabled: []
 };
 
@@ -15,7 +15,7 @@ function fixture() {
 	const transport: Transport = {
 		kind: 'tauri', pickFolder: vi.fn(), recentFolders: vi.fn(),
 		openFolder: vi.fn(), sendOp: vi.fn().mockResolvedValue(undefined),
-		closeTab: vi.fn().mockResolvedValue(undefined),
+		closeTab: vi.fn().mockResolvedValue(undefined), openUrl: vi.fn().mockResolvedValue(undefined),
 		listen(listener) { receive = listener; return unlisten; }
 	};
 	const workspaces = new Workspaces(transport);
@@ -23,7 +23,7 @@ function fixture() {
 }
 
 describe('workspace lifecycle', () => {
-	it('retains replay and permission events sent before open resolves', async () => {
+	it('retains replay and mode events sent before open resolves', async () => {
 		const { transport, workspaces, receive } = fixture();
 		vi.mocked(transport.openFolder).mockImplementation(async () => {
 			receive({ tab: 3, info });
@@ -32,13 +32,14 @@ describe('workspace lifecycle', () => {
 				session: { id: 'saved', cwd: '/workspace', model: null, profile: 'generic' },
 				items: [{ kind: 'assistant', text: 'Saved response' }]
 			} });
-			receive({ tab: 3, event: { event: 'permission_mode', mode: 'read-only' } });
+			receive({ tab: 3, event: { event: 'mode_changed', work_mode: 'edit', approvals: 'read-only' } });
 			return { tab: 3, info };
 		});
 		await workspaces.open('/workspace', { resume: 'latest' });
 		expect(workspaces.sessions).toHaveLength(1);
 		expect(workspaces.sessions[0].items[0]).toMatchObject({ text: 'Saved response' });
-		expect(workspaces.sessions[0].mode).toBe('read-only');
+		expect(workspaces.sessions[0].approvals).toBe('read-only');
+		expect(workspaces.sessions[0].workMode).toBe('edit');
 		expect(workspaces.sessions[0].resumed).toBe(true);
 	});
 

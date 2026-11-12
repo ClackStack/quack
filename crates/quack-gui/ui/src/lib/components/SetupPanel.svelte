@@ -8,6 +8,13 @@
 	let serverKey = $state('');
 	const available = $derived(session.providers.filter((p) => p.available && p.models.length > 0));
 	const busy = $derived(session.setupWorking || session.closed || session.starting);
+	const service = $derived(session.services.find((s) => s.id === serviceId) ?? null);
+	const signingIn = $derived(session.signingIn !== null && session.signingIn.id === serviceId);
+	const signInError = $derived(
+		session.signInError !== null && session.signInError.id === serviceId
+			? session.signInError.message
+			: null
+	);
 
 	async function saveKey(event: SubmitEvent) {
 		event.preventDefault();
@@ -44,7 +51,14 @@
 							disabled={busy}
 							onclick={() => session.setModel(`${provider.id}/${model.id}`)}
 						>
-							<span>{model.id}</span><span class="note">{model.price ?? 'Select model'}</span>
+							<span>{model.id}</span
+							><span class="note">{[
+									model.price,
+									model.reasoning_efforts?.length
+										? `thinking: ${model.reasoning_efforts.join(' · ')}`
+										: null
+									].filter(Boolean).join(' · ') || 'Select model'}</span
+							>
 						</button>
 					{/each}
 				</div>
@@ -88,33 +102,62 @@
 	<section aria-labelledby="hosted-heading">
 		<h2 id="hosted-heading">Hosted provider</h2>
 		{#if session.services.length > 0}
-			<form onsubmit={saveKey}>
-				<label
-					>Provider<select bind:value={serviceId} disabled={busy} required>
-						<option value="" disabled>Choose a provider</option>
-						{#each session.services as service (service.id)}<option value={service.id}
-								>{service.name}{service.ready ? ' · connected' : ''}</option
-							>{/each}
-					</select></label
-				>
-				<label
-					>API key<input
-						type="password"
-						bind:value={serviceKey}
-						disabled={busy}
-						required
-						autocomplete="off"
-						spellcheck="false"
-					/></label
-				>
+			<label
+				>Provider<select bind:value={serviceId} disabled={busy} required>
+					<option value="" disabled>Choose a provider</option>
+					{#each session.services as service (service.id)}<option value={service.id}
+						>{service.name}{service.ready
+							? service.subscription
+								? ' · signed in'
+								: ' · connected'
+							: ''}</option
+					>{/each}
+				</select></label
+			>
+			{#if service?.subscription}
 				<p>
-					Keys are stored in your OS credential store, or a private key file when the store is
-					unavailable.
+					{service.name} uses your browser to sign in; no API key is needed. Your saved sign-in
+					allows plan usage.
 				</p>
-				<button class="btn" type="submit" disabled={busy || !serviceId || !serviceKey.trim()}
-					>Save key and list models</button
-				>
-			</form>
+				{#if signInError}
+					<p class="status" role="alert">Sign-in failed: {signInError}</p>
+				{/if}
+				{#if signingIn}
+					<p role="status">Waiting for the sign-in to finish in your browser…</p>
+					{#if session.signingIn?.url}
+						<button class="btn" onclick={() => session.reopenSignIn()}
+							>Open the sign-in page again</button
+						>
+					{/if}
+					<button class="btn" disabled={busy} onclick={() => session.signIn(null)}
+						>Cancel sign-in</button
+					>
+				{:else}
+					<button class="btn" disabled={busy || !serviceId} onclick={() => session.signIn(serviceId)}
+						>{service.ready ? 'Sign in again' : `Sign in to ${service.name}`}</button
+					>
+				{/if}
+			{:else}
+				<form onsubmit={saveKey}>
+					<label
+						>API key<input
+							type="password"
+							bind:value={serviceKey}
+							disabled={busy}
+							required
+							autocomplete="off"
+							spellcheck="false"
+						/></label
+					>
+					<p>
+						Keys are stored in your OS credential store, or a private key file when the store is
+						unavailable.
+					</p>
+					<button class="btn" type="submit" disabled={busy || !serviceId || !serviceKey.trim()}
+						>Save key and list models</button
+					>
+				</form>
+			{/if}
 		{:else}
 			<p>No hosted providers are configured. Add an OpenAI-compatible endpoint below.</p>
 		{/if}

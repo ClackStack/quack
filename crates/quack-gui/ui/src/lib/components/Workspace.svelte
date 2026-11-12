@@ -29,7 +29,7 @@
 	let sidebarOpen = $state(false);
 
 	const planReady = $derived(
-		session.mode === 'plan' && session.plan.trim().length > 0 && !session.streaming
+		session.workMode === 'plan' && session.plan.trim().length > 0 && !session.streaming
 	);
 
 	$effect(() => {
@@ -87,7 +87,7 @@
 						<button class="btn btn-primary" onclick={() => session.acceptPlan()}>
 							Carry out the plan
 						</button>
-						<button class="btn" onclick={() => session.setMode('ask')}>Back to Ask</button>
+						<button class="btn" onclick={() => session.setWorkMode('edit')}>Back to Edit</button>
 					</div>
 				{/if}
 				{#if session.approval}

@@ -66,6 +66,10 @@ export function tauriTransport(): Transport {
 			return await invoke<RecentFolder[]>('recent_folders', { client: await connect(), limit });
 		},
 
+		async openUrl(url: string): Promise<void> {
+			await invoke('open_url', { url });
+		},
+
 		listen(listener: (message: TabMessage) => void): () => void {
 			listeners.add(listener);
 			return () => listeners.delete(listener);

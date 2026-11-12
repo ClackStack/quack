@@ -61,14 +61,48 @@ export interface SpeedState {
 	tokensPerSec: number | null;
 }
 
-export type PermissionMode = 'read-only' | 'ask' | 'auto-edit' | 'full-auto' | 'plan' | 'yolo';
+export type WorkMode = 'plan' | 'edit';
+export type ApprovalPolicy = 'read-only' | 'ask' | 'auto-edit' | 'allow' | 'yolo';
 
-export const MODES: { id: PermissionMode; label: string; about: string }[] = [
-	{ id: 'ask', label: 'Ask', about: 'Ask before edits and commands' },
-	{ id: 'auto-edit', label: 'Auto-edit', about: 'Edit files without asking; ask before commands' },
-	{ id: 'full-auto', label: 'Full auto', about: 'Run without asking, inside the sandbox' },
-	{ id: 'read-only', label: 'Read-only', about: 'Look around; change nothing' },
-	{ id: 'plan', label: 'Plan', about: 'Look around and propose a plan; change nothing' }
+/** What the agent may do; independent of the approval policy. */
+export const WORK_MODES: { id: WorkMode; label: string; about: string }[] = [
+	{ id: 'edit', label: 'Edit', about: 'Edit files and run commands, within approvals' },
+	{ id: 'plan', label: 'Plan', about: 'Read and search only; propose a plan for review' }
+];
+
+/** What runs without asking; independent of the work mode. Ask and Allow are the
+ * offered choices; the rest are legacy policies that stay reachable for existing
+ * configurations and show only while active. */
+export const APPROVALS: {
+	id: ApprovalPolicy;
+	label: string;
+	about: string;
+	legacy?: boolean;
+}[] = [
+	{ id: 'ask', label: 'Ask', about: 'Ask before unapproved edits and commands' },
+	{
+		id: 'allow',
+		label: 'Allow',
+		about: 'Run without asking, inside the sandbox; Plan still only reads'
+	},
+	{
+		id: 'yolo',
+		label: 'Yolo',
+		about: 'Run without asking and without the sandbox',
+		legacy: true
+	},
+	{
+		id: 'auto-edit',
+		label: 'Auto-edit',
+		about: 'Edit without asking; ask before commands (legacy)',
+		legacy: true
+	},
+	{
+		id: 'read-only',
+		label: 'Read-only',
+		about: 'Look around; change nothing (legacy)',
+		legacy: true
+	}
 ];
 
 let itemSeq = 0;
@@ -88,7 +122,19 @@ export class Session {
 	questions = $state<{ callId: string; questions: Question[] } | null>(null);
 	providers = $state<ProviderModels[]>([]);
 	currentModel = $state<string | null>(null);
-	mode = $state<PermissionMode>('ask');
+	/** Thinking level in effect for the current model, when it declares any. */
+	reasoningEffort = $state<string | null>(null);
+	/** Selectable thinking levels of the current model, in picker order. */
+	reasoningEfforts = $state<string[]>([]);
+	/** Open after a model switch lands: that switch asked for a level. */
+	thinkingOpen = $state(false);
+	/** The model a pending switch expects, so the picker opens only for it. */
+	#pickThinkingFor = $state<string | null>(null);
+	workMode = $state<WorkMode>('edit');
+	approvals = $state<ApprovalPolicy>('ask');
+	/** A subscription sign-in in flight: the service and the browser address. */
+	signingIn = $state<{ id: string; url: string | null } | null>(null);
+	signInError = $state<{ id: string; message: string } | null>(null);
 	sandboxOff = $state(false);
 	sandboxAvailable = $state(true);
 	context = $state<ContextState | null>(null);
@@ -137,7 +183,8 @@ export class Session {
 		this.tab = tab;
 		this.info = info;
 		this.currentModel = info.model;
-		this.mode = info.permission_mode as PermissionMode;
+		this.approvals = info.permission_mode as ApprovalPolicy;
+		this.workMode = info.work_mode === 'plan' ? 'plan' : 'edit';
 	}
 
 	/** Feed one protocol event; the only place transcript state is written. */
@@ -148,10 +195,22 @@ export class Session {
 				this.sessionId = ev.session.id;
 				this.switching = false;
 				this.currentModel = ev.session.model ?? null;
+				this.reasoningEffort = ev.session.reasoning_effort ?? null;
+				this.reasoningEfforts = ev.session.reasoning_efforts ?? [];
 				if (this.currentModel) {
 					this.setupWorking = false;
 					this.setupOpen = false;
 				}
+				// Switching to a model that declares thinking levels asks for one: the level
+				// changes both how the model works and what it costs.
+				if (
+					this.#pickThinkingFor !== null &&
+					this.#pickThinkingFor === this.currentModel &&
+					this.reasoningEfforts.length > 0
+				) {
+					this.thinkingOpen = true;
+				}
+				this.#pickThinkingFor = null;
 				break;
 			case 'startup_complete':
 				this.starting = false;
@@ -272,8 +331,42 @@ export class Session {
 			case 'plan':
 				this.plan = ev.checklist;
 				break;
+			case 'mode_changed':
+				// Authoritative for both controls; no need to remember a previous mode.
+				this.workMode = ev.work_mode;
+				this.approvals = ev.approvals;
+				break;
 			case 'permission_mode':
-				this.mode = ev.mode as PermissionMode;
+				// Legacy single-control notification: `plan` named the work mode.
+				if (ev.mode === 'plan') this.workMode = 'plan';
+				else {
+					this.workMode = 'edit';
+					this.approvals = ev.mode as ApprovalPolicy;
+				}
+				break;
+			case 'sign_in_url':
+				if (this.signingIn?.id === ev.id) {
+					this.signingIn = { id: ev.id, url: ev.url };
+					void this.#transport.openUrl(ev.url);
+				}
+				break;
+			case 'sign_in_result':
+				if (this.signingIn?.id !== ev.id) break;
+				this.signingIn = null;
+				if (ev.error) {
+					this.signInError = { id: ev.id, message: ev.error };
+					this.items.push({
+						kind: 'system',
+					id: nextId(),
+					tone: 'warning',
+					text: `Sign-in failed: ${ev.error}`
+					});
+				} else {
+					this.signInError = null;
+					this.setupNotice = `Signed in to ${ev.id}. Choose a model to continue.`;
+					void this.#send({ op: 'list_services' });
+					void this.#send({ op: 'list_models' });
+				}
 				break;
 			case 'sandbox':
 				this.sandboxOff = ev.off;
@@ -384,6 +477,7 @@ export class Session {
 		this.detecting = false;
 		this.starting = false;
 		this.streaming = false;
+		this.signingIn = null;
 		this.#sealStreams();
 		this.approval = null;
 		this.questions = null;
@@ -540,20 +634,55 @@ export class Session {
 		const slash = providerModel.indexOf('/');
 		if (slash < 1 || slash === providerModel.length - 1) return false;
 		this.setupWorking = true;
+		// A model that declares thinking levels asks for one once the switch lands.
+		const provider = this.providers.find((p) => p.id === providerModel.slice(0, slash));
+		const model = provider?.models.find((m) => m.id === providerModel.slice(slash + 1));
+		if (model?.reasoning_efforts?.length) this.#pickThinkingFor = providerModel;
 		const sent = await this.#send({
 			op: 'set_model',
 			provider: providerModel.slice(0, slash),
 			model: providerModel.slice(slash + 1)
 		});
-		if (!sent) this.setupWorking = false;
+		if (!sent) {
+			this.setupWorking = false;
+			this.#pickThinkingFor = null;
+		}
 		return sent;
 	}
 
-	async setMode(mode: PermissionMode) {
-		return this.#send({ op: 'set_permission_mode', mode });
+	/** Picks a thinking level for the current model; `null` restores its default. */
+	async setReasoningEffort(effort: string | null) {
+		this.thinkingOpen = false;
+		return this.#send({ op: 'set_reasoning_effort', effort });
+	}
+
+	async setWorkMode(mode: WorkMode) {
+		return this.#send({ op: 'set_work_mode', mode });
+	}
+	async setApprovals(policy: ApprovalPolicy) {
+		return this.#send({ op: 'set_approval_policy', policy });
 	}
 	async acceptPlan() {
-		return this.#send({ op: 'accept_plan', mode: 'auto-edit' });
+		// An empty mode keeps the current approvals; the engine performs the handoff.
+		return this.#send({ op: 'accept_plan', mode: '' });
+	}
+	/** Starts a browser subscription sign-in, or cancels the pending one with `null`. */
+	async signIn(id: string | null) {
+		const before = this.signingIn;
+		if (id) {
+			this.signInError = null;
+			this.signingIn = { id, url: null };
+		} else {
+			this.signingIn = null; // the engine aborts silently on cancel
+		}
+		const sent = await this.#send({ op: 'sign_in', id });
+		if (!sent) this.signingIn = before;
+		return sent;
+	}
+	/** Reopens the browser page of a pending sign-in. */
+	async reopenSignIn() {
+		const url = this.signingIn?.url;
+		if (url) await this.#transport.openUrl(url);
 	}
 	async refreshContext() {
 		return this.#send({ op: 'get_context' });

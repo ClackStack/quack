@@ -8,6 +8,7 @@ const info: AppInfo = {
 	branch: null,
 	model: 'mock/org/model',
 	permission_mode: 'ask',
+	work_mode: 'edit',
 	ui: { theme: 'auto', reduced_motion: false },
 	settings: [],
 	layers: [],
@@ -24,11 +25,16 @@ function fixture(model: string | null = info.model) {
 		openFolder: vi.fn(),
 		sendOp: vi.fn().mockResolvedValue(undefined),
 		closeTab: vi.fn(),
+		openUrl: vi.fn().mockResolvedValue(undefined),
 		listen: () => () => {}
 	};
 	const session = new Session(transport, 3, { ...info, model });
 	session.onEvent({ event: 'session_configured', session: { ...sessionInfo, model } });
-	return { session, send: vi.mocked(transport.sendOp) };
+	return {
+		session,
+		send: vi.mocked(transport.sendOp),
+		openUrl: vi.mocked(transport.openUrl)
+	};
 }
 
 describe('setup and project trust', () => {
@@ -212,5 +218,132 @@ describe('action recovery', () => {
 		session.onEvent({ event: 'session_configured', session: { ...sessionInfo, id: 'saved' } });
 		expect(session.items).toHaveLength(1);
 		expect(session.items[0]).toMatchObject({ text: 'Saved response' });
+	});
+});
+
+describe('work mode and approvals', () => {
+	it('tracks both controls from the authoritative mode_changed event', () => {
+		const { session } = fixture();
+		expect(session.workMode).toBe('edit');
+		expect(session.approvals).toBe('ask');
+		session.onEvent({ event: 'mode_changed', work_mode: 'plan', approvals: 'ask' });
+		expect(session.workMode).toBe('plan');
+		expect(session.approvals).toBe('ask');
+		session.onEvent({ event: 'mode_changed', work_mode: 'plan', approvals: 'allow' });
+		expect(session.workMode).toBe('plan');
+		expect(session.approvals).toBe('allow');
+	});
+	it('sends the typed ops for each control and keeps plan on accept', async () => {
+		const { session, send } = fixture();
+		await session.setWorkMode('plan');
+		expect(send).toHaveBeenCalledWith(3, { op: 'set_work_mode', mode: 'plan' });
+		await session.setApprovals('auto-edit');
+		expect(send).toHaveBeenCalledWith(3, { op: 'set_approval_policy', policy: 'auto-edit' });
+		await session.acceptPlan();
+		expect(send).toHaveBeenCalledWith(3, { op: 'accept_plan', mode: '' });
+	});
+	it('maps the legacy permission_mode notification onto both controls', () => {
+		const { session } = fixture();
+		session.onEvent({ event: 'permission_mode', mode: 'plan' });
+		expect(session.workMode).toBe('plan');
+		session.onEvent({ event: 'permission_mode', mode: 'read-only' });
+		expect(session.workMode).toBe('edit');
+		expect(session.approvals).toBe('read-only');
+	});
+});
+
+describe('model thinking levels', () => {
+	it('asks for a level when the switched-to model declares them', async () => {
+		const { session, send } = fixture();
+		session.onEvent({
+			event: 'model_catalog',
+			providers: [
+				{
+					id: 'mock',
+					available: true,
+					note: '',
+					bundled: false,
+					models: [
+						{ id: 'org/model' },
+						{ id: 'org/thinker', reasoning_efforts: ['low', 'high'] }
+					]
+				}
+			],
+			current: 'mock/org/model'
+		});
+		await session.setModel('mock/org/thinker');
+		expect(send).toHaveBeenCalledWith(3, { op: 'set_model', provider: 'mock', model: 'org/thinker' });
+		expect(session.thinkingOpen).toBe(false);
+		session.onEvent({
+			event: 'session_configured',
+			session: {
+				...sessionInfo,
+				model: 'mock/org/thinker',
+				reasoning_effort: null,
+				reasoning_efforts: ['low', 'high']
+			}
+		});
+		expect(session.thinkingOpen).toBe(true);
+		expect(session.reasoningEfforts).toEqual(['low', 'high']);
+		await session.setReasoningEffort('high');
+		expect(send).toHaveBeenCalledWith(3, { op: 'set_reasoning_effort', effort: 'high' });
+		expect(session.thinkingOpen).toBe(false);
+		await session.setReasoningEffort(null);
+		expect(send).toHaveBeenCalledWith(3, { op: 'set_reasoning_effort', effort: null });
+	});
+	it('does not ask for a level when the model declares none', () => {
+		const { session } = fixture();
+		session.onEvent({
+			event: 'session_configured',
+			session: { ...sessionInfo, model: 'mock/org/model' }
+		});
+		expect(session.thinkingOpen).toBe(false);
+		expect(session.reasoningEfforts).toEqual([]);
+	});
+});
+
+describe('subscription sign-in', () => {
+	it('opens the browser address, then refreshes services on success', async () => {
+		const { session, send, openUrl } = fixture();
+		await session.signIn('charm');
+		expect(send).toHaveBeenCalledWith(3, { op: 'sign_in', id: 'charm' });
+		session.onEvent({
+			event: 'sign_in_url',
+			id: 'charm',
+			url: 'https://charm.example/oauth'
+		});
+		expect(session.signingIn).toEqual({ id: 'charm', url: 'https://charm.example/oauth' });
+		expect(openUrl).toHaveBeenCalledWith('https://charm.example/oauth');
+		session.onEvent({ event: 'sign_in_result', id: 'charm', error: null });
+		expect(session.signingIn).toBeNull();
+		expect(session.setupNotice).toContain('Signed in to charm');
+		expect(send).toHaveBeenCalledWith(3, { op: 'list_services' });
+		expect(send).toHaveBeenCalledWith(3, { op: 'list_models' });
+	});
+	it('keeps the error beside the service and can retry', async () => {
+		const { session } = fixture();
+		await session.signIn('charm');
+		session.onEvent({
+			event: 'sign_in_result',
+			id: 'charm',
+			error: 'browser timed out'
+		});
+		expect(session.signInError).toEqual({ id: 'charm', message: 'browser timed out' });
+		expect(session.signingIn).toBeNull();
+		await session.signIn('charm');
+		expect(session.signInError).toBeNull();
+	});
+	it('ignores results for services it is no longer signing in to', () => {
+		const { session } = fixture();
+		session.onEvent({ event: 'sign_in_result', id: 'other', error: null });
+		expect(session.setupNotice).toBe('');
+	});
+	it('clears the pending sign-in locally on cancel', async () => {
+		const { session, send } = fixture();
+		await session.signIn('charm');
+		session.onEvent({ event: 'sign_in_url', id: 'charm', url: 'https://charm.example' });
+		await session.signIn(null);
+		expect(send).toHaveBeenCalledWith(3, { op: 'sign_in', id: null });
+		expect(session.signingIn).toBeNull();
 	});
 });

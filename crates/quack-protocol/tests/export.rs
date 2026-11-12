@@ -8,13 +8,15 @@
 use std::path::PathBuf;
 
 use quack_protocol::{
-    Answer, ApprovalDecision, ApprovalRequest, CallId, CheckStatus, CheckpointId, CommandInfo,
-    ContextReport, ContextSegment, DetectedServer, DoctorCheck, EngineError, EngineErrorKind,
-    Event, EventIndex, ExportFormat, Image, InputItem, InstructionFile, KeySource, LoadState,
-    LspServerInfo, McpServerInfo, MemoryNote, ModelId, ModelInfo, Op, ProfileInfo, ProviderId,
-    ProviderModels, PruneReport, Question, QuestionOption, ReplayItem, RequestStat, RewindPoint,
-    SecretText, ServiceInfo, SessionId, SessionInfo, SessionSummary, SkillInfo, StatsReport,
-    Subsystem, ToolCallInfo, ToolResultSummary, ToolStat, TurnId, TurnOverrides, Usage, WriteScope,
+    Answer, ApprovalDecision, ApprovalPolicy, ApprovalRequest, CallId, CheckStatus, CheckpointId,
+    CommandInfo, ContextReport, ContextSegment, DetectedServer, DoctorCheck, EngineError,
+    EngineErrorKind, Event, EventIndex, ExportFormat, HookConnection, HookConnectionDraft,
+    HookConnectionInfo, HookCredentialChange, HookDescriptor, HookField, HookPreset, HookSetupInfo,
+    Image, InputItem, InstructionFile, KeySource, LoadState, LspServerInfo, McpServerInfo,
+    MemoryNote, ModelId, ModelInfo, Op, ProfileInfo, ProviderId, ProviderModels, PruneReport,
+    Question, QuestionOption, ReplayItem, RequestStat, RewindPoint, SecretText, ServiceInfo,
+    SessionId, SessionInfo, SessionSummary, SkillInfo, StatsReport, Subsystem, ToolCallInfo,
+    ToolResultSummary, ToolStat, TurnId, TurnOverrides, Usage, WorkMode, WriteScope,
 };
 use ts_rs::TS;
 
@@ -102,6 +104,21 @@ fn export_protocol_ts() {
             LoadState::docs().unwrap_or_default(),
             LoadState::decl(&cfg),
         ),
+        (
+            "WorkMode",
+            WorkMode::docs().unwrap_or_default(),
+            WorkMode::decl(&cfg),
+        ),
+        (
+            "ApprovalPolicy",
+            ApprovalPolicy::docs().unwrap_or_default(),
+            ApprovalPolicy::decl(&cfg),
+        ),
+        (
+            "HookCredentialChange",
+            HookCredentialChange::docs().unwrap_or_default(),
+            HookCredentialChange::decl(&cfg),
+        ),
         // structs
         (
             "TurnOverrides",
@@ -142,6 +159,41 @@ fn export_protocol_ts() {
             "ApprovalRequest",
             ApprovalRequest::docs().unwrap_or_default(),
             ApprovalRequest::decl(&cfg),
+        ),
+        (
+            "HookField",
+            HookField::docs().unwrap_or_default(),
+            HookField::decl(&cfg),
+        ),
+        (
+            "HookPreset",
+            HookPreset::docs().unwrap_or_default(),
+            HookPreset::decl(&cfg),
+        ),
+        (
+            "HookDescriptor",
+            HookDescriptor::docs().unwrap_or_default(),
+            HookDescriptor::decl(&cfg),
+        ),
+        (
+            "HookConnection",
+            HookConnection::docs().unwrap_or_default(),
+            HookConnection::decl(&cfg),
+        ),
+        (
+            "HookConnectionInfo",
+            HookConnectionInfo::docs().unwrap_or_default(),
+            HookConnectionInfo::decl(&cfg),
+        ),
+        (
+            "HookConnectionDraft",
+            HookConnectionDraft::docs().unwrap_or_default(),
+            HookConnectionDraft::decl(&cfg),
+        ),
+        (
+            "HookSetupInfo",
+            HookSetupInfo::docs().unwrap_or_default(),
+            HookSetupInfo::decl(&cfg),
         ),
         (
             "ToolCallInfo",

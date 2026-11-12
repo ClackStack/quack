@@ -19,8 +19,10 @@ pub struct AppInfo {
     pub branch: Option<String>,
     /// `<provider>/<model>` the session starts on.
     pub model: Option<String>,
-    /// The engine's permission mode label, e.g. `ask`.
+    /// The approval policy label, e.g. `ask` or `allow`.
     pub permission_mode: String,
+    /// The work mode label: `plan` or `edit`.
+    pub work_mode: String,
     /// `theme` and motion settings the webview honors (dark/light and reduced motion).
     pub ui: UiSnapshot,
     /// Effective settings for the settings table (`Op::SaveSetting` edits them).
@@ -98,6 +100,7 @@ impl AppInfo {
             cwd,
             model: Some(config.settings.model.default.clone()).filter(|m| !m.is_empty()),
             permission_mode: permissions.mode.label().to_owned(),
+            work_mode: permissions.work_mode.label().to_owned(),
             ui: UiSnapshot {
                 theme: config.settings.ui.theme.clone(),
                 reduced_motion: config.settings.ui.reduced_motion,

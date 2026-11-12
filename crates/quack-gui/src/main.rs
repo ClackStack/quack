@@ -8,6 +8,7 @@
 //! invoke("send_op", { client, tab, op })         // the tagged JSON of a protocol Op
 //! invoke("close_tab", { client, tab })           // awaits engine shutdown
 //! invoke("recent_folders", { client, limit })
+//! invoke("open_url", { url })                    // a sign-in address from the engine
 //! ```
 
 use std::sync::Arc;
@@ -99,6 +100,17 @@ async fn recent_folders(
     Ok(state.recent_folders(limit.unwrap_or(10).max(1) as usize))
 }
 
+/// Opens a subscription sign-in address in the user's browser. The only URL the webview
+/// may open is one the engine handed over `Event::SignInUrl`; no arbitrary `fetch` or
+/// shell access is granted to it.
+#[tauri::command]
+fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 fn main() {
     // Launched from Finder/Dock, the PATH is the system default; give the engines the
     // login shell's so npx, cargo and friends are found (macOS/Linux).
@@ -132,7 +144,8 @@ fn main() {
             open_folder,
             send_op,
             close_tab,
-            recent_folders
+            recent_folders,
+            open_url
         ])
         .build(tauri::generate_context!())
         .expect("the tauri application builds")

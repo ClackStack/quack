@@ -1,16 +1,33 @@
 <script lang="ts">
-	import { MODES, type PermissionMode, type Session } from '#lib/session.svelte';
+	import {
+		APPROVALS,
+		WORK_MODES,
+		type ApprovalPolicy,
+		type Session,
+		type WorkMode
+	} from '#lib/session.svelte';
 	import iconUrl from '#lib/assets/icon.png';
 	import ThemeToggle from '#lib/components/ThemeToggle.svelte';
 
 	let { session }: { session: Session } = $props();
 
 	let showModels = $state(false);
-	let showModes = $state(false);
+	let showWorkMode = $state(false);
+	let showApprovals = $state(false);
 	let showContext = $state(false);
 
 	const modelLabel = $derived(session.currentModel ?? 'no model');
-	const modeLabel = $derived(MODES.find((m) => m.id === session.mode)?.label ?? session.mode);
+	const workModeLabel = $derived(
+		WORK_MODES.find((m) => m.id === session.workMode)?.label ?? session.workMode
+	);
+	const approvalsLabel = $derived(
+		APPROVALS.find((a) => a.id === session.approvals)?.label ?? session.approvals
+	);
+	const thinkingLabel = $derived(session.reasoningEffort ?? 'default');
+	// Legacy policies stay visible only while active (docs/plan/15-desktop-client.md).
+	const approvalChoices = $derived(
+		APPROVALS.filter((a) => !a.legacy || session.approvals === a.id)
+	);
 
 	const fill = $derived.by(() => {
 		const c = session.context;
@@ -25,11 +42,20 @@
 	);
 
 	function closeMenus(event: MouseEvent) {
-		if (!(event.target as HTMLElement).closest('.menu-anchor')) {
-			showModels = false;
-			showModes = false;
-			showContext = false;
-		}
+		if ((event.target as HTMLElement).closest('.menu-anchor')) return;
+		showModels = false;
+		showWorkMode = false;
+		showApprovals = false;
+		showContext = false;
+		session.thinkingOpen = false;
+	}
+
+	function closeMenusExcept(thinking: boolean) {
+		showModels = false;
+		showWorkMode = false;
+		showApprovals = false;
+		showContext = false;
+		if (!thinking) session.thinkingOpen = false;
 	}
 
 	const disabled = $derived(
@@ -59,14 +85,27 @@
 			class:pill-live={session.streaming}
 			onclick={() => {
 				showModels = !showModels;
-				showModes = false;
-				showContext = false;
+				closeMenusExcept(false);
 			}}
 			aria-expanded={showModels}
 		>
-			{modelLabel}
+			{modelLabel}{#if session.reasoningEfforts.length > 0}<span class="note"> · {thinkingLabel}</span>{/if}
 			{#if session.streaming}<span class="live-dot" aria-label="streaming"></span>{/if}
 		</button>
+		{#if session.reasoningEfforts.length > 0}
+			<button
+				class="pill chip"
+				class:chip-open={session.thinkingOpen}
+				onclick={() => {
+					session.thinkingOpen = !session.thinkingOpen;
+				closeMenusExcept(true);
+			}}
+				aria-expanded={session.thinkingOpen}
+				title="Thinking level for {modelLabel}"
+			>
+				thinking: {thinkingLabel}
+			</button>
+		{/if}
 		{#if showModels}
 			<div class="menu" role="menu">
 				{#each providers as provider (provider.id)}
@@ -86,7 +125,12 @@
 								}}
 							>
 								<span class="model-id">{provider.id}/{model.id}</span>
-								{#if model.price}<span class="note">{model.price}</span>{/if}
+								<span class="note">{[
+									model.price,
+									model.reasoning_efforts?.length
+										? `thinking: ${model.reasoning_efforts.join(' · ')}`
+										: null
+									].filter(Boolean).join(' · ') || 'Select model'}</span>
 							</button>
 						{/each}
 					</div>
@@ -105,37 +149,100 @@
 				{/if}
 			</div>
 		{/if}
+		{#if session.thinkingOpen}
+			<div class="menu" role="menu" aria-label="Thinking level">
+				<div class="menu-heading">Thinking · {modelLabel}</div>
+				<button
+					class="model"
+					role="menuitemradio"
+					aria-checked={session.reasoningEffort === null}
+					onclick={() => void session.setReasoningEffort(null)}
+				>
+					<span class="model-id">Default</span>
+					<span class="note">The level configured for this model</span>
+				</button>
+				{#each session.reasoningEfforts as level (level)}
+					<button
+						class="model"
+						role="menuitemradio"
+						aria-checked={session.reasoningEffort === level}
+						onclick={() => void session.setReasoningEffort(level)}
+					>
+						<span class="model-id">{level}</span>
+					</button>
+				{/each}
+				<div class="menu-foot">
+					Lower levels favor speed and cost; higher ones allow more time for hard tasks.
+					Applies between turns and is saved with the session.
+				</div>
+			</div>
+		{/if}
 	</div>
 
 	<div class="menu-anchor">
 		<button
 			class="pill"
-			class:pill-live={session.mode === 'plan'}
+			class:pill-live={session.workMode === 'plan'}
 			onclick={() => {
-				showModes = !showModes;
-				showModels = false;
-				showContext = false;
+				showWorkMode = !showWorkMode;
+				closeMenusExcept(false);
 			}}
-			aria-expanded={showModes}
+			aria-expanded={showWorkMode}
 		>
-			{modeLabel}{session.sandboxOff ? ' · sandbox off' : ''}
+			{workModeLabel}
 		</button>
-		{#if showModes}
-			<div class="menu" role="menu">
-				{#each MODES as mode (mode.id)}
+		{#if showWorkMode}
+			<div class="menu" role="menu" aria-label="Work mode">
+				{#each WORK_MODES as mode (mode.id)}
 					<button
 						class="model"
 						role="menuitemradio"
-						aria-checked={session.mode === mode.id}
+						aria-checked={session.workMode === mode.id}
 						onclick={() => {
-							void session.setMode(mode.id as PermissionMode);
-							showModes = false;
+							void session.setWorkMode(mode.id as WorkMode);
+							showWorkMode = false;
 						}}
 					>
 						<span class="model-id">{mode.label}</span>
 						<span class="note">{mode.about}</span>
 					</button>
 				{/each}
+				<div class="menu-foot">What the agent may do; Plan proposes changes for review.</div>
+			</div>
+		{/if}
+	</div>
+
+	<div class="menu-anchor">
+		<button
+			class="pill"
+			class:pill-live={session.approvals === 'yolo'}
+			onclick={() => {
+				showApprovals = !showApprovals;
+				closeMenusExcept(false);
+			}}
+			aria-expanded={showApprovals}
+		>
+			{approvalsLabel}{session.sandboxOff ? ' · sandbox off' : ''}
+		</button>
+		{#if showApprovals}
+			<div class="menu" role="menu" aria-label="Approvals">
+				{#each approvalChoices as approval (approval.id)}
+					<button
+						class="model"
+						role="menuitemradio"
+						aria-checked={session.approvals === approval.id}
+						onclick={() => {
+							void session.setApprovals(approval.id as ApprovalPolicy);
+							showApprovals = false;
+						}}
+					>
+						<span class="model-id">{approval.label}</span>
+						<span class="note">{approval.about}</span>
+					</button>
+				{/each}
+				<div class="menu-foot">
+					Approvals apply within the work mode; deny rules and the sandbox still hold.
+				</div>
 			</div>
 		{/if}
 	</div>
@@ -150,8 +257,7 @@
 			onclick={() => {
 				void session.refreshContext();
 				showContext = !showContext;
-				showModels = false;
-				showModes = false;
+				closeMenusExcept(false);
 			}}
 			aria-expanded={showContext}
 		>
@@ -214,6 +320,15 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		display: block;
+	}
+
+	.chip {
+		font-size: 12px;
+		padding: 2px 8px;
+	}
+
+	.chip-open {
+		border-color: var(--sky-ink);
 	}
 
 	.wordmark {
@@ -279,6 +394,21 @@
 	.menu.right {
 		left: auto;
 		right: 0;
+	}
+
+	.menu-heading {
+		font-weight: 700;
+		font-size: 12px;
+		color: var(--ink-2);
+		padding: 6px 8px 2px;
+	}
+
+	.menu-foot {
+		font-size: 12px;
+		color: var(--ink-3);
+		padding: 6px 8px;
+		border-top: 1px solid var(--rule-soft);
+		margin-top: 4px;
 	}
 
 	.provider {

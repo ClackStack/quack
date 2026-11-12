@@ -83,6 +83,18 @@ A native [page-load hook](https://docs.rs/tauri/2.12.5/tauri/struct.Builder.html
 
 Validation on Linux: 30 desktop Rust tests (including six concurrency/cancellation/reconnect tests and four Unix PATH tests), 26 bridge-only tests, warnings-denied desktop Clippy, 28 frontend tests, Svelte checks and a production SPA build. Gate-controlled tests verify other-tab Interrupt/session controls during slow load/close, closing-workspace reservation, simultaneous opens, stale config completion, cancelled opens and engine retirement. All config, cache and recent-folder data in tests are isolated. No live model calls. Native-window reload, installed-bundle and other-platform runtime checks remain pending; G1 remains in progress.
 
+## Mode split, thinking levels and subscriptions (2026-11-11)
+
+The engine's permission model split into two independent controls, and the GUI followed ([00](00-architecture.md#engine-protocol)):
+
+- **Work mode and approvals are separate pills.** `SetWorkMode` picks Plan/Edit, `SetApprovalPolicy` picks the approval default, and `ModeChanged` is the authoritative state for both (the legacy `PermissionMode` notification still maps onto them for older engines). Ask and Allow are the offered choices; yolo, auto-edit and read-only are legacy policies that stay visible only while active, matching the TUI's `/permissions`. Accepting a plan keeps the current approvals (`AcceptPlan` with an empty mode) and the plan bar's escape hatch returns to Edit without touching approvals.
+- **Model selection asks for a thinking level.** Models that declare `reasoning.efforts` show them in the pickers, and switching to one opens a level picker beside the model pill (Default plus the declared levels, sent as `SetReasoningEffort`; `null` restores the provider file's default). The header pill shows the effective level, the picker reopens from a *thinking* chip, and the level survives resume because it rides on `SessionInfo`.
+- **Subscription sign-in in setup.** Services with `subscription: true` offer a browser sign-in instead of an API-key field: `SignIn` starts it, `SignInUrl` is opened through a new least-privilege `open_url` IPC command (the webview still has no `fetch` or shell access; the opener plugin runs on the Rust side), and `SignInResult` refreshes services and models. Failures stay beside the service for a retry; cancelling aborts locally because the engine aborts silently.
+
+Hooks gained declarative setup Ops and events (`HookSetup*`, `InspectHookSetup`, `SaveHookSetup`, `CheckHookSetup`); their types are exported to `protocol.ts` but no GUI surface exists yet (G3's settings dialog).
+
+Validation on Linux: full `QUACK_DEFAULTS_DIR=none cargo test --workspace --locked`, warnings-denied Clippy on the touched crates including `--features desktop`, `cargo fmt --all --check`, protocol export, `pnpm check`, `pnpm test` (43 tests) and `pnpm build`. No live model calls; the sign-in and thinking flows were exercised through the scripted dev transport and unit tests.
+
 ## The bridge
 
 One `Channel` per tab, created by the frontend and handed to `open_folder`; commands carry a connection id and (where applicable) a tab id:
@@ -92,7 +104,8 @@ invoke("connect") → client                      // retires engines from the di
 invoke("open_folder", { client, cwd, resume, events }) → tab (number); AppInfo arrives on events first
 invoke("send_op", { client, tab, op })            // op is tagged JSON, parsed into quack_protocol::Op
 invoke("close_tab", { client, tab })             // awaits engine.shutdown() so MCP/LSP and session_end hooks finish
-events.listen(…)                                 // {"tab":…,"event":{…}}, {"tab":…,"info":{…}} or {"tab":…,"closed":{…}}
+invoke("open_url", { url })                       // a subscription sign-in address from Event::SignInUrl, opened in the system browser
+  events.listen(…)                                 // {"tab":…,"event":{…}}, {"tab":…,"info":{…}} or {"tab":…,"closed":{…}}
 ```
 
 - `send_op` accepts the `Op`'s serde JSON as-is (`#[serde(tag = "op")]`, `snake_case`); no translation layer beyond the tab envelope.
@@ -118,9 +131,9 @@ Instead of cloning the TUI's 23 terminal modals one-for-one, the GUI groups ever
 
 1. **Welcome / Recent Folders & First-Run Setup (when no folder or model is ready):**
    - Launching from an icon reopens the last open workspace tabs (persisted in `user_data_dir`), or shows a Welcome view with *Open Folder…* and recent folders (`quack-gui [path]` opens that folder directly).
-   - When startup finishes with no model ready, the setup flow opens automatically (matching the TUI's `/setup`: local server detection via `Op::DetectServers`, hosted services via `Op::ListServices` + `Op::SetProviderKey`, or custom URL via `Op::AddServer`).
+   - When startup finishes with no model ready, the setup flow opens automatically (matching the TUI's `/setup`: local server detection via `Op::DetectServers`, hosted services via `Op::ListServices` + `Op::SetProviderKey`, subscription sign-in via `Op::SignIn` + `Event::SignInUrl`, or custom URL via `Op::AddServer`).
 2. **Header, Composer & Context Inspector:**
-   - **Header / composer bar:** model selector dropdown (`Op::ListModels` + inline provider status and key entry), separate work-mode (`Plan` / `Edit`) and approval (`Ask` / `Allow`) controls (`SetWorkMode`, `SetApprovalPolicy`, `ModeChanged`) plus the sandbox indicator, and a live context meter pill. Legacy policies load for compatibility and remain visible only while active; they are omitted from the choices.
+   - **Header / composer bar:** model selector dropdown (`Op::ListModels` + inline provider status and key entry) with a thinking-level picker for models that declare `reasoning.efforts` (`Op::SetReasoningEffort`, opened on switch and from a chip beside the model), separate work-mode (`Plan` / `Edit`) and approval (`Ask` / `Allow`) controls (`SetWorkMode`, `SetApprovalPolicy`, `ModeChanged`) plus the sandbox indicator, and a live context meter pill. Legacy policies load for compatibility and remain visible only while active; they are omitted from the choices.
    - **Composer:** multi-line editor, `@` workspace file autocomplete (`InputItem::File`), image/file drag-drop and picker (`InputItem::Image`), `/skill` and custom command autocomplete.
    - **Context & Stats popover:** clicking the context pill opens the `/context` segment breakdown (`Op::GetContext`), `/stats` SVG charts (`Op::GetStats`, from the same data as the TUI's `charts.rs`) and a *Compact now* action (`Op::Compact`).
 3. **Sidebar (Workspaces, Sessions, Plan & Sub-agents):**

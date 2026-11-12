@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// What the agent may do. Planning never authorizes changes or test execution.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum WorkMode {
     Plan,
@@ -24,6 +25,7 @@ impl WorkMode {
 /// Approval defaults, ordered so the existing system policy can cap them.
 /// Read-only and auto-edit remain available for existing configurations.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum ApprovalPolicy {
     ReadOnly,

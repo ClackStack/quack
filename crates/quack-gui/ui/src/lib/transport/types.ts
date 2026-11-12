@@ -10,7 +10,10 @@ export interface AppInfo {
 	cwd: string;
 	branch: string | null;
 	model: string | null;
+	/** The approval policy label: `read-only`, `ask`, `auto-edit`, `allow` or `yolo`. */
 	permission_mode: string;
+	/** The work mode label: `plan` or `edit`. */
+	work_mode: string;
 	ui: { theme: string; reduced_motion: boolean };
 	settings: {
 		key: string;
@@ -56,6 +59,8 @@ export interface Transport {
 	openFolder(cwd: string, resume: ResumeRequest): Promise<OpenedTab>;
 	sendOp(tab: number, op: Op): Promise<void>;
 	closeTab(tab: number): Promise<void>;
-	recentFolders(limit?: number): Promise<RecentFolder[]>;
+	recentFolders(limit?: number): Promise<RecentFolder[]>
+	/** Opens a URL in the user's browser (a subscription sign-in address). */
+	openUrl(url: string): Promise<void>;
 	listen(listener: (message: TabMessage) => void): () => void;
 }
