@@ -56,6 +56,53 @@ pub(crate) fn merge(
     }
 }
 
+/// Merge item documents across layers, without origin tracking. A `[section]` table
+/// merges recursively; anything written inline — `api_key = { ... }` above all, a table
+/// that is one value rather than a group of settings — replaces, as do scalars and
+/// arrays, and `key.append = [...]` extends a lower layer's array. Inline-ness is the
+/// line between "a group of settings" and "one value that happens to be a table". The
+/// value rules match [`merge`]; keep the two in step.
+pub(crate) fn merge_docs(base: &mut toml_edit::DocumentMut, over: &toml_edit::DocumentMut) {
+    merge_sections(base.as_table_mut(), over.as_table());
+}
+
+fn merge_sections(base: &mut toml_edit::Table, over: &toml_edit::Table) {
+    for (key, item) in over {
+        if let toml_edit::Item::Table(t) = item {
+            if let Some(extra) = append_array(t) {
+                match base.get_mut(key) {
+                    Some(toml_edit::Item::Value(toml_edit::Value::Array(a))) => {
+                        for v in extra.iter() {
+                            a.push(v.clone());
+                        }
+                        continue;
+                    }
+                    Some(toml_edit::Item::ArrayOfTables(aot)) => {
+                        for one in extra.iter().filter_map(|v| v.as_inline_table()) {
+                            aot.push(one.clone().into_table());
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(toml_edit::Item::Table(b)) = base.get_mut(key) {
+                merge_sections(b, t);
+                continue;
+            }
+        }
+        base.insert(key, item.clone());
+    }
+}
+
+/// The array an `append = [...]` table carries, when `t` is one and nothing else.
+fn append_array(t: &toml_edit::Table) -> Option<&toml_edit::Array> {
+    (t.len() == 1)
+        .then(|| t.get("append"))
+        .flatten()
+        .and_then(toml_edit::Item::as_array)
+}
+
 pub(crate) fn get_path<'a>(table: &'a Table, path: &str) -> Option<&'a Value> {
     let mut parts = path.split('.');
     let mut cur = table.get(parts.next()?)?;

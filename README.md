@@ -45,7 +45,7 @@ quack
 
 On first launch, the interactive `/setup` wizard helps you configure a model in seconds:
 - **Local servers**: Automatically detects running instances of Ollama, llama.cpp, vLLM, or LM Studio.
-- **Hosted providers**: Configure API keys for OpenRouter, DeepSeek, Fireworks, and others (securely saved in your OS keyring; on headless Linux such as WSL, where no Secret Service runs, in a file only your user can read instead).
+- **Hosted providers**: Configure API keys for OpenRouter, DeepSeek, Fireworks, and others (securely saved in your OS keyring; on headless Linux such as WSL, where no Secret Service runs, in a file only your user can read instead). Setup writes only a minimal override to your config, so new models a quack update brings in the defaults bundle reach you on their own; if your own file pins a model list that has moved on, `quack doctor` says so.
 - **Subscriptions**: In **Hosted services**, choose **ChatGPT plan** to sign in through your browser, allow plan usage, and pick a model. This also works in `quack setup`; `quack login chatgpt` remains available for standalone sign-in.
 - **Custom endpoints**: Connect any OpenAI-compatible server URL.
 
