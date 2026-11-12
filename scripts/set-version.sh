@@ -20,6 +20,13 @@ esac
   exit 1
 }
 
+# Populate the registry cache from the committed lock before stamping: the
+# refresh below runs --offline, and on a fresh runner with an empty cargo home
+# offline resolution cannot see the crates.io index at all. Fetching here also
+# pins what that refresh can pick to versions already in Cargo.lock. It must
+# run while Cargo.toml and Cargo.lock still agree, so before the stamp.
+(cd "$root" && cargo fetch --locked --quiet)
+
 toml=$root/Cargo.toml
 awk -v ver="$version" '
   /^\[/ { in_pkg = ($0 == "[workspace.package]") }
