@@ -156,6 +156,21 @@ async fn the_provider_file_beats_the_catalog() {
 }
 
 #[tokio::test]
+async fn declared_thinking_levels_reach_the_model_catalog() {
+    let server = chat_server().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let models = "[[models]]\nid = \"tiny\"\nreasoning = { efforts = [\"low\", \"high\"] }";
+    let config = load(tmp.path(), &server.uri(), models, "");
+    let mut engine = Engine::spawn(Arc::new(config));
+    let models = listed(&mut engine).await;
+    assert_eq!(
+        models[0].reasoning_efforts,
+        vec!["low".to_owned(), "high".to_owned()]
+    );
+    engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn the_models_endpoint_beats_the_catalog() {
     let server = chat_server().await;
     Mock::given(method("GET"))

@@ -15,8 +15,10 @@ turns it off, leaving the empty profile (no prompt beyond the instructions).
   DeepSeek and MiMo.
 - `zcode`: Z.ai's ZCode tool names (`Read`, `Edit`, `Bash`, `TodoWrite`, ...), for GLM.
 - `kimi-code`: Kimi CLI tool names (`ReadFile`, `StrReplaceFile`, `Shell`, ...).
-- `codex`: Codex tools for gpt-oss: `shell` with an argument list, `apply_patch`,
-  `update_plan`.
+- `codex`: Codex-shaped tools for OpenAI coding models: `shell` with an argument list,
+  `apply_patch`, `update_plan`, tracked `read` before patching existing files, `task`, and
+  capability-gated `view_image`. Automatically selected only for `gpt-6.1-sol`,
+  `gpt-6-astra`, `gpt-6-luna`, and `gpt-6.1-terra`; gpt-oss remains opt-in.
 - `dsh`: DeepSeek Harness tool names (`read`, `write`, `edit`, `bash`, `todo_write`), for
   DeepSeek.
 - `vibe`: Mistral Vibe tool names (`read_file`, `write_file`, `edit`, `bash`, `grep`,
@@ -27,7 +29,9 @@ them (`profile = "qwen-code"`) until `quack eval` shows they beat `generic` for 
 family; `zcode` (GLM-5) and `dsh` (DeepSeek-V4) passed that bar on 2026-10-20 and are
 matched automatically. `vibe` (Mistral coding models) is matched automatically too, as
 of 2026-11-09: it tied `generic`'s pass rate on a single hard pass with clearly fewer
-steps and cost, and its `--repeat 3` confirmation is still owed. Each file's comment
+steps and cost, and its `--repeat 3` confirmation is still owed. `codex` now matches
+Sol, Astra, Luna and Terra by explicit user approval after a live Sol comparison and upstream
+review (2026-11-11); Astra has one successful smoke task, while Luna/Terra remain unmeasured. Each file's comment
 has the proposed globs for the profiles still waiting. Every prompt is
 original text; only tool names and parameter shapes follow the family's own harness
 (see each `source`).

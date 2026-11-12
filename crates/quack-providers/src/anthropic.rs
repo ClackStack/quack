@@ -190,9 +190,6 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
             })
             .collect();
     }
-    if let Some(e) = &req.reasoning_effort {
-        body["output_config"] = json!({ "effort": e });
-    }
     let s = &req.sampling;
     if let Some(t) = s.temperature {
         body["temperature"] = json!(t);
@@ -204,6 +201,12 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
         body["top_k"] = json!(k);
     }
     merge(&mut body, &req.extra_body);
+    if let Some(e) = &req.reasoning_effort {
+        if !body["output_config"].is_object() {
+            body["output_config"] = json!({});
+        }
+        body["output_config"]["effort"] = json!(e);
+    }
     body
 }
 
@@ -647,6 +650,21 @@ mod tests {
                 items,
             }),
         }
+    }
+
+    #[test]
+    fn selected_effort_preserves_other_output_options() {
+        let req = ChatRequest {
+            reasoning_effort: Some("high".into()),
+            extra_body: serde_json::from_value(json!({
+                "output_config": { "effort": "low", "format": { "type": "json_schema" } }
+            }))
+            .expect("extra body"),
+            ..ChatRequest::default()
+        };
+        let body = build_body(&req);
+        assert_eq!(body["output_config"]["effort"], "high");
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
     }
 
     #[test]

@@ -1,17 +1,14 @@
 #:schema ../../schemas/profile.json
-description = "Codex-shaped tools (shell with an argument list, apply_patch, update_plan) for gpt-oss"
+description = "Codex-shaped tools for OpenAI coding models (shell with an argument list, apply_patch, update_plan)"
 source = "Original prompt text (quack project, Apache-2.0). Tool names, the shell argument list and the apply_patch format follow openai/codex (Apache-2.0)"
 
-# Codex-trained models read files with shell commands; only these tools are offered.
+# Only these tools are offered; `read` tracks file reads required by `apply_patch`.
 exclusive = true
 
-# Not chosen automatically until the eval shows it beats `generic` for gpt-oss
-# (docs/plan/03-model-profiles.md#evaluating-profiles). Proposed:
-#   model = ["*gpt-oss*"]
-#   priority = 50
-# Use it now with `profile = "codex"` on a model.
+# Exact current OpenAI model ids only; gpt-oss remains opt-in with profile = "codex".
 [match]
-model = []
+model = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna", "gpt-6.1-terra"]
+priority = 50
 
 [defaults]
 edit_format = "apply_patch"
@@ -19,9 +16,13 @@ edit_format = "apply_patch"
 [[tools]]
 name = "shell"
 maps_to = "shell"
-description = "Runs a shell command and returns its output. `command` is the argument list, for example [\"bash\", \"-lc\", \"rg -n parse src\"]."
+description = "Runs one command to completion in the workspace and returns its exit code and output. `command` is an argument list, for example [\"bash\", \"-lc\", \"rg -n parse src\"]. Each call is a fresh process, with no stdin or persistent session; use non-interactive flags. `timeout_secs` sets the timeout within configured limits. Commands use the configured sandbox; only retry with `sandbox: false` after a sandbox denial, subject to user approval."
 [tools.params]
 command = { to = "command", transform = "argv" }
+
+[[tools]]
+name = "read"
+maps_to = "read"
 
 [[tools]]
 name = "apply_patch"
@@ -32,6 +33,14 @@ name = "update_plan"
 maps_to = "todo"
 [tools.params]
 plan = { to = "items" }
+
+[[tools]]
+name = "task"
+maps_to = "task"
+
+[[tools]]
+name = "view_image"
+maps_to = "view_image"
 
 [[tools]]
 name = "ask_user"

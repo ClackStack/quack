@@ -6,30 +6,44 @@ import shlex
 import tempfile
 from pathlib import Path, PurePosixPath
 
+from quack_usage import session_usage
+
 BIN = "/usr/local/bin/quack"
 DEFAULTS = "/usr/local/share/quack/defaults"
 # Both frameworks copy the container's /logs/agent to the trial's agent dir before
 # populate_context_post_run, even after a timeout, so the log and the session go there.
 AGENT_LOGS = PurePosixPath("/logs/agent")
 PROMPT = "/tmp/quack_instruction.txt"
+PROVIDERS = {
+    "fireworks": ("FIREWORKS_API_KEY", "api.fireworks.ai"),
+    "charm-hyper": ("CHARM_API_KEY", "hyper.charm.land"),
+    "moonshot": ("MOONSHOT_API_KEY", "api.moonshot.ai"),
+    "openrouter": ("OPENROUTER_API_KEY", "openrouter.ai"),
+    "together": ("TOGETHER_API_KEY", "api.together.xyz"),
+}
 
 
 def quack_model(name: str | None) -> str:
-    m = name or "kimi-k3"
+    m = name or "fireworks/accounts/fireworks/models/kimi-k3"
     if m.startswith("openai/"):
         m = m[len("openai/"):]
     if "/" not in m:
-        m = f"charm-hyper/{m}"
+        m = f"fireworks/accounts/fireworks/models/{m}"
+    prefix, rest = m.split("/", 1)
+    prefix = {"fireworks_ai": "fireworks", "together_ai": "together"}.get(prefix, prefix)
+    if prefix not in PROVIDERS:
+        raise ValueError(f"Unsupported benchmark provider {prefix!r} · use a configured quack provider")
+    m = f"{prefix}/{rest}"
     return m
 
 
-def api_key() -> str:
-    key = os.environ.get("CHARM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+def api_key(name: str) -> str:
+    key = os.environ.get(name) or ""
     if not key and os.path.exists("/etc/environment"):
         try:
             with open("/etc/environment") as ef:
                 for line in ef:
-                    if line.startswith("CHARM_API_KEY="):
+                    if line.startswith(name + "="):
                         key = line.split("=", 1)[1].strip().strip('"').strip("'")
                         break
         except OSError:
@@ -75,78 +89,56 @@ async def upload_prompt(environment, instruction: str) -> None:
         os.unlink(tmp_local)
 
 
-def quack_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+async def upload_manifest(environment, model: str) -> None:
+    manifest = json.loads((Path(DEFAULTS).parent / "eval-manifest.json").read_text())
+    manifest["model"] = quack_model(model)
+    manifest["command"] = quack_command(model)
+    with tempfile.NamedTemporaryFile("w", delete=False) as handle:
+        json.dump(manifest, handle, indent=2)
+        local = handle.name
+    try:
+        await environment.exec(f"mkdir -p {AGENT_LOGS}")
+        await environment.upload_file(local, (AGENT_LOGS / "eval-manifest.json").as_posix())
+    finally:
+        os.unlink(local)
+
+
+def quack_env(model: str, extra: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(extra or {})
-    key = api_key()
+    key_name, _ = PROVIDERS[quack_model(model).split("/", 1)[0]]
+    key = env.get(key_name) or api_key(key_name)
     if key:
-        env["CHARM_API_KEY"] = key
+        env[key_name] = key
+    else:
+        raise RuntimeError(f"Missing {key_name} · configure the benchmark provider secret")
     env["QUACK_DEFAULTS_DIR"] = DEFAULTS
     env["QUACK_DATA_DIR"] = (AGENT_LOGS / "quack-data").as_posix()
+    env["QUACK_CONFIG_DIR"] = (AGENT_LOGS / "quack-config").as_posix()
+    env["QUACK_CACHE_DIR"] = (AGENT_LOGS / "quack-cache").as_posix()
     return env
 
 
 def quack_command(model: str) -> str:
-    # pipefail keeps quack's exit code through tee; the code is logged, not raised, so
-    # the verifier still scores whatever the agent left behind.
+    # Preserve and retain quack's exit status through tee for infrastructure diagnosis.
     log = (AGENT_LOGS / "quack.log").as_posix()
+    steps = int(os.environ.get("QUACK_EVAL_MAX_STEPS", "500"))
+    if steps <= 0:
+        raise ValueError("QUACK_EVAL_MAX_STEPS must be positive")
+    args = shlex.join([
+        BIN, "--yolo", "--mode", "edit", "--profile", "generic",
+        "-c", f"agent.max_steps={steps}", "-c", "tools.edit_format=str_replace",
+        "-c", 'model.small=""', "-m", quack_model(model), "exec", "-",
+    ])
     return (
         f"set -o pipefail; mkdir -p {AGENT_LOGS}; "
-        f"cat {PROMPT} | {BIN} --yolo -m {shlex.quote(model)} exec - 2>&1 | tee {log}; "
-        f'echo "quack exit code: $?" >> {log}'
+        f"cat {PROMPT} | {args} 2>&1 | tee {log}; "
+        f'quack_status=$?; echo "quack exit code: $quack_status" >> {log}; exit "$quack_status"'
     )
 
 
-def session_usage(logs_dir: Path) -> dict | None:
-    """Sum quack's session logs: one `usage` record per model call, `agent_usage` per
-    sub-agent call, each with `cost` when the model is priced. Records are flushed as
-    they are written, so a run killed at the timeout still counts up to that point."""
-    sessions = Path(logs_dir) / "quack-data" / "sessions"
-    logs = [p for p in sessions.glob("*/*/events.jsonl")]
-    if not logs:
-        return None
-    prompt = cached = completion = calls = agent_calls = compactions = peak = 0
-    cost, unpriced = 0.0, 0
-    for path in logs:
-        for line in path.read_text(errors="replace").splitlines():
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            kind = rec.get("t")
-            if kind == "compaction":
-                compactions += 1
-            if kind not in ("usage", "agent_usage"):
-                continue
-            u = rec.get("usage") or {}
-            p = int(u.get("prompt_tokens") or 0)
-            prompt += p
-            cached += int(u.get("cached_prompt_tokens") or 0)
-            completion += int(u.get("completion_tokens") or 0)
-            if kind == "usage":
-                calls += 1
-                peak = max(peak, p)
-            else:
-                agent_calls += 1
-            if isinstance(rec.get("cost"), (int, float)):
-                cost += rec["cost"]
-            else:
-                unpriced += 1
-    return {
-        "n_input_tokens": prompt,
-        "n_cache_tokens": cached,
-        "n_output_tokens": completion,
-        # A partial sum would understate the cost, so leave it out.
-        "cost_usd": cost if unpriced == 0 and calls + agent_calls else None,
-        "peak_context_tokens": peak,
-        "summarization_count": compactions,
-        "n_agent_steps": calls,
-        "metadata": {
-            "model_calls": calls,
-            "sub_agent_calls": agent_calls,
-            "unpriced_calls": unpriced,
-            "sessions": len(logs),
-        },
-    }
+def installed_version() -> str:
+    manifest = Path(DEFAULTS).parent / "eval-manifest.json"
+    return json.loads(manifest.read_text())["version"]
 
 
 def fill_context(context, logs_dir: Path) -> None:
@@ -174,7 +166,7 @@ try:
             return "quack"
 
         def version(self) -> str | None:
-            return "0.1.0"
+            return installed_version()
 
         async def install(self, environment: HarborBaseEnvironment) -> None:
             await install_quack(environment)
@@ -190,7 +182,8 @@ try:
         ) -> None:
             await ensure_quack(environment)
             await upload_prompt(environment, instruction)
-            env = quack_env()
+            await upload_manifest(environment, quack_model(self.model_name))
+            env = quack_env(quack_model(self.model_name))
             await environment.exec(quack_command(quack_model(self.model_name)), env=env)
 except ImportError:
     pass
@@ -209,10 +202,11 @@ try:
             return "quack"
 
         def version(self) -> str | None:
-            return "0.1.0"
+            return installed_version()
 
         def network_allowlist(self) -> NetworkAllowlist:
-            return NetworkAllowlist(domains=["hyper.charm.land"])
+            model = quack_model(self.model_name)
+            return NetworkAllowlist(domains=[PROVIDERS[model.split("/", 1)[0]][1]])
 
         def install_spec(self) -> AgentInstallSpec:
             # Baked into the agent image, where the binary isn't there yet; setup()
@@ -240,9 +234,10 @@ try:
         ) -> None:
             await ensure_quack(environment)
             await upload_prompt(environment, instruction)
+            await upload_manifest(environment, quack_model(self.model_name))
 
-            env = quack_env()
-            env = environment.agent_process_env(env) or env
+            env = environment.agent_process_env({}) or {}
+            env = quack_env(quack_model(self.model_name), env)
 
             # Upload CA certificate if present in the runtime environment
             for ca_cand in [

@@ -5,3 +5,24 @@ name = "Z.ai API"
 group = "From the model makers"
 base_url = "https://api.z.ai/api/paas/v4"
 api_key = { env = "ZAI_API_KEY" }
+
+# Thinking is on by default in the GLM-5 series and `reasoning_effort` defaults to `max`.
+# The 5.3 models take only `low`/`high`/`max` and cannot turn thinking off. GLM-5.2 also
+# takes other values by mapping them (`none`/`minimal` skip thinking, `low`/`medium` act
+# as `high`, `xhigh` as `max`), so its picker lists only the distinct behaviours:
+# https://docs.z.ai/api-reference/llm/chat-completion
+[[models]]
+id = "glm-5.3"
+reasoning = { effort = "max", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "glm-5.3-flash"
+reasoning = { effort = "max", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "glm-5.3-flashx"
+reasoning = { effort = "max", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "glm-5.2"
+reasoning = { effort = "max", efforts = ["none", "high", "max"] }

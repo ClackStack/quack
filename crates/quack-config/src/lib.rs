@@ -51,7 +51,7 @@ pub use secret::{
     Secret, SecretError, expand_home, keyring_available, keyring_delete, keyring_parts, keyring_set,
 };
 pub use settings::Settings;
-pub use state::{last_model, save_last_model};
+pub use state::{last_model, reasoning_efforts, save_last_model, save_reasoning_efforts};
 pub use trust::{ProjectSummary, TrustDecision};
 
 /// Product name, used for directory names. Kept in one place for the eventual rename.

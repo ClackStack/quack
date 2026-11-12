@@ -311,6 +311,21 @@ async fn every_profile_keeps_its_prefix_across_turns() {
 #[tokio::test]
 async fn hashline_edits_keep_the_prefix_too() {
     for p in profiles() {
+        let path = defaults_bundle()
+            .join("profiles.d")
+            .join(&p)
+            .join("profile.toml");
+        let file: quack_config::profile::ProfileFile =
+            toml::from_str(&std::fs::read_to_string(path).expect("profile")).expect("profile toml");
+        // Incompatible exclusive surfaces are rejected at startup (see edit_formats.rs).
+        if file.exclusive
+            && !file
+                .tools
+                .iter()
+                .any(|t| t.maps_to.as_deref().unwrap_or(&t.name) == "edit_hashline")
+        {
+            continue;
+        }
         session(
             &p,
             "[permissions]\nmode = \"full-auto\"\n[tools]\nedit_format = \"hashline\"\n",

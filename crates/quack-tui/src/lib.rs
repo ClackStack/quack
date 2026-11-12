@@ -14,6 +14,7 @@ mod input;
 mod markdown;
 mod modal;
 mod select;
+mod sidebar;
 mod theme;
 mod ui;
 mod wrap;
@@ -104,6 +105,10 @@ async fn event_loop(
     let mut files_task = Some(tokio::task::spawn_blocking(move || {
         quack_core::workspace_files(&root, 10_000)
     }));
+    let mut branch_task = None;
+    let mut branch_tick = tokio::time::interval(Duration::from_secs(2));
+    branch_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    branch_tick.reset();
 
     while !app.should_quit() {
         tokio::select! {
@@ -141,6 +146,21 @@ async fn event_loop(
             } => {
                 files_task = None;
                 app.set_files(files);
+            },
+            _ = branch_tick.tick(), if branch_task.is_none() => {
+                let root = engine.config().dirs.workspace_root.clone();
+                branch_task = Some(tokio::task::spawn_blocking(move || app::git_branch(&root)));
+            },
+            result = async {
+                match branch_task.as_mut() {
+                    Some(task) => task.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                branch_task = None;
+                if let Ok(branch) = result {
+                    app.set_branch(branch);
+                }
             },
             _ = tick.tick() => {
                 app.on_tick();

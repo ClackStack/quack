@@ -113,6 +113,7 @@ async fn probe(
             alias: m.alias.clone(),
             context_window: m.context_window,
             price: m.cost.as_ref().map(price),
+            reasoning_efforts: m.reasoning.efforts.clone(),
         })
         .collect();
     let include = file.discovery.include.clone();
@@ -157,6 +158,9 @@ async fn probe(
                 alias: None,
                 context_window: d.context_window,
                 price: d.cost.as_ref().map(price),
+                // The models endpoint cannot say which efforts a model supports; only the
+                // provider file can.
+                reasoning_efforts: Vec::new(),
             }),
         }
     }

@@ -185,7 +185,7 @@ async fn a_prompt_streams_the_answer_and_ends_the_turn() {
         .as_str()
         .expect("session id")
         .to_owned();
-    assert_eq!(new["result"]["modes"]["currentModeId"], "ask", "{new}");
+    assert_eq!(new["result"]["modes"]["currentModeId"], "edit", "{new}");
 
     let id = editor
         .request(
@@ -388,5 +388,102 @@ async fn cancel_stops_the_turn_with_cancelled() {
         .await;
     let (_, reply) = editor.until(id, "deny").await;
     assert_eq!(reply["result"]["stopReason"], "cancelled", "{reply}");
+    editor.close().await;
+}
+
+#[tokio::test]
+async fn approvals_can_change_without_leaving_plan_mode() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"role\":\"tool\""))
+        .respond_with(sse(&[r#"{"choices":[{"delta":{"content":"Proposed tests: cargo test checks the change."},"finish_reason":"stop"}]}"#]))
+        .mount(&server).await;
+    Mock::given(method("POST"))
+        .respond_with(sse(&[r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"edit-plan","function":{"name":"write","arguments":"{\"path\":\"notes.txt\",\"content\":\"changed\"}"}}]},"finish_reason":"tool_calls"}]}"#]))
+        .up_to_n_times(1).mount(&server).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ws = workspace(tmp.path());
+    let mut editor = Editor::connect(spawner(tmp.path(), &server.uri()));
+    editor
+        .call(
+            "initialize",
+            json!({"protocolVersion":1,"clientCapabilities":{}}),
+        )
+        .await;
+    let new = editor
+        .call("session/new", json!({"cwd":ws,"mcpServers":[]}))
+        .await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("session")
+        .to_owned();
+    assert_eq!(
+        new["result"]["modes"]["availableModes"]
+            .as_array()
+            .expect("modes")
+            .len(),
+        2
+    );
+    let result = editor
+        .call(
+            "session/set_mode",
+            json!({"sessionId":session,"modeId":"plan"}),
+        )
+        .await;
+    assert!(result.get("error").is_none(), "{result}");
+    // Older clients may still send a legacy policy. Keep its behavior and show it
+    // only while active, so the new picker never silently changes permissions.
+    let result = editor
+        .call(
+            "session/set_config_option",
+            json!({"sessionId":session,"configId":"approvals","value":"auto-edit"}),
+        )
+        .await;
+    let legacy = result["result"]["configOptions"]
+        .as_array()
+        .expect("options")
+        .iter()
+        .find(|o| o["id"] == "approvals")
+        .expect("approval control");
+    assert_eq!(legacy["currentValue"], "auto-edit");
+    assert_eq!(legacy["options"].as_array().expect("choices").len(), 3);
+    assert_eq!(legacy["options"][2]["name"], "Auto-edit (legacy)");
+    let result = editor
+        .call(
+            "session/set_config_option",
+            json!({"sessionId":session,"configId":"approvals","value":"allow"}),
+        )
+        .await;
+    let approvals = result["result"]["configOptions"]
+        .as_array()
+        .expect("options")
+        .iter()
+        .find(|o| o["id"] == "approvals")
+        .expect("approval control");
+    assert_eq!(approvals["currentValue"], "allow");
+    assert_eq!(
+        approvals["options"],
+        json!([{"value":"ask","name":"Ask"},{"value":"allow","name":"Allow"}])
+    );
+    let id = editor
+        .request(
+            "session/prompt",
+            json!({"sessionId":session,"prompt":[{"type":"text","text":"plan a change"}]}),
+        )
+        .await;
+    let (seen, reply) = editor.until(id, "deny").await;
+    assert_eq!(reply["result"]["stopReason"], "end_turn");
+    assert!(
+        !seen
+            .iter()
+            .any(|m| m["method"] == "session/request_permission")
+    );
+    assert!(!ws.join("notes.txt").exists());
+    let requests = server.received_requests().await.expect("requests");
+    let chat: Vec<_> = requests.iter().filter(|r| r.method == "POST").collect();
+    let first = String::from_utf8_lossy(&chat[0].body);
+    let second = String::from_utf8_lossy(&chat[1].body);
+    assert!(first.contains("exact test commands"), "{first}");
+    assert!(second.contains("plan mode: no changes"), "{second}");
     editor.close().await;
 }

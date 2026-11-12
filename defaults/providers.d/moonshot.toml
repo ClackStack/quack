@@ -6,3 +6,18 @@ group = "From the model makers"
 base_url = "https://api.moonshot.ai/v1"
 catalog = "moonshotai"
 api_key = { env = "MOONSHOT_API_KEY" }
+
+# The K3 models always reason and take `reasoning_effort` `low`/`high`/`max`, default
+# `max`. K2.6 has only a thinking toggle and K2.7 Code none, so they list no levels:
+# https://platform.kimi.ai/docs/guide/use-reasoning-effort
+[[models]]
+id = "kimi-k3"
+reasoning = { effort = "max", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "kimi-k3.1-pro"
+reasoning = { effort = "max", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "kimi-k3.1-pro-highspeed"
+reasoning = { effort = "max", efforts = ["low", "high", "max"] }

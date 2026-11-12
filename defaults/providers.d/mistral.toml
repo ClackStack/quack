@@ -5,3 +5,10 @@ name = "Mistral (API or Vibe plan)"
 group = "From the model makers"
 base_url = "https://api.mistral.ai/v1"
 api_key = { env = "MISTRAL_API_KEY" }
+
+# Large 4 takes `reasoning_effort` `none` or `high` (quack's Mistral dialect maps other
+# values onto those two, as Mistral's own harness does). No default is pinned: an unset
+# effort sends nothing and the server picks. Other Mistral models were not looked at.
+[[models]]
+id = "mistral-large-4"
+reasoning = { efforts = ["none", "high"] }

@@ -2,7 +2,8 @@
 //!
 //! The answer goes to stdout; tool activity and errors go to stderr in text mode.
 //! Nobody can answer an approval prompt here, so anything that would ask is denied and
-//! the model is told why. `--permission-mode` or `[permissions] allow` rules widen this.
+//! the model is told why. `--approvals allow` or `[permissions] allow` rules permit eligible
+//! actions; Plan restrictions and explicit ask/deny rules still apply.
 
 #![allow(clippy::print_stdout)]
 
@@ -29,7 +30,7 @@ pub mod exit {
 
 const HEADLESS_DENIAL: &str = "this run is headless and nobody can approve actions. \
 Continue without it if you can; otherwise explain what you would run. \
-(The user can allow it with --permission-mode or a [permissions] allow rule.)";
+(For eligible actions, the user can use --approvals allow or a [permissions] allow rule.)";
 
 /// Run a single prompt to completion. Returns the process exit code.
 pub async fn run(mut engine: EngineHandle, prompt: String, format: OutputFormat) -> i32 {
@@ -111,7 +112,7 @@ pub async fn run(mut engine: EngineHandle, prompt: String, format: OutputFormat)
                     })
                     .await;
                 if text_mode {
-                    let _ = writeln!(stderr, "  ✗ denied: needs approval (see --permission-mode)");
+                    let _ = writeln!(stderr, "  ✗ denied: needs approval (see --approvals)");
                 }
             }
             Event::Questions { call_id, .. } => {

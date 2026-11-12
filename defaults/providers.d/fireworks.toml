@@ -12,3 +12,7 @@ api_key = { env = "FIREWORKS_API_KEY" }
 # doubles the wait, so a long prefill (headers came at 4s for a 60k-token prompt) still fits.
 [http]
 timeout_first_byte_secs = 30
+
+[[models]]
+id = "accounts/fireworks/models/kimi-k3"
+vision = true

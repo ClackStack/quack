@@ -49,6 +49,17 @@ On first launch, the interactive `/setup` wizard helps you configure a model in 
 - **Subscriptions**: In **Hosted services**, choose **ChatGPT plan** to sign in through your browser, allow plan usage, and pick a model. This also works in `quack setup`; `quack login chatgpt` remains available for standalone sign-in.
 - **Custom endpoints**: Connect any OpenAI-compatible server URL.
 
+ChatGPT `chatgpt/sol` has been [evaluated live](evals/results/2026-11-11/README.md).
+The `codex` profile is selected automatically for Sol, Astra, Luna and Terra on ChatGPT
+and OpenAI providers; use `--profile generic` to override it. It includes tracked
+reads before patches, sub-agents and image viewing on vision-capable models.
+All shipped profiles have mock-tested tracked-read/edit workflows; incompatible
+exclusive-profile edit-format overrides report an actionable startup error.
+[An upstream Codex review](evals/results/2026-11-11/codex-comparison.md) informed
+compatibility fixes; Astra passed a [single smoke task](evals/results/2026-11-11/terra-astra.md),
+while Luna and Terra remain untested live.
+Evaluations consume plan allowance or API credit, depending on the provider.
+
 ### 3. Common Commands
 
 | Command | Description |
@@ -75,7 +86,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 - **Compiler and syntax aware**: Immediate Tree-sitter syntax validation on edits and background LSP diagnostics that guide the model to fix type or compile errors immediately.
 - **Smart context distillation**: Automatically folds passing test sequences (Cargo, Pytest, Go, Jest) and verbose build logs, keeping context compact and prompt caches warm.
 - **Transactional multi-file refactoring**: Atomic multi-file changes automatically roll back if any write fails. Revert edits instantly with `/undo` or `/rewind`.
-- **Collaborative plan mode**: `/plan` lets you explore solutions and approve checklists before modifying files, with optional dual-model planning.
+- **Plan with fewer prompts**: Plan + Allow reads and searches automatically, then presents proposed changes and test commands for review. Accepting the plan starts implementation with the same approval policy. A separate planner model is optional.
 - **Extensible with MCP & LSP**: Native Model Context Protocol (stdio & HTTP) support, background language servers for 10+ languages, sub-agents, and custom slash commands.
 - **Editor integration (ACP)**: Connect quack directly into your editor panel via the Agent Client Protocol.
 
@@ -88,11 +99,11 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 ### Models & Reasoning
 
 - **Local and hosted engines**: Works with local servers (Ollama, llama.cpp, vLLM, SGLang, LM Studio) and 12+ hosted providers (OpenRouter, Fireworks, Together, DeepInfra, Novita, DeepSeek, Moonshot, Kimi, Mistral, Charm Hyper), plus Anthropic and OpenAI APIs.
-- **Thinking and reasoning models**: Native streaming with collapsible reasoning display (`Ctrl-T` or `/thinking`). Reasoning tokens are preserved across tool steps as required by DeepSeek, Kimi, MiniMax, GLM, Claude, and OpenAI.
+- **Thinking and reasoning models**: `/thinking` picks the active model's supported effort level; `/thinking high` sets it directly and `/thinking default` restores its configured default. The toolbar and sidebar show the level beside the model, and each model's selection survives reload, session resume and restarts. `Ctrl-T` or `/thinking show|hide` controls the reasoning display. Reasoning tokens are preserved across tool steps as required by DeepSeek, Kimi, MiniMax, GLM, Claude, and OpenAI.
 - **Tool-call repair**: Automatically parses and heals calls returned as text or markup (Hermes, Qwen-XML, GLM, DeepSeek, Kimi formats), recovers loose arguments, and deduplicates call IDs.
 - **Guided decoding**: Enforces schema-guided grammar decoding (`ToolCallMode::Grammar`) on supported local engines to eliminate JSON malformations.
 - **Family profiles**: Automatically tunes prompt templates, tool definitions, edit formats, and sampling parameters for specific model families (`qwen-code`, `cc-style`, `kimi-code`, `codex`, `dsh`, `vibe`).
-- **Live switching**: Change active models mid-conversation with `/models` or inspect provider health with `/providers` without losing conversation history.
+- **Live switching**: Change active models mid-conversation with `/models` or inspect provider health with `/providers` without losing conversation history. Models that declare `reasoning.efforts` show their levels in `/models`, and quack asks for a thinking level right after you switch to one, since the level changes both behaviour and cost.
 - **Token telemetry**: Real-time tokens per second and time-to-first-token tracking in the status bar.
 
 ### Tools & Editing
@@ -118,16 +129,38 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 
 ### Safety & Sandboxing
 
-- **Permission modes**: `read-only`, `ask` (default), `auto-edit`, `full-auto`, and `yolo`.
+- **Independent work mode and approvals**: choose **Plan / Edit** and **Ask / Allow** separately. Plan reads and searches; Edit may change files and run tests. Ask prompts for unapproved actions; Allow runs them within the configured sandbox. `/yolo` or `--yolo` explicitly disables approvals and sandboxing.
 - **OS-level sandboxing**: Shell commands execute in an isolated sandbox (Landlock + seccomp on Linux, Seatbelt on macOS) with workspace-only write access and network access disabled.
 - **AST-aware command verification**: Tree-sitter parses shell commands to verify that compound expressions (`&&`, `||`, subshells, command substitutions, aliases) do not violate deny rules.
-- **Transparent approvals**: Every file modification displays an interactive diff preview with options to allow once (`y`), allow for session (`a`), permanently allow rule (`A`), or deny (`n`).
+- **Transparent approvals**: When an edit needs approval, the prompt shows a diff preview with options to allow once (`y`), allow for session (`a`), permanently allow rule (`A`), or deny (`n`).
 - **Project trust**: Untrusted cloned repositories execute no `.quack/` configurations until explicitly trusted via `/trust`.
-- **Quick sandbox toggle**: Toggle the sandbox on or off during a session with `/sandbox` while preserving your active permission mode.
+- **Quick sandbox toggle**: Toggle the sandbox on or off during a session with `/sandbox` while preserving work mode and approvals.
 
 ### Planning & Sub-Agents
 
-- **Interactive plan mode**: Activate `/plan` (or Shift-Tab) to brainstorm and refine multi-step tasks. The agent explores the workspace, asks clarifying questions, and proposes a checklist for approval before modifying code.
+Choose what the agent can do and when it asks independently. New sessions default to **Edit + Ask**.
+
+| Work mode | Ask | Allow |
+|---|---|---|
+| **Plan** | Read and search; unapproved tools ask | Read and search automatically |
+| **Edit** | Read and search; unapproved edits and commands ask | Read, search, edit and run commands automatically |
+
+Plan proposes the exact test commands and what each verifies; it never runs tests, builds or
+scripts, or changes files or memory. Allow keeps the configured sandbox, deny rules and explicit
+ask rules; leaving the sandbox still needs approval. Yolo disables approvals and sandboxing,
+while Plan restrictions and deny rules still apply.
+
+```sh
+quack --mode plan --approvals allow   # investigate automatically; propose tests for review
+quack --mode edit --approvals ask     # implement with approvals
+```
+
+In the TUI, **Shift-Tab** toggles Plan/Edit; `/permissions ask` or `/permissions allow` changes
+approvals. `/plan accept` implements the plan with the current approvals; `/edit` leaves planning
+without starting implementation. See [work modes and approvals](docs/modes.md) for commands,
+configuration and migration from older modes.
+
+- **Interactive plan review**: `/plan` reads and searches, asks clarifying questions, and presents proposed changes and tests. The review bar offers **Implement plan** or **Keep planning**. Work mode and approvals survive reload and resume, subject to system policy.
 - **Dual-model planning**: Use a large model to architect the plan (`[model] planner = "..."`) while your daily model carries out the implementation steps.
 - **Sub-agents**: Delegate work to isolated sub-agents using the `task` tool:
   - `explore`: Read-only scout that searches the codebase and returns file paths and line ranges, keeping exploratory reads out of the primary context.
@@ -155,10 +188,11 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 ### Interface
 
 - **Full-screen Ratatui TUI**: Markdown formatting, syntax-highlighted code blocks, tables, and optional ASCII mode (`--ascii`).
+- **Wide-terminal sidebar**: At 140 columns × 24 rows and above, a right sidebar shows the session title, working folder, Git branch, model, profile, context usage and generation speed. It grows from 36 up to 48 columns on wider terminals and adapts as you resize; set `ui.sidebar = false` to disable it, or toggle it in `/config`.
 - **Window title**: The terminal's title shows the duck and what the session is about (`_(•)> fix the login bug`), and marks when a turn runs or quack needs you. If `[model] small` is configured, quack makes one background request to title the session from the first message. The title also appears in `/resume`. The first line serves as the fallback, and `/title` sets it manually. `ui.terminal_title = false` turns it off.
 - **Smooth scrolling and selection**: Mouse wheel scrolling, click-to-position cursor, and OSC 52 terminal copy integration.
 - **Interactive pickers**: Fast, fuzzy-filtered modals for `/models`, `/providers`, `/config`, `/context`, `/stats`, `/doctor`, and `/help`. In `/config` → Layers, inspect each layer’s status and file path, then press Enter to copy the selected path.
-- **Status bar**: Real-time indicators for active permission mode, context window utilization, model generation speed, and background tasks.
+- **Status bar**: Separate work mode and approval indicators, context window utilization, model generation speed, and background tasks.
 
 ### Editor Integration (ACP)
 
@@ -215,7 +249,7 @@ Settings merge in the following order of precedence (higher layers override lowe
 | **User** | `~/.config/quack/` (`$XDG_CONFIG_HOME`) or `%APPDATA%\quack\` | User preferences and private configurations |
 | **Project** | `.quack/` at the repository root | Project-specific tools, commands, and rules (active once trusted) |
 | **Environment** | `QUACK_MODEL`, `QUACK_CONFIG_DIR`, etc. | Runtime environment variables |
-| **CLI Flags** | `-m`, `--profile`, `--permission-mode`, `-c key=value` | Command-line overrides for the active run |
+| **CLI Flags** | `-m`, `--profile`, `--mode`, `--approvals`, `-c key=value` | Command-line overrides for the active run |
 
 Run `quack config show --origin` to view your effective configuration and see which layer defined each setting.
 
@@ -272,7 +306,7 @@ deny = ["shell:curl *", "shell:wget *"]
 
 [policy]
 locked = ["model.default", "network", "sandbox.mode", "permissions.deny"]
-max_permission_mode = "full-auto"
+max_permission_mode = "allow"  # allow automatic actions, but prevent yolo
 project_config = "trusted-only"
 
 [policy.providers]
@@ -312,10 +346,16 @@ info  network       llm.internal.example · policy allows only llm.internal.exam
 **`[permissions]`**
 | Key | Default | Description |
 |---|---|---|
-| `mode` | `"ask"` | Active mode: `read-only`, `ask`, `auto-edit`, `full-auto`, or `yolo` |
+| `work_mode` | `"edit"` | `plan` (read/search and propose tests) or `edit` (implementation) |
+| `mode` | `"ask"` | Approval policy: `ask` or `allow` |
 | `allow` | `[]` | Rule patterns executed without prompting (`shell:cargo test*`, `edit:src/**`) |
-| `ask` | `[]` | Rule patterns that always prompt, even in `full-auto` |
+| `ask` | `[]` | Rule patterns that always prompt, even in `allow` (yolo bypasses asks) |
 | `deny` | `[]` | Rule patterns strictly forbidden across all modes |
+
+Older `auto-edit` and `read-only` settings retain their behavior for compatibility but are
+omitted from the approval choices. Use Plan for read/search-only work, or Ask with
+`allow = ["edit:src/**"]` to approve selected edits automatically. `full-auto` remains an
+alias for Allow; existing flags and saved sessions still load without increasing access.
 
 **`[sandbox]`**
 | Key | Default | Description |
@@ -347,7 +387,7 @@ info  network       llm.internal.example · policy allows only llm.internal.exam
 | Key | Default | Description |
 |---|---|---|
 | `locked` | `[]` | Configuration keys that lower layers cannot modify |
-| `max_permission_mode` | unset | Ceiling on allowed permission mode (e.g. locks out `yolo`) |
+| `max_permission_mode` | unset | Ceiling on approvals; `"allow"` prevents yolo. Lock `permissions.work_mode` separately to enforce Plan |
 | `project_config` | `"trusted-only"` | Project `.quack/` loading policy: `trusted-only`, `never`, or `always` |
 | `providers.allowed` | `[]` | Allowed provider ID globs |
 | `providers.hosts` | `[]` | Allowed provider host globs |
@@ -375,11 +415,12 @@ info  network       llm.internal.example · policy allows only llm.internal.exam
 |---|---|---|
 | `theme` | `"auto"` | Theme name (`dark` or `light`) |
 | `show_reasoning` | `"collapsed"` | Initial display state for reasoning: `collapsed`, `expanded`, or `hidden` |
-| `startup_panel` | `"auto"` | Startup status overlay: `auto`, `always`, or `never` |
+| `startup_panel` | `"auto"` | Startup diagnostics: in the sidebar until the first turn; on narrow terminals only on problems. `always` or `never` |
 | `ascii` | `false` | Enable pure ASCII rendering mode |
 | `mouse` | `true` | Enable mouse wheel scrolling, cursor placement, and drag selection |
 | `reduced_motion` | `false` | Replace animated spinners with static indicators |
 | `terminal_title` | `true` | Set the terminal window title to the duck and the session title (`_(•)> fix the login bug`); `false` leaves the title alone |
+| `sidebar` | `true` | Show session details on the right at 140 columns × 24 rows and above, growing from 36 up to 48 columns on wider terminals; `false` uses the full width for the conversation |
 
 **`[instructions]`, `[skills]`, `[memory]`, `[sessions]`**
 | Key | Default | Description |
@@ -424,8 +465,15 @@ info  network       llm.internal.example · policy allows only llm.internal.exam
 | `tool_calling.mode` | `"native"` | `native`, `text` (markup in reply), or `grammar` (guided decoding) |
 | `tool_calling.text_format` | `"auto"` | Format for text tool calls: `hermes`, `qwen3-xml`, `glm`, `json-block`, `deepseek`, or `kimi` |
 | `reasoning.format` | `"auto"` | Format of thinking tokens: `reasoning_content`, `reasoning`, `think-tags`, or `none` |
+| `reasoning.effort` | unset (server default) | Default thinking effort; explicit values take precedence over effort in `extra_body` |
+| `reasoning.efforts` | `[]` | Supported effort values in picker order; enables `/thinking` choices without assuming model capabilities |
 | `sampling` | from profile | Model parameters (`temperature`, `top_p`, `top_k`, `min_p`) |
 | `cost` | from server, then catalog | Cost per million tokens: `input`, `output`, `cached_input`, `cache_write` |
+
+For example, add `reasoning = { effort = "medium", efforts = ["low", "medium", "high"] }`
+to a model entry when the server supports those levels. The bundled OpenAI API and
+ChatGPT models declare their supported levels. Selections apply between turns;
+`/new` starts with the configured defaults.
 
 ---
 

@@ -7,7 +7,62 @@ base_url = "https://hyper.charm.land/v1"
 catalog = "hyper"
 api_key = { env = "CHARM_API_KEY" }
 
+# The entries below only declare each model's thinking levels (`reasoning_effort`, as
+# the models.dev hyper catalog lists them); discovery fills in prices and windows, and
+# an unset `effort` leaves the choice to the server. Where the model's maker documents a
+# default (Z.ai, DeepSeek, Kimi, the Muse Spark card) it is pinned, so a reset restores
+# the vendor's own setting.
 # Kimi K3 takes images; the entry only marks that, and discovery fills in the rest.
 [[models]]
 id = "kimi-k3"
 vision = true
+reasoning = { effort = "max", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "kimi-k3.1-pro"
+reasoning = { effort = "max", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "glm-5.3"
+reasoning = { effort = "max", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "glm-5.3-flash"
+reasoning = { effort = "max", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "deepseek-v4.1-flash-1017"
+reasoning = { effort = "high", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "deepseek-v4-pro-0813"
+reasoning = { effort = "high", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "minimax-m3"
+reasoning = { efforts = ["low", "medium", "high"] }
+
+[[models]]
+id = "inkling"
+reasoning = { efforts = ["low", "medium", "high"] }
+
+[[models]]
+id = "gpt-oss-120b"
+reasoning = { efforts = ["low", "medium", "high"] }
+
+# The server default is xhigh, which the model card recommends for coding along with high.
+[[models]]
+id = "muse-spark-open"
+reasoning = { effort = "xhigh", efforts = ["low", "medium", "high", "xhigh"] }
+
+[[models]]
+id = "qwen3.8-2.4t-a95b"
+reasoning = { efforts = ["minimal", "low", "medium", "high"] }
+
+[[models]]
+id = "qwen3.8-27b"
+reasoning = { efforts = ["none", "minimal", "low", "medium", "high"] }
+
+[[models]]
+id = "qwen3.8-flash"
+reasoning = { efforts = ["none", "minimal", "low", "medium", "high"] }

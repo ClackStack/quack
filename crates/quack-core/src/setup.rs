@@ -410,6 +410,7 @@ async fn probe(
                 alias: None,
                 context_window: m.context_window,
                 price: None,
+                reasoning_efforts: Vec::new(),
             })
             .collect(),
         configured: None,

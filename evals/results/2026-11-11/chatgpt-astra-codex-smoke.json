@@ -1,0 +1,30 @@
+{
+  "harness": "quack 0.1.0",
+  "date": "2026-11-11",
+  "suite": "tasks",
+  "model": "chatgpt/astra",
+  "profile": "codex",
+  "sampling": {},
+  "results": [
+    {
+      "task": "fix-typo",
+      "category": "single-edit",
+      "passed": true,
+      "changed": [
+        "README.md"
+      ],
+      "steps": 5,
+      "tool_calls": 4,
+      "tool_errors": 1,
+      "parse_failures": 0,
+      "edit_failures": 0,
+      "prompt_tokens": 19595,
+      "cached_tokens": 2944,
+      "completion_tokens": 190,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 5088,
+      "seconds": 14.958266767
+    }
+  ]
+}

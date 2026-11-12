@@ -19,17 +19,21 @@ const MAX_INPUT_LINES: usize = 6;
 const MAX_POPUP_ROWS: usize = 8;
 
 pub(crate) fn draw(f: &mut Frame<'_>, app: &App) {
+    let (main, sidebar) = crate::sidebar::areas(f.area(), app.info.ui.sidebar);
+    // The sidebar's startup section replaces the panel: one place shows the diagnostics,
+    // so they never appear and vanish a moment later.
+    let startup_sidebar = sidebar.is_some() && app.startup_status_visible();
     // The question or plan review bar takes rows from the transcript, keeping a few; the
     // startup panel gives way to it.
-    let choices = choices(app, usize::from(f.area().width).saturating_sub(2));
-    let panel_rows = if app.panel_visible() && choices.is_none() {
+    let choices = choices(app, usize::from(main.width).saturating_sub(2));
+    let panel_rows = if app.panel_visible() && !startup_sidebar && choices.is_none() {
         u16::try_from(app.startup.len()).unwrap_or(0) + 1
     } else {
         0
     };
     let input_rows = u16::try_from(
         app.input
-            .layout(input_width(f.area().width))
+            .layout(input_width(main.width))
             .rows
             .len()
             .min(MAX_INPUT_LINES),
@@ -38,7 +42,7 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App) {
         + 2;
     let plan_rows = if app.plan_expanded && !app.plan.is_empty() {
         // The whole plan, up to a third of the screen.
-        let cap = (f.area().height / 3).max(2);
+        let cap = (main.height / 3).max(2);
         u16::try_from(app.plan.len() + 1)
             .unwrap_or(u16::MAX)
             .min(cap)
@@ -47,8 +51,7 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App) {
     };
     let attach_rows = u16::from(!app.attachments.is_empty());
     let choice_rows = choices.as_ref().map_or(0, |c| {
-        let room = f
-            .area()
+        let room = main
             .height
             .saturating_sub(1 + panel_rows + plan_rows + input_rows + 1 + 3);
         u16::try_from(c.height()).unwrap_or(u16::MAX).min(room)
@@ -72,9 +75,9 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App) {
         Constraint::Length(input_rows),
         Constraint::Length(1),
     ])
-    .areas(f.area());
+    .areas(main);
 
-    draw_header(f, app, header);
+    draw_header(f, app, header, sidebar.is_some());
     if panel_rows > 0 {
         draw_panel(f, app, panel);
     }
@@ -88,7 +91,16 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App) {
         draw_attachments(f, app, attach);
     }
     draw_input(f, app, input);
-    draw_status(f, app, status);
+    draw_status(
+        f,
+        app,
+        status,
+        sidebar.is_some() && !startup_sidebar,
+        startup_sidebar,
+    );
+    if let Some(area) = sidebar {
+        crate::sidebar::draw(f, app, area);
+    }
     draw_popup(f, app, transcript);
     if let Some(c) = choices {
         draw_choices(f, app, choice_area, c);
@@ -170,9 +182,16 @@ fn draw_prompt(f: &mut Frame<'_>, app: &App) {
     }
 }
 
-fn draw_header(f: &mut Frame<'_>, app: &App, area: Rect) {
+fn draw_header(f: &mut Frame<'_>, app: &App, area: Rect, sidebar: bool) {
     let t = &app.theme;
     let version = format!(" {}", app.info.version);
+    if sidebar {
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(t.gradient_spans("quack"));
+        spans.push(Span::styled(version, t.dim));
+        f.render_widget(Line::from(spans), area);
+        return;
+    }
     let branch = app
         .info
         .branch
@@ -725,7 +744,13 @@ fn draw_input(f: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
-fn draw_status(f: &mut Frame<'_>, app: &App, area: Rect) {
+fn draw_status(
+    f: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    session_sidebar: bool,
+    startup_shown: bool,
+) {
     let t = &app.theme;
     let mode = &app.info.permission_mode;
     let label = if mode == "yolo" {
@@ -735,6 +760,11 @@ fn draw_status(f: &mut Frame<'_>, app: &App, area: Rect) {
     };
     let mut left: Vec<Span<'_>> = vec![
         Span::raw(" "),
+        Span::styled(
+            format!(" {} ", app.info.work_mode.label()),
+            t.pill(t.mode(app.info.work_mode.label())),
+        ),
+        Span::raw(" "),
         Span::styled(format!(" {label} "), t.pill(t.mode(mode))),
         Span::raw(" "),
     ];
@@ -743,34 +773,45 @@ fn draw_status(f: &mut Frame<'_>, app: &App, area: Rect) {
         left.push(Span::styled("no sandbox", t.warn));
         left.push(Span::styled(" · ", t.dim));
     }
+    let thinking = app.thinking_label();
     match &app.info.model {
-        Some(m) => left.push(Span::raw(m.clone())),
+        Some(m) => left.push(Span::raw(if thinking.is_some() {
+            // Keep the effort visible beside long model names, including on resize.
+            truncate(m, usize::from(area.width) / 2)
+        } else {
+            m.clone()
+        })),
         None => left.push(Span::styled("no model", t.warn)),
     }
-    if app.info.profile != "empty" {
-        left.push(Span::styled(format!(" · {}", app.info.profile), t.dim));
+    if let Some(thinking) = thinking {
+        left.push(Span::styled(format!(" · {thinking}"), t.dim));
     }
-    if let Some((used, max)) = app.context {
-        let k = crate::theme::tokens;
-        left.push(Span::styled(" · ", t.dim));
-        if max > 0 {
-            let line = app.compact_at.unwrap_or(max).max(1);
-            #[allow(clippy::cast_precision_loss)]
-            let frac = used as f32 / line as f32;
-            let style = if frac >= 0.85 {
-                t.error
-            } else if frac >= 0.6 {
-                t.warn
-            } else {
-                t.dim
-            };
-            left.push(Span::styled(format!("{}/{}", k(used), k(max)), style));
-        } else {
-            left.push(Span::styled(format!("{} in context", k(used)), t.dim));
+    if !session_sidebar {
+        if app.info.profile != "empty" {
+            left.push(Span::styled(format!(" · {}", app.info.profile), t.dim));
         }
-    }
-    if let Some(tps) = app.speed {
-        left.push(Span::styled(format!(" · {tps:.0} t/s"), t.dim));
+        if let Some((used, max)) = app.context {
+            let k = crate::theme::tokens;
+            left.push(Span::styled(" · ", t.dim));
+            if max > 0 {
+                let line = app.compact_at.unwrap_or(max).max(1);
+                #[allow(clippy::cast_precision_loss)]
+                let frac = used as f32 / line as f32;
+                let style = if frac >= 0.85 {
+                    t.error
+                } else if frac >= 0.6 {
+                    t.warn
+                } else {
+                    t.dim
+                };
+                left.push(Span::styled(format!("{}/{}", k(used), k(max)), style));
+            } else {
+                left.push(Span::styled(format!("{} in context", k(used)), t.dim));
+            }
+        }
+        if let Some(tps) = app.speed {
+            left.push(Span::styled(format!(" · {tps:.0} t/s"), t.dim));
+        }
     }
     let mut right: Vec<Span<'_>> = Vec::new();
     if app.approval.is_some() {
@@ -815,7 +856,7 @@ fn draw_status(f: &mut Frame<'_>, app: &App, area: Rect) {
         }
     }
     let issues = app.startup_issues();
-    if issues > 0 && !app.panel_visible() {
+    if issues > 0 && !app.panel_visible() && !startup_shown {
         right.push(Span::styled(
             format!("  ! {issues} startup issue(s)"),
             t.warn,
@@ -1565,6 +1606,7 @@ mod tests {
     /// Startup ends; these tests are not about the first-run `/setup` offer.
     fn started(app: &mut App) {
         app.skip_setup_offer();
+        app.dismiss_startup();
         app.on_engine(Event::StartupComplete);
     }
 
@@ -1627,8 +1669,9 @@ mod tests {
         app.on_engine(Event::Sandbox { off: true });
         assert!(render(&app, 100, 30).contains("no sandbox"));
         // Yolo's pill already says so.
-        app.on_engine(Event::PermissionMode {
-            mode: "yolo".into(),
+        app.on_engine(Event::ModeChanged {
+            work_mode: quack_protocol::WorkMode::Edit,
+            approvals: quack_protocol::ApprovalPolicy::Yolo,
         });
         assert!(!render(&app, 100, 30).contains("no sandbox"));
     }
@@ -1658,27 +1701,24 @@ mod tests {
     }
 
     #[test]
-    fn startup_panel_waits_for_a_problem_or_a_slow_start() {
+    fn startup_panel_shows_only_problems_until_the_user_starts_working() {
+        use crossterm::event::{KeyCode, KeyModifiers};
         let ready = |subsystem| Event::StartupProgress {
             subsystem,
             state: LoadState::Ready {
                 detail: "ready-detail".into(),
             },
         };
-        // A fast, clean start never shows the panel.
+        // A slow, clean start never shows the panel: the status bar's "starting" covers
+        // the wait, and the flash of a panel that vanishes on completion is gone.
         let mut app = App::new(test_info());
         app.on_engine(ready(Subsystem::Config));
+        for _ in 0..120 {
+            app.on_tick();
+        }
         assert!(!render(&app, 80, 24).contains("ready-detail"));
         started(&mut app);
         assert!(!render(&app, 80, 24).contains("ready-detail"));
-
-        // A slow one shows it after the grace period.
-        let mut app = App::new(test_info());
-        app.on_engine(ready(Subsystem::Config));
-        for _ in 0..30 {
-            app.on_tick();
-        }
-        assert!(render(&app, 80, 24).contains("ready-detail"));
 
         // A problem shows it at once and keeps it after startup.
         let mut app = App::new(test_info());
@@ -1689,8 +1729,18 @@ mod tests {
             },
         });
         assert!(render(&app, 80, 24).contains("no model selected"));
-        started(&mut app);
+        // Completion alone does not pull it away.
+        app.skip_setup_offer();
+        app.on_engine(Event::StartupComplete);
         assert!(render(&app, 80, 24).contains("no model selected"));
+
+        // Once the user starts working, the panel goes and the status bar carries the
+        // issue count instead.
+        app.execute("/help");
+        key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        let s = render(&app, 80, 24);
+        assert!(!s.contains("no model selected"), "{s}");
+        assert!(s.contains("! 1 startup issue"), "{s}");
     }
 
     #[test]
@@ -1880,11 +1930,12 @@ mod tests {
         assert!(s.contains("Summary") && s.contains("1 failed"), "{s}");
         insta::assert_snapshot!("doctor_modal_100x30", s);
 
-        let model = |id: &str, window| ModelInfo {
+        let model = |id: &str, window, efforts: &[&str]| ModelInfo {
             id: id.into(),
             alias: None,
             context_window: window,
             price: None,
+            reasoning_efforts: efforts.iter().map(|e| (*e).to_owned()).collect(),
         };
         let catalog = [ProviderModels {
             bundled: false,
@@ -1893,8 +1944,8 @@ mod tests {
             available: true,
             note: String::new(),
             models: vec![
-                model("glm-5.3", Some(1_000_000)),
-                model("qwen3.8-flash", Some(262_144)),
+                model("glm-5.3", Some(1_000_000), &["low", "medium", "high"]),
+                model("qwen3.8-flash", Some(262_144), &["low", "high"]),
             ],
         }];
         app.modal = Some(crate::modal::models(
@@ -1906,6 +1957,8 @@ mod tests {
         key(&mut app, KeyCode::Down, KeyModifiers::NONE);
         let s = render(&app, 100, 30);
         assert!(s.contains("26% of largest"), "{s}");
+        assert!(s.contains("thinking") && s.contains("low · high"), "{s}");
+        assert!(s.contains("quack then asks for a thinking level"), "{s}");
         insta::assert_snapshot!("models_modal_100x30", s);
     }
 
@@ -2003,6 +2056,212 @@ mod tests {
         app.context = Some((12_345, 0));
         let s = render(&app, 100, 24);
         assert!(s.contains("12.3k in context"), "{s}");
+    }
+
+    #[test]
+    fn sidebar_shows_session_details_and_follows_live_updates() {
+        let mut app = App::new(test_info());
+        app.info.model = Some("charm/qwen3.8-flash".into());
+        app.info.profile = "generic".into();
+        started(&mut app);
+        app.transcript.push(Entry::User("fix the parser".into()));
+        app.transcript.push(Entry::Assistant(
+            "I found the failing case and am checking the parser.".into(),
+        ));
+        app.take_dirty();
+        app.on_engine(Event::SessionTitle {
+            title: Some("Fix the parser".into()),
+        });
+        assert!(app.take_dirty(), "a title update must redraw the sidebar");
+        app.on_engine(Event::ContextUpdate {
+            used: 60_000,
+            budget: 88_400,
+            window: Some(104_000),
+            cache_hit_tokens: None,
+            threshold: Some(83_200),
+        });
+        app.on_engine(Event::Speed {
+            ttft_ms: 120,
+            tokens_per_sec: Some(48.0),
+        });
+        let s = render(&app, 140, 24);
+        for text in [
+            "Fix the parser",
+            "Working folder",
+            "~/src/project",
+            "Git branch  main",
+            "charm/qwen3.8-flash",
+            "Profile  generic",
+            "60k / 104k tokens (57%)",
+            "Summarize at 83.2k tokens",
+            "48 tokens/s",
+        ] {
+            assert!(s.contains(text), "missing {text}: {s}");
+        }
+        assert_eq!(s.matches("~/src/project").count(), 1);
+        assert_eq!(s.matches("charm/qwen3.8-flash").count(), 2);
+        insta::assert_snapshot!("sidebar_140x24", s);
+
+        app.set_branch(Some("fix/parser".into()));
+        assert!(app.take_dirty());
+        assert!(render(&app, 140, 24).contains("Git branch  fix/parser"));
+        app.set_branch(None);
+        assert!(!render(&app, 140, 24).contains("Git branch"));
+        app.on_engine(Event::SessionTitle { title: None });
+        assert!(render(&app, 140, 24).contains("New session"));
+    }
+
+    #[test]
+    fn sidebar_carries_the_startup_diagnostics_until_the_user_starts_working() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = started_app();
+        let s = render(&app, 140, 24);
+        assert!(s.contains("Startup"), "{s}");
+        assert!(
+            s.contains("rust-analyzer") && s.contains("no model selected"),
+            "the rows show their detail: {s}"
+        );
+        assert!(!s.contains("Working folder"), "{s}");
+        insta::assert_snapshot!("sidebar_startup_140x24", s);
+
+        // The extra width on larger terminals is the point: details stop wrapping.
+        let wide = render(&app, 200, 24);
+        assert!(wide.contains("no .quack/ in this workspace"), "{wide}");
+
+        // Startup finishing does not pull the diagnostics away; the first message does.
+        app.skip_setup_offer();
+        app.on_engine(Event::StartupComplete);
+        assert!(render(&app, 140, 24).contains("Startup"));
+        app.input.set("fix the parser");
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let s = render(&app, 140, 24);
+        assert!(s.contains("Working folder"), "{s}");
+        assert!(!s.contains("rust-analyzer"), "{s}");
+    }
+
+    #[test]
+    fn sidebar_adapts_to_terminal_size_and_can_be_disabled_live() {
+        let mut app = App::new(test_info());
+        app.info.model = Some("mock/tiny".into());
+        started(&mut app);
+        // The sidebar takes one of every four columns past 140, up to 48; the
+        // conversation keeps the rest and never drops below 104.
+        for (width, height, main_width, visible) in [
+            (139, 24, 139, false),
+            (140, 24, 104, true),
+            (143, 24, 107, true),
+            (160, 24, 119, true),
+            (200, 30, 152, true),
+            (300, 30, 252, true),
+            (140, 23, 140, false),
+            (80, 24, 80, false),
+            (140, 24, 104, true),
+        ] {
+            let s = render(&app, width, height);
+            assert_eq!(s.contains("Working folder"), visible, "{s}");
+            assert_eq!(app.transcript_area.get().width, main_width);
+            assert_eq!(app.input_view.get().0.width, main_width - 2);
+            assert!(
+                s.contains("mock/tiny"),
+                "metadata must survive resizing: {s}"
+            );
+        }
+        app.on_engine(Event::SettingSaved {
+            key: "ui.sidebar".into(),
+            value: "false".into(),
+            path: "/u/config.toml".into(),
+            note: None,
+        });
+        let s = render(&app, 200, 30);
+        assert!(!s.contains("Working folder"), "{s}");
+        assert_eq!(app.transcript_area.get().width, 200);
+        assert!(
+            !s.contains("next start"),
+            "the setting takes effect immediately"
+        );
+
+        app.reconfigure(test_info());
+        assert!(render(&app, 140, 24).contains("Working folder"));
+    }
+
+    #[test]
+    fn sidebar_bounds_long_values_and_supports_ascii_and_unreported_context() {
+        let mut info = test_info();
+        info.ui.ascii = true;
+        info.ui.theme = "light".into();
+        info.no_color = true;
+        info.cwd = format!("~/{}my-project", "very-long-directory/".repeat(6));
+        info.branch = Some("feature/a-very-long-branch-name-for-the-parser".into());
+        info.model = Some(format!("mock/{}", "long-model-id-".repeat(6)));
+        info.profile = "generic".into();
+        let mut app = App::new(info);
+        started(&mut app);
+        app.on_engine(Event::SessionTitle {
+            title: Some("A long session title that should wrap and stop before it crowds out the working folder and context".into()),
+        });
+        app.context = Some((90_000, 104_000));
+        app.compact_at = Some(83_200);
+        app.speed = Some(48.0);
+        let s = render(&app, 140, 24);
+        assert!(
+            s.contains("my-project") && s.contains("90k / 104k tokens (86%)"),
+            "{s}"
+        );
+        assert!(
+            s.contains("48 tokens/s"),
+            "long values leave room for all context rows: {s}"
+        );
+        insta::assert_snapshot!("sidebar_long_values_ascii_140x24", s);
+
+        app.info.branch = None;
+        app.info.model = None;
+        app.info.profile = "empty".into();
+        app.context = None;
+        let s = render(&app, 140, 24);
+        assert!(
+            s.contains("Usage not reported yet") && s.contains("Select with /models"),
+            "{s}"
+        );
+        assert!(!s.contains("Git branch") && !s.contains("Profile"), "{s}");
+        app.context = Some((12_345, 0));
+        let s = render(&app, 140, 24);
+        assert!(
+            s.contains("12.3k tokens in context") && s.contains("Window size unknown"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn sidebar_keeps_input_wrapping_and_mouse_coordinates_in_the_conversation() {
+        use crossterm::event::{
+            Event as TermEvent, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        let mut app = App::new(test_info());
+        started(&mut app);
+        app.input.set(&"x".repeat(130));
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).expect("terminal");
+        terminal.draw(|f| draw(f, &app)).expect("draw");
+        let pos = terminal.get_cursor_position().expect("cursor");
+        assert_eq!((pos.x, pos.y), (33, 21));
+        key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        terminal.draw(|f| draw(f, &app)).expect("draw");
+        let pos = terminal.get_cursor_position().expect("cursor");
+        assert_eq!((pos.x, pos.y), (33, 20));
+        app.on_terminal(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 110,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(
+            app.selection.is_none(),
+            "clicking the sidebar must not select transcript or input"
+        );
+        key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(
+            app.input.text(),
+            format!("{}y{}", "x".repeat(30), "x".repeat(100))
+        );
     }
 
     #[test]
@@ -2163,11 +2422,38 @@ mod tests {
     }
 
     #[test]
+    fn permissions_modal_100x30() {
+        use crate::modal;
+
+        let mut app = App::new(test_info());
+        started(&mut app);
+        app.modal = Some(modal::permissions("ask", &[], &app.theme));
+        let s = render(&app, 100, 30);
+        insta::assert_snapshot!("permissions_modal_100x30", s);
+        for (current, label) in [
+            ("auto-edit", "auto-edit (legacy)"),
+            ("read-only", "read-only (legacy)"),
+            ("yolo", "yolo"),
+        ] {
+            app.modal = Some(modal::permissions(current, &[], &app.theme));
+            let s = render(&app, 100, 30);
+            assert!(s.contains(label), "the active policy stays visible: {s}");
+        }
+        app.modal = Some(modal::permissions("allow", &[], &app.theme));
+        let s = render(&app, 60, 20);
+        assert!(s.contains("ask") && s.contains("allow"), "{s}");
+        assert!(
+            !s.contains("auto-edit") && !s.contains("read-only") && !s.contains("yolo"),
+            "{s}"
+        );
+    }
+
+    #[test]
     fn plan_strip_and_turn_summary_80x24() {
         use quack_protocol::{CallId, ToolCallInfo, ToolResultSummary};
         let mut info = test_info();
         info.model = Some("charm/qwen3.8-flash".into());
-        info.permission_mode = "auto-edit".into();
+        info.permission_mode = "allow".into();
         let mut app = App::new(info);
         started(&mut app);
         app.transcript
@@ -2351,8 +2637,9 @@ mod tests {
         insta::assert_snapshot!("question_bar_80x24", s);
 
         app.asking = None;
-        app.on_engine(Event::PermissionMode {
-            mode: "plan".into(),
+        app.on_engine(Event::ModeChanged {
+            work_mode: quack_protocol::WorkMode::Plan,
+            approvals: quack_protocol::ApprovalPolicy::Ask,
         });
         app.plan = vec![
             (PlanState::Pending, "add the token store".into()),
@@ -2641,6 +2928,83 @@ mod tests {
         let s = render(&app, 80, 24);
         assert!(!s.contains("greet back"), "{s}");
         assert!(s.contains("thought for 6 words"), "{s}");
+    }
+
+    #[test]
+    fn thinking_levels_picker_updates_and_displays_the_active_models_choices() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use quack_protocol::{Op, SessionId, SessionInfo};
+        let mut app = started_app();
+        started(&mut app);
+        let configured = |effort: Option<&str>, levels: &[&str]| Event::SessionConfigured {
+            session: SessionInfo {
+                id: SessionId("test".into()),
+                cwd: String::new(),
+                model: Some("mock/tiny".into()),
+                profile: "generic".into(),
+                reasoning_effort: effort.map(str::to_owned),
+                reasoning_efforts: levels.iter().map(|s| (*s).to_owned()).collect(),
+            },
+        };
+        app.on_engine(configured(Some("high"), &["low", "medium", "high"]));
+        for (width, height) in [(80, 24), (100, 30), (140, 24)] {
+            let s = render(&app, width, height);
+            assert!(s.contains("mock/tiny · high thinking"), "{s}");
+            if width == 140 {
+                assert!(s.contains("Model · high thinking"), "{s}");
+                insta::assert_snapshot!("thinking_sidebar_140x24", s);
+            }
+        }
+        app.execute("/thinking");
+        let s = render(&app, 100, 30);
+        assert!(
+            s.contains("high") && s.contains("current") && !s.contains("xhigh"),
+            "{s}"
+        );
+        insta::assert_snapshot!("thinking_picker_100x30", s);
+        // The current level starts selected; moving up chooses medium.
+        key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SetReasoningEffort {
+                effort: Some("medium".into())
+            }]
+        );
+        assert!(app.modal.is_none());
+        app.execute("/thinking default");
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SetReasoningEffort { effort: None }]
+        );
+
+        // An open picker refreshes when a model with different choices becomes active.
+        app.execute("/thinking");
+        app.on_engine(configured(None, &[]));
+        let s = render(&app, 100, 30);
+        assert!(s.contains("No selectable thinking levels"), "{s}");
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.take_ops().is_empty());
+        key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!render(&app, 80, 24).contains("high thinking"));
+        app.on_engine(configured(None, &["low", "high"]));
+        assert!(render(&app, 80, 24).contains("default thinking"));
+
+        app.info.ui.ascii = true;
+        app.on_engine(configured(Some("none"), &["none", "low", "high"]));
+        let s = render(&app, 140, 24);
+        assert!(s.contains("Model - none thinking"), "{s}");
+        app.info.model = Some(format!("mock/{}", "long-model-name-".repeat(8)));
+        assert!(render(&app, 80, 24).contains("none thinking"));
+        app.on_engine(configured(Some("off"), &["off", "high"]));
+        app.execute("/thinking");
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SetReasoningEffort {
+                effort: Some("off".into())
+            }]
+        );
     }
 
     #[test]

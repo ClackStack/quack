@@ -127,7 +127,7 @@ As implemented (M2, 2026-10-18):
 - Index lines are replaced in place, and lines the user wrote by hand are kept.
 - `/memory` lists notes from both scopes with their text and file path. Ctrl-S deletes the selected note.
 - The startup panel shows the note count and the project memory folder.
-- Memory writes have their own permission subject. They are outside the workspace, so the edit rules and `read-only` mode don't apply to them; only `memory.writes` does.
+- Memory writes have their own permission subject. Plan refuses them regardless of approvals or `memory.writes`. In Edit, workspace edit rules do not apply: `memory.writes = "ask"` prompts unless the current approvals are Allow/Yolo or the write was approved for the session.
 
 When to save, and keeping notes healthy (2026-10-25):
 - **Triggers in the prompt.** The `memory` tool description (which every profile gets) names the moments to save: the user corrects how the model works, states a lasting preference ("always", "never", "from now on", "I prefer"), accepts an approach after pushing back, or the model learns an unwritten project fact. It asks for the reason in the note, an update rather than a near-duplicate, and nothing secret, already in the repo, or only about this task. `generic`, `kimi-code` and `qwen-code` say the same in short.

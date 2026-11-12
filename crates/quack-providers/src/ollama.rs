@@ -143,24 +143,24 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
     if !options.is_empty() {
         body.insert("options".into(), Value::Object(options));
     }
-    match req.reasoning_effort.as_deref() {
-        None | Some("") => {}
-        Some("none" | "off") => {
-            body.insert("think".into(), json!(false));
-        }
-        // gpt-oss takes a level; other thinking models take `true` and ignore levels.
-        Some(level @ ("low" | "medium" | "high")) => {
-            body.insert("think".into(), json!(level));
-        }
-        Some(_) => {
-            body.insert("think".into(), json!(true));
-        }
-    }
     if req.tool_mode == Some(quack_config::provider::ToolCallMode::Grammar) {
         body.insert("format".into(), json!("json"));
     }
     let mut body = Value::Object(body);
     merge(&mut body, &req.extra_body);
+    match req.reasoning_effort.as_deref() {
+        None | Some("") => {}
+        Some("none" | "off") => {
+            body["think"] = json!(false);
+        }
+        // gpt-oss takes a level; other thinking models take `true` and ignore levels.
+        Some(level @ ("low" | "medium" | "high")) => {
+            body["think"] = json!(level);
+        }
+        Some(_) => {
+            body["think"] = json!(true);
+        }
+    }
     body
 }
 
@@ -379,6 +379,7 @@ mod tests {
             context_window: Some(32_768),
             max_tokens: Some(1024),
             reasoning_effort: Some("none".into()),
+            extra_body: serde_json::from_value(json!({ "think": true })).expect("extra body"),
             ..ChatRequest::default()
         };
         let b = build_body(&req);

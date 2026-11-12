@@ -9,8 +9,7 @@ For CI, scripts, git hooks, and wrapping by other tools.
 ```
 quack exec "fix the failing test in crates/core" \
   --model corp-vllm/qwen3-coder \
-  --permission-mode auto-edit \
-  --allow "shell:cargo test*" \
+  --approvals allow \
   --output-format stream-json \
   --max-steps 50 \
   --resume <id> | --continue
@@ -31,7 +30,7 @@ We'll evaluate making `stream-json` compatible with Claude Code's stream-json fo
 
 ### Behaviour
 
-- Approvals: anything that would `ask` is **denied** in headless mode unless `--permission-mode` or `--allow` covers it. The denial reason goes to the model, so it can adapt.
+- Approvals: anything that still needs approval is **denied** in headless mode, with feedback to the model. Use `--approvals allow` or `[permissions] allow` rules for eligible actions. Explicit ask rules and approval for leaving the sandbox still apply. `--mode plan` reads/searches and proposes tests without running them; approvals cannot override Plan restrictions. See the [user guide](../modes.md).
 - `ask_user` and MCP elicitation are unavailable unless `--allow-elicitation` is given, in which case they read from the TTY if one is present.
 - Exit codes: `0` success, `1` agent error / max steps, `2` config error, `3` provider unreachable, `4` denied by policy, `130` interrupted.
 - Sessions are saved like interactive ones (`--no-session` to skip).
@@ -67,13 +66,13 @@ maki (`maki-acp`) and goose both implement ACP and are the main references.
 ### As implemented (2026-10-24)
 
 - **No new crates.** `quack-acp/src/wire.rs` holds serde types for the messages quack reads (protocol version 1), replies are built with `json!`, and `rpc.rs` is about 120 lines of newline-delimited JSON-RPC over tokio. The official crates were measured first: the `agent-client-protocol` SDK is about 14k lines of its own connection framework, and `agent-client-protocol-schema` (4 more crates per OS) turns on serde_json's `preserve_order`, which through feature unification would change the key order of every request body sent to models, and differently in builds without `acp`. The wire names were taken from schema 1.12.0.
-- **One engine per ACP session.** `quack acp` loads the config of the folder it starts in, as every command does, then each `session/new` loads the config of the session's `cwd` with the same command line (`-m`, `--profile`, `-c`, `--permission-mode`) through a `Spawn` closure from `quack-cli`. Sessions are saved as usual, so `session/load` is `Resume::Id`, and the saved transcript is replayed as `user_message_chunk`, `agent_message_chunk` and completed `tool_call` updates before the response.
+- **One engine per ACP session.** `quack acp` loads the config of the folder it starts in, as every command does, then each `session/new` loads the config of the session's `cwd` with the same command line (`-m`, `--profile`, `-c`, `--mode`, `--approvals`) through a `Spawn` closure from `quack-cli`. Sessions are saved as usual, so `session/load` is `Resume::Id`, and the saved transcript is replayed as `user_message_chunk`, `agent_message_chunk` and completed `tool_call` updates before the response.
 - **Editor MCP servers** go into `LoadOptions::mcp` and load after every layer's `mcp.d` (replacing a file with the same id), with the policy allowlist applied. stdio and streamable HTTP are taken; SSE servers are skipped with a log line, since `rmcp` here speaks streamable HTTP only. `/reload` keeps them, because a reload re-applies the `LoadOptions`.
 - **Mapping as built:**
   - `session/prompt` → `Op::UserTurn`, answered on `TurnComplete` (`end_turn`) or `TurnAborted` (`cancelled` after `session/cancel`, otherwise a JSON-RPC error with the turn's error). The first prompt waits for MCP startup, as `quack exec` does. A second prompt while one runs is refused.
   - Text, reasoning, `ToolCallBegin`/`End` (kind guessed from the tool name, so every profile's names work; output or diff as fenced content), `Plan`, `ContextUpdate` (as `usage_update`), `PermissionMode` (as `current_mode_update`), and `Compacting` and warnings during a turn (as thought text, so they stay out of the answer).
   - `ApprovalRequest` → `session/request_permission` with allow once, allow for this session (`AllowSession`, never written to config) and deny. It runs on its own task, so a cancel meanwhile still gets through; a cancelled or failed request is a denial.
-  - Modes: `ask`, `auto-edit`, `full-auto`, `read-only`, `plan` (`SetPermissionMode`). Leaving plan mode from the editor doesn't run the plan (no `AcceptPlan`); the user says so in the next prompt.
+  - Work modes: `plan` and `edit`; the independent `approvals` config option offers Ask/Allow. An active legacy policy (or yolo from the command line) appears only while selected, because the current value must be among the options. `ModeChanged` updates both controls. Legacy `session/set_mode` approval names still work without leaving Plan. Leaving Plan does not run it; the user says so in the next prompt.
   - The model is a `session/set_config_option` select (category `model`), filled from `Op::ListModels` when the session starts: the available providers' models.
   - `ask_user` questions are answered as skipped, as in `quack exec`. ACP's elicitation is newer than most clients; it is the way to add them.
 - **Not yet:** images (`promptCapabilities.image` is false; the engine takes image paths, so this needs a temp file per image), `fs/*` and `terminal/*` through the editor, slash commands (`available_commands_update`), session titles, `session/list`, and showing sub-agents' own tool calls.

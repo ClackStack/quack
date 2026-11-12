@@ -10,6 +10,11 @@
 //! the tool results carry the answers), `model_switch` (also skipped), `agent` (a sub-agent
 //! run started; its own records are in `agents/<id>.jsonl`, which replay never reads),
 //! `plan` (the `todo` checklist after a change; the last one is the plan on resume).
+//! `mode` remembers independent work mode and approval defaults (never session grants).
+//! `planner_start` marks the planner's history boundary for a resumed handoff.
+//! `reasoning_effort` remembers each model's session selection; null restores its default.
+//! `request_start` / `agent_request_start` identify requests interrupted before usage
+//! could be saved. A `usage` / `agent_usage` record may have null usage when unreported.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -72,6 +77,36 @@ pub(crate) fn find(config: &Loaded, resume: &Resume) -> Result<Option<IndexEntry
     }
 }
 
+pub(crate) fn modes(
+    records: &[Record],
+) -> Option<(quack_protocol::WorkMode, quack_protocol::ApprovalPolicy)> {
+    records
+        .iter()
+        .rev()
+        .filter(|r| r.kind == "mode")
+        .find_map(|r| {
+            Some((
+                serde_json::from_value(r.data.get("work_mode")?.clone()).ok()?,
+                serde_json::from_value(r.data.get("approvals")?.clone()).ok()?,
+            ))
+        })
+}
+
+pub(crate) fn reasoning_efforts(records: &[Record]) -> std::collections::BTreeMap<String, String> {
+    let mut efforts = std::collections::BTreeMap::new();
+    for record in records.iter().filter(|r| r.kind == "reasoning_effort") {
+        let Some(model) = record.data.get("model").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if let Some(effort) = record.data.get("effort").and_then(|v| v.as_str()) {
+            efforts.insert(model.to_owned(), effort.to_owned());
+        } else {
+            efforts.remove(model);
+        }
+    }
+    efforts
+}
+
 /// A session rebuilt from its records.
 #[derive(Debug, Default)]
 pub(crate) struct Replayed {
@@ -83,6 +118,7 @@ pub(crate) struct Replayed {
     pub turns: u32,
     /// The plan's checklist (`Plan::restore`); empty when there is none.
     pub plan: String,
+    pub planner_start: Option<usize>,
 }
 
 /// Rebuild model history, the display transcript and the plan from a session's records.
@@ -92,6 +128,7 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
     let mut turns: u32 = 0;
     // A rewind leaves the plan as it was, as it does live.
     let mut plan = String::new();
+    let mut planner_start: Option<usize> = None;
     // `(history index, items length)` at each user message, to cut the transcript on rewind.
     let mut marks: Vec<(usize, usize)> = Vec::new();
     for r in records {
@@ -159,6 +196,8 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
                         .unwrap_or(usize::MAX)
                         .min(history.len());
                     compact::apply(&mut history, cut, msg);
+                    planner_start =
+                        planner_start.map(|start| if start >= cut { start - cut + 1 } else { 0 });
                     marks.retain(|(i, _)| *i >= cut);
                     for (i, _) in &mut marks {
                         *i = *i - cut + 1;
@@ -182,8 +221,10 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
                 marks.retain(|(i, _)| *i < to);
                 turns = turns.saturating_sub(u32::try_from(dropped).unwrap_or(u32::MAX));
                 history.truncate(to);
+                planner_start = planner_start.map(|start| start.min(history.len()));
             }
             "handoff" => {
+                planner_start = None;
                 if let Some(to) = r
                     .data
                     .get("to")
@@ -202,6 +243,17 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
                     c.clone_into(&mut plan);
                 }
             }
+            "planner_start" => {
+                planner_start = r
+                    .data
+                    .get("at")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|at| usize::try_from(at).ok())
+                    .map(|at| at.min(history.len()));
+            }
+            "mode" if r.data.get("work_mode").and_then(|v| v.as_str()) == Some("edit") => {
+                planner_start = None;
+            }
             _ => {}
         }
     }
@@ -211,6 +263,7 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
         items,
         turns,
         plan,
+        planner_start,
     }
 }
 
@@ -265,9 +318,8 @@ pub(crate) fn record_message(log: Option<&SharedLog>, m: &Message) {
     record(log, "message", json!({ "message": m }));
 }
 
-/// One model call's usage, and its price when the model has a `cost`.
+/// One attempted model call's usage (null when unreported), and its price when known.
 pub(crate) fn record_usage(log: Option<&SharedLog>, u: Option<&Usage>, cost: Option<f64>) {
-    let Some(u) = u else { return };
     match cost {
         Some(c) => record(log, "usage", json!({ "usage": u, "cost": c })),
         None => record(log, "usage", json!({ "usage": u })),
@@ -353,6 +405,7 @@ mod tests {
             items,
             turns,
             plan,
+            ..
         } = replay(&records);
         // As live: a rewind changes the conversation, not the plan.
         assert_eq!(plan, "[~] two");

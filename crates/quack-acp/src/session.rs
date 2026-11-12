@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use quack_core::EngineHandle;
 use quack_protocol::{
-    ApprovalDecision, ApprovalRequest, CallId, Event, InputItem, LoadState, ModelId, Op,
-    ProviderId, ProviderModels, Subsystem, TurnOverrides, WriteScope,
+    ApprovalDecision, ApprovalPolicy, ApprovalRequest, CallId, Event, InputItem, LoadState,
+    ModelId, Op, ProviderId, ProviderModels, Subsystem, TurnOverrides, WriteScope,
 };
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
@@ -23,24 +23,19 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The modes an editor can switch between, as the engine names them.
 const MODES: &[(&str, &str, &str)] = &[
-    ("ask", "Ask", "Ask before edits and commands"),
-    (
-        "auto-edit",
-        "Auto-edit",
-        "Edit files without asking; ask before commands",
-    ),
-    (
-        "full-auto",
-        "Full auto",
-        "Run without asking, inside the sandbox",
-    ),
-    ("read-only", "Read-only", "Look around; change nothing"),
     (
         "plan",
         "Plan",
-        "Look around and propose a plan; change nothing",
+        "Read and search; propose changes and tests for review",
+    ),
+    (
+        "edit",
+        "Edit",
+        "Implement the task using the selected approval policy",
     ),
 ];
+
+pub(crate) const APPROVALS_OPTION: &str = "approvals";
 
 pub(crate) const MODEL_OPTION: &str = "model";
 
@@ -52,6 +47,10 @@ pub(crate) enum Cmd {
     },
     Cancel,
     Mode(String),
+    Approvals {
+        value: String,
+        reply: oneshot::Sender<Result<Value, RpcError>>,
+    },
     Model {
         value: String,
         /// The config options after the change.
@@ -123,8 +122,10 @@ pub(crate) fn modes(current: &str) -> Value {
 /// Start the task that runs session `id` on `engine`.
 pub(crate) fn start(id: String, engine: EngineHandle, peer: Peer, startup: Startup) -> Handle {
     let (cmds, rx) = mpsc::unbounded_channel();
+    let approvals = engine.config().settings.permissions.mode;
     let run = Run {
         id,
+        approvals,
         ops: engine.ops.clone(),
         peer,
         ready: startup.mcp_ready,
@@ -144,6 +145,7 @@ pub(crate) fn start(id: String, engine: EngineHandle, peer: Peer, startup: Start
 
 struct Run {
     id: String,
+    approvals: ApprovalPolicy,
     ops: mpsc::Sender<Op>,
     peer: Peer,
     /// MCP startup settled; until then the first prompt waits, as in `quack exec`.
@@ -221,6 +223,17 @@ impl Run {
             }
             Cmd::Mode(mode) => {
                 let _ = self.ops.send(Op::SetPermissionMode { mode }).await;
+            }
+            Cmd::Approvals { value, reply } => {
+                let result = match serde_json::from_value::<ApprovalPolicy>(json!(value)) {
+                    Ok(policy) => {
+                        let _ = self.ops.send(Op::SetApprovalPolicy { policy }).await;
+                        self.approvals = policy;
+                        Ok(self.config_options())
+                    }
+                    Err(_) => Err(RpcError::invalid("unknown approvals · choose ask or allow")),
+                };
+                let _ = reply.send(result);
             }
             Cmd::Model { value, reply } => {
                 let result = match value.split_once('/') {
@@ -337,8 +350,13 @@ impl Run {
                 let text = format!("\n(summarizing earlier conversation: {reason})\n");
                 self.update(chunk("agent_thought_chunk", &text));
             }
-            Event::PermissionMode { mode } => {
-                self.update(json!({"sessionUpdate": "current_mode_update", "currentModeId": mode}));
+            Event::ModeChanged {
+                work_mode,
+                approvals,
+            } => {
+                self.approvals = approvals;
+                self.update(json!({"sessionUpdate": "current_mode_update", "currentModeId": work_mode.label()}));
+                self.update(json!({"sessionUpdate": "config_option_update", "configOptions": self.config_options()}));
             }
             Event::ModelCatalog { providers, current } => {
                 self.catalog = choices(&providers);
@@ -460,28 +478,50 @@ impl Run {
         });
     }
 
-    /// The session's config options: the model, as a select.
+    /// Model and approvals are separate selects; work mode uses ACP's mode picker.
     fn config_options(&self) -> Value {
-        let Some(current) = self
+        let mut approvals = vec![
+            json!({"value": "ask", "name": "Ask"}),
+            json!({"value": "allow", "name": "Allow"}),
+        ];
+        // ACP requires the current value to be among the options. Preserve an active
+        // legacy policy without advertising it to sessions that use Ask/Allow.
+        let active_name = match self.approvals {
+            ApprovalPolicy::ReadOnly => Some("Read-only (legacy)"),
+            ApprovalPolicy::AutoEdit => Some("Auto-edit (legacy)"),
+            ApprovalPolicy::Yolo => Some("Yolo (no sandbox)"),
+            ApprovalPolicy::Ask | ApprovalPolicy::Allow => None,
+        };
+        if let Some(name) = active_name {
+            approvals.push(json!({"value": self.approvals.label(), "name": name}));
+        }
+        let mut options = vec![json!({
+            "id": APPROVALS_OPTION,
+            "name": "Approvals",
+            "category": "permissions",
+            "type": "select",
+            "currentValue": self.approvals.label(),
+            "options": approvals,
+        })];
+        if let Some(current) = self
             .current_model
             .clone()
             .or_else(|| self.catalog.first().map(|(v, _)| v.clone()))
-        else {
-            return json!([]);
-        };
-        let options: Vec<Value> = self
-            .catalog
-            .iter()
-            .map(|(value, name)| json!({"value": value, "name": name}))
-            .collect();
-        json!([{
-            "id": MODEL_OPTION,
-            "name": "Model",
-            "category": "model",
-            "type": "select",
-            "currentValue": current,
-            "options": options,
-        }])
+        {
+            let choices: Vec<Value> = self
+                .catalog
+                .iter()
+                .map(|(value, name)| json!({"value": value, "name": name}))
+                .collect();
+            options.insert(
+                0,
+                json!({
+                    "id": MODEL_OPTION, "name": "Model", "category": "model", "type": "select",
+                    "currentValue": current, "options": choices,
+                }),
+            );
+        }
+        json!(options)
     }
 }
 

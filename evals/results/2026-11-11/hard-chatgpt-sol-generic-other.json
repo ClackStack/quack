@@ -1,0 +1,85 @@
+{
+  "harness": "quack 0.1.0",
+  "date": "2026-11-11",
+  "suite": "hard",
+  "model": "chatgpt/sol",
+  "profile": "generic",
+  "sampling": {},
+  "results": [
+    {
+      "task": "log-parser",
+      "category": "fix-test",
+      "passed": true,
+      "changed": [
+        "logsum/parse.py"
+      ],
+      "steps": 12,
+      "tool_calls": 11,
+      "tool_errors": 0,
+      "parse_failures": 0,
+      "edit_failures": 0,
+      "prompt_tokens": 68297,
+      "cached_tokens": 22528,
+      "completion_tokens": 1239,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 6720,
+      "seconds": 67.122469992
+    },
+    {
+      "task": "migrate-fetch",
+      "category": "refactor",
+      "passed": true,
+      "changed": [
+        "scripts/backfill.py",
+        "tests/test_callers.py",
+        "tests/test_net.py",
+        "weather/alerts.py",
+        "weather/cache.py",
+        "weather/forecast.py",
+        "weather/net.py",
+        "weather/sources.py",
+        "weather/stations.py"
+      ],
+      "steps": 17,
+      "tool_calls": 22,
+      "tool_errors": 3,
+      "parse_failures": 0,
+      "edit_failures": 2,
+      "prompt_tokens": 116369,
+      "cached_tokens": 31104,
+      "completion_tokens": 2373,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 10030,
+      "seconds": 101.046948568
+    },
+    {
+      "task": "partial-shipment",
+      "category": "feature",
+      "passed": true,
+      "changed": [
+        "config/settings.json",
+        "orderly/inventory.py",
+        "orderly/notifications.py",
+        "orderly/orders.py",
+        "orderly/serialize.py",
+        "orderly/shop.py",
+        "tests/test_shop.py",
+        "tests/test_storage.py"
+      ],
+      "steps": 27,
+      "tool_calls": 39,
+      "tool_errors": 1,
+      "parse_failures": 0,
+      "edit_failures": 0,
+      "prompt_tokens": 356371,
+      "cached_tokens": 65280,
+      "completion_tokens": 4663,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 19012,
+      "seconds": 184.452972332
+    }
+  ]
+}

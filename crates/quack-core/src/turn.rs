@@ -10,8 +10,8 @@ use quack_protocol::{
     ToolResultSummary, TurnId, Usage, WriteScope,
 };
 use quack_providers::{
-    ChatRequest, ErrorKind, Message, ResponseBuilder, StreamEvent, ToolCall, ToolSpec, tokens,
-    toolparse,
+    ChatRequest, ErrorKind, FinishReason, Message, ResponseBuilder, StreamEvent, ToolCall,
+    ToolSpec, tokens, toolparse,
 };
 use quack_store::checkpoint::Checkpoints;
 use quack_tools::{Answers, Decision, Permissions, Subject, ToolOutput};
@@ -26,8 +26,6 @@ use crate::session::{self, SharedLog};
 use crate::startup::Setup;
 use crate::stats::Stats;
 
-/// Steps (model calls) per turn before pausing.
-pub(crate) const MAX_STEPS: usize = 100;
 /// Identical consecutive calls before the model is told to change approach.
 const REPEAT_LIMIT: usize = 3;
 
@@ -76,6 +74,43 @@ pub(crate) struct Prompt {
 }
 
 impl TurnCtx {
+    pub(crate) fn start_request(&self) {
+        session::record(self.log.as_ref(), "request_start", json!({}));
+        if let Some(agent) = &self.agent {
+            session::record(
+                self.main_log.as_ref(),
+                "agent_request_start",
+                json!({ "agent": agent }),
+            );
+        }
+    }
+
+    /// Count every attempted request, including summaries and discarded replies. A missing
+    /// usage report stays null in the log so collectors can detect incomplete accounting.
+    pub(crate) fn record_request(&self, usage: Option<&Usage>, took: std::time::Duration) {
+        let cost = usage.and_then(|u| {
+            self.setup.model.cost.as_ref().map(|c| {
+                c.of(
+                    u.prompt_tokens,
+                    u.cached_prompt_tokens.unwrap_or(0),
+                    u.cache_write_tokens.unwrap_or(0),
+                    u.completion_tokens,
+                )
+            })
+        });
+        session::record_usage(self.log.as_ref(), usage, cost);
+        if let Some(agent) = &self.agent {
+            session::record(
+                self.main_log.as_ref(),
+                "agent_usage",
+                json!({ "agent": agent, "usage": usage, "cost": cost }),
+            );
+        }
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.request(usage, cost, took);
+        }
+    }
+
     /// For an append-only provider, end the step's last tool result with the plan and working
     /// file reminders, where they stay: the next request extends this one instead of rewriting its end.
     fn keep_plan(&self, content: &mut String, last: bool) {
@@ -190,6 +225,10 @@ impl TurnCtx {
 const EMPTY_NUDGE: &str =
     "Your last reply was empty. Continue: call a tool if you need one, otherwise answer.";
 
+const LENGTH_NUDGE: &str = "Your last response reached its output-token limit and was discarded. \
+    None of its tool calls ran. Continue the task with a shorter response; split large writes \
+    into smaller edits and keep reasoning concise.";
+
 enum StepEnd {
     Done,
     Aborted(String),
@@ -198,6 +237,7 @@ enum StepEnd {
     /// The reply stalled or the connection dropped before it finished; nothing went into the
     /// history, so the step can be sent again.
     Dropped(String),
+    Truncated,
 }
 
 /// Step-level retries after a dropped reply, on top of the provider's own retries (which stop
@@ -258,6 +298,7 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
     let mut nudged = false;
     let mut overflowed = false;
     let mut dropped = 0;
+    let mut truncated = 0;
 
     let end = 'steps: {
         for _ in 0..ctx.max_steps {
@@ -266,7 +307,27 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
             let (msg, usage) = match stream_step(&ctx, &history).await {
                 Ok(r) => {
                     dropped = 0;
+                    truncated = 0;
                     r
+                }
+                Err(StepEnd::Truncated) => {
+                    if truncated < MAX_DROPPED_RETRIES {
+                        truncated += 1;
+                        ctx.emit(Event::Warning {
+                            message: "the reply reached its output-token limit; asking for a shorter response".into(),
+                        });
+                        ctx.push(
+                            &mut history,
+                            Message::User {
+                                content: LENGTH_NUDGE.into(),
+                                images: Vec::new(),
+                            },
+                        );
+                        continue;
+                    }
+                    ctx.error(EngineErrorKind::Provider,
+                        "The model repeatedly reached its output-token limit · increase the model's max_output or use a model with a larger output budget.");
+                    break 'steps StepEnd::Aborted("output-token limit reached".into());
                 }
                 Err(StepEnd::Aborted(reason)) => break 'steps StepEnd::Aborted(reason),
                 Err(StepEnd::Done) => break 'steps StepEnd::Done,
@@ -438,13 +499,11 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
             // Tool output can be large; show its weight before the next request.
             ctx.context_estimate(&history);
         }
-        ctx.emit(Event::Warning {
-            message: format!(
-                "stopped after {} steps; send a message to continue",
-                ctx.max_steps
-            ),
-        });
-        StepEnd::Done
+        ctx.error(EngineErrorKind::Internal, format!(
+            "Stopped after {} model calls · increase agent.max_steps or send a message to continue.",
+            ctx.max_steps
+        ));
+        StepEnd::Aborted("step limit reached".into())
     };
 
     match end {
@@ -462,6 +521,7 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                 reason,
             });
         }
+        StepEnd::Truncated => unreachable!("truncated replies are handled inside the step loop"),
     }
     history
 }
@@ -530,7 +590,7 @@ pub(crate) fn request(s: &Setup, mut messages: Vec<Message>, tools: bool) -> Cha
         context_window: s.model.context_window,
         max_tokens: s.model.max_output,
         sampling: sampling(s),
-        reasoning_effort: Some(s.model.reasoning.effort.clone()).filter(|e| !e.is_empty()),
+        reasoning_effort: Some(s.reasoning_effort()).filter(|e| !e.is_empty()),
         preserve_reasoning: s.model.reasoning.preserve_in_history,
         extra_body: serde_json::to_value(&s.model.extra_body)
             .ok()
@@ -682,6 +742,7 @@ async fn stream_step(
         None => ctx.session.clone(),
     });
     let fingerprint = quack_providers::fingerprint(&req);
+    ctx.start_request();
     let mut rx = s
         .provider
         .stream(req, reasoning_format(s), ctx.cancel.child_token());
@@ -690,87 +751,90 @@ async fn stream_step(
     let mut first: Option<std::time::Instant> = None;
     let format = toolparse::TextFormat::parse(&s.model.tool_calling.text_format);
     let mut gate = toolparse::TextGate::new(format);
-    loop {
-        let item = tokio::select! {
-            () = ctx.cancel.cancelled() => None,
-            item = rx.recv() => Some(item),
-        };
-        let Some(item) = item else {
-            // Interrupted. The partial text is not kept in history: an assistant message cut
-            // mid-sentence confuses some chat templates. The session log will record it.
-            return Err(StepEnd::Aborted("interrupted".into()));
-        };
-        let Some(item) = item else { break };
-        match item {
-            Ok(ev) => {
-                if first.is_none()
-                    && matches!(
-                        ev,
-                        StreamEvent::TextDelta(_)
-                            | StreamEvent::ReasoningDelta(_)
-                            | StreamEvent::ToolCallStart { .. }
-                    )
-                {
-                    first = Some(std::time::Instant::now());
-                }
-                match &ev {
-                    StreamEvent::TextDelta(t) => {
-                        let text = gate.feed(t);
-                        if !text.is_empty() {
-                            ctx.emit(Event::AssistantDelta { text });
+    let result = async {
+        loop {
+            let item = tokio::select! {
+                () = ctx.cancel.cancelled() => None,
+                item = rx.recv() => Some(item),
+            };
+            let Some(item) = item else {
+                // Interrupted. The partial text is not kept in history: an assistant message cut
+                // mid-sentence confuses some chat templates. The session log will record it.
+                return Err(StepEnd::Aborted("interrupted".into()));
+            };
+            let Some(item) = item else { break };
+            match item {
+                Ok(ev) => {
+                    if first.is_none()
+                        && matches!(
+                            ev,
+                            StreamEvent::TextDelta(_)
+                                | StreamEvent::ReasoningDelta(_)
+                                | StreamEvent::ToolCallStart { .. }
+                        )
+                    {
+                        first = Some(std::time::Instant::now());
+                    }
+                    match &ev {
+                        StreamEvent::TextDelta(t) => {
+                            let text = gate.feed(t);
+                            if !text.is_empty() {
+                                ctx.emit(Event::AssistantDelta { text });
+                            }
                         }
+                        StreamEvent::ReasoningDelta(t) => {
+                            ctx.emit(Event::ReasoningDelta { text: t.clone() })
+                        }
+                        _ => {}
                     }
-                    StreamEvent::ReasoningDelta(t) => {
-                        ctx.emit(Event::ReasoningDelta { text: t.clone() })
+                    b.push(&ev);
+                }
+                Err(e) => {
+                    if e.kind == ErrorKind::ContextLengthExceeded {
+                        return Err(StepEnd::Overflow(format!("{}: {e}", s.provider.id)));
                     }
-                    _ => {}
+                    if matches!(e.kind, ErrorKind::Timeout | ErrorKind::Network) {
+                        return Err(StepEnd::Dropped(format!("{}: {e}", s.provider.id)));
+                    }
+                    let hint = match e.kind {
+                        ErrorKind::Auth => " · check the provider's api_key",
+                        _ => "",
+                    };
+                    ctx.error(
+                        EngineErrorKind::Provider,
+                        format!("{}: {e}{hint}", s.provider.id),
+                    );
+                    return Err(StepEnd::Aborted("provider error".into()));
                 }
-                b.push(&ev);
-            }
-            Err(e) => {
-                if e.kind == ErrorKind::ContextLengthExceeded {
-                    return Err(StepEnd::Overflow(format!("{}: {e}", s.provider.id)));
-                }
-                if matches!(e.kind, ErrorKind::Timeout | ErrorKind::Network) {
-                    return Err(StepEnd::Dropped(format!("{}: {e}", s.provider.id)));
-                }
-                let hint = match e.kind {
-                    ErrorKind::Auth => " · check the provider's api_key",
-                    _ => "",
-                };
-                ctx.error(
-                    EngineErrorKind::Provider,
-                    format!("{}: {e}{hint}", s.provider.id),
-                );
-                return Err(StepEnd::Aborted("provider error".into()));
             }
         }
+        Ok(())
+    }
+    .await;
+    ctx.record_request(b.usage.as_ref(), sent.elapsed());
+    result?;
+    match &b.finish {
+        None => {
+            return Err(StepEnd::Dropped(format!(
+                "{}: the stream ended without a finish reason",
+                s.provider.id
+            )));
+        }
+        Some(FinishReason::Length) => return Err(StepEnd::Truncated),
+        Some(FinishReason::ContentFilter) => {
+            ctx.error(
+                EngineErrorKind::Provider,
+                "The provider filtered the response · check the provider's response policy.",
+            );
+            return Err(StepEnd::Aborted("response filtered".into()));
+        }
+        _ => {}
     }
     let tail = gate.finish();
     if !tail.is_empty() {
         ctx.emit(Event::AssistantDelta { text: tail });
     }
     let usage = b.usage;
-    let cost = usage.as_ref().and_then(|u| {
-        let c = s.model.cost.as_ref()?;
-        Some(c.of(
-            u.prompt_tokens,
-            u.cached_prompt_tokens.unwrap_or(0),
-            u.cache_write_tokens.unwrap_or(0),
-            u.completion_tokens,
-        ))
-    });
-    session::record_usage(ctx.log.as_ref(), usage.as_ref(), cost);
-    if let (Some(agent), Some(u)) = (&ctx.agent, &usage) {
-        session::record(
-            ctx.main_log.as_ref(),
-            "agent_usage",
-            json!({ "agent": agent, "usage": u, "cost": cost }),
-        );
-    }
-    if let Ok(mut st) = ctx.stats.lock() {
-        st.request(usage.as_ref(), cost, sent.elapsed());
-    }
     let mut msg = b.into_message();
     if let Some(first) = first {
         emit_speed(ctx, sent, first, usage, &msg);
@@ -1017,9 +1081,11 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
     let mut tctx = s.tool_ctx.clone();
     tctx.cancel = ctx.cancel.child_token();
     // Yolo and `/sandbox off` run commands outside the sandbox.
-    if ctx.perms.lock().is_ok_and(|p| {
-        p.sandbox_off || (p.mode == quack_config::settings::PermissionMode::Yolo && !p.plan)
-    }) {
+    if ctx
+        .perms
+        .lock()
+        .is_ok_and(|p| p.sandbox_off || p.mode == quack_config::settings::PermissionMode::Yolo)
+    {
         tctx.sandbox = quack_tools::SandboxState::Off;
     }
     let summary = tool.summary(&args, &tctx);
@@ -1154,6 +1220,14 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
                 }
             }
         }
+    }
+
+    // The user may have entered Plan while an approval dialog was open. Recheck
+    // restrictions before any checkpoint or tool execution, without asking twice.
+    if let Ok(p) = ctx.perms.lock()
+        && let Decision::Deny(reason) = p.check(&subject)
+    {
+        return done(ToolOutput::error(format!("permission denied: {reason}")));
     }
 
     let (otx, mut orx) = mpsc::unbounded_channel::<String>();

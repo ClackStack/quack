@@ -64,9 +64,16 @@ default = "corp/qwen3.8-coder"
 [network]
 offline = true                     # nothing but the providers' base URLs and egress_allow
 
+[permissions]
+mode = "ask"
+allow = ["edit:src/**"]             # selected edits run automatically; commands still ask
+
+[sandbox]
+mode = "workspace-write"
+
 [policy]
-locked = ["model.default", "network", "permissions.mode", "sandbox.mode"]
-max_permission_mode = "auto-edit"  # caps /permissions, --yolo and every layer
+locked = ["model.default", "network", "permissions", "sandbox.mode"]
+max_permission_mode = "allow"      # caps approvals, including --yolo, in every layer
 project_config = "trusted-only"    # or "never": ignore repositories' .quack/ entirely
 
 [policy.providers]
@@ -78,8 +85,12 @@ allowed = ["github-enterprise", "jira"]
 hosts = ["*.corp.example"]
 ```
 
-- A lock covers everything under it: `locked = ["permissions"]` locks the mode and every
-  rule list. A locked key that is unset stays unset.
+- A lock covers everything under it: `locked = ["permissions"]` locks approvals, work
+  mode and every rule list. A locked key that is unset stays unset.
+- Work mode and approvals are independent: Plan reads/searches and proposes tests;
+  Edit may implement. Ask prompts for unapproved actions; Allow keeps the configured
+  sandbox and rules. To enforce planning only, set `permissions.work_mode = "plan"` and
+  lock that key; this also prevents accepting a plan. See [work modes and approvals](modes.md).
 - `[policy.providers] hosts` holds even when the defaults bundle is installed: a provider
   pointing anywhere else does not load. The same goes for remote MCP servers.
 - Hooks in the system layer's `hooks.d/` always run; users cannot turn them off. Use them

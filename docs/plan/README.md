@@ -14,6 +14,8 @@ A fast, context-efficient coding agent for **self-hosted and open-weight models*
 
 ## Documents
 
+User documentation: [Work modes and approvals](../modes.md), [Company rollout](../enterprise.md).
+
 | # | Document | Scope |
 |---|---|---|
 | 00 | [Architecture](00-architecture.md) | Workspace layout, crates, engine protocol, async model, dependency choices |

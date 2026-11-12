@@ -489,6 +489,80 @@ pub(crate) fn help(theme: &Theme) -> Modal {
     )
 }
 
+/// The current model's declared thinking levels, plus a reset to its configured default.
+pub(crate) fn thinking(
+    model: Option<&str>,
+    levels: &[String],
+    current: Option<&str>,
+    theme: &Theme,
+) -> Modal {
+    let mut items = Vec::new();
+    if model.is_some() && !levels.is_empty() {
+        for level in std::iter::once("default").chain(levels.iter().map(String::as_str)) {
+            let description = if level == "default" {
+                "Restore the level configured in the model's provider file."
+            } else {
+                "Use this thinking level for this model in the current session."
+            };
+            items.push(ModalItem {
+                label: level.to_owned(),
+                hint: if current == Some(level) || (current.is_none() && level == "default") {
+                    "current".into()
+                } else {
+                    String::new()
+                },
+                detail: vec![
+                    Line::styled(model.unwrap_or_default().to_owned(), theme.accent),
+                    Line::raw(""),
+                    Line::raw(description),
+                    Line::raw(""),
+                    Line::raw("Lower levels favor speed and fewer reasoning tokens."),
+                    Line::raw("Higher levels allow more time for difficult tasks."),
+                    Line::raw("Changes apply between turns and are saved with the session."),
+                ],
+                action: Some(if level == "default" {
+                    "/thinking default".into()
+                } else {
+                    // Names such as `off` may also be visibility commands.
+                    format!("/thinking level {level}")
+                }),
+                run: true,
+                alt: None,
+                charts: Vec::new(),
+            });
+        }
+    } else {
+        items.push(ModalItem {
+            label: "No selectable thinking levels".into(),
+            hint: String::new(),
+            detail: vec![Line::raw(match model {
+                Some(model) => format!(
+                    "{model} does not declare thinking levels. Add reasoning.efforts to its model entry in the provider file."
+                ),
+                None => "Select a model with /models first.".into(),
+            })],
+            action: None,
+            run: false,
+            alt: None,
+            charts: Vec::new(),
+        });
+    }
+    let mut modal = Modal::new(
+        "Thinking",
+        vec![ModalTab {
+            title: "Levels".into(),
+            items,
+        }],
+    );
+    modal.footer.retain(|(key, _)| *key != "tab");
+    if let Some(level) = current
+        && let Some(index) = levels.iter().position(|e| e == level)
+    {
+        modal.selected = index + 1;
+    }
+    modal
+}
+
 /// The `/models` modal. `catalog` is `None` while the engine is still listing models.
 pub(crate) fn models(
     catalog: Option<&[quack_protocol::ProviderModels]>,
@@ -563,6 +637,9 @@ pub(crate) fn models(
                     if let Some(price) = &m.price {
                         detail.push(field("price", price.clone()));
                     }
+                    if !m.reasoning_efforts.is_empty() {
+                        detail.push(field("thinking", m.reasoning_efforts.join(" · ")));
+                    }
                     detail.push(Line::raw(""));
                     let mut charts = Vec::new();
                     if let Some(c) = m.context_window.filter(|_| widest > 0) {
@@ -590,6 +667,16 @@ pub(crate) fn models(
                     } else {
                         Line::styled("⏎ switch to this model for the session", theme.dim)
                     });
+                    if !m.reasoning_efforts.is_empty() {
+                        detail.push(Line::styled(
+                            if is_current {
+                                "/thinking reopens the level picker"
+                            } else {
+                                "quack then asks for a thinking level (speed vs cost)"
+                            },
+                            theme.dim,
+                        ));
+                    }
                     detail.push(Line::styled(
                         "^s save as the default model (user config.toml)",
                         theme.dim,
@@ -1667,34 +1754,16 @@ pub(crate) fn memory(
     .with_alt("delete")
 }
 
-/// The `/permissions` modal: modes to switch to, and the configured rules.
+/// The `/permissions` modal: Ask/Allow approvals and the configured rules.
 pub(crate) fn permissions(current: &str, rules: &[(String, String)], theme: &Theme) -> Modal {
     const MODES: &[(&str, &str)] = &[
         (
-            "read-only",
-            "Reads only. Edits are refused; commands run only when an allow rule matches.",
-        ),
-        (
-            "plan",
-            "Look around and propose a plan. Edits are refused; read-only commands run.",
-        ),
-        (
             "ask",
-            "Reads in the workspace run; edits and commands ask first.",
+            "Ask before unapproved tools. Plan/Edit stays as selected; Plan only reads and searches.",
         ),
         (
-            "auto-edit",
-            "Edits inside the workspace run; commands ask first.",
-        ),
-        (
-            "full-auto",
-            "Everything runs without asking, inside the sandbox when it is on, except the \
-             built-in deny list and deny rules. Leaving the sandbox still asks.",
-        ),
-        (
-            "yolo",
-            "Nothing asks and the sandbox is off. Only the built-in deny list (rm -rf /, \
-             disk wipes, …) and your deny rules still apply.",
+            "allow",
+            "Automatically approve tools within the current work mode and sandbox. Explicit ask/deny rules still apply; leaving the sandbox asks.",
         ),
     ];
     let modes = MODES
@@ -1713,9 +1782,9 @@ pub(crate) fn permissions(current: &str, rules: &[(String, String)], theme: &The
                 Line::raw(""),
                 Line::styled(
                     if *name == current {
-                        "the current mode"
+                        "the current approval policy"
                     } else {
-                        "⏎ switch to it for this session"
+                        "⏎ select approvals, keeping Plan/Edit"
                     },
                     theme.dim,
                 ),
@@ -1745,7 +1814,7 @@ pub(crate) fn permissions(current: &str, rules: &[(String, String)], theme: &The
                     field(theme, "list", list.clone()),
                     Line::raw(""),
                     Line::styled(
-                        "Order: built-in deny list, deny, session approvals, allow, ask, then the mode.",
+                        "Order: Plan restrictions, built-in deny list, deny, ask, session approvals/allow, then the approval default.",
                         theme.dim,
                     ),
                 ],
@@ -1760,7 +1829,11 @@ pub(crate) fn permissions(current: &str, rules: &[(String, String)], theme: &The
         "Permissions",
         vec![
             ModalTab {
-                title: "Mode".into(),
+                title: match current {
+                    "ask" | "allow" => "Approvals".into(),
+                    "yolo" => "Approvals · yolo".into(),
+                    _ => format!("Approvals · {current} (legacy)"),
+                },
                 items: modes,
             },
             ModalTab {

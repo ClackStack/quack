@@ -150,6 +150,47 @@ fn toml_files(dir: &Path) -> usize {
     })
 }
 
+/// Every bundled model entry's thinking levels are consistent: a pinned default effort is
+/// one of the picker's levels, no level is listed twice, and no level is empty.
+#[test]
+fn bundled_reasoning_efforts_are_consistent() {
+    let providers = defaults_bundle().join("providers.d");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&providers)
+        .expect("providers.d")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().is_some_and(|x| x != "toml") {
+            continue;
+        }
+        let file: quack_config::ProviderFile =
+            toml::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        for model in &file.models {
+            let reasoning = &model.reasoning;
+            let shown = format!("{} {}", path.display(), model.id);
+            if !reasoning.effort.is_empty() {
+                assert!(
+                    reasoning.efforts.contains(&reasoning.effort),
+                    "{shown}: effort {:?} is not one of its efforts {:?}",
+                    reasoning.effort,
+                    reasoning.efforts
+                );
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for effort in &reasoning.efforts {
+                assert!(!effort.is_empty(), "{shown}: empty effort level");
+                assert!(seen.insert(effort), "{shown}: effort {effort} listed twice");
+            }
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 20,
+        "expected the bundle's model entries, got {checked}"
+    );
+}
+
 /// Everything in the defaults bundle a user or company might delete, relative to it.
 fn removable(defaults: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();

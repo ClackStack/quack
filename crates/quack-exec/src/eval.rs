@@ -650,7 +650,8 @@ pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
         ));
     }
     load.overrides.extend([
-        "permissions.mode=\"full-auto\"".to_owned(),
+        "permissions.mode=\"allow\"".to_owned(),
+        "permissions.work_mode=\"edit\"".to_owned(),
         // Memory stays inside the run.
         format!(
             "memory.path={}",

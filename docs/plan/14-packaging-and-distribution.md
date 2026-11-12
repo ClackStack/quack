@@ -115,6 +115,15 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds each target, 
 `scripts/package.sh`, and publishes a GitHub release. cargo-dist was dropped: it has no
 notion of two flavours of one binary, and the hand-written workflow is about 60 lines.
 
+Before building, the workflow runs `scripts/set-version.sh "${GITHUB_REF_NAME#v}"`, which
+stamps the tag into `[workspace.package] version` and refreshes `Cargo.lock` for the
+workspace members, so `--locked` still passes. Every crate inherits the version
+(`version.workspace = true`), which means `quack --version`, the `quack update` comparison
+and the CycloneDX SBOM all report the release instead of the tree's possibly stale
+`0.1.0`; the Homebrew formulas' `assert_match version.to_s` on `quack --version` depends
+on this. The version committed to the tree can lag behind the tags; nothing writes it
+back.
+
 | Target | Archives |
 |---|---|
 | `x86_64`/`aarch64-unknown-linux-musl` (static) | `quack-<target>.tar.gz`, `quack-plucked-<target>.tar.gz` |

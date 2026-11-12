@@ -10,7 +10,7 @@
 
 ## Startup panel
 
-The panel is drawn at the top of the transcript area during startup. It collapses to a single status-bar line when everything is ready (`ui.startup_panel = "auto"`).
+The startup diagnostics (one row per subsystem, fed by `Event::StartupProgress`) live in the sidebar while it is open (140 columns × 24 rows and above), from the first frame until the user starts working: the first message, command, resumed session or accepted plan swaps the sidebar back to session details. The diagnostics never appear and vanish a moment later; they stay until they are no longer news. On narrower terminals the panel is drawn at the top of the transcript area instead, and `ui.startup_panel = "auto"` shows it only when something needs attention (a failed or needs-attention row), which also stays until the user starts working; a slow but clean start just leaves the status bar's "starting" spinner. `always` keeps the diagnostics up for the whole session, `never` hides them (the status bar still counts `! N startup issue(s)`).
 
 ```
  quack 0.1.0 · ~/src/project (main*)
@@ -47,11 +47,67 @@ The panel is drawn at the top of the transcript area during startup. It collapse
 
 Choice bars (2026-10-19) sit between the transcript and the input, taking rows from the transcript (the startup panel hides while one shows): the model's `ask_user` questions, and the plan review after a plan-mode turn. Both number their choices, preselect one, and keep the input live so the user can type an answer or a revision instead ([04](04-agent-loop-and-tools.md#plan-mode)).
 
+### Wide-terminal sidebar (2026-11-11)
+
+At 140 columns × 24 rows and above, a right sidebar shows the session
+title, working folder, Git branch (or short detached commit), model, profile,
+context tokens and percentage, a context meter, the summarization threshold and
+generation speed. It is 36 columns wide at 140, takes one of every four columns
+past that, and stops at 48; the conversation always keeps at least 104.
+Long values wrap within the sidebar with bounded height; long paths keep the
+project folder visible. Missing Git metadata is omitted and unreported context
+usage is labeled. Themes, `NO_COLOR` and ASCII mode apply to the sidebar too.
+
+The folder and branch move out of the header, and context/speed move out of
+the status bar while the sidebar is visible. Model and thinking level remain next
+to each other in the status bar and the sidebar's Model section. Permission mode, sandbox warnings,
+activity, approvals and diagnostics stay in the status bar. Resizing below either
+minimum restores the single-column layout and its metadata. Popups and approval
+bars use the conversation width; modals still use the whole screen.
+
+`ui.sidebar = true` is the default. `/config set ui.sidebar false` (or the boolean
+toggle in `/config`) applies immediately, and `/reload` follows file changes.
+Title and context updates redraw the sidebar from existing engine events. Local
+Git HEAD is refreshed off-thread every two seconds, including external checkouts;
+neither drawing nor the first frame waits for the refresh.
+
+Until the user starts working (first message, command, resumed session or accepted
+plan), the sidebar's content is the startup diagnostics instead of the session
+details, one row per subsystem; `/reload` brings them back while it re-runs startup.
+
 Speed in the status bar: local and on-prem users care more about speed than dollars. The status bar shows the last response's generation speed (tokens per second, from server timings when reported, otherwise measured), and a details line in `/context` shows prompt processing time, time to first token and cache hits. Cost is shown only when the model is priced: by its provider file, or by the `pricing` its provider's models endpoint lists.
 
 ## Slash commands & modals
 
 Typing `/` opens a completion popup above the input. It fuzzy-matches built-in commands, custom commands ([08](08-instructions-skills-commands.md)), skills and MCP prompts, and shows a one-line description for each. Ctrl-P opens the same list as a full command palette. Enter runs the command. Commands that need choices open a modal. Commands with arguments (`/title fix auth`) run directly.
+
+### Thinking levels (2026-11-11)
+
+`/thinking` opens a picker of the current model's `reasoning.efforts`, with its active
+level marked and selected. `/thinking <level>` selects directly; `/thinking default`
+restores `reasoning.effort` (or the server default when unset). Models without declared
+levels show an explanation. The picker follows model changes while open, and unsupported
+levels are rejected by the engine. `none`, when offered, is a real effort value distinct
+from `default`.
+
+`/models` lists each model's declared levels in its details pane (`thinking  low · high`),
+so the cost and behaviour trade-off is visible before switching. Selecting a model that
+declares levels opens the thinking picker as soon as the engine confirms the switch,
+preselected on the model's effective level; `default` in that picker keeps the provider
+file's configured effort. The picker opens once per selection and does not nag on resume,
+reload or `/thinking` changes.
+
+The engine applies selections between turns and remembers them per provider/model in
+the session log. Model switches, planner switches, config reloads, forks and resume
+retain the choices, and the last selection per model is also written to `state.toml`,
+so a new session and the next start keep it; `/thinking default` is remembered as a
+choice too, and a level the provider file no longer declares falls back to its default.
+Changing effort leaves the system prompt, tools and conversation intact. The toolbar shows, for example,
+`openai/sol · high thinking`; the sidebar's Model heading shows the same level without
+taking an extra row from context usage. `Ctrl-T` and `/thinking show|hide` still control
+reasoning visibility independently.
+Custom levels whose names overlap visibility commands can be selected in the picker
+or with `/thinking level <level>`.
 
 ### Modal framework
 
@@ -88,7 +144,7 @@ All configuration UIs share one modal widget, so they look and behave the same:
 
 | Command | Aliases | Opens / does |
 |---|---|---|
-| `/models` | `/model` | Models modal (above). Switch for session, set default (`[model].default`), set `small` model, refresh discovery, set unknown context window |
+| `/models` | `/model` | Models modal (above). Switch for session, set default (`[model].default`), set `small` model, refresh discovery, set unknown context window. A model with `reasoning.efforts` shows its levels in the details pane and asks for one right after the switch (2026-11-11) |
 | `/providers` | | Provider list: state, protocol, base URL, auth status. Actions: enable/disable, test connection, set API key (keyring/env/cmd wizard), edit file, **add provider** (pick a local engine or hosted service from setup's list, or start blank; writes a new `providers.d/<id>.toml`) |
 | `/key` | | `/key <provider>`: replace a provider's API key, for example after rotating it (a hidden prompt). A key in the OS credential store is replaced under its own name and the provider file stays as it is; a key read from elsewhere (`env`, `file`, `cmd`, a value) moves to the store, and the provider file in the user layer is pointed at it. Providers in use take the new key at once: clones of a `Provider` share its headers, so a running turn and the planner pick it up too. With no argument it opens `/providers`, where Enter on a provider with a key does the same, as Ctrl-S does on a ready hosted service in `/setup` (2026-10-22) |
 | `/setup` | | Find model servers on this machine (loopback ports only) and add one: one row per server and model, Enter writes `providers.d/<id>.toml` to the user layer and switches to the model. Tabs for hosted services (enter the key; it goes to the OS credential store) and any server by its URL. Opens on its own when startup ends with no model ([14](14-packaging-and-distribution.md#setup-in-the-tui-2026-10-20)) |
@@ -98,14 +154,15 @@ All configuration UIs share one modal widget, so they look and behave the same:
 | `/rewind` | (Esc Esc) | Pick an earlier user message. Choose conversation / files / both |
 | `/undo` | | Revert the last mutating tool call's file changes |
 | `/fork` | | Branch the session from here. `--worktree` runs the branch in its own git worktree ([07](07-sessions-memory-checkpoints.md#parallel-sessions-in-worktrees)) |
-| `/plan` | | Enter plan mode: read-only exploration and a few questions, ending in a todo plan with a review bar to accept or revise ([04](04-agent-loop-and-tools.md#plan-mode)) |
+| `/edit` | | Enter Edit without changing approvals; optionally send a task |
+| `/plan` | | Read/search only; propose changes and exact tests, then review to implement or keep planning ([04](04-agent-loop-and-tools.md#plan-mode)) |
 | `/bundles` | | Installed bundles with their contents; turn each on or off ([08](08-instructions-skills-commands.md#bundles)) |
 | `/title <text>` | | Rename the session |
 | `/export [md\|json]` | | Write transcript to a file |
 | `/compact [focus]` | | Compact now, with optional focus instructions |
 | `/context` | | Context breakdown modal: segments, tokens, prunable items, cache state; actions: prune now, drop an item |
 | `/config` | `/settings` | **Settings editor**: tabs mirror `config.toml` tables (Model, UI, Context, Tools, Permissions, Memory, Sessions, Network). Each row shows the effective value, its source layer and a description from the JSON Schema. Edit inline with type-aware widgets (toggle, enum picker, number, string, list) |
-| `/permissions` | | Mode picker plus allow/ask/deny rule lists per layer; add/remove rules; shows the compiled-in deny floor (read-only) |
+| `/permissions [ask\|allow]` | | Ask/Allow approval picker, keeping Plan/Edit, plus allow/ask/deny rule lists per layer; add/remove rules; shows the compiled-in deny floor (read-only). Yolo stays under `/yolo`; an active legacy policy is named in the tab title |
 | `/mcp` | | MCP servers: state, tool count, token cost, deferred flag, logs. Actions: restart, enable/disable (session or persistent), view tools, add server (template or blank) |
 | `/lsp` | | LSP servers: state, indexing progress, diagnostics count; restart, enable/disable |
 | `/skills` | | Skill list by layer; view SKILL.md; enable/disable; invoke |
@@ -152,7 +209,7 @@ The **approval dialog** shows a diff view for edits (side-by-side at 160 columns
 
 ## Keybindings
 
-Defaults are listed in `quack keys --print`. Users override them in `config.toml [keys]`. Notable defaults: Esc interrupts the turn (double Esc opens the rewind picker), Ctrl-C clears input or interrupts, and a second Ctrl-C quits. Shift-Tab cycles permission mode, and Ctrl-T shows or hides the model's thinking (`/thinking`). PageUp/PageDown and Shift-Up/Down scroll the transcript, Ctrl-Home/Ctrl-End jump to its top and bottom, and the todo pane is toggled with `/todo`.
+Defaults are listed in `quack keys --print`. Users override them in `config.toml [keys]`. Notable defaults: Esc interrupts the turn (double Esc opens the rewind picker), Ctrl-C clears input or interrupts, and a second Ctrl-C quits. Shift-Tab toggles Plan/Edit, keeping Ask/Allow approvals, and Ctrl-T shows or hides the model's thinking (`/thinking show|hide`). PageUp/PageDown and Shift-Up/Down scroll the transcript, Ctrl-Home/Ctrl-End jump to its top and bottom, and the todo pane is toggled with `/todo`.
 
 ## Themes
 

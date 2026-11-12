@@ -19,12 +19,15 @@ headers = { "anthropic-beta" = "thinking-binding-controls-2026-08-01,server-side
 extra_body = { thinking = { type = "adaptive", display = "summarized", block_binding = { prefix_mismatch_behavior = "drop_block" } } }
 
 # Prices: US dollars per million tokens. Cache writes are the 5-minute rate.
+# Every bundled Claude takes the same five effort levels, and each `effort` below is its
+# documented default (Opus 5.5 and Haiku 5.5 default to medium, the rest to high):
+# https://docs.anthropic.com/en/docs/build-with-claude/effort
 [[models]]
 id = "claude-opus-5-5"
 alias = "opus"
 context_window = 1000000
 max_output = 64000
-reasoning = { effort = "high" }
+reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
 extra_body = { fallbacks = "default" }
 cost = { input = 4.0, output = 20.0, cached_input = 0.2, cache_write = 5.0 }
 
@@ -33,7 +36,7 @@ id = "claude-sonnet-5-5"
 alias = "sonnet"
 context_window = 1000000
 max_output = 64000
-reasoning = { effort = "medium" }
+reasoning = { effort = "high", efforts = ["low", "medium", "high", "xhigh", "max"] }
 extra_body = { fallbacks = "default" }
 cost = { input = 2.0, output = 10.0, cached_input = 0.2, cache_write = 2.5 }
 
@@ -43,7 +46,7 @@ id = "claude-haiku-5-5"
 alias = "haiku"
 context_window = 1000000
 max_output = 64000
-reasoning = { effort = "medium" }
+reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
 cost = { input = 0.1, output = 0.5, cached_input = 0.01, cache_write = 0.125 }
 
 [[models]]
@@ -51,7 +54,7 @@ id = "claude-fable-5-1"
 alias = "fable"
 context_window = 1000000
 max_output = 64000
-reasoning = { effort = "high" }
+reasoning = { effort = "high", efforts = ["low", "medium", "high", "xhigh", "max"] }
 extra_body = { fallbacks = "default" }
 cost = { input = 10.0, output = 50.0, cached_input = 0.25, cache_write = 12.5 }
 
@@ -59,7 +62,7 @@ cost = { input = 10.0, output = 50.0, cached_input = 0.25, cache_write = 12.5 }
 id = "claude-opus-5"
 context_window = 1000000
 max_output = 64000
-reasoning = { effort = "high" }
+reasoning = { effort = "high", efforts = ["low", "medium", "high", "xhigh", "max"] }
 extra_body = { fallbacks = "default" }
 cost = { input = 5.0, output = 25.0, cached_input = 0.5, cache_write = 6.25 }
 
@@ -67,12 +70,12 @@ cost = { input = 5.0, output = 25.0, cached_input = 0.5, cache_write = 6.25 }
 id = "claude-sonnet-5"
 context_window = 1000000
 max_output = 64000
-reasoning = { effort = "xhigh" }
+reasoning = { effort = "high", efforts = ["low", "medium", "high", "xhigh", "max"] }
 cost = { input = 2.0, output = 10.0, cached_input = 0.2, cache_write = 2.5 }
 
 [[models]]
 id = "claude-opus-4-8"
 context_window = 1000000
 max_output = 64000
-reasoning = { effort = "xhigh" }
+reasoning = { effort = "high", efforts = ["low", "medium", "high", "xhigh", "max"] }
 cost = { input = 5.0, output = 25.0, cached_input = 0.5, cache_write = 6.25 }

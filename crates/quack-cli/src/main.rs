@@ -40,9 +40,13 @@ fn main() -> ExitCode {
         (m, false) => m,
     };
     // Plan mode is an overlay on the configured mode, set once the engine runs.
-    let plan = matches!(mode, Some(cli::PermissionModeArg::Plan));
-    if let Some(mode) = mode.filter(|_| !plan) {
+    let legacy_plan = matches!(mode, Some(cli::PermissionModeArg::Plan));
+    let plan = legacy_plan && cli.global.work_mode.is_none();
+    if let Some(mode) = mode.filter(|_| !legacy_plan) {
         overrides.push(format!("permissions.mode=\"{}\"", mode.as_str()));
+    }
+    if let Some(mode) = cli.global.work_mode {
+        overrides.push(format!("permissions.work_mode=\"{}\"", mode.as_str()));
     }
     let opts = LoadOptions {
         cwd,

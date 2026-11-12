@@ -84,10 +84,10 @@ Both APIs return reasoning that must go back unchanged for the model to keep it:
 
 ### The provider files
 
-- `anthropic.toml`: `claude-opus-5-5` (`opus`), `claude-sonnet-5-5` (`sonnet`), `claude-haiku-5-5` (`haiku`), `claude-fable-5-1` (`fable`), plus `claude-opus-5`, `claude-sonnet-5` and `claude-opus-4-8`, with 1M windows, `max_output = 64000`, prices (cache reads and 5-minute writes) and an effort each. A file-level `extra_body` asks for adaptive thinking with summaries; models with refusal classifiers get `fallbacks = "default"` (beta `server-side-fallback-2026-07-01`), billed at the fallback model's price.
-- `openai.toml` and `chatgpt.toml`: `gpt-6.1-sol` (`sol`), `gpt-6-astra` (`astra`), `gpt-6-luna` (`luna`), with `reasoning = { summary = "auto", context = "all_turns" }`. Prices in `openai.toml` are for prompts up to 272k tokens. The ChatGPT plan's own list (`models[].slug`, only `visibility = "list"`) is merged in `/models`.
+- `anthropic.toml`: `claude-opus-5-5` (`opus`), `claude-sonnet-5-5` (`sonnet`), `claude-haiku-5-5` (`haiku`), `claude-fable-5-1` (`fable`), plus `claude-opus-5`, `claude-sonnet-5` and `claude-opus-4-8`, with 1M windows, `max_output = 64000`, prices (cache reads and 5-minute writes) and their documented effort levels and defaults. A file-level `extra_body` asks for adaptive thinking with summaries; models with refusal classifiers get `fallbacks = "default"` (beta `server-side-fallback-2026-07-01`), billed at the fallback model's price.
+- `openai.toml` and `chatgpt.toml`: `gpt-6.1-sol` (`sol`), `gpt-6-astra` (`astra`), `gpt-6-luna` (`luna`), and `gpt-6.1-terra` (`terra`), with vision enabled and upstream Codex default context budgets of 272k (Sol/Astra/Luna) and 500k (Terra), not the optional 872k maximum, and `reasoning = { summary = "auto", context = "all_turns" }`. Prices in `openai.toml` are for prompts up to 272k tokens; Terra pricing is not specified until verified. The ChatGPT plan's own list (`models[].slug`, only `visibility = "list"`) is merged in `/models`.
 - Provider files gained `extra_body` (merged under each model's; objects now merge key by key in every adapter), `[auth]`, and `cost.cache_write`.
-- The family profiles (`cc-style` for Claude, `codex` for GPT) stay opt-in until `quack eval` shows they beat `generic` on these models.
+- The family profile `cc-style` remains opt-in for Claude. `codex` automatically matches the exact Sol, Astra, Luna and Terra IDs following the user-approved 2026-11-11 decisions; Sol has live comparison evidence and Astra has a single smoke pass. Other GPTs and gpt-oss remain opt-in ([upstream comparison](../../evals/results/2026-11-11/codex-comparison.md)).
 
 ### Sign in with ChatGPT
 
@@ -116,9 +116,10 @@ the session transcript. The existing `quack login` and `quack logout` commands r
 Provider ids and issuers still come entirely from configuration; API-key services retain
 their existing setup flow. Tests use mock issuers and callback clients, with no live calls.
 
-### Not done yet
+### Live validation and remaining work
 
-- None of this has been run against the live APIs; everything is checked against mock servers and the published docs. A first live run should confirm the beta headers, `reasoning.context`, and that the plan route accepts `prompt_cache_key` and `reasoning.summary`.
+- Live `chatgpt/sol` plan validation on 2026-11-11 passed a smoke task and, after fixing the Codex profile's missing tracked `read`, all 12 saved comparison runs across four hard tasks. Both `generic` and `codex` passed 6/6; only CSV had three repeats each. After reviewing upstream Codex, the user approved automatic `codex` selection for all three current model IDs as an explicit exception to the normal repeat-based promotion rule. Multi-step turns accepted the configured request fields and replayed sealed replies without observed protocol errors. This does not validate other OpenAI models, the API-key route, live resume or long-window behavior; Claude remains mock-only. [Full evidence and limitations](../../evals/results/2026-11-11/README.md).
+- Astra smoke (2026-11-11): one `fix-typo` task using `chatgpt/astra --profile auto` resolved to `codex` and passed in 5 requests / 15 seconds, with no parse or edit failures. No API-key calls, repeats or hard tasks. Terra was added as `gpt-6.1-terra` (`terra`) to both providers with upstream's 500k budget and vision support; Luna/Terra remain untested live. [Details](../../evals/results/2026-11-11/terra-astra.md).
 - Server tools (web search) and Anthropic's mid-conversation system messages are not used. Images are: see [Vision](#vision-2026-10-24).
 
 ## Provider file schema
@@ -411,6 +412,44 @@ The `vibe` profile (2026-10-20) follows Vibe's tool names and keeps the exact-st
 
 - Should we support `api = "openai-completions"` (raw prompt with our own chat template) for servers with broken templates? It would give full control but means maintaining Jinja templates. Proposed: later, behind a feature, using `minijinja` with each model's own template.
 - Should multiple base URLs per provider (load balancing/failover across GPU nodes) be supported? Proposed: `base_urls = [...]` with round-robin plus health checks, in M5.
+
+### Selectable reasoning effort (2026-11-11)
+
+Model entries can declare `reasoning.efforts = ["low", "medium", "high"]` in picker
+order alongside their default `reasoning.effort`. The list is optional and empty by
+default; no model capability or provider name is inferred in code. `/thinking` selects
+a level for the active model, and `SessionInfo` carries both the effective value and
+the allowed choices. Session records preserve each provider/model selection across
+reload and resume; `default` removes the session override.
+
+Typed effort takes precedence over effort in `extra_body`, while sibling reasoning
+options such as summaries remain intact. Adapters send `reasoning_effort` for Chat
+Completions, `reasoning.effort` for Responses (including ChatGPT plans),
+`output_config.effort` for Anthropic, and `think` for Ollama, preserving its boolean/level
+mapping. Wiremock tests exercise selection, rejection, turn boundaries and persistence;
+adapter tests check precedence and sibling options without live inference.
+
+The bundled OpenAI API and ChatGPT entries default to `medium`: Sol 6.1 and Astra offer
+`low`, `medium`, `high`, `xhigh`, `max`; Luna and Terra also offer `none`, following the
+[official reasoning guide](https://developers.openai.com/api/docs/guides/reasoning),
+[Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol),
+[Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) and
+[Terra](https://developers.openai.com/api/docs/models/gpt-6.1-terra) model pages.
+
+The rest of the bundle declares its levels from each vendor's own docs (2026-11-11):
+every bundled Claude takes the same five levels with Anthropic's per-model defaults,
+Opus 5.5 and Haiku 5.5 `medium` and the rest `high`
+([effort](https://docs.anthropic.com/en/docs/build-with-claude/effort)); the GLM 5.3
+models `low`/`high`/`max` and GLM-5.2 the three distinct behaviours, default `max`
+([Z.ai](https://docs.z.ai/api-reference/llm/chat-completion)); DeepSeek `low`/`high`/`max`,
+default `high` ([thinking mode](https://api-docs.deepseek.com/guides/thinking_mode));
+the Kimi K3 family `low`/`high`/`max`, default `max`, with `none` on the coding plan's
+K3-era models ([reasoning effort](https://platform.kimi.ai/docs/guide/use-reasoning-effort));
+Mistral Large 4 `none`/`high` on Mistral's API (the dialect maps other values itself) and
+`low`/`medium`/`high` on OpenRouter, where the mapping does not apply. The pinned
+OpenRouter and Charm Hyper entries follow the models.dev catalog, and an `effort` is
+pinned only where the model's maker documents one. Providers without pinned entries and
+local servers declare nothing, since their models are discovered at run time.
 
 ### Reasoning in history (2026-10-18)
 

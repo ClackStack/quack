@@ -7,11 +7,13 @@
 mod hooks;
 mod ids;
 pub mod image;
+mod modes;
 mod startup;
 
 pub use hooks::*;
 pub use ids::{CallId, CheckpointId, EventIndex, ModelId, ProviderId, SessionId, TurnId};
 pub use image::Image;
+pub use modes::{ApprovalPolicy, WorkMode};
 pub use startup::{LoadState, Subsystem};
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +43,12 @@ pub enum Op {
     SetModel {
         provider: ProviderId,
         model: ModelId,
+    },
+    /// Select a declared reasoning effort for the active model. `None` restores its
+    /// configured default. Applies between turns, survives session resume, and is
+    /// remembered for the next start.
+    SetReasoningEffort {
+        effort: Option<String>,
     },
     /// Ask for the model catalogue; answered with `Event::ModelCatalog`.
     ListModels,
@@ -79,9 +87,16 @@ pub enum Op {
     GetContext,
     /// Ask for this session's usage so far; answered with `Event::Stats`.
     GetStats,
-    /// `read-only`, `ask`, `auto-edit`, `full-auto` (capped by policy), or `plan`.
+    /// Compatibility command: `plan`/`edit` changes work mode; other values change
+    /// approvals without changing work mode. Prefer the typed operations below.
     SetPermissionMode {
         mode: String,
+    },
+    SetWorkMode {
+        mode: WorkMode,
+    },
+    SetApprovalPolicy {
+        policy: ApprovalPolicy,
     },
     /// Run shell commands without the OS sandbox for the rest of the session (`off`), or
     /// go back to `[sandbox] mode`. Permission modes and approvals are unchanged. Refused
@@ -89,10 +104,13 @@ pub enum Op {
     SetSandbox {
         off: bool,
     },
-    /// Leave plan mode for `mode` and carry out the plan. When a `[model] planner` wrote
+    /// Switch to Edit and carry out the plan, preserving approvals when `mode` is empty.
+    /// When a `[model] planner` wrote
     /// it, the session's model gets the requests, the user's answers and the plan in one
     /// message instead of the planner's transcript.
     AcceptPlan {
+        /// Empty preserves the current approval policy; legacy callers may choose one.
+        #[serde(default)]
         mode: String,
     },
     /// Run the environment checks; answered with `Event::DoctorReport`.
@@ -478,6 +496,11 @@ pub enum Event {
     /// The session's permission mode, e.g. `ask` or `plan`.
     PermissionMode {
         mode: String,
+    },
+    /// Authoritative state of both controls; clients need not remember a previous mode.
+    ModeChanged {
+        work_mode: WorkMode,
+        approvals: ApprovalPolicy,
     },
     /// Whether the user turned the sandbox off for this session (`Op::SetSandbox`).
     Sandbox {
@@ -877,6 +900,10 @@ pub struct ModelInfo {
     /// For showing, e.g. `$0.30 in · $1.20 out per 1M tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price: Option<String>,
+    /// Selectable thinking levels from the provider file's `reasoning.efforts`, in picker
+    /// order. Empty means the model declares none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1096,6 +1123,12 @@ pub struct SessionInfo {
     /// `<provider-id>/<model-id>`, if a model is selected.
     pub model: Option<String>,
     pub profile: String,
+    /// Effective effort, when the model has an explicit default or session selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Supported levels for the active model, in picker order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

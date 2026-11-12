@@ -6,3 +6,26 @@ group = "From the model makers"
 base_url = "https://api.kimi.com/coding/v1"
 catalog = "kimi-code-plan-global"
 api_key = { env = "KIMI_API_KEY" }
+
+# The K3 family takes `reasoning_effort` `low`/`high`/`max`, default `max`. The K3
+# entries also take `none`, which turns thinking off for the cheaper plan models:
+# https://platform.kimi.ai/docs/guide/use-reasoning-effort
+[[models]]
+id = "k3"
+reasoning = { effort = "max", efforts = ["none", "low", "high", "max"] }
+
+[[models]]
+id = "k3-256k"
+reasoning = { effort = "max", efforts = ["none", "low", "high", "max"] }
+
+[[models]]
+id = "kimi-for-coding"
+reasoning = { effort = "max", efforts = ["none", "low", "high", "max"] }
+
+[[models]]
+id = "k3.1-pro"
+reasoning = { effort = "max", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "k3.1-pro-highspeed"
+reasoning = { effort = "max", efforts = ["low", "high", "max"] }

@@ -302,12 +302,15 @@ fn a_key_without_a_secret_service_goes_into_a_file_the_provider_points_at() {
     let example = "base_url = \"https://api.example.com/v1\"\n\
                    api_key = { env = \"QUACK_TEST_UNSET_KEY\" }\n";
     std::fs::write(providers_d.join("example.toml"), example).expect("write");
-    // A provider that already reads its key from a file keeps that file.
+    // A provider that already reads its key from a file keeps that file. The fixture
+    // goes through `with_file_key` because a Windows path in a basic string would be
+    // invalid TOML (its `\` are escape starts).
     let their_file = tmp.path().join("elsewhere").join("custom.key");
-    let keyed = format!(
-        "base_url = \"https://api.example.org/v1\"\napi_key = {{ file = \"{}\" }}\n",
-        their_file.display()
-    );
+    let keyed = quack_config::provider::with_file_key(
+        "base_url = \"https://api.example.org/v1\"\n",
+        &their_file.display().to_string(),
+    )
+    .expect("fixture");
     std::fs::write(providers_d.join("keyed.toml"), &keyed).expect("write");
     let reason = "no Secret Service is running".to_owned();
     let no_ring = |_name: &str, _key: &str| {
@@ -334,12 +337,16 @@ fn a_key_without_a_secret_service_goes_into_a_file_the_provider_points_at() {
             .as_str()
         )
     );
+    // The quoting of the path depends on the platform (a literal string on Windows,
+    // where backslashes cannot go into a basic string unescaped), so check the parsed
+    // file instead of its text.
     let text = std::fs::read_to_string(providers_d.join("example.toml")).expect("file");
-    assert!(
-        text.contains(&format!(
-            "api_key = {{ file = \"{}\" }}",
-            key_file.display()
-        )),
+    let pointed: quack_config::ProviderFile = toml::from_str(&text).expect("parses");
+    assert_eq!(
+        pointed.api_key,
+        Some(quack_config::Secret::File {
+            file: key_file.display().to_string()
+        }),
         "{text}"
     );
 
@@ -378,11 +385,12 @@ fn add_server_without_a_secret_service_writes_the_key_file() {
     )
     .expect("file");
     let key_file = tmp.path().join("user").join("keys").join("example.key");
-    assert!(
-        text.contains(&format!(
-            "api_key = {{ file = \"{}\" }}",
-            key_file.display()
-        )),
+    let pointed: quack_config::ProviderFile = toml::from_str(&text).expect("parses");
+    assert_eq!(
+        pointed.api_key,
+        Some(quack_config::Secret::File {
+            file: key_file.display().to_string()
+        }),
         "{text}"
     );
     assert_eq!(std::fs::read_to_string(&key_file).expect("key file"), key);

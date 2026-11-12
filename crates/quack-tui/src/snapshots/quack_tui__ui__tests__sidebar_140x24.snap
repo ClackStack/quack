@@ -1,0 +1,28 @@
+---
+source: crates/quack-tui/src/ui.rs
+expression: s
+---
+" quack 0.1.0                                                                                            │                                   "
+" › fix the parser                                                                                       │  Session                          "
+"                                                                                                        │  Fix the parser                   "
+" _(•)> I found the failing case and am checking the parser.                                             │                                   "
+"                                                                                                        │  Working folder                   "
+"                                                                                                        │  ~/src/project                    "
+"                                                                                                        │  Git branch  main                 "
+"                                                                                                        │                                   "
+"                                                                                                        │  Model                            "
+"                                                                                                        │  charm/qwen3.8-flash              "
+"                                                                                                        │  Profile  generic                 "
+"                                                                                                        │                                   "
+"                                                                                                        │  Context                          "
+"                                                                                                        │  60k / 104k tokens (57%)          "
+"                                                                                                        │  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱ "
+"                                                                                                        │  Summarize at 83.2k tokens        "
+"                                                                                                        │  48 tokens/s                      "
+"                                                                                                        │                                   "
+"                                                                                                        │                                   "
+"                                                                                                        │                                   "
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────────╮│                                   "
+"│›                                                                                                     ││                                   "
+"╰──────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                   "
+"  edit   ask  charm/qwen3.8-flash                                                                 /help │                                   "

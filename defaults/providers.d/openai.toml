@@ -11,22 +11,39 @@ api_key = { env = "OPENAI_API_KEY" }
 # back with each reply, so the model keeps it across steps.
 extra_body = { reasoning = { summary = "auto", context = "all_turns" } }
 
+# Default context budgets (272k, Terra 500k) and image input follow the Codex catalog
+# reviewed 2026-11-11; larger account/route-specific windows require an explicit override.
 # Prices: US dollars per million tokens, for prompts up to 272k tokens. Longer prompts
 # cost about twice as much.
+# Supported reasoning efforts: https://developers.openai.com/api/docs/guides/reasoning
 [[models]]
 id = "gpt-6.1-sol"
 alias = "sol"
-context_window = 1050000
+context_window = 272000
+vision = true
+reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
 cost = { input = 2.0, output = 10.0, cached_input = 0.1, cache_write = 2.5 }
 
 [[models]]
 id = "gpt-6-astra"
 alias = "astra"
-context_window = 1050000
+context_window = 272000
+vision = true
+reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
 cost = { input = 10.0, output = 50.0, cached_input = 1.0, cache_write = 12.5 }
 
 [[models]]
 id = "gpt-6-luna"
 alias = "luna"
-context_window = 1050000
+context_window = 272000
+vision = true
+reasoning = { effort = "medium", efforts = ["none", "low", "medium", "high", "xhigh", "max"] }
 cost = { input = 0.1, output = 0.5, cached_input = 0.01, cache_write = 0.125 }
+
+# Terra pricing is not verified here; do not infer it from another model.
+[[models]]
+id = "gpt-6.1-terra"
+alias = "terra"
+context_window = 500000
+vision = true
+reasoning = { effort = "medium", efforts = ["none", "low", "medium", "high", "xhigh", "max"] }

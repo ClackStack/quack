@@ -72,7 +72,7 @@ remember_last = true                        # start with the model last switched
 [ui]
 theme = "auto"                 # auto | dark | light | <name in themes/>
 show_reasoning = "collapsed"   # hidden | collapsed | expanded
-startup_panel = "auto"         # auto (only on problems or a slow start) | always | never
+startup_panel = "auto"         # auto (sidebar until first turn; panel only on problems) | always | never
 
 [context]
 budget_ratio = 0.85            # fraction of model context window we plan to use
@@ -86,7 +86,8 @@ shell = "auto"                 # auto | bash | zsh | pwsh | powershell | cmd | <
 default_timeout_secs = 120
 
 [permissions]
-mode = "ask"                   # ask | auto-edit | full-auto | read-only
+work_mode = "edit"              # plan | edit, independent of approvals
+mode = "ask"                   # ask | allow
 allow = ["shell:git status*", "shell:cargo check*", "edit:src/**", "mcp:github/get_*"]
 deny  = ["shell:rm -rf /*", "mcp:github/delete_*"]   # kinds: shell, edit, read, mcp (<server>/<tool>)
 
@@ -159,9 +160,11 @@ Loading a project's `.quack/` can run code: MCP `command`s, LSP `command`s, hook
 
 ## Remembered state
 
-`<user data>/state.toml` holds what quack remembers between runs. It is not configuration: it is never a config layer, and deleting it only forgets. Today it holds `last_model`, written whenever the model is switched (`/models`, `/setup`).
+`<user data>/state.toml` holds what quack remembers between runs. It is not configuration: it is never a config layer, and deleting it only forgets. Today it holds `last_model`, written whenever the model is switched (`/models`, `/setup`), and `reasoning_efforts`, a table mapping `<provider>/<model>` to the thinking level last picked in `/thinking` (a reset to `default` removes its entry).
 
 At startup the remembered model is tried before `model.default`, but only when the default is a personal one (defaults bundle, system or user layer). A trusted project's `model.default`, `QUACK_MODEL`, `-m` and a policy lock on `model.default` all win over it. If it can't be used (for example, its provider file was removed), a warning says so and startup continues with `model.default`. `model.remember_last = false` turns this off, so only `model.default` is used. `quack doctor` shows which model will be used and why.
+
+Remembered thinking levels apply whenever a model becomes active: at startup, on a model switch, in a new session and after a resume, always beneath a selection the session itself made (its log records) and only when the model still declares the level in `reasoning.efforts`.
 
 ## Secrets
 
@@ -192,7 +195,7 @@ A provider can use a sign-in instead of a key: `auth = { type = "chatgpt", issue
 
 ## Hot reload
 
-As implemented (2026-10-18): `/reload` (`Op::ReloadConfig`) re-reads every layer with the same command-line options. It waits for a running turn and holds new turns until it finishes. It then stops and restarts the MCP servers, runs startup again (the startup panel shows its progress), and keeps the conversation and the model in use, falling back to the normal model choice if that model has gone. The permission mode carries over, capped by policy. Approvals given for the session are dropped, because the rules they were given under may have changed. The TUI rebuilds its `/config` view from the new settings, and `ui.*` changes apply at once. Still to do: reloading by itself when the folders change (they are watched since 2026-10-25, see below), and restarting only the MCP servers whose files changed.
+As implemented (2026-10-18): `/reload` (`Op::ReloadConfig`) re-reads every layer with the same command-line options. It waits for a running turn and holds new turns until it finishes. It then stops and restarts the MCP servers, runs startup again (the startup panel shows its progress), and keeps the conversation and the model in use, falling back to the normal model choice if that model has gone. Work mode and approvals carry over independently, subject to current policy locks and the approval ceiling. Approvals given for the session are dropped, because the rules they were given under may have changed. The TUI rebuilds its `/config` view from the new settings, and `ui.*` changes apply at once. Still to do: reloading by itself when the folders change (they are watched since 2026-10-25, see below), and restarting only the MCP servers whose files changed.
 
 Folder watching, first step (2026-10-25): `quack-core/src/watch.rs` stamps the files in the system, user and project config folders (path, size and modification time; not `memory/`, `worktrees/`, `schemas/`, hidden or `.tmp` files) every 2 s, on a blocking thread. A change that is still there at the next check gives one notice, "config files changed · /reload to apply them". A reload makes the current files the new baseline. This uses polling, so no new crates. It doesn't reload by itself yet, because a reload restarts every MCP server and drops session approvals. Automatic reload waits for the selective restart below.
 

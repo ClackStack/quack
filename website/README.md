@@ -10,8 +10,8 @@ It is laid out as plates in a field guide, with the TUI's own ASCII duck (`_(o)>
 
 1. **quack**: "Any model. Any provider. No leaks.", the install command (with a Plucked switch for the install without hosted-service providers, and the archive for the visitor's detected platform), and the duck with four field marks that link into the grinder.
 2. **Grinder**: the same models through a generic harness and through quack; pick a failure to see what each does.
-3. **In the wild**: three example sessions drawn the way the TUI draws them.
-4. **Field marks**: every other README feature, one line each, grouped.
+3. **In the wild**: three example sessions drawn the way the TUI draws them, including Plan + Allow proposing tests for review. Work mode and approvals appear separately in the status bar.
+4. **Field marks**: the Plan/Edit × Ask/Allow matrix, then every other README feature, one line each, grouped. Mode descriptions follow [`docs/modes.md`](../docs/modes.md); keep the matrix, terminal example and configuration reference in step.
 5. **Measured**: quack's own dated eval runs from `docs/plan/roadmap.md`, newest first, and the FrontierHarness Eval chart (quack has not been run on it).
 6. **For teams**: what administrators need: nothing built in, host policy, locked settings, enforced hooks, `quack-plucked`.
 7. **Config**: the administrator's path (`quack-plucked`, a provider file, a locked policy, `quack doctor`), what is guaranteed, where each layer lives, and every option, folded by file. Its content is in `src/lib/config.ts` and follows the repo README's Configuration section; keep the two in step.

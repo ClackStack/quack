@@ -1,0 +1,28 @@
+---
+source: crates/quack-tui/src/ui.rs
+expression: s
+---
+" quack 0.1.0                                                                                            |                                   "
+"                                                                                                        |  Session                          "
+"      __        quack  a coding agent for open-weight models                                            |  A long session title that should "
+"    <(o )___                                                                                            |  wrap and stop before it crowd... "
+"     ( ._> /    model mock/long-model-id-long-model-id-long-model-id-long-model-id-long-model-id-long-mo|                                   "
+"      `---'     / commands  shift+tab modes  /plan plan first                                           |  Working folder                   "
+"   ~~~~~~~~~~   /help everything  esc esc rewind  /yolo no prompts                                      |  ...irectory/very-long-directory/ "
+"                                                                                                        |  my-project                       "
+"                                                                                                        |  Git branch  feature/a-very-lo... "
+"                                                                                                        |                                   "
+"                                                                                                        |  Model                            "
+"                                                                                                        |  mock/long-model-id-long-model-id "
+"                                                                                                        |  -long-model-id-long-model-id-... "
+"                                                                                                        |  Profile  generic                 "
+"                                                                                                        |                                   "
+"                                                                                                        |  Context                          "
+"                                                                                                        |  90k / 104k tokens (86%)          "
+"                                                                                                        |  ############################---- "
+"                                                                                                        |  Summarize at 83.2k tokens        "
+"                                                                                                        |  48 tokens/s                      "
+"+------------------------------------------------------------------------------------------------------+|                                   "
+"|>                                                                                                     ||                                   "
+"+------------------------------------------------------------------------------------------------------+|                                   "
+"  edit   ask  mock/long-model-id-long-model-id-long-model-id-long-model-id-long-model-id-long-model-id- |                                   "

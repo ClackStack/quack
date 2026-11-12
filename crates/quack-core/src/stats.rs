@@ -89,6 +89,8 @@ impl Stats {
                         let cost = r.data.get("cost").and_then(serde_json::Value::as_f64);
                         s.tokens(&u, cost);
                         s.price(cost);
+                    } else {
+                        s.request(None, None, Duration::ZERO);
                     }
                 }
                 "compaction" => s.compactions += 1,
