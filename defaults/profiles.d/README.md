@@ -14,7 +14,8 @@ turns it off, leaving the empty profile (no prompt beyond the instructions).
 - `cc-style`: Claude Code-style tool names (`Read`, `Edit`, `Bash`, ...), for GLM, MiniMax,
   DeepSeek and MiMo.
 - `zcode`: Z.ai's ZCode tool names (`Read`, `Edit`, `Bash`, `TodoWrite`, ...), for GLM.
-- `kimi-code`: Kimi CLI tool names (`ReadFile`, `StrReplaceFile`, `Shell`, ...).
+- `kimi-code`: Kimi Code v2-engine tool names (`Read`, `Edit`, `Bash`, `TodoList`, ...),
+  for Kimi models.
 - `codex`: Codex-shaped tools for OpenAI coding models: `shell` with an argument list,
   `apply_patch`, `update_plan`, tracked `read` before patching existing files, `task`, and
   capability-gated `view_image`. Automatically selected only for `gpt-6.1-sol`,

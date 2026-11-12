@@ -816,6 +816,8 @@ fn draw_status(
     let mut right: Vec<Span<'_>> = Vec::new();
     if app.approval.is_some() {
         right.push(Span::styled("waiting for approval", t.warn));
+    } else if app.step_limit.is_some() {
+        right.push(Span::styled("waiting to continue", t.warn));
     } else if app.turn_running {
         let clock = app
             .turn_started
@@ -1244,6 +1246,35 @@ fn choices(app: &App, width: usize) -> Option<Choices<'_>> {
             " {arrows} choose  enter confirm  esc skip{back}  ctrl-s stop asking  ctrl-c interrupts"
         );
         (title, body, a.selected, Some(own), keys)
+    } else if let Some(s) = &app.step_limit {
+        lead = wrap(
+            &format!(
+                "The turn made {} model calls, the limit set by agent.max_steps.",
+                s.limit
+            ),
+            width.saturating_sub(1),
+        )
+        .into_iter()
+        .map(|l| Line::styled(format!(" {l}"), Style::new().add_modifier(Modifier::BOLD)))
+        .collect();
+        options.push((
+            format!("Keep going for {} more", s.limit),
+            Some("the conversation and tool state stay as they are".into()),
+            true,
+        ));
+        options.push((
+            "Stop here".into(),
+            Some("nothing is lost; send a message to continue".into()),
+            false,
+        ));
+        let keys = format!(" {arrows} choose  enter confirm  esc stop  or type a redirect");
+        (
+            " Keep going? ".to_owned(),
+            Vec::new(),
+            s.selected,
+            None,
+            keys,
+        )
     } else {
         let selected = app.review?;
         let body: Vec<Line<'_>> = app
@@ -2661,6 +2692,23 @@ mod tests {
             "{s}"
         );
         insta::assert_snapshot!("plan_review_bar_100x30", s);
+    }
+
+    #[test]
+    fn step_limit_bar() {
+        use quack_protocol::TurnId;
+        let mut app = started_app();
+        app.on_engine(Event::TurnStarted { turn: TurnId(1) });
+        app.on_engine(Event::StepLimitReached {
+            turn: TurnId(1),
+            limit: 100,
+        });
+        let s = render(&app, 80, 24);
+        assert!(
+            s.contains("Keep going?") && s.contains("Keep going for 100 more"),
+            "{s}"
+        );
+        insta::assert_snapshot!("step_limit_bar_80x24", s);
     }
 
     #[test]

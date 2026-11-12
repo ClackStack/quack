@@ -410,6 +410,11 @@ alias for Allow; existing flags and saved sessions still load without increasing
 | `default_timeout_secs` | `120` | Maximum execution time before process tree termination |
 | `read_outline_tokens` | `2000` | Token threshold above which large file reads return Tree-sitter outlines |
 
+**`[agent]`**
+| Key | Default | Description |
+|---|---|---|
+| `max_steps` | `100` | Model calls per turn before it pauses and asks whether to keep going (headless runs stop instead). Sub-agents have their own limits in `agents.d` |
+
 **`[ui]`**
 | Key | Default | Description |
 |---|---|---|

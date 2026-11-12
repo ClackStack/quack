@@ -265,6 +265,7 @@ async fn start(parent: &TurnCtx, call_key: &str, req: TaskRequest) -> TaskReport
         nested,
         approvals: parent.approvals.clone(),
         questions: parent.questions.clone(),
+        continues: parent.continues.clone(),
         tx: parent.tx.clone(),
         cancel: parent.cancel.child_token(),
         log,

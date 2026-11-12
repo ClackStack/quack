@@ -1,0 +1,28 @@
+---
+source: crates/quack-tui/src/ui.rs
+expression: s
+---
+" quack 0.1.0 · ~/src/project                                             ⎇ main "
+"   the turn reached its limit of 100 model calls                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"╭ Keep going? ─────────────────────────────────────────────────────────────────╮"
+"│ The turn made 100 model calls, the limit set by agent.max_steps.             │"
+"│▌1. Keep going for 100 more (recommended) · the conversation and tool state s…│"
+"│ 2. Stop here · nothing is lost; send a message to continue                   │"
+"│ ↑↓ choose  enter confirm  esc stop  or type a redirect                       │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"╭──────────────────────────────────────────────────────────────────────────────╮"
+"│›                                                                             │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"  edit   ask  no model                               waiting to continue  /help "

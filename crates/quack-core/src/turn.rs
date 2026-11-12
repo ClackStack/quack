@@ -32,6 +32,8 @@ const REPEAT_LIMIT: usize = 3;
 pub(crate) type Approvals = Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>>;
 /// `ask_user` calls waiting for the user's answers, by call id.
 pub(crate) type Questions = Arc<Mutex<HashMap<String, oneshot::Sender<Answers>>>>;
+/// Turns paused at `agent.max_steps`, waiting for the user's go-ahead, by turn id.
+pub(crate) type Continues = Arc<Mutex<HashMap<TurnId, oneshot::Sender<bool>>>>;
 
 pub(crate) struct TurnCtx {
     pub turn: TurnId,
@@ -40,6 +42,7 @@ pub(crate) struct TurnCtx {
     pub nested: Arc<quack_instructions::agents_md::Nested>,
     pub approvals: Approvals,
     pub questions: Questions,
+    pub continues: Continues,
     pub tx: broadcast::Sender<Event>,
     pub cancel: CancellationToken,
     pub log: Option<SharedLog>,
@@ -301,7 +304,22 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
     let mut truncated = 0;
 
     let end = 'steps: {
-        for _ in 0..ctx.max_steps {
+        let mut steps = 0usize;
+        loop {
+            if steps >= ctx.max_steps {
+                match continue_at_limit(&ctx).await {
+                    Continue::Proceed => steps = 0,
+                    Continue::Stop => {
+                        ctx.error(EngineErrorKind::Internal, format!(
+                            "Stopped after {} model calls · increase agent.max_steps or send a message to continue.",
+                            ctx.max_steps
+                        ));
+                        break 'steps StepEnd::Aborted("step limit reached".into());
+                    }
+                    Continue::Interrupted => break 'steps StepEnd::Aborted("interrupted".into()),
+                }
+            }
+            steps += 1;
             crate::context::fit(&ctx, &mut history).await;
             let estimated = raw_estimate(&ctx.setup, &history);
             let (msg, usage) = match stream_step(&ctx, &history).await {
@@ -499,11 +517,6 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
             // Tool output can be large; show its weight before the next request.
             ctx.context_estimate(&history);
         }
-        ctx.error(EngineErrorKind::Internal, format!(
-            "Stopped after {} model calls · increase agent.max_steps or send a message to continue.",
-            ctx.max_steps
-        ));
-        StepEnd::Aborted("step limit reached".into())
     };
 
     match end {
@@ -983,6 +996,57 @@ fn finish(ctx: &TurnCtx, call: &ToolCall, summary: &str, out: ToolOutput) -> Too
 fn reject(ctx: &TurnCtx, call: &ToolCall, message: String) -> ToolOutput {
     begin(ctx, call, &call.name);
     finish(ctx, call, &call.name, ToolOutput::error(message))
+}
+
+/// What happens when a turn reaches `agent.max_steps`.
+enum Continue {
+    Proceed,
+    Stop,
+    /// The turn was interrupted while waiting for the user.
+    Interrupted,
+}
+
+/// At `max_steps` model calls, ask the user whether the turn should keep going
+/// (`Op::ContinueTurn`); continuing grants another `max_steps` calls. Sub-agents never
+/// ask: they stop at their limit and the model that called them decides what next.
+async fn continue_at_limit(ctx: &TurnCtx) -> Continue {
+    if ctx.agent.is_some() {
+        return Continue::Stop;
+    }
+    let _one_at_a_time = ctx.prompt_lock.lock().await;
+    let (otx, orx) = oneshot::channel();
+    if let Ok(mut pending) = ctx.continues.lock() {
+        pending.insert(ctx.turn, otx);
+    }
+    ctx.emit(Event::StepLimitReached {
+        turn: ctx.turn,
+        limit: u32::try_from(ctx.max_steps).unwrap_or(u32::MAX),
+    });
+    let asked = std::time::Instant::now();
+    let answer = tokio::select! {
+        () = ctx.cancel.cancelled() => None,
+        a = orx => a.ok(),
+    };
+    if let Ok(mut st) = ctx.stats.lock() {
+        st.waited(asked.elapsed());
+    }
+    if let Ok(mut pending) = ctx.continues.lock() {
+        pending.remove(&ctx.turn);
+    }
+    session::record(
+        ctx.log.as_ref(),
+        "step_limit",
+        json!({
+            "turn": ctx.turn.0,
+            "limit": ctx.max_steps,
+            "continued": answer,
+        }),
+    );
+    match answer {
+        Some(true) => Continue::Proceed,
+        Some(false) => Continue::Stop,
+        None => Continue::Interrupted,
+    }
 }
 
 /// Show the user an `ask_user` call's questions and wait for the answers; `None` when

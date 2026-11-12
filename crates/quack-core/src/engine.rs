@@ -147,6 +147,7 @@ pub struct Engine {
     running: Option<(TurnId, CancellationToken)>,
     approvals: Approvals,
     questions: Questions,
+    continues: turn::Continues,
     resume: Resume,
     /// Created at the first turn (no empty sessions) or reopened on resume.
     log: Option<SharedLog>,
@@ -224,6 +225,7 @@ impl Engine {
             running: None,
             approvals: Approvals::default(),
             questions: Questions::default(),
+            continues: turn::Continues::default(),
             resume,
             log: None,
             turns: 0,
@@ -1817,6 +1819,17 @@ impl Engine {
                     }),
                 }
             }
+            Op::ContinueTurn { turn, proceed } => {
+                let waiting = self.continues.lock().ok().and_then(|mut p| p.remove(&turn));
+                match waiting {
+                    Some(tx) => {
+                        let _ = tx.send(proceed);
+                    }
+                    None => self.emit(Event::Warning {
+                        message: format!("turn {} is not paused at its step limit", turn.0),
+                    }),
+                }
+            }
             Op::ListModels => {
                 let config = self.config.clone();
                 let tx = self.tx.clone();
@@ -2455,6 +2468,7 @@ impl Engine {
             max_steps: self.config.settings.agent.max_steps.get() as usize,
             pool,
             prompt_lock: Arc::default(),
+            continues: self.continues.clone(),
         };
         tokio::spawn(async move {
             ctx.emit(Event::TurnStarted { turn });
@@ -2711,6 +2725,7 @@ impl Engine {
             max_steps: self.config.settings.agent.max_steps.get() as usize,
             pool,
             prompt_lock: Arc::default(),
+            continues: self.continues.clone(),
         };
         let start = self.start_context.take();
         tokio::spawn(async move {
@@ -2905,6 +2920,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::Interrupt => "interrupt",
         Op::ApprovalResponse { .. } => "approval_response",
         Op::AnswerQuestions { .. } => "answer_questions",
+        Op::ContinueTurn { .. } => "continue_turn",
         Op::SetModel { .. } => "set_model",
         Op::SetReasoningEffort { .. } => "set_reasoning_effort",
         Op::ListProfiles => "list_profiles",

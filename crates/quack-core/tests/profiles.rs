@@ -246,6 +246,95 @@ fn codex_matches_only_the_current_openai_model_ids() {
 }
 
 #[test]
+fn kimi_code_matches_the_kimi_k3_family_and_the_plan_models() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = configure(tmp.path(), "http://localhost:1", "auto");
+    let (profiles, warnings) = quack_profiles::load_profiles(&loaded);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let kimi = profiles
+        .iter()
+        .find(|p| p.id == "kimi-code")
+        .expect("kimi-code");
+    assert_eq!(kimi.file.matching.priority, 50);
+    // Every Kimi model the bundled provider files ship must auto-select the
+    // profile, whatever the provider names it (moonshot/charm-hyper `kimi-k3*`,
+    // fireworks' accounts-prefixed id, the Kimi Code plan's short ids). The
+    // multi-family providers keep their other models on their own profiles.
+    for provider in ["moonshot", "charm-hyper", "fireworks", "kimi-code"] {
+        let path = defaults_bundle()
+            .join("providers.d")
+            .join(format!("{provider}.toml"));
+        let file: quack_config::provider::ProviderFile =
+            toml::from_str(&std::fs::read_to_string(path).expect("provider file"))
+                .expect("provider TOML");
+        for model in &file.models {
+            let id = if model.id.contains("kimi") || provider == "kimi-code" {
+                "kimi-code"
+            } else if model.id.contains("glm-") {
+                "zcode"
+            } else if model.id.contains("deepseek") {
+                "dsh"
+            } else {
+                "generic"
+            };
+            assert_eq!(
+                quack_profiles::select(&profiles, "auto", &[&model.id])
+                    .expect("selection")
+                    .id,
+                id,
+                "{provider}/{}",
+                model.id
+            );
+        }
+    }
+    // Prefixed and aliased K3 ids from other providers (openrouter-style) too.
+    for model in [
+        "moonshotai/kimi-k3",
+        "kimi-k3.1-pro",
+        "accounts/fireworks/routers/kimi-k3-fast",
+        "kimi-for-coding",
+    ] {
+        assert_eq!(
+            quack_profiles::select(&profiles, "auto", &[model])
+                .expect("selection")
+                .id,
+            "kimi-code",
+            "{model}"
+        );
+        assert_eq!(
+            quack_profiles::select(&profiles, "generic", &[model])
+                .expect("override")
+                .id,
+            "generic",
+            "{model}"
+        );
+    }
+    // K2 was trained on the retired kimi-cli names, and moving-target aliases
+    // are left to `generic` on purpose.
+    for model in [
+        "kimi-k2",
+        "kimi-k2.5",
+        "kimi-latest",
+        "kimi-fast-latest",
+        "tiny",
+    ] {
+        assert_eq!(
+            quack_profiles::select(&profiles, "auto", &[model])
+                .expect("selection")
+                .id,
+            "generic",
+            "{model}"
+        );
+    }
+    assert_eq!(
+        quack_profiles::select(&profiles, "kimi-code", &["tiny"])
+            .expect("opt-in")
+            .id,
+        "kimi-code"
+    );
+}
+
+#[test]
 fn current_openai_provider_models_have_conservative_context_and_vision() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let loaded = configure(tmp.path(), "http://localhost:1", "auto");

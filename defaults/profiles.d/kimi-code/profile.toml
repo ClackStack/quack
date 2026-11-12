@@ -1,53 +1,71 @@
 #:schema ../../schemas/profile.json
-description = "Kimi CLI-shaped tools (ReadFile, StrReplaceFile, Shell, ...) for Kimi coding models"
-source = "Original prompt text (quack project, Apache-2.0). Tool names follow MoonshotAI/kimi-cli (Apache-2.0); parameters are simplified to flat fields"
+description = "Tools named and shaped like Kimi Code's v2 engine (Read, Edit, Bash, TodoList, ...) for Kimi coding models"
+source = "Original prompt text (quack project, Apache-2.0). Tool names and parameter shapes follow MoonshotAI/kimi-code (MIT), whose v2 engine (default since kimi-code 0.33.0) replaced the older kimi-cli names (ReadFile, StrReplaceFile, Shell, SetTodoList) with Read, Edit, Bash, TodoList"
 
-# Not chosen automatically until the eval shows it beats `generic` for Kimi models
-# (docs/plan/03-model-profiles.md#evaluating-profiles). Proposed:
-#   model = ["*kimi-k3*", "*kimi-k2*"]
-#   priority = 50
-# Use it now with `profile = "kimi-code"` on a model.
+# Auto-selected for the Kimi K3 family and the Kimi Code plan models. Enabled
+# 2026-11-12 by user approval without the usual `--repeat 3` comparison
+# (docs/plan/03-model-profiles.md#evaluating-profiles): the surface follows the
+# vendor's own harness, and a $0.31 live validation on Fireworks kimi-k3 passed
+# 7/7 quick-suite tasks with 0 parse and 0 edit failures (roadmap, 2026-11-12).
+# kimi-k2 stays on `generic`: it was trained on the retired kimi-cli names, and
+# moving-target aliases (kimi-latest, kimi-fast-latest) are left out on purpose.
 [match]
-model = []
+model = [
+    "*kimi-k3*",
+    "kimi-for-coding",
+    "k3",
+    "k3-256k",
+    "k3.1-pro",
+    "k3.1-pro-highspeed",
+]
+priority = 50
 
 [defaults]
 edit_format = "str_replace"
 
 [[tools]]
-name = "ReadFile"
+name = "Read"
 maps_to = "read"
 [tools.params]
-path = { to = "path" }
 line_offset = { to = "offset" }
 n_lines = { to = "limit" }
 
 [[tools]]
-name = "WriteFile"
+name = "Write"
 maps_to = "write"
 
 [[tools]]
-name = "StrReplaceFile"
+name = "Edit"
 maps_to = "edit"
-[tools.params]
-old = { to = "old_string" }
-new = { to = "new_string" }
 
 [[tools]]
-name = "Shell"
+name = "Bash"
 maps_to = "shell"
+[tools.params]
+timeout = { to = "timeout_secs" }
 
 [[tools]]
 name = "Glob"
 maps_to = "glob"
-[tools.params]
-directory = { to = "path" }
 
 [[tools]]
 name = "Grep"
 maps_to = "grep"
+[tools.params]
+"-i" = { to = "case_insensitive" }
 
 [[tools]]
-name = "SetTodoList"
+name = "TodoList"
 maps_to = "todo"
 [tools.params]
 todos = { to = "items" }
+
+[[tools]]
+name = "Agent"
+maps_to = "task"
+[tools.params]
+subagent_type = { to = "agent" }
+
+[[tools]]
+name = "AskUserQuestion"
+maps_to = "ask_user"

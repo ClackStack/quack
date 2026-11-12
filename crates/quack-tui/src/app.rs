@@ -10,7 +10,7 @@ use quack_config::{LayerStatus, Loaded, SettingRow};
 use quack_protocol::{
     Answer, ApprovalDecision, ApprovalRequest, CallId, Event, ExportFormat, InputItem, KeySource,
     LoadState, ModelId, Op, ProviderId, Question, ReplayItem, SecretText, SessionId, Subsystem,
-    TurnOverrides, WorkMode, WriteScope,
+    TurnId, TurnOverrides, WorkMode, WriteScope,
 };
 use ratatui::layout::Rect;
 
@@ -527,6 +527,15 @@ pub(crate) struct Approval {
     pub always: Vec<String>,
 }
 
+/// A turn paused at `agent.max_steps`, waiting for the user's go-ahead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StepLimit {
+    pub turn: TurnId,
+    pub limit: u32,
+    /// The highlighted choice: continue, or stop here.
+    pub selected: usize,
+}
+
 /// An image attached to the next message: the path the engine loads, and the size its
 /// header gave, for the chip.
 #[derive(Debug, Clone)]
@@ -574,6 +583,8 @@ pub struct App {
     pub(crate) approval: Option<Approval>,
     /// Questions from the model waiting for answers.
     pub(crate) asking: Option<Asking>,
+    /// The step-limit bar, while a turn waits for its go-ahead.
+    pub(crate) step_limit: Option<StepLimit>,
     /// The plan review bar, with its highlighted choice.
     pub(crate) review: Option<usize>,
     /// `(used, max)` tokens from the last response.
@@ -687,6 +698,7 @@ impl App {
             queued: false,
             approval: None,
             asking: None,
+            step_limit: None,
             review: None,
             context: None,
             compact_at: None,
@@ -774,7 +786,8 @@ impl App {
             return None;
         }
         let g = &self.glyphs;
-        let state = if self.approval.is_some() || self.asking.is_some() {
+        let state = if self.approval.is_some() || self.asking.is_some() || self.step_limit.is_some()
+        {
             format!("{} ", g.attention)
         } else if self.turn_running {
             format!("{} ", g.think)
@@ -1490,6 +1503,16 @@ impl App {
             Event::Questions { call_id, questions } if !questions.is_empty() => {
                 self.asking = Some(Asking::new(call_id, questions));
             }
+            Event::StepLimitReached { turn, limit } => {
+                self.note(format!(
+                    "the turn reached its limit of {limit} model calls"
+                ));
+                self.step_limit = Some(StepLimit {
+                    turn,
+                    limit,
+                    selected: 0,
+                });
+            }
             Event::ContextUpdate {
                 used,
                 budget,
@@ -1546,6 +1569,7 @@ impl App {
                     self.transcript.push(Entry::TurnSummary(parts.join(" · ")));
                 }
                 self.asking = None;
+                self.step_limit = None;
                 if self.info.work_mode == WorkMode::Plan {
                     self.review = Some(0);
                 }
@@ -1582,6 +1606,7 @@ impl App {
                 self.turn_started = None;
                 self.approval = None;
                 self.asking = None;
+                self.step_limit = None;
                 self.note(reason);
             }
             Event::HookRan {
@@ -1895,6 +1920,9 @@ impl App {
         }
         if self.asking.is_some() {
             return self.on_asking_key(key);
+        }
+        if self.step_limit.is_some() && self.on_step_limit_key(key) {
+            return;
         }
         if self.prompt.is_some() {
             return self.on_prompt_key(key);
@@ -2343,12 +2371,45 @@ impl App {
         true
     }
 
+    /// Keys for the step-limit bar: keep going, or stop here. Returns whether it used
+    /// the key; typing goes on to the input, and submitting a message stops the turn
+    /// first, so it reads as "no, do this instead".
+    fn on_step_limit_key(&mut self, key: KeyEvent) -> bool {
+        let Some(s) = &self.step_limit else {
+            return false;
+        };
+        let typing = !self.input.is_empty();
+        let proceed = match key.code {
+            KeyCode::Up if key.modifiers.is_empty() => {
+                self.step_limit = Some(StepLimit {
+                    selected: s.selected.saturating_sub(1),
+                    ..s.clone()
+                });
+                return true;
+            }
+            KeyCode::Down if key.modifiers.is_empty() => {
+                self.step_limit = Some(StepLimit {
+                    selected: (s.selected + 1).min(1),
+                    ..s.clone()
+                });
+                return true;
+            }
+            KeyCode::Char(c @ '1'..='2') if !typing && key.modifiers.is_empty() => c == '1',
+            KeyCode::Enter if !typing => s.selected == 0,
+            KeyCode::Esc if !typing => false,
+            _ => return false,
+        };
+        let turn = s.turn;
+        self.step_limit = None;
+        self.ops.push(Op::ContinueTurn { turn, proceed });
+        true
+    }
+
     fn edited(&mut self, f: fn(&mut Input)) {
         f(&mut self.input);
         self.popup_dismissed = false;
         self.popup_selected = 0;
     }
-
     fn ctrl_c(&mut self) {
         if self.signing_in.take().is_some() {
             self.browser = None;
@@ -2362,6 +2423,10 @@ impl App {
         if self.approval.is_some() || self.asking.is_some() {
             self.approval = None;
             self.asking = None;
+            self.ops.push(Op::Interrupt);
+            return;
+        }
+        if self.step_limit.take().is_some() {
             self.ops.push(Op::Interrupt);
             return;
         }
@@ -2408,6 +2473,14 @@ impl App {
         let attachments = std::mem::take(&mut self.attachments);
         if text.trim().is_empty() && attachments.is_empty() {
             return;
+        }
+        // A message sent while the turn is paused at its step limit stops it first,
+        // so what the user typed reads as "no, do this instead".
+        if let Some(s) = self.step_limit.take() {
+            self.ops.push(Op::ContinueTurn {
+                turn: s.turn,
+                proceed: false,
+            });
         }
         if !text.trim().is_empty()
             && let Some(path) = &self.info.history_path
@@ -3566,6 +3639,57 @@ mod tests {
     }
 
     #[test]
+    fn step_limit_bar_continues_stops_or_takes_a_redirect() {
+        use quack_protocol::TurnId;
+        let ask = |app: &mut App| {
+            app.on_engine(Event::StepLimitReached {
+                turn: TurnId(1),
+                limit: 100,
+            });
+        };
+        let mut app = App::new(info());
+        app.on_engine(Event::TurnStarted { turn: TurnId(1) });
+        // Enter confirms the highlighted choice: keep going.
+        ask(&mut app);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::ContinueTurn {
+                turn: TurnId(1),
+                proceed: true
+            }]
+        );
+        // Esc stops the turn at the limit.
+        ask(&mut app);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::ContinueTurn {
+                turn: TurnId(1),
+                proceed: false
+            }]
+        );
+        // A typed redirect stops the turn and sends the message after it.
+        ask(&mut app);
+        type_str(&mut app, "use sqlite instead");
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            app.take_ops().as_slice(),
+            [Op::ContinueTurn { proceed: false, .. }, Op::UserTurn { items, .. }]
+                if items == &[InputItem::text("use sqlite instead")]
+        ));
+        assert_eq!(app.step_limit, None);
+        // The turn ending clears the bar.
+        ask(&mut app);
+        app.on_engine(Event::TurnAborted {
+            turn: TurnId(1),
+            reason: "interrupted".into(),
+        });
+        assert_eq!(app.step_limit, None);
+        assert!(app.take_ops().is_empty());
+    }
+
+    #[test]
     fn questions_are_picked_typed_or_skipped() {
         use quack_protocol::QuestionOption;
         let mut app = App::new(info());
@@ -3781,9 +3905,7 @@ mod tests {
         type_str(&mut app, "hello");
         press(&mut app, KeyCode::Enter);
         assert!(matches!(app.take_ops().as_slice(), [Op::UserTurn { .. }]));
-        app.on_engine(Event::TurnStarted {
-            turn: quack_protocol::TurnId(1),
-        });
+        app.on_engine(Event::TurnStarted { turn: TurnId(1) });
         app.on_engine(Event::AssistantDelta { text: "hi ".into() });
         app.on_engine(Event::AssistantDelta {
             text: "there".into(),
