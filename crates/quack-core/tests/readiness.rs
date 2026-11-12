@@ -26,6 +26,25 @@ async fn outcome(engine: &mut EngineHandle) -> (bool, String) {
     }
 }
 
+/// Waits for the turn to end, answering each step-limit ask with `answer`.
+async fn finish(engine: &mut EngineHandle, mut answer: impl FnMut() -> bool) -> (bool, String) {
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), engine.events.recv())
+            .await
+            .expect("event within 10s")
+            .expect("channel open");
+        match event {
+            Event::TurnComplete { .. } => return (true, String::new()),
+            Event::TurnAborted { reason, .. } => return (false, reason),
+            Event::StepLimitReached { turn, .. } => {
+                let proceed = answer();
+                engine.submit(Op::ContinueTurn { turn, proceed }).await;
+            }
+            _ => {}
+        }
+    }
+}
+
 async fn submit(engine: &mut EngineHandle) {
     engine
         .submit(Op::UserTurn {
@@ -36,7 +55,7 @@ async fn submit(engine: &mut EngineHandle) {
 }
 
 #[tokio::test]
-async fn a_configured_step_limit_aborts_instead_of_completing() {
+async fn a_declined_step_limit_aborts_instead_of_completing() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(sse_call("c1", "list_dir", json!({})))
@@ -48,10 +67,62 @@ async fn a_configured_step_limit_aborts_instead_of_completing() {
     let mut engine = Engine::spawn(Arc::new(config));
     submit(&mut engine).await;
     assert_eq!(
-        outcome(&mut engine).await,
+        finish(&mut engine, || false).await,
         (false, "step limit reached".into())
     );
     assert_eq!(bodies(&server).await.len(), 3);
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn continuing_at_the_step_limit_grants_another_budget_of_steps() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse_call("c1", "list_dir", json!({})))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    config.settings.agent.max_steps = std::num::NonZeroU32::new(3).expect("positive");
+    let mut engine = Engine::spawn(Arc::new(config));
+    submit(&mut engine).await;
+    // Continue once, then decline: 3 calls, another 3 after the go-ahead.
+    let mut asks = 0;
+    assert_eq!(
+        finish(&mut engine, || {
+            asks += 1;
+            asks == 1
+        })
+        .await,
+        (false, "step limit reached".into())
+    );
+    assert_eq!(asks, 2);
+    assert_eq!(bodies(&server).await.len(), 6);
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn interrupting_while_paused_at_the_step_limit_aborts() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse_call("c1", "list_dir", json!({})))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    config.settings.agent.max_steps = std::num::NonZeroU32::new(3).expect("positive");
+    let mut engine = Engine::spawn(Arc::new(config));
+    submit(&mut engine).await;
+    loop {
+        if matches!(
+            engine.events.recv().await.expect("event"),
+            Event::StepLimitReached { .. }
+        ) {
+            break;
+        }
+    }
+    engine.submit(Op::Interrupt).await;
+    assert_eq!(outcome(&mut engine).await, (false, "interrupted".into()));
     engine.shutdown().await;
 }
 

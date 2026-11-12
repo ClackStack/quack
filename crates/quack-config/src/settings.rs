@@ -46,7 +46,9 @@ pub struct Settings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentSettings {
-    /// Maximum model calls in one user turn. Sub-agents have their own limits.
+    /// Model calls before a turn pauses and asks whether to keep going; continuing
+    /// grants as many again. Headless clients stop instead, and sub-agents have their
+    /// own limits in `agents.d`.
     pub max_steps: std::num::NonZeroU32,
 }
 

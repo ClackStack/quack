@@ -54,7 +54,7 @@ There is one engine and three in-process clients, connected by an Op/Event proto
 
 ### Where things happen
 
-- **A turn:** `quack-core/src/turn.rs`. `run` loops over model calls (`stream_step`) and tool calls (`run_call`: permission check, approval, execution).
+- **A turn:** `quack-core/src/turn.rs`. `run` loops over model calls (`stream_step`) and tool calls (`run_call`: permission check, approval, execution). At `agent.max_steps` model calls the turn pauses and asks (`Event::StepLimitReached`, answered by `Op::ContinueTurn`); sub-agents stop at their own limits and report instead.
   - Every event a turn emits goes through `TurnCtx::emit`, which also feeds the session stats (`stats.rs`).
   - Anything that should count toward `/stats` either is an event, or is recorded beside the event.
 - **Engine state and Op handling:** `quack-core/src/engine.rs`. Adding an `Op` also means adding it to `op_name` (an exhaustive match). Adding an `Event` needs no client changes, because clients match with a wildcard.

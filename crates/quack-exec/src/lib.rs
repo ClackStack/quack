@@ -129,6 +129,22 @@ pub async fn run(mut engine: EngineHandle, prompt: String, format: OutputFormat)
                     let _ = writeln!(stderr, "  › questions skipped (headless)");
                 }
             }
+            Event::StepLimitReached { turn, .. } => {
+                // Nobody to ask: stop at the limit. Raise agent.max_steps to run longer.
+                let _ = engine
+                    .ops
+                    .send(Op::ContinueTurn {
+                        turn,
+                        proceed: false,
+                    })
+                    .await;
+                if text_mode {
+                    let _ = writeln!(
+                        stderr,
+                        "  › stopped at the agent.max_steps limit (raise it to run longer)"
+                    );
+                }
+            }
             Event::Compacting { reason } => {
                 if text_mode {
                     let _ = writeln!(stderr, "› summarizing earlier conversation ({reason})");

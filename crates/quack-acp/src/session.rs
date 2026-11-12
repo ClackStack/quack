@@ -333,6 +333,16 @@ impl Run {
                     })
                     .await;
             }
+            Event::StepLimitReached { turn, .. } => {
+                // Nothing in ACP to answer with: end the turn at its step limit.
+                let _ = self
+                    .ops
+                    .send(Op::ContinueTurn {
+                        turn,
+                        proceed: false,
+                    })
+                    .await;
+            }
             Event::Plan { checklist } => self.update(convert::plan(&checklist)),
             Event::ContextUpdate {
                 used,

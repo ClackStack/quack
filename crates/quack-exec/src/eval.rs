@@ -750,6 +750,15 @@ pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
                 };
                 engine.submit(answer).await;
             }
+            Event::StepLimitReached { turn, .. } => {
+                // Unattended run: stop at the limit and let the task fail on its files.
+                engine
+                    .submit(Op::ContinueTurn {
+                        turn,
+                        proceed: false,
+                    })
+                    .await;
+            }
             Event::Error { error } if result.error.is_none() => {
                 result.error = Some(error.message);
             }

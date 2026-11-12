@@ -5,7 +5,7 @@
       "properties": {
         "max_steps": {
           "default": 100,
-          "description": "Maximum model calls in one user turn. Sub-agents have their own limits.",
+          "description": "Model calls before a turn pauses and asks whether to keep going; continuing\ngrants as many again. Headless clients stop instead, and sub-agents have their\nown limits in `agents.d`.",
           "format": "uint32",
           "minimum": 1,
           "type": "integer"

@@ -68,6 +68,7 @@ As implemented (2026-10-19, ahead of M3): the `task` tool starts an agent from `
 ### Loop guards
 
 - `max_steps_per_turn` (default 100), configurable. When reached, the loop pauses and asks the user whether to continue.
+  As implemented (2026-11-11): the turn emits `Event::StepLimitReached` and waits; `Op::ContinueTurn` answers it (`true` grants another `max_steps` calls, anything else or an interrupt ends the turn as `step limit reached`). The TUI shows a numbered choice bar (keep going / stop, or type a redirect, which stops the turn and sends the message); `quack exec`, evals and ACP answer stop, so unattended runs keep the old behaviour. Sub-agents never ask: they stop at their own limit and report back to the model that called them. The decision is recorded as a `step_limit` record in the session log.
 - **Repetition detection**: the same tool call with identical arguments three times in a row, or the same failing edit twice, injects a short system note ("this call has failed N times; try a different approach"). A further repeat pauses the loop. Small models get stuck in loops often, so this matters.
 - **Empty response handling**: a response with no text and no tool calls is retried once with a nudge, then surfaced to the user.
 - **Malformed tool call**: the parse or validation error goes back to the model as a tool result. After three consecutive parse failures, the turn switches to `text` tool-calling mode, if the profile allows it, and records that decision for the session.

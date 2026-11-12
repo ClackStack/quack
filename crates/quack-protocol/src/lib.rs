@@ -41,6 +41,12 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         stop_asking: bool,
     },
+    /// Answers an `Event::StepLimitReached`: `proceed` runs the turn for another
+    /// `agent.max_steps` model calls, anything else ends it there.
+    ContinueTurn {
+        turn: TurnId,
+        proceed: bool,
+    },
     SetModel {
         provider: ProviderId,
         model: ModelId,
@@ -400,6 +406,14 @@ pub enum Event {
     Questions {
         call_id: CallId,
         questions: Vec<Question>,
+    },
+    /// The turn reached `agent.max_steps` model calls and paused; answered with
+    /// `Op::ContinueTurn`, or by interrupting. Sub-agents never send this: they stop at
+    /// their own limits and report back to the model that called them.
+    StepLimitReached {
+        turn: TurnId,
+        /// The limit reached; continuing grants as many model calls again.
+        limit: u32,
     },
     TurnComplete {
         turn: TurnId,
