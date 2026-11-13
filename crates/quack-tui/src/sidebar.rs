@@ -93,6 +93,11 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App, area: Rect) {
             Span::styled(clip(branch, width.saturating_sub(12), ascii), t.magenta),
         ]));
     }
+    if !app.agents.is_empty() {
+        rows.push(Line::raw(""));
+        rows.push(Line::styled("Sub-agents", heading));
+        draw_agents(app, &mut rows, width, ascii);
+    }
     rows.push(Line::raw(""));
     let mut model_heading = vec![Span::styled("Model", heading)];
     if let Some(thinking) = app.thinking_label() {
@@ -152,6 +157,56 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App, area: Rect) {
         rows.push(Line::styled(format!("{speed:.0} tokens/s"), t.dim));
     }
     f.render_widget(Paragraph::new(rows).block(block), area);
+}
+
+/// The session's sub-agent runs: the running ones live with their step count, the
+/// finished ones as their result. Newest last; only the last few finished runs stay,
+/// so a long session keeps room for the rest of the panel. `/tasks` has the detail.
+fn draw_agents(app: &App, rows: &mut Vec<Line<'static>>, width: usize, ascii: bool) {
+    let t = &app.theme;
+    /// How many finished runs stay listed after new ones push them down.
+    const KEPT_DONE: usize = 2;
+    let done = app.agents.iter().filter(|a| a.ok.is_some()).count();
+    let first_done = done.saturating_sub(KEPT_DONE);
+    for (i, a) in app.agents.iter().enumerate() {
+        if a.ok.is_some() && i < first_done {
+            continue;
+        }
+        let (icon, style) = match a.ok {
+            None => (app.spinner().to_owned(), t.accent),
+            Some(true) => (app.glyphs.ok.to_owned(), t.ok),
+            Some(false) => (app.glyphs.fail.to_owned(), t.error),
+        };
+        let room = width.saturating_sub(2);
+        rows.push(Line::from(vec![
+            Span::styled(format!("{icon} "), style),
+            Span::styled(clip(&a.description, room, ascii), style),
+        ]));
+        let took = a.took.unwrap_or_else(|| a.started.elapsed());
+        let detail = match a.ok {
+            None => format!("{} · {} steps", a.agent, a.steps()),
+            Some(true) => format!("{} · {}", a.agent, a.summary),
+            Some(false) => format!("{} · failed · {}", a.agent, a.summary),
+        };
+        rows.push(Line::styled(
+            format!(
+                "  {}",
+                clip(
+                    &format!("{detail} · {}", crate::theme::elapsed(took)),
+                    width,
+                    ascii
+                )
+            ),
+            t.dim,
+        ));
+    }
+    if first_done > 0 {
+        let dots = if ascii { "..." } else { "…" };
+        rows.push(Line::styled(
+            format!("  +{first_done} earlier{dots}"),
+            t.dim,
+        ));
+    }
 }
 
 /// One row per subsystem, the same states the transcript-area panel shows. A detail

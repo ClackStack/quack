@@ -2143,6 +2143,62 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_lists_sub_agents_while_they_run_and_after_they_finish() {
+        use quack_protocol::CallId;
+        let mut app = started_app();
+        started(&mut app);
+        let start = |app: &mut App, id: &str, agent: &str, description: &str| {
+            app.on_engine(Event::AgentStarted {
+                id: id.into(),
+                agent: agent.into(),
+                description: description.into(),
+                call_id: CallId(format!("t-{id}")),
+                model: "mock/small".into(),
+            });
+        };
+        start(
+            &mut app,
+            "explore-1",
+            "explore",
+            "find the empty-input case",
+        );
+        app.on_engine(Event::Agent {
+            id: "explore-1".into(),
+            inner: Box::new(Event::ToolCallBegin {
+                call: quack_protocol::ToolCallInfo {
+                    call_id: CallId("explore-1/c1".into()),
+                    name: "grep".into(),
+                    summary: "grep fn parse".into(),
+                },
+            }),
+        });
+        let s = render(&app, 140, 24);
+        assert!(
+            s.contains("Sub-agents")
+                && s.contains("find the empty-input case")
+                && s.contains("explore · 1 steps"),
+            "{s}"
+        );
+        app.on_engine(Event::AgentFinished {
+            id: "explore-1".into(),
+            ok: true,
+            summary: "2 steps · 34.5k tokens".into(),
+        });
+        start(
+            &mut app,
+            "general-1",
+            "general",
+            "fix the parser and add a test",
+        );
+        let s = render(&app, 140, 24);
+        assert!(
+            s.contains("explore · 2 steps")
+                && s.contains("fix the parser and add a test"),
+            "{s}"
+        );
+    }
+
+    #[test]
     fn sidebar_carries_the_startup_diagnostics_until_the_user_starts_working() {
         use crossterm::event::{KeyCode, KeyModifiers};
         let mut app = started_app();
