@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex};
 use futures::future::BoxFuture;
 use quack_config::{ItemState, Loaded, load_mcp};
 use quack_mcp::{McpManager, ServerSpec, ServerState, ToolInfo, model_tool_name};
-use quack_protocol::{ApprovalRequest, CommandInfo, Event, LoadState, McpServerInfo, Subsystem};
+use quack_protocol::{
+    ApprovalRequest, CommandInfo, Event, LoadState, McpServerInfo, McpServerState, Subsystem,
+};
 use quack_tools::{Subject, Tool, ToolCtx, ToolKind, ToolOutput};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -116,10 +118,10 @@ impl Mcp {
             .into_iter()
             .map(|s| {
                 let (state, error) = match s.state {
-                    ServerState::Starting => ("starting", String::new()),
-                    ServerState::Ready => ("ready", String::new()),
-                    ServerState::Failed(e) => ("failed", e),
-                    ServerState::Stopped => ("stopped", String::new()),
+                    ServerState::Starting => (McpServerState::Starting, String::new()),
+                    ServerState::Ready => (McpServerState::Ready, String::new()),
+                    ServerState::Failed(e) => (McpServerState::Failed, e),
+                    ServerState::Stopped => (McpServerState::Stopped, String::new()),
                 };
                 McpServerInfo {
                     tool_tokens: tools
@@ -131,7 +133,7 @@ impl Mcp {
                     transport: s.transport,
                     target: s.target,
                     description: s.description,
-                    state: state.into(),
+                    state,
                     error,
                     tools: s.tools,
                     prompts: s.prompts,

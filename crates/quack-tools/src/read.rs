@@ -6,10 +6,11 @@ use serde_json::{Value, json};
 
 use crate::paths;
 use crate::registry::{Subject, Tool, ToolCtx, ToolKind, ToolOutput, arg_str, opt_str, opt_u64};
-use crate::text::{TextFile, io_msg, looks_binary};
+use crate::text::{MAX_EDIT_BYTES, TextFile, io_msg, looks_binary};
 
 const DEFAULT_LIMIT: usize = 2000;
 const MAX_LINE_CHARS: usize = 2000;
+const MAX_READ_BYTES: u64 = MAX_EDIT_BYTES;
 const PATH: &[&str] = &["path", "file_path", "filename", "file"];
 
 #[derive(Debug)]
@@ -82,7 +83,8 @@ impl Tool for Read {
     }
 
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolCtx) -> BoxFuture<'a, ToolOutput> {
-        Box::pin(async move { read(&args, ctx).unwrap_or_else(ToolOutput::error) })
+        let ctx = ctx.clone();
+        Box::pin(crate::registry::blocking(move || read(&args, &ctx)))
     }
 }
 
@@ -91,6 +93,13 @@ fn read(args: &Value, ctx: &ToolCtx) -> Result<ToolOutput, String> {
     let shown = paths::display(&ctx.root, &path);
     if path.is_dir() {
         return Err(format!("{shown} is a directory; use list_dir"));
+    }
+    let meta = std::fs::metadata(&path).map_err(|e| io_msg(&path, &e))?;
+    if meta.len() > MAX_READ_BYTES {
+        return Err(format!(
+            "{shown} is {} bytes; too large to read whole, use offset/limit",
+            meta.len()
+        ));
     }
     let bytes = std::fs::read(&path).map_err(|e| io_msg(&path, &e))?;
     if looks_binary(&bytes) {

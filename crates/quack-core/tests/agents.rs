@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{bodies, sse_call, sse_raw, sse_text};
-use quack_core::protocol::{ApprovalDecision, Event, InputItem, Op, TurnOverrides};
+use quack_core::protocol::{ApprovalDecision, Event, InputItem, Op, PermissionMode, TurnOverrides};
 use quack_core::{Engine, EngineHandle};
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer};
@@ -235,7 +235,7 @@ async fn plan_mode_runs_only_read_only_agents() {
     let mut engine = start(&server, tmp.path()).await;
     engine
         .submit(Op::SetPermissionMode {
-            mode: "plan".into(),
+            mode: PermissionMode::Plan,
         })
         .await;
     submit(&engine, "plan it").await;

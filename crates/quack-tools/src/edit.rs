@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::paths;
 use crate::registry::{Subject, Tool, ToolCtx, ToolKind, ToolOutput, arg_str, opt_bool, opt_u64};
-use crate::text::{TextFile, diff_stats, io_msg, unified_diff};
+use crate::text::{TextFile, io_msg, unified_diff};
 
 const PATH: &[&str] = &["path", "file_path", "filename", "file"];
 const OLD: &[&str] = &["old_string", "old_str", "old", "search"];
@@ -80,19 +80,22 @@ pub(crate) fn replace(
     new: &str,
     all: bool,
 ) -> Result<(String, Option<&'static str>, usize), String> {
-    let hits: Vec<usize> = text.match_indices(old).map(|(i, _)| i).collect();
-    match hits.len() {
-        0 => {}
-        1 => return Ok((text.replacen(old, new, 1), None, 1)),
-        n if all => return Ok((text.replace(old, new), None, n)),
-        _ => {
-            let lines: Vec<String> = hits.iter().map(|&i| line_of(text, i).to_string()).collect();
-            return Err(format!(
-                "old_string matches {} places (lines {}); include more surrounding lines to make it unique, or set replace_all",
-                hits.len(),
-                lines.join(", ")
-            ));
+    let count = text.match_indices(old).count();
+    if count == 1 {
+        return Ok((text.replacen(old, new, 1), None, 1));
+    }
+    if count > 1 {
+        if all {
+            return Ok((text.replace(old, new), None, count));
         }
+        let lines: Vec<String> = text
+            .match_indices(old)
+            .map(|(i, _)| line_of(text, i).to_string())
+            .collect();
+        return Err(format!(
+            "old_string matches {count} places (lines {}); include more surrounding lines to make it unique, or set replace_all",
+            lines.join(", ")
+        ));
     }
 
     let file_lines: Vec<&str> = text.split('\n').collect();
@@ -153,12 +156,11 @@ pub(crate) fn replace(
     if old.chars().any(is_smart_punct) {
         let normalized_old = normalize_quotes(old);
         let normalized_text = normalize_quotes(text);
-        let hits: Vec<usize> = normalized_text
-            .match_indices(&normalized_old)
-            .map(|(i, _)| i)
-            .collect();
-        if hits.len() == 1 {
-            let start_line = text[..hits[0]].matches('\n').count();
+        let mut hits = normalized_text.match_indices(&normalized_old);
+        if let Some((i, _)) = hits.next()
+            && hits.next().is_none()
+        {
+            let start_line = text[..i].matches('\n').count();
             let end_line = start_line + old_lines.len();
             if end_line <= file_lines.len() {
                 return Ok((
@@ -384,38 +386,33 @@ impl Tool for StrReplace {
     }
 
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolCtx) -> BoxFuture<'a, ToolOutput> {
-        Box::pin(async move {
-            let run = || -> Result<ToolOutput, String> {
-                let p = plan(&args, ctx)?;
-                std::fs::write(&p.path, p.file.encode(&p.after))
-                    .map_err(|e| io_msg(&p.path, &e))?;
-                ctx.reads.record(&p.path);
-                let (add, del) = diff_stats(&p.file.text, &p.after);
-                let mut msg = format!("Edited {}", p.shown);
-                if p.count > 1 {
-                    msg.push_str(&format!(" ({} replacements)", p.count));
-                }
-                if let Some(note) = p.note {
-                    msg.push_str(&format!(" ({note})"));
-                }
-                msg.push('.');
-                if let Some(line) =
-                    crate::outline::new_syntax_error(&p.path, &p.file.text, &p.after)
-                {
-                    msg.push_str(&format!(
-                        "\n\nWarning: Tree-sitter detected a syntax error at line {line} after this edit (the file previously parsed cleanly). Check brackets, indentation or delimiters."
-                    ));
-                }
-                Ok(
-                    ToolOutput::ok(msg, format!("+{add} -{del}")).with_detail(unified_diff(
-                        &p.shown,
-                        &p.file.text,
-                        &p.after,
-                    )),
-                )
-            };
-            run().unwrap_or_else(ToolOutput::error)
-        })
+        let ctx = ctx.clone();
+        Box::pin(crate::registry::blocking(move || {
+            let p = plan(&args, &ctx)?;
+            std::fs::write(&p.path, p.file.encode(&p.after)).map_err(|e| io_msg(&p.path, &e))?;
+            let c = crate::text::commit(
+                &ctx,
+                &p.path,
+                &p.shown,
+                Some(&p.file.text),
+                &p.after,
+                "edit",
+                false,
+            );
+            let mut msg = format!("Edited {}", p.shown);
+            if p.count > 1 {
+                msg.push_str(&format!(" ({} replacements)", p.count));
+            }
+            if let Some(note) = p.note {
+                msg.push_str(&format!(" ({note})"));
+            }
+            msg.push('.');
+            if let Some(warning) = &c.warning {
+                msg.push_str("\n\n");
+                msg.push_str(warning);
+            }
+            Ok(ToolOutput::ok(msg, format!("+{} -{}", c.add, c.del)).with_detail(c.detail))
+        }))
     }
 }
 

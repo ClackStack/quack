@@ -49,6 +49,9 @@ pub(crate) struct Setup {
     pub budget: Option<u32>,
     /// Byte estimate corrected by this model's reported usage.
     pub estimator: std::sync::Mutex<quack_providers::tokens::Estimator>,
+    /// The tool definitions' share of [`crate::turn::raw_estimate`], computed once:
+    /// names, descriptions and schemas do not change during a session.
+    pub tool_block_bytes: std::sync::OnceLock<usize>,
     pub context: quack_config::settings::ContextSettings,
     /// Directories whose AGENTS.md is in the system prompt (or that have none).
     pub instruction_dirs: Vec<std::path::PathBuf>,
@@ -829,6 +832,7 @@ async fn build_setup(
         permissions,
         budget,
         estimator: std::sync::Mutex::default(),
+        tool_block_bytes: std::sync::OnceLock::new(),
         context: config.settings.context.clone(),
         instruction_dirs: instructions.dirs,
         mcp,

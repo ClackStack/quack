@@ -5,7 +5,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{bodies, sse_text as sse, turn, until_done};
-use quack_core::protocol::{Event, Op, ReplayItem};
+use quack_core::protocol::{Event, Op, PermissionMode, ReplayItem};
 use quack_core::{Engine, Resume};
 use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -288,7 +288,7 @@ async fn the_summary_lists_the_files_the_session_changed() {
     let mut engine = Engine::spawn(loaded);
     engine
         .submit(Op::SetPermissionMode {
-            mode: "full-auto".into(),
+            mode: PermissionMode::Allow,
         })
         .await;
     turn(&mut engine, &format!("FIRST {big}")).await;

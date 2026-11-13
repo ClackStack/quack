@@ -103,6 +103,55 @@ pub(crate) fn diff_stats(before: &str, after: &str) -> (usize, usize) {
     (add, del)
 }
 
+/// What an edit tool needs after writing a file: diff stats, the detail diff, and the
+/// tree-sitter warning when the change broke the file's parse.
+#[derive(Debug)]
+pub(crate) struct Commit {
+    pub add: usize,
+    pub del: usize,
+    pub detail: String,
+    /// The full warning line (without its leading newlines), if the change broke the parse.
+    pub warning: Option<String>,
+}
+
+/// The tail every edit tool shares after writing a file: record the read, compute the
+/// diff stats and the detail diff, and check tree-sitter for a newly broken parse.
+/// `before` is `None` for a created file (no parse check); `action` is the word after
+/// "after this" in the warning; `name_file` prefixes the file name when one call can
+/// change several files and the warning must say which one.
+pub(crate) fn commit(
+    ctx: &crate::registry::ToolCtx,
+    path: &Path,
+    shown: &str,
+    before: Option<&str>,
+    after: &str,
+    action: &str,
+    name_file: bool,
+) -> Commit {
+    ctx.reads.record(path);
+    let (add, del) = diff_stats(before.unwrap_or(""), after);
+    let warning = before.and_then(|before| {
+        crate::outline::new_syntax_error(path, before, after).map(|line| {
+            let file = if name_file {
+                format!(" in {shown}")
+            } else {
+                String::new()
+            };
+            format!(
+                "Warning: Tree-sitter detected a syntax error{file} at line {line} after this \
+                 {action} (the file previously parsed cleanly). Check brackets, indentation or \
+                 delimiters."
+            )
+        })
+    });
+    Commit {
+        add,
+        del,
+        detail: unified_diff(shown, before.unwrap_or(""), after),
+        warning,
+    }
+}
+
 /// Keep the head and tail of long output, marking what was cut.
 pub(crate) fn trim_middle(s: &str, head: usize, tail: usize) -> String {
     if s.len() <= head + tail {

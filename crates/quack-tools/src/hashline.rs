@@ -1294,27 +1294,23 @@ impl Tool for Hashline {
     }
 
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolCtx) -> BoxFuture<'a, ToolOutput> {
-        Box::pin(async move {
-            let p = match plan(&args, ctx) {
-                Ok(p) => p,
-                Err(r) => {
-                    if let (Some(reveal), Ok(path)) = (&r.shown, target(&args, ctx)) {
-                        ctx.reads.saw(
-                            &path,
-                            &reveal.tag,
-                            &reveal.text,
-                            (reveal.from + 1, reveal.to),
-                        );
-                    }
-                    return ToolOutput::error(r.message);
+        let ctx = ctx.clone();
+        Box::pin(crate::registry::blocking(move || {
+            let p = plan(&args, &ctx).map_err(|r| {
+                if let (Some(reveal), Ok(path)) = (&r.shown, target(&args, &ctx)) {
+                    ctx.reads.saw(
+                        &path,
+                        &reveal.tag,
+                        &reveal.text,
+                        (reveal.from + 1, reveal.to),
+                    );
                 }
-            };
-            if let Err(e) = std::fs::write(&p.path, p.file.encode(&p.after)) {
-                return ToolOutput::error(io_msg(&p.path, &e));
-            }
+                r.message
+            })?;
+            std::fs::write(&p.path, p.file.encode(&p.after)).map_err(|e| io_msg(&p.path, &e))?;
             ctx.reads.record(&p.path);
-            output(&p, ctx)
-        })
+            Ok(output(&p, &ctx))
+        }))
     }
 }
 

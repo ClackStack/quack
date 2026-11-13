@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::{bodies, sse_call, sse_text, turn};
 use quack_core::protocol::{
-    ApprovalDecision, ApprovalPolicy, Event, InputItem, Op, TurnOverrides, WorkMode,
+    ApprovalDecision, ApprovalPolicy, Event, InputItem, Op, PermissionMode, TurnOverrides, WorkMode,
 };
 use quack_core::{Engine, EngineHandle, Resume};
 use wiremock::matchers::{body_string_contains, method};
@@ -37,7 +37,7 @@ async fn plan_mode_refuses_edits_and_asks_for_a_plan() {
     let mut engine = Engine::spawn(Arc::new(loaded));
     engine
         .submit(Op::SetPermissionMode {
-            mode: "plan".into(),
+            mode: PermissionMode::Plan,
         })
         .await;
     let mode = loop {
@@ -46,12 +46,12 @@ async fn plan_mode_refuses_edits_and_asks_for_a_plan() {
             .expect("event")
             .expect("open");
         if let Event::PermissionMode { mode } = e
-            && mode == "plan"
+            && mode == PermissionMode::Plan
         {
             break mode;
         }
     };
-    assert_eq!(mode, "plan");
+    assert_eq!(mode, PermissionMode::Plan);
 
     turn(&mut engine, "add notes").await;
     assert!(!ws.join("notes.txt").exists());

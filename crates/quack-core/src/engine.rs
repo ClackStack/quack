@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use quack_config::hooks::HookEvent;
-use quack_config::settings::PermissionMode;
 use quack_config::{LayerKind, Loaded};
 use quack_lsp::LspManager;
 use quack_mcp::{McpManager, ServerAsk};
+use quack_protocol::PermissionMode;
 use quack_protocol::{
     ApprovalPolicy, CallId, EngineError, EngineErrorKind, Event, ExportFormat, InputItem,
     InstructionFile, Op, SessionId, SessionInfo, SessionSummary, TurnId, WorkMode, WriteScope,
@@ -156,7 +156,7 @@ pub struct Engine {
     title_tasks: JoinSet<(SessionId, Option<String>)>,
     switch_tx: Option<mpsc::Sender<(Role, Result<Setup, String>)>>,
     /// A mode set before startup finished, applied once a model is ready.
-    pending_mode: Option<String>,
+    pending_mode: Option<PermissionMode>,
     pending_work_mode: Option<WorkMode>,
     pending_approvals: Option<ApprovalPolicy>,
     saved_mode: Option<(WorkMode, ApprovalPolicy)>,
@@ -574,7 +574,7 @@ impl Engine {
             self.set_approval_policy(policy);
         }
         match self.pending_mode.take() {
-            Some(mode) => self.set_mode(&mode),
+            Some(mode) => self.set_mode(mode),
             None => self.emit_mode(),
         }
         if let Some(mode) = self.pending_work_mode.take() {
@@ -833,16 +833,15 @@ impl Engine {
         self.emit(Event::SessionList { sessions });
     }
 
-    fn set_mode(&mut self, mode: &str) {
+    fn set_mode(&mut self, mode: PermissionMode) {
         match mode {
-            "plan" => self.set_work_mode(WorkMode::Plan),
-            "edit" => self.set_work_mode(WorkMode::Edit),
-            m => match serde_json::from_value::<ApprovalPolicy>(serde_json::Value::from(m)) {
-                Ok(policy) => self.set_approval_policy(policy),
-                Err(_) => self.warn(format!(
-                    "unknown mode `{m}`; use plan/edit for work mode or ask/allow for approvals"
-                )),
-            },
+            PermissionMode::Plan => self.set_work_mode(WorkMode::Plan),
+            PermissionMode::Edit => self.set_work_mode(WorkMode::Edit),
+            mode => {
+                if let Some(policy) = mode.policy() {
+                    self.set_approval_policy(policy);
+                }
+            }
         }
     }
 
@@ -1001,13 +1000,11 @@ impl Engine {
         );
         // Retain the legacy notification for older clients.
         let mode = if work_mode == WorkMode::Plan {
-            "plan"
+            PermissionMode::Plan
         } else {
-            approvals.label()
+            PermissionMode::from(approvals)
         };
-        self.emit(Event::PermissionMode {
-            mode: mode.to_owned(),
-        });
+        self.emit(Event::PermissionMode { mode });
         self.emit(Event::ModeChanged {
             work_mode,
             approvals,
@@ -1071,7 +1068,7 @@ impl Engine {
             .unwrap_or_default();
         let root = &self.config.dirs.workspace_root;
         let mut points = Vec::new();
-        let mut calls: Vec<String> = Vec::new();
+        let mut calls: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (index, m) in history.iter().enumerate().rev() {
             match m {
                 Message::Assistant { tool_calls, .. } => {
@@ -1081,7 +1078,10 @@ impl Engine {
                     if !content.starts_with(quack_context::compact::SUMMARY_MARKER) =>
                 {
                     let mut files: Vec<String> = Vec::new();
-                    for c in changes.iter().filter(|c| calls.contains(&c.call_id)) {
+                    for c in changes
+                        .iter()
+                        .filter(|c| calls.contains(c.call_id.as_str()))
+                    {
                         let shown = c
                             .path
                             .strip_prefix(root)
@@ -1135,7 +1135,7 @@ impl Engine {
             let changes: Vec<_> = cp
                 .changes()
                 .into_iter()
-                .filter(|c| point.calls.contains(&c.call_id))
+                .filter(|c| point.calls.contains(c.call_id.as_str()))
                 .collect();
             let conflicts = cp.conflicts(&changes);
             if !force && !conflicts.is_empty() {
@@ -1626,9 +1626,10 @@ impl Engine {
     /// its messages give way to one brief, so the session's model reads only that on top of
     /// the history it already has cached.
     fn accept_plan(&mut self, mode: &str, done: mpsc::Sender<(TurnId, Vec<Message>)>) {
-        if !mode.is_empty()
-            && serde_json::from_value::<PermissionMode>(serde_json::Value::from(mode)).is_err()
-        {
+        let approvals = (!mode.is_empty())
+            .then(|| serde_json::from_value::<ApprovalPolicy>(serde_json::Value::from(mode)).ok())
+            .flatten();
+        if !mode.is_empty() && approvals.is_none() {
             return self.warn(format!(
                 "cannot carry out the plan with `{mode}` approvals; use ask or allow"
             ));
@@ -1656,8 +1657,8 @@ impl Engine {
             }
             _ => None,
         };
-        if !mode.is_empty() {
-            self.set_mode(mode);
+        if let Some(policy) = approvals {
+            self.set_mode(PermissionMode::from(policy));
         }
         self.set_work_mode(WorkMode::Edit);
         let text = match brief {
@@ -2022,7 +2023,7 @@ impl Engine {
                 crate::setup::add_server(config, &base_url, key.as_ref().map(|k| k.0.as_str()))
             }),
             Op::SetPermissionMode { mode } if !self.started => self.pending_mode = Some(mode),
-            Op::SetPermissionMode { mode } => self.set_mode(&mode),
+            Op::SetPermissionMode { mode } => self.set_mode(mode),
             Op::SetWorkMode { mode } if !self.started => self.pending_work_mode = Some(mode),
             Op::SetWorkMode { mode } => self.set_work_mode(mode),
             Op::SetApprovalPolicy { policy } if !self.started => {
@@ -2639,11 +2640,13 @@ impl Engine {
         let setup = convo.setup.clone();
         let perms = convo.perms.clone();
         let nested = convo.nested.clone();
-        let typed = prompt.clone();
-        let (prompt, skill_error) = if mcp_prompt.is_some() {
-            (prompt, None)
+        // `expand_skill` borrows the typed prompt; when it expands a skill the
+        // expansion replaces the request body, so the original is kept once, not twice.
+        let typed = prompt;
+        let (expanded, skill_error) = if mcp_prompt.is_some() {
+            (None, None)
         } else {
-            expand_skill(&setup, prompt)
+            expand_skill(&setup, &typed)
         };
         let notes = (!self.notes.is_empty()).then(|| std::mem::take(&mut self.notes).join("\n"));
         if let Some(e) = skill_error {
@@ -2730,7 +2733,7 @@ impl Engine {
         let start = self.start_context.take();
         tokio::spawn(async move {
             let body = match mcp_prompt {
-                None => prompt,
+                None => expanded.unwrap_or_else(|| typed.clone()),
                 Some((server, name, args)) => {
                     match manager.get_prompt(&server, &name, args).await {
                         Ok(text) => text,
@@ -2769,7 +2772,7 @@ struct Point {
     /// Index of the user message in the history.
     index: usize,
     /// Tool calls made after it.
-    calls: Vec<String>,
+    calls: std::collections::HashSet<String>,
 }
 
 /// Steps of a reload, reported back to the engine loop.
@@ -2841,23 +2844,24 @@ fn plan_note(setup: &Setup) -> String {
 }
 
 /// `/<skill> [args]` becomes the skill's instructions followed by the request. Anything
-/// else (including unknown `/words`) is sent as typed.
-fn expand_skill(setup: &Setup, prompt: String) -> (String, Option<String>) {
+/// else (including unknown `/words`) is sent as typed, so the expansion is `None` and
+/// the caller keeps the prompt it passed in.
+fn expand_skill(setup: &Setup, prompt: &str) -> (Option<String>, Option<String>) {
     let Some(rest) = prompt.strip_prefix('/') else {
-        return (prompt, None);
+        return (None, None);
     };
     let (name, args) = rest
         .split_once(char::is_whitespace)
         .map_or((rest, ""), |(n, a)| (n, a.trim()));
     let Some(skill) = setup.tool_ctx.skills.iter().find(|s| s.name == name) else {
         // A custom command: its prompt with the arguments filled in.
-        return match quack_instructions::commands::expand(&setup.commands, &prompt) {
-            Some(Ok(text)) => (text, None),
+        return match quack_instructions::commands::expand(&setup.commands, prompt) {
+            Some(Ok(text)) => (Some(text), None),
             Some(Err(e)) => {
                 let message = format!("/{name}: {e}");
-                (prompt, Some(message))
+                (None, Some(message))
             }
-            None => (prompt, None),
+            None => (None, None),
         };
     };
     match quack_tools::expand_skill(skill) {
@@ -2867,11 +2871,11 @@ fn expand_skill(setup: &Setup, prompt: String) -> (String, Option<String>) {
             } else {
                 args
             };
-            (format!("{text}\n\n{request}"), None)
+            (Some(format!("{text}\n\n{request}")), None)
         }
         Err(e) => {
             let message = format!("skill /{name}: {e}");
-            (prompt, Some(message))
+            (None, Some(message))
         }
     }
 }

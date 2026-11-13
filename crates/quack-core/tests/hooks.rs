@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use common::{bodies, sse_call, sse_text, turn};
 use quack_core::Engine;
-use quack_core::protocol::{Event, InputItem, Op, TurnOverrides};
+use quack_core::protocol::{Event, HookOutcome, InputItem, Op, TurnOverrides};
 use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -57,11 +57,11 @@ async fn run_turn(engine: &mut quack_core::EngineHandle, text: &str) -> Vec<Even
     }
 }
 
-fn hook_runs(events: &[Event]) -> Vec<(String, String)> {
+fn hook_runs(events: &[Event]) -> Vec<(String, HookOutcome)> {
     events
         .iter()
         .filter_map(|e| match e {
-            Event::HookRan { id, outcome, .. } => Some((id.clone(), outcome.clone())),
+            Event::HookRan { id, outcome, .. } => Some((id.clone(), *outcome)),
             _ => None,
         })
         .collect()
@@ -99,7 +99,10 @@ async fn user_prompt_hook_adds_context_only_when_its_pattern_matches() {
         "look at https://jira.corp/browse/PAY-12 please",
     )
     .await;
-    assert_eq!(hook_runs(&events), [("issues".into(), "context".into())]);
+    assert_eq!(
+        hook_runs(&events),
+        [("issues".into(), HookOutcome::Context)]
+    );
     let ran = events.iter().find_map(|e| match e {
         Event::HookRan {
             message,
@@ -258,7 +261,7 @@ print(json.dumps({"decision": "allow", "updated_args": args}))
     );
 
     let events = turn(&mut engine, "write the secrets").await;
-    assert!(hook_runs(&events).contains(&("guard".into(), "denied".into())));
+    assert!(hook_runs(&events).contains(&("guard".into(), HookOutcome::Denied)));
     assert!(!ws.join("secrets.env").exists());
     let sent = bodies(&server).await;
     assert!(
@@ -469,7 +472,7 @@ async fn shipped_jira_hook_fetches_linked_issues() {
     assert!(
         events.iter().any(
             |e| matches!(e, Event::HookRan { id, outcome, message: Some(m), .. }
-            if id == "jira" && outcome == "context"
+            if id == "jira" && *outcome == HookOutcome::Context
                 && m == "fetched PAY-1234; could not fetch PAY-9")
         ),
         "{events:?}"
@@ -632,7 +635,7 @@ async fn enabling_a_shipped_hook_copies_it_into_the_user_layer_and_runs_it() {
         events
             .iter()
             .any(|e| matches!(e, Event::HookRan { id, outcome, .. }
-            if id == "jira" && outcome == "context")),
+            if id == "jira" && *outcome == HookOutcome::Context)),
         "{events:?}"
     );
     let sent = bodies(&model).await;
@@ -815,7 +818,7 @@ async fn shipped_forge_review_hook_uses_forge_rest_endpoints() {
         assert!(
             events.iter().any(|event| matches!(event,
                 Event::HookRan { id, outcome, .. }
-                if id == "forge-review" && outcome == "context"
+                if id == "forge-review" && *outcome == HookOutcome::Context
             )),
             "{kind}: {events:?}"
         );

@@ -127,7 +127,8 @@ fn main() -> ExitCode {
                 let mut o = opts.clone();
                 o.cwd = start.cwd;
                 o.mcp = start.mcp;
-                let loaded = quack_config::load(&o).map_err(|e| e.to_string())?;
+                let loaded = quack_config::load(&o)
+                    .map_err(|e| quack_acp::SessionError::Other(e.to_string()))?;
                 let engine = Engine::spawn_with(Arc::new(loaded), start.resume);
                 if plan {
                     let _ = engine.ops.try_send(plan_op());
@@ -192,7 +193,7 @@ fn toml_string(s: &str) -> String {
 
 fn plan_op() -> quack_core::protocol::Op {
     quack_core::protocol::Op::SetPermissionMode {
-        mode: "plan".into(),
+        mode: quack_core::protocol::PermissionMode::Plan,
     }
 }
 

@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -8,9 +8,9 @@ use crossterm::event::{
 use quack_config::settings::{ShowReasoning, StartupPanel, UiSettings};
 use quack_config::{LayerStatus, Loaded, SettingRow};
 use quack_protocol::{
-    Answer, ApprovalDecision, ApprovalRequest, CallId, Event, ExportFormat, InputItem, KeySource,
-    LoadState, ModelId, Op, ProviderId, Question, ReplayItem, SecretText, SessionId, Subsystem,
-    TurnId, TurnOverrides, WorkMode, WriteScope,
+    Answer, ApprovalDecision, ApprovalRequest, CallId, Event, ExportFormat, HookOutcome, InputItem,
+    KeySource, LoadState, ModelId, Op, PermissionMode, ProviderId, Question, ReplayItem,
+    SecretText, SessionId, Subsystem, TurnId, TurnOverrides, WorkMode, WriteScope,
 };
 use ratatui::layout::Rect;
 
@@ -179,6 +179,23 @@ pub(crate) struct PopupItem {
     pub command: Option<&'static Command>,
 }
 
+/// What `popup_matches` was last computed from; any difference means a recompute.
+#[derive(Debug, Default, PartialEq)]
+struct PopupKey {
+    text: String,
+    modal_open: bool,
+    dismissed: bool,
+    /// Bumped when the files, skills, custom commands or MCP prompts change.
+    epoch: u64,
+}
+
+/// The last popup match list, and what it was computed from.
+#[derive(Debug, Default)]
+struct PopupCache {
+    key: PopupKey,
+    items: Vec<PopupItem>,
+}
+
 impl PopupItem {
     fn command(c: &'static Command) -> Self {
         Self {
@@ -279,13 +296,33 @@ pub(crate) struct AgentRun {
     pub items: Vec<AgentItem>,
 }
 
+/// A streaming delta goes onto the last entry when it is the same kind, or starts a new
+/// one with `new`. Shared by the transcript and sub-agent runs; `new` decides how a fresh
+/// entry shapes the text (the transcript trims leading whitespace, agents keep it).
+fn append_delta<T>(
+    items: &mut Vec<T>,
+    delta: &str,
+    as_text: impl Fn(&mut T) -> Option<&mut String>,
+    new: impl FnOnce(&str) -> T,
+) {
+    match items.last_mut().and_then(as_text) {
+        Some(buf) => buf.push_str(delta),
+        None => items.push(new(delta)),
+    }
+}
+
 impl AgentRun {
     fn on_event(&mut self, e: Event) {
         match e {
-            Event::AssistantDelta { text } => match self.items.last_mut() {
-                Some(AgentItem::Text(t)) => t.push_str(&text),
-                _ => self.items.push(AgentItem::Text(text)),
-            },
+            Event::AssistantDelta { text } => append_delta(
+                &mut self.items,
+                &text,
+                |i| match i {
+                    AgentItem::Text(t) => Some(t),
+                    _ => None,
+                },
+                |t| AgentItem::Text(t.to_owned()),
+            ),
             Event::AssistantRewrite { text } => {
                 if let Some(AgentItem::Text(t)) = self.items.last_mut() {
                     *t = text;
@@ -570,6 +607,14 @@ pub struct App {
     pub(crate) input_view: Cell<(Rect, usize)>,
     /// The transcript's area as last drawn, scrollbar column included.
     pub(crate) transcript_area: Cell<Rect>,
+    /// Rendered transcript rows per entry, so drawing only lays out new or changed text
+    /// (streaming deltas, finished tools); see `ui::transcript_pieces`. Drawing only
+    /// writes here, like the `Cell`s above.
+    pub(crate) transcript_cache: RefCell<crate::ui::TranscriptCache>,
+    /// The popup's match list, rebuilt only when the input or its sources change.
+    popup_cache: RefCell<Option<PopupCache>>,
+    /// Bumped whenever the popup's sources (files, skills, custom or MCP commands) change.
+    popup_epoch: u64,
     /// Text being selected with the mouse, or selected and copied.
     pub(crate) selection: Option<Selection>,
     /// The frame a selection was copied on, and how many chars it had.
@@ -665,6 +710,29 @@ pub struct App {
     last_esc: Option<Instant>,
 }
 
+/// Which surface owns the next key (`App::focus` computes it, `App::on_key` dispatches on
+/// it). The order is the priority: a key goes to the topmost surface that is showing,
+/// with the two bars (`StepLimit`, `Review`) letting unused keys fall through to `Base`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    /// The hook-setup form, which reads every key and turns Ctrl-C into Esc.
+    HookForm,
+    /// A tool-approval request.
+    Approval,
+    /// The engine's questions, with the input live for an answer in the user's own words.
+    Asking,
+    /// The step-limit bar.
+    StepLimit,
+    /// A one-line prompt from `/setup`.
+    Prompt,
+    /// An open modal (picker) dialog.
+    Modal,
+    /// The plan-review bar.
+    Review,
+    /// The transcript and input box.
+    Base,
+}
+
 impl App {
     pub fn new(info: AppInfo) -> Self {
         let input = Input::with_history(info.history.clone());
@@ -689,6 +757,9 @@ impl App {
             view: Cell::new((0, 0)),
             input_view: Cell::new((Rect::default(), 0)),
             transcript_area: Cell::new(Rect::default()),
+            transcript_cache: RefCell::new(crate::ui::TranscriptCache::default()),
+            popup_cache: RefCell::new(None),
+            popup_epoch: 0,
             selection: None,
             copied: None,
             show_reasoning: info.ui.show_reasoning,
@@ -851,6 +922,7 @@ impl App {
     /// Workspace relative file paths for `@file` completion, loaded off-thread.
     pub fn set_files(&mut self, files: Vec<String>) {
         self.files = files;
+        self.popup_epoch = self.popup_epoch.wrapping_add(1);
         if self.input.at_mention().is_some() {
             self.dirty = true;
         }
@@ -867,6 +939,28 @@ impl App {
     /// Commands matching the input while it is a bare `/word`, or workspace files matching
     /// an `@file` token at the cursor.
     pub(crate) fn popup_matches(&self) -> Vec<PopupItem> {
+        // Both the draw path and every key press ask for the list; only recompute it when
+        // the input text or one of its sources changed since the last time.
+        let key = PopupKey {
+            text: self.input.text().to_owned(),
+            modal_open: self.modal.is_some(),
+            dismissed: self.popup_dismissed,
+            epoch: self.popup_epoch,
+        };
+        if let Some(cache) = self.popup_cache.borrow().as_ref()
+            && cache.key == key
+        {
+            return cache.items.clone();
+        }
+        let items = self.compute_popup_matches();
+        *self.popup_cache.borrow_mut() = Some(PopupCache {
+            key,
+            items: items.clone(),
+        });
+        items
+    }
+
+    fn compute_popup_matches(&self) -> Vec<PopupItem> {
         let text = self.input.text();
         if self.modal.is_some() || self.popup_dismissed {
             return Vec::new();
@@ -1133,7 +1227,10 @@ impl App {
                     ));
                 }
             }
-            Event::Skills { skills } => self.skills = skills,
+            Event::Skills { skills } => {
+                self.skills = skills;
+                self.popup_epoch = self.popup_epoch.wrapping_add(1);
+            }
             Event::Commands { commands } => {
                 let (hidden, kept): (Vec<_>, Vec<_>) = commands
                     .into_iter()
@@ -1145,8 +1242,12 @@ impl App {
                     )));
                 }
                 self.custom = kept;
+                self.popup_epoch = self.popup_epoch.wrapping_add(1);
             }
-            Event::McpPrompts { prompts } => self.mcp_prompts = prompts,
+            Event::McpPrompts { prompts } => {
+                self.mcp_prompts = prompts;
+                self.popup_epoch = self.popup_epoch.wrapping_add(1);
+            }
             Event::FilesRestored {
                 restored,
                 conflicts,
@@ -1404,12 +1505,15 @@ impl App {
                 self.turn_started = Some(Instant::now());
                 self.turn_tools = 0;
             }
-            Event::AssistantDelta { text } => match self.transcript.last_mut() {
-                Some(Entry::Assistant(buf)) => buf.push_str(&text),
-                _ => self
-                    .transcript
-                    .push(Entry::Assistant(text.trim_start().to_owned())),
-            },
+            Event::AssistantDelta { text } => append_delta(
+                &mut self.transcript,
+                &text,
+                |e| match e {
+                    Entry::Assistant(buf) => Some(buf),
+                    _ => None,
+                },
+                |t| Entry::Assistant(t.trim_start().to_owned()),
+            ),
             Event::AssistantRewrite { text } => {
                 let last = self
                     .transcript
@@ -1419,12 +1523,15 @@ impl App {
                     self.transcript[i] = Entry::Assistant(text);
                 }
             }
-            Event::ReasoningDelta { text } => match self.transcript.last_mut() {
-                Some(Entry::Reasoning(buf)) => buf.push_str(&text),
-                _ => self
-                    .transcript
-                    .push(Entry::Reasoning(text.trim_start().to_owned())),
-            },
+            Event::ReasoningDelta { text } => append_delta(
+                &mut self.transcript,
+                &text,
+                |e| match e {
+                    Entry::Reasoning(buf) => Some(buf),
+                    _ => None,
+                },
+                |t| Entry::Reasoning(t.trim_start().to_owned()),
+            ),
             Event::ToolCallBegin { call } => {
                 self.turn_tools += 1;
                 self.transcript.push(Entry::Tool(ToolEntry {
@@ -1620,7 +1727,7 @@ impl App {
                 self.hook_runs.push(HookRun {
                     id: id.clone(),
                     on: on.clone(),
-                    outcome: outcome.clone(),
+                    outcome: outcome.label().to_owned(),
                     ms,
                     message: message.clone(),
                     context_tokens,
@@ -1632,17 +1739,17 @@ impl App {
                     );
                 }
                 // Quiet unless the hook changed something; failures arrive as warnings.
-                let did = match outcome.as_str() {
-                    "context" => format!(
+                let did = match outcome {
+                    HookOutcome::Context => format!(
                         "added ~{} tokens of context",
                         crate::theme::tokens(context_tokens)
                     ),
-                    "denied" => "denied".to_owned(),
-                    "asked" => "asked for approval".to_owned(),
-                    "allowed" => "allowed".to_owned(),
-                    "updated" => "changed the arguments".to_owned(),
-                    _ if message.is_some() => "said".to_owned(),
-                    _ => {
+                    HookOutcome::Denied => "denied".to_owned(),
+                    HookOutcome::Asked => "asked for approval".to_owned(),
+                    HookOutcome::Allowed => "allowed".to_owned(),
+                    HookOutcome::Updated => "changed the arguments".to_owned(),
+                    HookOutcome::Ok | HookOutcome::Failed if message.is_some() => "said".to_owned(),
+                    HookOutcome::Ok | HookOutcome::Failed => {
                         if !self.modal.as_ref().is_some_and(|m| m.title == "Hooks") {
                             self.dirty = false;
                         }
@@ -1899,64 +2006,105 @@ impl App {
         self.hook_form = Some(form);
     }
 
+    /// Which surface owns the next key, in `on_key`'s priority order. Each variant names
+    /// the `on_*_key` handler it dispatches to; `Base` is the transcript-and-input view.
+    ///
+    /// `Ctrl-C` deliberately bypasses this order: only the hook form sees it first (as
+    /// Esc); everywhere else a dragged selection turns it into a copy, and otherwise it
+    /// interrupts or quits whatever `ctrl_c` finds on screen. See `on_key`.
+    fn focus(&self) -> Focus {
+        if self.hook_form.is_some() {
+            Focus::HookForm
+        } else if self.approval.is_some() {
+            Focus::Approval
+        } else if self.asking.is_some() {
+            Focus::Asking
+        } else if self.step_limit.is_some() {
+            Focus::StepLimit
+        } else if self.prompt.is_some() {
+            Focus::Prompt
+        } else if self.modal.is_some() {
+            Focus::Modal
+        } else if self.review.is_some() {
+            Focus::Review
+        } else {
+            Focus::Base
+        }
+    }
+
     fn on_key(&mut self, key: KeyEvent) {
         self.dirty = true;
-        if self.hook_form.is_some() {
-            self.on_hook_key(key);
-            return;
+        if let Focus::HookForm = self.focus() {
+            // The hook form takes every key, including Ctrl-C (as Esc); no selection is
+            // released on the way in.
+            return self.on_hook_key(key);
         }
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // Any key lets go of a selection. Ctrl-C, out of habit, copies it again rather than
-        // interrupting or quitting.
+        // interrupting or quitting — this wins over every focus below.
         let selection = self.selection.take().filter(|s| s.dragged);
-        if ctrl && key.code == KeyCode::Char('c') {
-            if let Some(sel) = selection {
-                return self.copy_selection(&sel);
-            }
-            return self.ctrl_c();
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            return match selection {
+                Some(sel) => self.copy_selection(&sel),
+                None => self.ctrl_c(),
+            };
         }
-        if self.approval.is_some() {
-            return self.on_approval_key(key);
-        }
-        if self.asking.is_some() {
-            return self.on_asking_key(key);
-        }
-        if self.step_limit.is_some() && self.on_step_limit_key(key) {
-            return;
-        }
-        if self.prompt.is_some() {
-            return self.on_prompt_key(key);
-        }
-        if let Some(modal) = &mut self.modal {
-            match modal.on_key(key) {
-                ModalOutcome::None => {}
-                ModalOutcome::Close => {
-                    self.modal = None;
-                    if self.signing_in.take().is_some() {
-                        self.browser = None;
-                        self.ops.push(Op::SignIn { id: None });
-                        self.open_hosted_setup();
-                    }
-                }
-                ModalOutcome::Copy(text) => {
-                    self.copied = Some((self.frame, text.chars().count()));
-                    self.clipboard = Some(text);
-                }
-                ModalOutcome::Insert(text) => {
-                    self.modal = None;
-                    self.input.set(&text);
-                    self.popup_dismissed = true;
-                }
-                ModalOutcome::Run(text) => {
-                    self.modal = None;
-                    self.execute(&text);
+        match self.focus() {
+            // These take every key; ones they don't use are swallowed.
+            Focus::Approval => self.on_approval_key(key),
+            Focus::Asking => self.on_asking_key(key),
+            Focus::Prompt => self.on_prompt_key(key),
+            Focus::Modal => self.on_modal_key(key),
+            // Bars over the live transcript: a key they don't use falls through to the
+            // base handler, so typing stays possible.
+            Focus::StepLimit => {
+                if !self.on_step_limit_key(key) {
+                    self.on_base_key(key);
                 }
             }
-            return;
+            Focus::Review => {
+                if !self.on_review_key(key) {
+                    self.on_base_key(key);
+                }
+            }
+            // HookForm was handled above; unreachable here.
+            Focus::HookForm | Focus::Base => self.on_base_key(key),
         }
-        if self.on_review_key(key) {
+    }
+
+    /// A key for the open modal. Every key is consumed, even one the modal ignores.
+    fn on_modal_key(&mut self, key: KeyEvent) {
+        let Some(modal) = &mut self.modal else {
             return;
+        };
+        match modal.on_key(key) {
+            ModalOutcome::None => {}
+            ModalOutcome::Close => {
+                self.modal = None;
+                if self.signing_in.take().is_some() {
+                    self.browser = None;
+                    self.ops.push(Op::SignIn { id: None });
+                    self.open_hosted_setup();
+                }
+            }
+            ModalOutcome::Copy(text) => {
+                self.copied = Some((self.frame, text.chars().count()));
+                self.clipboard = Some(text);
+            }
+            ModalOutcome::Insert(text) => {
+                self.modal = None;
+                self.input.set(&text);
+                self.popup_dismissed = true;
+            }
+            ModalOutcome::Run(text) => {
+                self.modal = None;
+                self.execute(&text);
+            }
         }
+    }
+
+    /// Keys for the transcript and input box: editing, history, scrolling, popups.
+    fn on_base_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let popup = self.popup_matches();
         match key.code {
             KeyCode::Esc if !popup.is_empty() => self.popup_dismissed = true,
@@ -2556,9 +2704,12 @@ impl App {
             "edit" => self.ops.push(Op::SetWorkMode {
                 mode: WorkMode::Edit,
             }),
-            _ => self.ops.push(Op::SetPermissionMode {
-                mode: mode.to_owned(),
-            }),
+            _ => match mode.parse::<PermissionMode>() {
+                Ok(mode) => self.ops.push(Op::SetPermissionMode { mode }),
+                Err(()) => self.note(format!(
+                    "unknown mode `{mode}`; use plan/edit for work mode or ask/allow for approvals"
+                )),
+            },
         }
     }
 
@@ -3561,7 +3712,7 @@ mod tests {
         assert_eq!(
             app.take_ops(),
             vec![Op::SetPermissionMode {
-                mode: "allow".into()
+                mode: PermissionMode::Allow
             }]
         );
         app.on_engine(Event::ModeChanged {
@@ -3773,7 +3924,9 @@ mod tests {
     #[test]
     fn yolo_toggles_back_to_the_previous_mode() {
         let mut app = App::new(info());
-        let mode = |m: &str| Op::SetPermissionMode { mode: m.into() };
+        let mode = |m: &str| Op::SetPermissionMode {
+            mode: m.parse().expect("mode"),
+        };
         app.on_engine(Event::ModeChanged {
             work_mode: WorkMode::Edit,
             approvals: quack_protocol::ApprovalPolicy::AutoEdit,
@@ -4297,7 +4450,7 @@ mod tests {
         app.on_engine(Event::HookRan {
             id: "lint".into(),
             on: "post_tool".into(),
-            outcome: "ok".into(),
+            outcome: HookOutcome::Ok,
             ms: 12,
             message: None,
             context_tokens: 0,

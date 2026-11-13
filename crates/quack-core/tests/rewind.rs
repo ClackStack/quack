@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{bodies, sse_call, sse_text, turn};
-use quack_core::protocol::{Event, Op, RewindPoint};
+use quack_core::protocol::{Event, Op, PermissionMode, RewindPoint};
 use quack_core::{Engine, EngineHandle};
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer};
@@ -71,7 +71,7 @@ async fn rewind_restores_files_and_conversation() {
     let mut engine = Engine::spawn(Arc::new(loaded));
     engine
         .submit(Op::SetPermissionMode {
-            mode: "full-auto".into(),
+            mode: PermissionMode::Allow,
         })
         .await;
     turn(&mut engine, "first task").await;
@@ -162,7 +162,7 @@ async fn rewind_refuses_when_files_changed_since() {
     let mut engine = Engine::spawn(Arc::new(loaded));
     engine
         .submit(Op::SetPermissionMode {
-            mode: "full-auto".into(),
+            mode: PermissionMode::Allow,
         })
         .await;
     turn(&mut engine, "make it").await;

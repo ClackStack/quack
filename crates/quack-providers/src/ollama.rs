@@ -109,20 +109,7 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
     body.insert("messages".into(), Value::Array(messages));
     body.insert("stream".into(), json!(true));
     if !req.tools.is_empty() {
-        let tools: Vec<Value> = req
-            .tools
-            .iter()
-            .map(|t| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    }
-                })
-            })
-            .collect();
+        let tools = crate::openai_chat::openai_tools_json(&req.tools);
         body.insert("tools".into(), Value::Array(tools));
     }
     let s = &req.sampling;
@@ -171,14 +158,20 @@ pub(crate) struct LineDecoder {
 }
 
 impl LineDecoder {
-    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Vec<String> {
+    /// Collects the lines completed by `bytes` into `out`.
+    pub(crate) fn feed(&mut self, bytes: &[u8], out: &mut Vec<String>) {
         self.buf.extend_from_slice(bytes);
-        let mut out = Vec::new();
-        while let Some(i) = self.buf.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.buf.drain(..=i).collect();
-            out.push(String::from_utf8_lossy(&line).into_owned());
+        // Slice lines out by read offset and drain once, instead of one drain per line.
+        let mut pos = 0;
+        while let Some(i) = self.buf[pos..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|i| pos + i)
+        {
+            out.push(String::from_utf8_lossy(&self.buf[pos..i]).into_owned());
+            pos = i + 1;
         }
-        out
+        self.buf.drain(..pos);
     }
 
     pub(crate) fn finish(&mut self) -> Vec<String> {
@@ -471,12 +464,11 @@ mod tests {
         let mut b = ResponseBuilder::default();
         // Split mid-line to exercise the decoder.
         let (a, rest) = stream.split_at(50);
-        for line in d
-            .feed(a.as_bytes())
-            .into_iter()
-            .chain(d.feed(rest.as_bytes()))
-            .chain(d.finish())
-        {
+        let mut lines = Vec::new();
+        d.feed(a.as_bytes(), &mut lines);
+        d.feed(rest.as_bytes(), &mut lines);
+        lines.extend(d.finish());
+        for line in lines {
             for ev in p.parse(&line).expect("parse") {
                 b.push(&ev);
             }

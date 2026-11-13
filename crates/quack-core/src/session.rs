@@ -137,7 +137,7 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
                 let Some(m) = r
                     .data
                     .get("message")
-                    .and_then(|v| serde_json::from_value::<Message>(v.clone()).ok())
+                    .and_then(|v| <Message as serde::Deserialize>::deserialize(v).ok())
                 else {
                     continue;
                 };
@@ -180,7 +180,7 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
                 if let Some(ops) = r
                     .data
                     .get("ops")
-                    .and_then(|v| serde_json::from_value::<Vec<prune::PruneOp>>(v.clone()).ok())
+                    .and_then(|v| <Vec<prune::PruneOp> as serde::Deserialize>::deserialize(v).ok())
                 {
                     prune::apply(&mut history, &ops);
                 }
@@ -190,7 +190,7 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
                 let msg = r
                     .data
                     .get("message")
-                    .and_then(|v| serde_json::from_value::<Message>(v.clone()).ok());
+                    .and_then(|v| <Message as serde::Deserialize>::deserialize(v).ok());
                 if let (Some(cut), Some(msg)) = (cut, msg) {
                     let cut = usize::try_from(cut)
                         .unwrap_or(usize::MAX)

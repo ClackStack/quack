@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{bodies, sse_call, sse_text};
-use quack_core::protocol::{Answer, Event, InputItem, Op, TurnOverrides};
+use quack_core::protocol::{Answer, Event, InputItem, Op, PermissionMode, TurnOverrides};
 use quack_core::{Engine, EngineHandle};
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer};
@@ -94,7 +94,7 @@ async fn answers_reach_the_model_in_plan_mode_without_approval() {
     let mut engine = Engine::spawn(Arc::new(loaded));
     engine
         .submit(Op::SetPermissionMode {
-            mode: "plan".into(),
+            mode: PermissionMode::Plan,
         })
         .await;
     submit(&engine, "plan the login").await;

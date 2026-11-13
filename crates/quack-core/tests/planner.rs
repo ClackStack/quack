@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{sse_call, sse_text, turn, until_done};
-use quack_core::protocol::{Answer, Event, Op};
+use quack_core::protocol::{Answer, Event, Op, PermissionMode};
 use quack_core::{Engine, Resume};
 use serde_json::Value;
 use wiremock::matchers::{body_string_contains, method};
@@ -65,7 +65,7 @@ async fn the_planner_plans_and_the_session_model_gets_a_brief() {
 
     engine
         .submit(Op::SetPermissionMode {
-            mode: "plan".into(),
+            mode: PermissionMode::Plan,
         })
         .await;
     engine
@@ -159,7 +159,9 @@ async fn leaving_plan_mode_goes_back_to_the_session_model() {
     .expect("config");
     let loaded = common::workspace(tmp.path(), &server.uri(), r#"["small", "big"]"#, "");
     let mut engine = Engine::spawn(Arc::new(loaded));
-    let mode = |m: &str| Op::SetPermissionMode { mode: m.into() };
+    let mode = |m: &str| Op::SetPermissionMode {
+        mode: m.parse().expect("mode"),
+    };
     engine.submit(mode("plan")).await;
     turn(&mut engine, "plan it").await;
     engine.submit(mode("edit")).await;

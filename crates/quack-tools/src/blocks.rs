@@ -130,7 +130,7 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Vec<Change>, String> {
             }
         };
         let c = &mut changes[i];
-        let current = c.after.clone().unwrap_or_default();
+        let current = std::mem::take(&mut c.after).unwrap_or_default();
         let next = if b.search.is_empty() {
             if !current.is_empty() {
                 return Err(format!(
@@ -214,11 +214,10 @@ impl Tool for EditBlocks {
     }
 
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolCtx) -> BoxFuture<'a, ToolOutput> {
-        Box::pin(async move {
-            plan(&args, ctx)
-                .and_then(|changes| write(&changes, ctx))
-                .unwrap_or_else(ToolOutput::error)
-        })
+        let ctx = ctx.clone();
+        Box::pin(crate::registry::blocking(move || {
+            plan(&args, &ctx).and_then(|changes| write(&changes, &ctx))
+        }))
     }
 }
 

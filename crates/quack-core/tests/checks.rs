@@ -336,7 +336,7 @@ async fn a_newer_release_is_announced_and_remembered_for_the_next_start() {
 
 #[tokio::test]
 async fn an_older_or_absent_release_says_nothing() {
-    for location in ["/releases/tag/v0.0.1", "/releases"] {
+    for location in ["/releases/tag/v0.0.0-rc1", "/releases"] {
         let server = chat_server().await;
         Mock::given(path("/releases/latest"))
             .respond_with(ResponseTemplate::new(302).insert_header("location", location))

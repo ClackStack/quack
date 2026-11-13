@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::paths;
 use crate::registry::{
-    Subject, Tool, ToolCtx, ToolKind, ToolOutput, arg_str, opt_bool, opt_str, opt_u64,
+    Subject, Tool, ToolCtx, ToolKind, ToolOutput, arg_str, blocking, opt_bool, opt_str, opt_u64,
 };
 use crate::text::looks_binary;
 
@@ -55,16 +55,6 @@ pub fn workspace_files(root: &Path, limit: usize) -> Vec<String> {
 
 fn base(args: &Value, ctx: &ToolCtx) -> PathBuf {
     opt_str(args, PATH).map_or_else(|| ctx.root.clone(), |p| paths::resolve(&ctx.root, p))
-}
-
-/// Run blocking filesystem work off the async runtime.
-pub(crate) async fn blocking(
-    f: impl FnOnce() -> Result<ToolOutput, String> + Send + 'static,
-) -> ToolOutput {
-    tokio::task::spawn_blocking(f)
-        .await
-        .unwrap_or_else(|e| Err(format!("tool panicked: {e}")))
-        .unwrap_or_else(ToolOutput::error)
 }
 
 fn read_preview(name: String, args: &Value) -> Result<ApprovalRequest, String> {
@@ -334,13 +324,16 @@ impl Tool for Grep {
                 if looks_binary(&bytes) {
                     continue;
                 }
-                let text = String::from_utf8_lossy(&bytes);
+                // Decode once: when the edit tools would load the file (valid UTF-8),
+                // the lossy decode yields the same text, and the tag matches what they saw.
+                let (text, tagged) = match crate::text::TextFile::from_bytes(&bytes) {
+                    Some(file) => {
+                        let tag = crate::hashline::file_tag(&file.text);
+                        (file.text, reads.as_ref().map(|reads| (reads, tag)))
+                    }
+                    None => (String::from_utf8_lossy(&bytes).into_owned(), None),
+                };
                 let shown_path = paths::display(&root, &path);
-                // The tag hashes the text as the edit tools load it.
-                let tagged = reads.as_ref().and_then(|reads| {
-                    let file = crate::text::TextFile::from_bytes(&bytes)?;
-                    Some((reads, crate::hashline::file_tag(&file.text), file.text))
-                });
                 let mut in_file = false;
                 for (i, line) in text.lines().enumerate() {
                     if !re.is_match(line) {
@@ -350,7 +343,7 @@ impl Tool for Grep {
                     if !in_file {
                         in_file = true;
                         files += 1;
-                        if let Some((_, tag, _)) = &tagged
+                        if let Some((_, tag)) = &tagged
                             && matches <= MAX_GREP
                         {
                             out.push_str(&crate::hashline::header(&shown_path, tag));
@@ -358,8 +351,8 @@ impl Tool for Grep {
                         }
                     }
                     if matches <= MAX_GREP {
-                        if let Some((reads, tag, text)) = &tagged {
-                            reads.saw(&path, tag, text, (i + 1, i + 1));
+                        if let Some((reads, tag)) = &tagged {
+                            reads.saw(&path, tag, &text, (i + 1, i + 1));
                         }
                         let line = line.trim_end();
                         let shown = if line.chars().count() > MAX_GREP_LINE {

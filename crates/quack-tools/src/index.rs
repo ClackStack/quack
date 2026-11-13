@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 
 use crate::outline::language_of;
 use crate::paths;
-use crate::registry::{Subject, Tool, ToolCtx, ToolKind, ToolOutput, opt_str};
-use crate::search::{blocking, walker};
+use crate::registry::{Subject, Tool, ToolCtx, ToolKind, ToolOutput, blocking, opt_str};
+use crate::search::walker;
 use crate::text::{MAX_EDIT_BYTES, TextFile};
 
 const PATH: &[&str] = &["path", "file_path", "file", "dir", "directory"];

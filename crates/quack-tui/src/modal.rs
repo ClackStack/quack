@@ -2709,9 +2709,9 @@ pub(crate) fn mcp(servers: Option<&[quack_protocol::McpServerInfo]>, theme: &The
         Some(list) => list
             .iter()
             .map(|s| {
-                let style = match s.state.as_str() {
-                    "ready" => theme.ok,
-                    "failed" => theme.error,
+                let style = match s.state {
+                    quack_protocol::McpServerState::Ready => theme.ok,
+                    quack_protocol::McpServerState::Failed => theme.error,
                     _ => theme.warn,
                 };
                 let mut detail = vec![Line::styled(s.id.clone(), style), Line::raw("")];
@@ -2719,12 +2719,12 @@ pub(crate) fn mcp(servers: Option<&[quack_protocol::McpServerInfo]>, theme: &The
                     detail.push(Line::raw(s.description.clone()));
                     detail.push(Line::raw(""));
                 }
-                detail.push(field(theme, "state", s.state.clone()));
+                detail.push(field(theme, "state", s.state.label().to_owned()));
                 if !s.error.is_empty() {
                     detail.push(Line::styled(s.error.clone(), theme.error));
                 }
                 detail.push(field(theme, s.transport.as_str(), s.target.clone()));
-                if s.state == "ready" {
+                if s.state == quack_protocol::McpServerState::Ready {
                     detail.push(field(
                         theme,
                         "tools",
@@ -2771,10 +2771,10 @@ pub(crate) fn mcp(servers: Option<&[quack_protocol::McpServerInfo]>, theme: &The
                 detail.push(Line::styled("^s restart this server", theme.dim));
                 ModalItem {
                     label: s.id.clone(),
-                    hint: if s.state == "ready" {
+                    hint: if s.state == quack_protocol::McpServerState::Ready {
                         format!("{} tools", s.tools.len())
                     } else {
-                        s.state.clone()
+                        s.state.label().to_owned()
                     },
                     detail,
                     action: None,
@@ -2810,16 +2810,18 @@ pub(crate) fn lsp(servers: Option<&[quack_protocol::LspServerInfo]>, theme: &The
         Some(list) => list
             .iter()
             .map(|s| {
-                let style = match s.state.as_str() {
-                    "ready" | "idle" => theme.ok,
-                    "failed" | "exited" => theme.error,
-                    "not installed" => theme.dim,
+                let style = match s.state {
+                    quack_protocol::LspServerState::Ready
+                    | quack_protocol::LspServerState::Idle => theme.ok,
+                    quack_protocol::LspServerState::Failed
+                    | quack_protocol::LspServerState::Exited => theme.error,
+                    quack_protocol::LspServerState::NotInstalled => theme.dim,
                     _ => theme.warn,
                 };
                 let mut detail = vec![Line::styled(s.id.clone(), style), Line::raw("")];
-                detail.push(field(theme, "state", s.state.clone()));
+                detail.push(field(theme, "state", s.state.label().to_owned()));
                 if !s.detail.is_empty() {
-                    let st = if s.state == "failed" {
+                    let st = if s.state == quack_protocol::LspServerState::Failed {
                         theme.error
                     } else {
                         theme.dim
@@ -2835,14 +2837,18 @@ pub(crate) fn lsp(servers: Option<&[quack_protocol::LspServerInfo]>, theme: &The
                 if !s.root.is_empty() {
                     detail.push(field(theme, "project", s.root.clone()));
                 }
-                if matches!(s.state.as_str(), "ready" | "indexing") {
+                if matches!(
+                    s.state,
+                    quack_protocol::LspServerState::Ready
+                        | quack_protocol::LspServerState::Indexing
+                ) {
                     detail.push(field(
                         theme,
                         "problems",
                         format!("{} errors · {} warnings", s.errors, s.warnings),
                     ));
                 }
-                if s.state == "idle" {
+                if s.state == quack_protocol::LspServerState::Idle {
                     detail.push(Line::raw(""));
                     detail.push(Line::styled(
                         "Starts when the agent reads or edits a file it covers.",
@@ -2867,11 +2873,11 @@ pub(crate) fn lsp(servers: Option<&[quack_protocol::LspServerInfo]>, theme: &The
                 };
                 ModalItem {
                     label,
-                    hint: match s.state.as_str() {
-                        "ready" if s.errors + s.warnings > 0 => {
+                    hint: match s.state {
+                        quack_protocol::LspServerState::Ready if s.errors + s.warnings > 0 => {
                             format!("✗{} ⚠{}", s.errors, s.warnings)
                         }
-                        other => other.to_owned(),
+                        other => other.label().to_owned(),
                     },
                     detail,
                     action: None,

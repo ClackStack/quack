@@ -10,7 +10,7 @@ use std::time::Duration;
 use common::{bodies, sse_call, sse_text, turn};
 use quack_core::Engine;
 use quack_core::protocol::{
-    ApprovalDecision, ApprovalRequest, Event, InputItem, Op, TurnOverrides,
+    ApprovalDecision, ApprovalRequest, Event, InputItem, Op, PermissionMode, TurnOverrides,
 };
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer};
@@ -75,7 +75,7 @@ async fn full_auto_stays_in_the_sandbox() {
     let mut engine = Engine::spawn(Arc::new(loaded));
     engine
         .submit(Op::SetPermissionMode {
-            mode: "full-auto".into(),
+            mode: PermissionMode::Allow,
         })
         .await;
 
@@ -167,7 +167,7 @@ async fn sandbox_off_keeps_the_mode_and_drops_the_sandbox() {
     let mut engine = Engine::spawn(Arc::new(loaded));
     engine
         .submit(Op::SetPermissionMode {
-            mode: "full-auto".into(),
+            mode: PermissionMode::Allow,
         })
         .await;
     engine.submit(Op::SetSandbox { off: true }).await;
