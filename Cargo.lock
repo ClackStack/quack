@@ -3831,7 +3831,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "quack-acp"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "quack-config",
  "quack-core",
@@ -3846,7 +3846,7 @@ dependencies = [
 
 [[package]]
 name = "quack-cli"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3872,7 +3872,7 @@ dependencies = [
 
 [[package]]
 name = "quack-config"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "apple-native-keyring-store",
  "keyring-core",
@@ -3890,7 +3890,7 @@ dependencies = [
 
 [[package]]
 name = "quack-context"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "quack-protocol",
  "quack-providers",
@@ -3900,7 +3900,7 @@ dependencies = [
 
 [[package]]
 name = "quack-core"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "futures",
  "quack-config",
@@ -3928,7 +3928,7 @@ dependencies = [
 
 [[package]]
 name = "quack-exec"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "quack-config",
  "quack-core",
@@ -3970,7 +3970,7 @@ dependencies = [
 
 [[package]]
 name = "quack-instructions"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "quack-config",
  "quack-protocol",
@@ -3980,7 +3980,7 @@ dependencies = [
 
 [[package]]
 name = "quack-lsp"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "futures",
  "quack-config",
@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "quack-mcp"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "quack-config",
  "quack-providers",
@@ -4012,7 +4012,7 @@ dependencies = [
 
 [[package]]
 name = "quack-profiles"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "minijinja",
  "quack-config",
@@ -4024,7 +4024,7 @@ dependencies = [
 
 [[package]]
 name = "quack-protocol"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "schemars 1.2.3",
  "serde",
@@ -4034,7 +4034,7 @@ dependencies = [
 
 [[package]]
 name = "quack-providers"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "futures",
  "quack-config",
@@ -4056,7 +4056,7 @@ dependencies = [
 
 [[package]]
 name = "quack-sandbox"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "libc",
  "tempfile",
@@ -4065,7 +4065,7 @@ dependencies = [
 
 [[package]]
 name = "quack-shell"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "nix 0.31.3",
  "quack-sandbox",
@@ -4078,7 +4078,7 @@ dependencies = [
 
 [[package]]
 name = "quack-store"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "quack-protocol",
  "serde",
@@ -4089,7 +4089,7 @@ dependencies = [
 
 [[package]]
 name = "quack-tools"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "futures",
  "globset",
@@ -4123,7 +4123,7 @@ dependencies = [
 
 [[package]]
 name = "quack-tui"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "crossterm",
  "futures",

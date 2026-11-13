@@ -242,6 +242,21 @@ fn unsealed(content: &str, calls: &[crate::ToolCall], items: &[Value]) -> Option
     (text == content && used == calls.len() && !out.is_empty()).then_some(out)
 }
 
+/// The reply's blocks in order (tool calls by number), kept as cheap pieces and built
+/// into `Value`s only at `end()`, and only when the reply actually has thinking.
+#[derive(Debug)]
+enum Piece {
+    Text(String),
+    Thinking {
+        text: String,
+        signature: String,
+    },
+    /// Verbatim: an opaque blob the server encrypts.
+    Redacted(Value),
+    /// The tool call's ordinal (0-based), for `unsealed` to match against the message.
+    ToolUse(u64),
+}
+
 /// Turns `data:` payloads into [`StreamEvent`]s.
 #[derive(Debug, Default)]
 pub(crate) struct EventParser {
@@ -249,8 +264,8 @@ pub(crate) struct EventParser {
     input: (u32, u32, u32),
     output: u32,
     finish: Option<FinishReason>,
-    /// The reply's blocks in order (tool calls by number), and where each stream index is.
-    blocks: Vec<Value>,
+    /// The reply's blocks in order, and where each stream index is.
+    blocks: Vec<Piece>,
     at: std::collections::HashMap<u32, usize>,
     calls: u64,
 }
@@ -286,15 +301,16 @@ impl EventParser {
                 let block = match b["type"].as_str() {
                     Some("tool_use" | "server_tool_use") => {
                         self.calls += 1;
-                        Some(json!({ "type": "tool_use", "ref": self.calls - 1 }))
+                        Some(Piece::ToolUse(self.calls - 1))
                     }
-                    Some("text") => Some(json!({ "type": "text", "text": b["text"] })),
-                    Some("thinking") => Some(json!({
-                        "type": "thinking",
-                        "thinking": b["thinking"],
-                        "signature": b["signature"].as_str().unwrap_or_default(),
-                    })),
-                    Some("redacted_thinking") => Some(b.clone()),
+                    Some("text") => Some(Piece::Text(
+                        b["text"].as_str().unwrap_or_default().to_owned(),
+                    )),
+                    Some("thinking") => Some(Piece::Thinking {
+                        text: b["thinking"].as_str().unwrap_or_default().to_owned(),
+                        signature: b["signature"].as_str().unwrap_or_default().to_owned(),
+                    }),
+                    Some("redacted_thinking") => Some(Piece::Redacted(b.clone())),
                     _ => None,
                 };
                 if let Some(block) = block {
@@ -338,23 +354,25 @@ impl EventParser {
                 match d["type"].as_str() {
                     Some("text_delta") => {
                         if let Some(t) = d["text"].as_str().filter(|t| !t.is_empty()) {
-                            if let Some(b) = block {
-                                append(b, "text", t);
+                            if let Some(Piece::Text(s)) = block {
+                                s.push_str(t);
                             }
                             out.push(StreamEvent::TextDelta(t.to_owned()));
                         }
                     }
                     Some("thinking_delta") => {
                         if let Some(t) = d["thinking"].as_str().filter(|t| !t.is_empty()) {
-                            if let Some(b) = block {
-                                append(b, "thinking", t);
+                            if let Some(Piece::Thinking { text, .. }) = block {
+                                text.push_str(t);
                             }
                             out.push(StreamEvent::ReasoningDelta(t.to_owned()));
                         }
                     }
                     Some("signature_delta") => {
-                        if let (Some(b), Some(sig)) = (block, d["signature"].as_str()) {
-                            append(b, "signature", sig);
+                        if let (Some(Piece::Thinking { signature, .. }), Some(sig)) =
+                            (block, d["signature"].as_str())
+                        {
+                            signature.push_str(sig);
                         }
                     }
                     Some("input_json_delta") => {
@@ -407,12 +425,25 @@ impl EventParser {
         let (fresh, read, write) = self.input;
         let mut out = Vec::new();
         // Only a reply with thinking needs its layout kept.
-        let thought = self
-            .blocks
+        let blocks = std::mem::take(&mut self.blocks);
+        let thought = blocks
             .iter()
-            .any(|b| matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking")));
+            .any(|b| matches!(b, Piece::Thinking { .. } | Piece::Redacted(_)));
         if thought {
-            out.push(StreamEvent::Sealed(std::mem::take(&mut self.blocks)));
+            let mut built = Vec::with_capacity(blocks.len());
+            for b in blocks {
+                built.push(match b {
+                    Piece::Text(s) => json!({ "type": "text", "text": s }),
+                    Piece::Thinking { text, signature } => json!({
+                        "type": "thinking",
+                        "thinking": text,
+                        "signature": signature,
+                    }),
+                    Piece::Redacted(v) => v,
+                    Piece::ToolUse(n) => json!({ "type": "tool_use", "ref": n }),
+                });
+            }
+            out.push(StreamEvent::Sealed(built));
         }
         out.push(StreamEvent::Finish(finish));
         out.push(StreamEvent::Usage(Usage {
@@ -428,13 +459,6 @@ impl EventParser {
     /// A cut stream ends without `message_delta`, so nothing is sealed.
     pub(crate) fn finish(&mut self) -> Vec<StreamEvent> {
         self.end()
-    }
-}
-
-fn append(block: &mut Value, key: &str, text: &str) {
-    match &mut block[key] {
-        Value::String(s) => s.push_str(text),
-        other => *other = json!(text),
     }
 }
 

@@ -14,6 +14,23 @@ use crate::types::{ChatRequest, DiscoveredModel, FinishReason, Message, StreamEv
 pub(crate) const CHAT_PATH: &str = "chat/completions";
 pub(crate) const MODELS_PATH: &str = "models";
 
+/// The `tools` array both the openai-chat and ollama `/api/chat` bodies use.
+pub(crate) fn openai_tools_json(tools: &[crate::types::ToolSpec]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|t| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                }
+            })
+        })
+        .collect()
+}
+
 /// How a server's `/chat/completions` differs from the common shape.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum Dialect {
@@ -134,20 +151,7 @@ pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
         body.insert("stream_options".into(), json!({ "include_usage": true }));
     }
     if !req.tools.is_empty() {
-        let tools: Vec<Value> = req
-            .tools
-            .iter()
-            .map(|t| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    }
-                })
-            })
-            .collect();
+        let tools = openai_tools_json(&req.tools);
         body.insert("tools".into(), Value::Array(tools));
     }
     if let Some(n) = req.max_tokens {
@@ -343,10 +347,28 @@ impl ChunkParser {
             ProviderError::new(ErrorKind::Protocol, format!("invalid stream chunk: {e}"))
         })?;
         if v.get("error").is_some() {
-            return Err(ProviderError::new(
-                ErrorKind::ServerOverloaded,
-                body_message(data),
-            ));
+            // Classify by the error's own `type`/`code`, the way the Anthropic parser does.
+            let kind = match v["error"]["type"]
+                .as_str()
+                .or_else(|| v["error"]["code"].as_str())
+            {
+                Some("server_error" | "api_error" | "overloaded_error" | "model_overloaded") => {
+                    ErrorKind::ServerOverloaded
+                }
+                Some("rate_limit_error" | "rate_limit_exceeded" | "too_many_requests") => {
+                    ErrorKind::RateLimited { retry_after: None }
+                }
+                Some(
+                    "invalid_api_key"
+                    | "authentication_error"
+                    | "invalid_auth"
+                    | "insufficient_quota"
+                    | "quota_exceeded"
+                    | "billing_not_active",
+                ) => ErrorKind::Auth,
+                _ => ErrorKind::BadRequest,
+            };
+            return Err(ProviderError::new(kind, body_message(data)));
         }
         let mut out = Vec::new();
         if let Some(choice) = v.pointer("/choices/0") {

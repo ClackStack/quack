@@ -85,10 +85,25 @@ pub(crate) fn preview(changes: &[Change]) -> ApprovalRequest {
 /// Write every change atomically; reports what was done or rolls back if any file fails.
 pub(crate) fn write(changes: &[Change], ctx: &ToolCtx) -> Result<ToolOutput, String> {
     let mut lines = Vec::new();
+    let mut details = Vec::new();
     let (mut add, mut del) = (0, 0);
     let mut written: Vec<(&Change, Option<Vec<u8>>)> = Vec::new();
     for c in changes {
-        match &c.after {
+        // Rollback bytes: the file as it was loaded, so no re-read is needed; only a
+        // file this call creates without having loaded it (a `Move to:` onto itself)
+        // is read from disk.
+        let old_bytes = match &c.before {
+            Some(f) => Some(f.encode(&f.text).into_bytes()),
+            None if c.path.exists() => match std::fs::read(&c.path) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    rollback(&written);
+                    return Err(io_msg(&c.path, &e));
+                }
+            },
+            None => None,
+        };
+        match c.after.as_deref() {
             Some(text) => {
                 if let Some(dir) = c.path.parent()
                     && let Err(e) = std::fs::create_dir_all(dir)
@@ -96,20 +111,9 @@ pub(crate) fn write(changes: &[Change], ctx: &ToolCtx) -> Result<ToolOutput, Str
                     rollback(&written);
                     return Err(io_msg(dir, &e));
                 }
-                let old_bytes = if c.path.exists() {
-                    match std::fs::read(&c.path) {
-                        Ok(b) => Some(b),
-                        Err(e) => {
-                            rollback(&written);
-                            return Err(io_msg(&c.path, &e));
-                        }
-                    }
-                } else {
-                    None
-                };
                 let bytes = match &c.before {
                     Some(f) => f.encode(text),
-                    None => text.clone(),
+                    None => text.to_owned(),
                 };
                 if let Err(e) = std::fs::write(&c.path, bytes) {
                     rollback(&written);
@@ -119,46 +123,44 @@ pub(crate) fn write(changes: &[Change], ctx: &ToolCtx) -> Result<ToolOutput, Str
                     ));
                 }
                 written.push((c, old_bytes));
-                ctx.reads.record(&c.path);
+                let commit = crate::text::commit(
+                    ctx,
+                    &c.path,
+                    &c.shown,
+                    c.before.as_ref().map(|f| f.text.as_str()),
+                    text,
+                    "change",
+                    true,
+                );
                 lines.push(match c.before {
                     Some(_) => format!("Edited {}", c.shown),
                     None => format!("Created {}", c.shown),
                 });
-                if let Some(before) = &c.before
-                    && let Some(line) =
-                        crate::outline::new_syntax_error(&c.path, &before.text, text)
-                {
-                    lines.push(format!(
-                        "\nWarning: Tree-sitter detected a syntax error in {} at line {line} after this change (the file previously parsed cleanly). Check brackets, indentation or delimiters.",
-                        c.shown
-                    ));
+                if let Some(warning) = &commit.warning {
+                    lines.push(format!("\n{warning}"));
                 }
+                details.push(commit.detail);
+                add += commit.add;
+                del += commit.del;
             }
             None => {
-                let old_bytes = if c.path.exists() {
-                    match std::fs::read(&c.path) {
-                        Ok(b) => Some(b),
-                        Err(e) => {
-                            rollback(&written);
-                            return Err(io_msg(&c.path, &e));
-                        }
-                    }
-                } else {
-                    None
-                };
                 if let Err(e) = std::fs::remove_file(&c.path) {
                     rollback(&written);
                     return Err(io_msg(&c.path, &e));
                 }
                 written.push((c, old_bytes));
                 lines.push(format!("Deleted {}", c.shown));
+                let (a, d) = diff_stats(c.before_text(), "");
+                add += a;
+                del += d;
+                details.push(unified_diff(&c.shown, c.before_text(), ""));
             }
         }
-        let (a, d) = diff_stats(c.before_text(), c.after.as_deref().unwrap_or(""));
-        add += a;
-        del += d;
     }
-    Ok(ToolOutput::ok(lines.join("\n") + ".", format!("+{add} -{del}")).with_detail(diff(changes)))
+    Ok(
+        ToolOutput::ok(lines.join("\n") + ".", format!("+{add} -{del}"))
+            .with_detail(details.concat()),
+    )
 }
 
 fn rollback(written: &[(&Change, Option<Vec<u8>>)]) {
@@ -524,11 +526,10 @@ impl Tool for ApplyPatch {
     }
 
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolCtx) -> BoxFuture<'a, ToolOutput> {
-        Box::pin(async move {
-            plan(&args, ctx)
-                .and_then(|changes| write(&changes, ctx))
-                .unwrap_or_else(ToolOutput::error)
-        })
+        let ctx = ctx.clone();
+        Box::pin(crate::registry::blocking(move || {
+            plan(&args, &ctx).and_then(|changes| write(&changes, &ctx))
+        }))
     }
 }
 

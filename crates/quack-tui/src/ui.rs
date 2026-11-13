@@ -1,3 +1,6 @@
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -247,7 +250,7 @@ fn draw_panel(f: &mut Frame<'_>, app: &App, area: Rect) {
                 Span::styled(format!(" {icon} "), style),
                 Span::raw(format!("{:<13}", subsystem.label())),
                 Span::styled(
-                    text.to_owned(),
+                    text,
                     if matches!(state, LoadState::Disabled { .. }) {
                         t.dim
                     } else {
@@ -289,127 +292,312 @@ fn assistant_lead(app: &App, is_head: bool) -> Vec<Span<'static>> {
     }
 }
 
-fn transcript_rows(app: &App, width: usize) -> Vec<Line<'static>> {
-    transcript_rows_with_gutters(app, width).0
-}
-
 /// The transcript's rows, and for each the columns its lead (glyph and indent) takes,
 /// which copying a selection leaves out.
 pub(crate) fn transcript_rows_with_gutters(
     app: &App,
     width: usize,
 ) -> (Vec<Line<'static>>, Vec<usize>) {
-    let t = &app.theme;
+    let pieces = transcript_pieces(app, width);
     let mut rows = Vec::new();
     let mut gutters = Vec::new();
-    let mut gutter = 0;
+    for piece in pieces {
+        gutters.extend(std::iter::repeat_n(
+            piece.gutter,
+            piece.rows.len() + usize::from(piece.blank),
+        ));
+        rows.extend(piece.rows.iter().cloned());
+        if piece.blank {
+            rows.push(Line::raw(""));
+        }
+    }
+    (rows, gutters)
+}
+
+/// The transcript's rendered rows, kept per entry so a frame only lays out entries whose
+/// text changed (streaming deltas, finished tools) or whose wrap width did. Drawing
+/// writes it, like the `Cell` view state in `App`.
+#[derive(Debug, Default)]
+pub(crate) struct TranscriptCache {
+    /// The wrap width the cached rows were laid out for.
+    width: usize,
+    /// One slot per transcript entry, in order. `None` for entries that are re-rendered
+    /// every frame (running tools, whose spinner and elapsed time move).
+    slots: Vec<Option<Slot>>,
+}
+
+#[derive(Debug, Clone)]
+struct Slot {
+    /// Fingerprint of everything the entry's rows depend on; any change re-renders it.
+    fp: u64,
+    rows: Arc<Vec<Line<'static>>>,
+}
+
+/// One entry's share of the transcript: its rendered rows, the gutter its lead takes
+/// (what copying a selection leaves out), and whether a blank row follows it.
+struct Piece {
+    rows: Arc<Vec<Line<'static>>>,
+    gutter: usize,
+    blank: bool,
+}
+
+/// Everything a tool entry's rows depend on beyond its own fields: sub-agent runs are
+/// drawn under their `task` call and grow while the sub-agent works.
+fn agents_fingerprint(app: &App) -> u64 {
+    let mut h = std::hash::DefaultHasher::new();
+    app.agents.len().hash(&mut h);
+    for a in &app.agents {
+        a.id.hash(&mut h);
+        a.ok.hash(&mut h);
+        a.summary.len().hash(&mut h);
+        a.items.len().hash(&mut h);
+    }
+    h.finish()
+}
+
+/// A cheap identity for an entry's rendering: the width, the entry's own content, and
+/// the pieces of `App` state it is drawn from (highlighted code blocks, the reasoning
+/// mode, whether the last reasoning line is live, sub-agent runs under tool calls).
+fn entry_fingerprint(
+    entry: &Entry,
+    width: usize,
+    last: bool,
+    show_reasoning: u8,
+    turn_running: bool,
+    highlights: u64,
+    agents: u64,
+) -> u64 {
+    let mut h = std::hash::DefaultHasher::new();
+    width.hash(&mut h);
+    match entry {
+        Entry::User(s) => {
+            0u8.hash(&mut h);
+            s.hash(&mut h);
+        }
+        Entry::TurnSummary(s) => {
+            1u8.hash(&mut h);
+            s.hash(&mut h);
+        }
+        Entry::System(s) => {
+            2u8.hash(&mut h);
+            s.hash(&mut h);
+        }
+        Entry::Warning(s) => {
+            3u8.hash(&mut h);
+            s.hash(&mut h);
+        }
+        Entry::Error(s) => {
+            4u8.hash(&mut h);
+            s.hash(&mut h);
+        }
+        Entry::Assistant(s) => {
+            5u8.hash(&mut h);
+            s.hash(&mut h);
+            highlights.hash(&mut h);
+        }
+        Entry::Reasoning(s) => {
+            6u8.hash(&mut h);
+            s.hash(&mut h);
+            show_reasoning.hash(&mut h);
+            (turn_running && last).hash(&mut h);
+        }
+        Entry::Tool(t) => {
+            7u8.hash(&mut h);
+            t.name.hash(&mut h);
+            t.summary.hash(&mut h);
+            t.ok.hash(&mut h);
+            t.result.hash(&mut h);
+            t.detail.hash(&mut h);
+            t.took.hash(&mut h);
+            agents.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+/// One entry's rows and gutter. `blank` says whether a separating blank row follows it
+/// (tool rows ask the caller, who knows the neighbours).
+fn render_entry(
+    app: &App,
+    entry: &Entry,
+    width: usize,
+    live: bool,
+) -> (Arc<Vec<Line<'static>>>, usize, bool) {
+    let t = &app.theme;
     let body_width = width.saturating_sub(3);
-    for (i, entry) in app.transcript.iter().enumerate() {
-        // The rows so far belong to the entry before.
-        gutters.resize(rows.len(), gutter);
-        gutter = match entry {
-            Entry::Assistant(_) => 2 + app.glyphs.assistant.width(),
-            Entry::TurnSummary(_) => 0,
-            _ => 3,
-        };
-        let (prefix, prefix_style, body_style, text) = match entry {
-            Entry::User(s) => {
-                // A tinted band, so each turn's start is easy to find when scrolling.
-                for (i, row) in wrap(s, body_width).into_iter().enumerate() {
-                    let lead = if i == 0 {
-                        format!(" {} ", app.glyphs.prompt)
-                    } else {
-                        "   ".into()
-                    };
-                    let pad = width.saturating_sub(3 + row.width());
-                    rows.push(Line::from(vec![
-                        Span::styled(lead, t.accent.patch(t.user_bg)),
-                        Span::styled(row, t.user.patch(t.user_bg)),
-                        Span::styled(" ".repeat(pad), t.user_bg),
-                    ]));
-                }
-                rows.push(Line::raw(""));
-                continue;
+    match entry {
+        Entry::User(s) => {
+            // A tinted band, so each turn's start is easy to find when scrolling.
+            let mut rows = Vec::new();
+            for (i, row) in wrap(s, body_width).into_iter().enumerate() {
+                let lead = if i == 0 {
+                    format!(" {} ", app.glyphs.prompt)
+                } else {
+                    "   ".into()
+                };
+                let pad = width.saturating_sub(3 + row.width());
+                rows.push(Line::from(vec![
+                    Span::styled(lead, t.accent.patch(t.user_bg)),
+                    Span::styled(row, t.user.patch(t.user_bg)),
+                    Span::styled(" ".repeat(pad), t.user_bg),
+                ]));
             }
-            Entry::TurnSummary(s) => {
-                let rule = app.glyphs.rule;
-                let text = format!("{rule}{rule} {s} ");
-                let fill = width.saturating_sub(3 + text.width()).min(8);
-                rows.push(Line::styled(
-                    format!("   {text}{}", rule.repeat(fill)),
-                    t.dim,
-                ));
-                rows.push(Line::raw(""));
-                continue;
+            (Arc::new(rows), 3, true)
+        }
+        Entry::TurnSummary(s) => {
+            let rule = app.glyphs.rule;
+            let text = format!("{rule}{rule} {s} ");
+            let fill = width.saturating_sub(3 + text.width()).min(8);
+            let rows = vec![Line::styled(
+                format!("   {text}{}", rule.repeat(fill)),
+                t.dim,
+            )];
+            (Arc::new(rows), 0, true)
+        }
+        Entry::Assistant(s) if s.trim().is_empty() => (Arc::new(Vec::new()), 3, false),
+        Entry::Assistant(s) => {
+            let lead_w = 2 + app.glyphs.assistant.width();
+            let body_w = width.saturating_sub(lead_w);
+            let mut rows = Vec::new();
+            for (i, row) in
+                crate::markdown::render(s, body_w, t, app.info.ui.ascii, Some(&app.highlights))
+                    .into_iter()
+                    .enumerate()
+            {
+                let mut spans = assistant_lead(app, i == 0);
+                spans.extend(row);
+                rows.push(Line::from(spans));
             }
-            Entry::Assistant(s) if s.trim().is_empty() => continue,
-            Entry::Assistant(s) => {
-                let lead_w = 2 + app.glyphs.assistant.width();
-                let body_w = width.saturating_sub(lead_w);
-                for (i, row) in
-                    crate::markdown::render(s, body_w, t, app.info.ui.ascii, Some(&app.highlights))
-                        .into_iter()
-                        .enumerate()
-                {
-                    let mut spans = assistant_lead(app, i == 0);
-                    spans.extend(row);
-                    rows.push(Line::from(spans));
-                }
-                rows.push(Line::raw(""));
-                continue;
-            }
-            Entry::Reasoning(s) => match app.show_reasoning {
-                ShowReasoning::Hidden => continue,
-                ShowReasoning::Collapsed => {
-                    let words = s.split_whitespace().count();
-                    let italic = t.dim.add_modifier(Modifier::ITALIC);
-                    let live = app.turn_running && i + 1 == app.transcript.len();
-                    let what = if live {
-                        format!("thinking… {words} words")
-                    } else {
-                        format!("thought for {words} words")
-                    };
-                    (
-                        app.glyphs.think,
-                        t.magenta,
-                        italic,
-                        format!("{what} · ctrl-t shows"),
-                    )
-                }
-                ShowReasoning::Expanded => (
+            (Arc::new(rows), lead_w, true)
+        }
+        Entry::Reasoning(s) => match app.show_reasoning {
+            ShowReasoning::Hidden => (Arc::new(Vec::new()), 3, false),
+            ShowReasoning::Collapsed => {
+                let words = s.split_whitespace().count();
+                let italic = t.dim.add_modifier(Modifier::ITALIC);
+                let what = if live {
+                    format!("thinking… {words} words")
+                } else {
+                    format!("thought for {words} words")
+                };
+                lead_rows(
                     app.glyphs.think,
                     t.magenta,
-                    t.dim.add_modifier(Modifier::ITALIC),
-                    s.trim().to_owned(),
-                ),
-            },
-            Entry::Tool(tool) => {
-                tool_rows(app, tool, body_width, &mut rows);
-                // Consecutive tool calls read as one block.
-                if !matches!(app.transcript.get(i + 1), Some(Entry::Tool(_)) | None) {
-                    rows.push(Line::raw(""));
-                }
-                continue;
+                    italic,
+                    &format!("{what} · ctrl-t shows"),
+                    width,
+                )
             }
-            Entry::System(s) => (" ", t.dim, t.dim, s.clone()),
-            Entry::Warning(s) => ("!", t.warn, t.warn, s.clone()),
-            Entry::Error(s) => (app.glyphs.fail, t.error, t.error, s.clone()),
-        };
-        for (i, row) in wrap(&text, body_width).into_iter().enumerate() {
-            let lead = if i == 0 {
-                format!(" {prefix} ")
-            } else {
-                "   ".into()
-            };
-            rows.push(Line::from(vec![
-                Span::styled(lead, prefix_style),
-                Span::styled(row, body_style),
-            ]));
+            ShowReasoning::Expanded => lead_rows(
+                app.glyphs.think,
+                t.magenta,
+                t.dim.add_modifier(Modifier::ITALIC),
+                s.trim(),
+                width,
+            ),
+        },
+        Entry::Tool(tool) => {
+            let mut rows = Vec::new();
+            tool_rows(app, tool, body_width, &mut rows);
+            (Arc::new(rows), 3, false)
         }
-        rows.push(Line::raw(""));
+        Entry::System(s) => lead_rows(" ", t.dim, t.dim, s, width),
+        Entry::Warning(s) => lead_rows("!", t.warn, t.warn, s, width),
+        Entry::Error(s) => lead_rows(app.glyphs.fail, t.error, t.error, s, width),
     }
-    gutters.resize(rows.len(), gutter);
-    (rows, gutters)
+}
+
+/// The common shape: a glyph lead on the first row, indented wrap after, blank below.
+fn lead_rows(
+    prefix: &str,
+    prefix_style: Style,
+    body_style: Style,
+    text: &str,
+    width: usize,
+) -> (Arc<Vec<Line<'static>>>, usize, bool) {
+    let mut rows = Vec::new();
+    let body_width = width.saturating_sub(3);
+    for (i, row) in wrap(text, body_width).into_iter().enumerate() {
+        let lead = if i == 0 {
+            format!(" {prefix} ")
+        } else {
+            "   ".into()
+        };
+        rows.push(Line::from(vec![
+            Span::styled(lead, prefix_style),
+            Span::styled(row, body_style),
+        ]));
+    }
+    (Arc::new(rows), 3, true)
+}
+
+/// The transcript's entries rendered at `width`, served from `App`'s layout cache: only
+/// entries whose fingerprint changed are laid out again, so a streaming delta re-renders
+/// one message, not the whole transcript. Running tools render fresh every frame.
+fn transcript_pieces(app: &App, width: usize) -> Vec<Piece> {
+    let agents = agents_fingerprint(app);
+    let highlights = app.highlights.version();
+    let show_reasoning = match app.show_reasoning {
+        ShowReasoning::Hidden => 0u8,
+        ShowReasoning::Collapsed => 1,
+        ShowReasoning::Expanded => 2,
+    };
+    let len = app.transcript.len();
+    let mut pieces = Vec::with_capacity(len);
+    {
+        let mut cache = app.transcript_cache.borrow_mut();
+        if cache.width != width {
+            cache.width = width;
+            cache.slots.clear();
+        }
+        cache.slots.truncate(len);
+        cache.slots.resize_with(len, || None);
+        for (i, entry) in app.transcript.iter().enumerate() {
+            let fp = entry_fingerprint(
+                entry,
+                width,
+                i + 1 == len,
+                show_reasoning,
+                app.turn_running,
+                highlights,
+                agents,
+            );
+            let last = i + 1 == len;
+            let rows = if matches!(entry, Entry::Tool(t) if t.ok.is_none()) {
+                // Live output, spinner and elapsed time: render it fresh each frame.
+                cache.slots[i] = None;
+                render_entry(app, entry, width, app.turn_running && last).0
+            } else if let Some(slot) = cache.slots[i].as_ref().filter(|s| s.fp == fp) {
+                slot.rows.clone()
+            } else {
+                let rows = render_entry(app, entry, width, app.turn_running && last).0;
+                cache.slots[i] = Some(Slot {
+                    fp,
+                    rows: rows.clone(),
+                });
+                rows
+            };
+            let (gutter, blank) = match entry {
+                Entry::Tool(_) => (
+                    3,
+                    // Consecutive tool calls read as one block.
+                    !matches!(app.transcript.get(i + 1), Some(Entry::Tool(_)) | None),
+                ),
+                Entry::User(_) | Entry::System(_) | Entry::Warning(_) | Entry::Error(_) => {
+                    (3, true)
+                }
+                Entry::TurnSummary(_) => (0, true),
+                Entry::Assistant(s) => (2 + app.glyphs.assistant.width(), !s.trim().is_empty()),
+                Entry::Reasoning(_) => (3, app.show_reasoning != ShowReasoning::Hidden),
+            };
+            pieces.push(Piece {
+                rows,
+                gutter,
+                blank,
+            });
+        }
+    }
+    pieces
 }
 
 fn tool_rows(app: &App, tool: &ToolEntry, width: usize, rows: &mut Vec<Line<'static>>) {
@@ -609,11 +797,15 @@ fn draw_transcript(f: &mut Frame<'_>, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(welcome(app, area)), area);
         return;
     }
-    // Only the visible rows are handed to ratatui. Per-message layout caching lands in M1.
-    // The last column is kept for the scrollbar.
-    let rows = transcript_rows(app, usize::from(area.width.saturating_sub(1)));
+    // The last column is kept for the scrollbar. Rows come from the per-entry layout
+    // cache, and only the visible slice is cloned into the paragraph.
+    let width = usize::from(area.width.saturating_sub(1));
+    let pieces = transcript_pieces(app, width);
     let height = usize::from(area.height);
-    let total = rows.len();
+    let total: usize = pieces
+        .iter()
+        .map(|p| p.rows.len() + usize::from(p.blank))
+        .sum();
     let max = total.saturating_sub(height);
     // Scrolled up while a reply streams in: move with the new rows so the view holds still.
     let (drawn, _) = app.view.get();
@@ -627,14 +819,39 @@ fn draw_transcript(f: &mut Frame<'_>, app: &App, area: Rect) {
 
     let end = total - scroll;
     let start = end.saturating_sub(height);
-    f.render_widget(Paragraph::new(rows[start..end].to_vec()), area);
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(end.saturating_sub(start));
+    // Row widths, collected only while a selection is painted over the rows.
+    let want_widths = app.selection.is_some_and(|s| s.pane == Pane::Transcript);
+    let mut widths = Vec::new();
+    let mut r = 0usize;
+    for piece in &pieces {
+        for line in piece.rows.iter() {
+            if want_widths {
+                widths.push(line.width());
+            }
+            if r >= start && r < end {
+                lines.push(line.clone());
+            }
+            r += 1;
+        }
+        if piece.blank {
+            if want_widths {
+                widths.push(0);
+            }
+            if r >= start && r < end {
+                lines.push(Line::raw(""));
+            }
+            r += 1;
+        }
+    }
+    f.render_widget(Paragraph::new(lines), area);
     if let Some(sel) = app.selection.filter(|s| s.pane == Pane::Transcript) {
         let text = Rect {
             width: area.width.saturating_sub(1),
             ..area
         };
         crate::select::paint(f.buffer_mut(), text, start, &sel, |r| {
-            rows.get(r).map_or(0, Line::width)
+            widths.get(r).copied().unwrap_or(0)
         });
     }
 
@@ -693,7 +910,7 @@ fn draw_attachments(f: &mut Frame<'_>, app: &App, area: Rect) {
         };
         let name = std::path::Path::new(&a.path)
             .file_name()
-            .map_or_else(|| a.path.clone(), |s| s.to_string_lossy().into_owned());
+            .map_or_else(|| a.path.as_str().into(), |s| s.to_string_lossy());
         spans.push(Span::styled(format!("[image] {name}{dims}"), t.accent));
     }
     spans.push(Span::styled("  (backspace removes)", t.dim));
@@ -754,9 +971,9 @@ fn draw_status(
     let t = &app.theme;
     let mode = &app.info.permission_mode;
     let label = if mode == "yolo" {
-        "YOLO".to_owned()
+        "YOLO"
     } else {
-        mode.clone()
+        mode.as_str()
     };
     let mut left: Vec<Span<'_>> = vec![
         Span::raw(" "),
@@ -777,9 +994,9 @@ fn draw_status(
     match &app.info.model {
         Some(m) => left.push(Span::raw(if thinking.is_some() {
             // Keep the effort visible beside long model names, including on resize.
-            truncate(m, usize::from(area.width) / 2)
+            std::borrow::Cow::Owned(truncate(m, usize::from(area.width) / 2))
         } else {
-            m.clone()
+            std::borrow::Cow::Borrowed(m.as_str())
         })),
         None => left.push(Span::styled("no model", t.warn)),
     }
@@ -2140,6 +2357,61 @@ mod tests {
         assert!(!render(&app, 140, 24).contains("Git branch"));
         app.on_engine(Event::SessionTitle { title: None });
         assert!(render(&app, 140, 24).contains("New session"));
+    }
+
+    #[test]
+    fn sidebar_lists_sub_agents_while_they_run_and_after_they_finish() {
+        use quack_protocol::CallId;
+        let mut app = started_app();
+        started(&mut app);
+        let start = |app: &mut App, id: &str, agent: &str, description: &str| {
+            app.on_engine(Event::AgentStarted {
+                id: id.into(),
+                agent: agent.into(),
+                description: description.into(),
+                call_id: CallId(format!("t-{id}")),
+                model: "mock/small".into(),
+            });
+        };
+        start(
+            &mut app,
+            "explore-1",
+            "explore",
+            "find the empty-input case",
+        );
+        app.on_engine(Event::Agent {
+            id: "explore-1".into(),
+            inner: Box::new(Event::ToolCallBegin {
+                call: quack_protocol::ToolCallInfo {
+                    call_id: CallId("explore-1/c1".into()),
+                    name: "grep".into(),
+                    summary: "grep fn parse".into(),
+                },
+            }),
+        });
+        let s = render(&app, 140, 24);
+        assert!(
+            s.contains("Sub-agents")
+                && s.contains("find the empty-input case")
+                && s.contains("explore · 1 steps"),
+            "{s}"
+        );
+        app.on_engine(Event::AgentFinished {
+            id: "explore-1".into(),
+            ok: true,
+            summary: "2 steps · 34.5k tokens".into(),
+        });
+        start(
+            &mut app,
+            "general-1",
+            "general",
+            "fix the parser and add a test",
+        );
+        let s = render(&app, 140, 24);
+        assert!(
+            s.contains("explore · 2 steps") && s.contains("fix the parser and add a test"),
+            "{s}"
+        );
     }
 
     #[test]

@@ -66,7 +66,7 @@ case $kind in
         ;;
 esac
 
-if ! scripts/local-server-turn.sh "$kind" "$url" "$model"; then
+if ! scripts/local-server-turn.sh "$kind" "$url" "$model" 5; then
     "$docker" logs "$name" 2>&1 | tail -n 40 >&2
     exit 1
 fi

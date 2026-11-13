@@ -20,6 +20,16 @@ pub enum ToolKind {
     Mutating,
 }
 
+/// Run blocking filesystem, diff or parsing work off the async runtime.
+pub(crate) async fn blocking(
+    f: impl FnOnce() -> Result<ToolOutput, String> + Send + 'static,
+) -> ToolOutput {
+    tokio::task::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| Err(format!("tool panicked: {e}")))
+        .unwrap_or_else(ToolOutput::error)
+}
+
 /// What a call touches, for the permission engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Subject {

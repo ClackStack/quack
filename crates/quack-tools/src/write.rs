@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::paths;
 use crate::registry::{Subject, Tool, ToolCtx, ToolKind, ToolOutput, arg_str};
-use crate::text::{TextFile, diff_stats, io_msg, unified_diff};
+use crate::text::{TextFile, io_msg, unified_diff};
 
 const PATH: &[&str] = &["path", "file_path", "filename", "file"];
 const CONTENT: &[&str] = &["content", "contents", "text"];
@@ -31,10 +31,16 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, String> {
     if path.is_dir() {
         return Err(format!("{shown} is a directory"));
     }
+    // `after` is the diffable text; a new file is written exactly as given, CRLFs and all.
+    let crlf = content.contains("\r\n");
     if path.exists() {
+        let after = if crlf {
+            content.replace("\r\n", "\n")
+        } else {
+            content
+        };
         let file = TextFile::load(&path)?;
         ctx.reads.editable(&path, &shown)?;
-        let after = content.replace("\r\n", "\n");
         Ok(Plan {
             encoded: file.encode(&after),
             path,
@@ -43,12 +49,18 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, String> {
             after,
         })
     } else {
+        let (after, encoded) = if crlf {
+            (content.replace("\r\n", "\n"), content)
+        } else {
+            let after = content.clone();
+            (after, content)
+        };
         Ok(Plan {
-            encoded: content.clone(),
+            encoded,
             path,
             shown,
             before: None,
-            after: content.replace("\r\n", "\n"),
+            after,
         })
     }
 }
@@ -128,34 +140,34 @@ impl Tool for Write {
     }
 
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolCtx) -> BoxFuture<'a, ToolOutput> {
-        Box::pin(async move {
-            let run = || -> Result<ToolOutput, String> {
-                let p = plan(&args, ctx)?;
-                if let Some(parent) = p.path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| io_msg(parent, &e))?;
-                }
-                std::fs::write(&p.path, &p.encoded).map_err(|e| io_msg(&p.path, &e))?;
-                ctx.reads.record(&p.path);
-                crate::hashline::saw_whole(ctx, &p.path, &p.after);
-                let before = p.before.as_deref().unwrap_or("");
-                let (add, del) = diff_stats(before, &p.after);
-                let verb = if p.before.is_some() {
-                    "Updated"
-                } else {
-                    "Created"
-                };
-                let mut msg = format!("{verb} {} ({} lines).", p.shown, p.after.lines().count());
-                if let Some(before) = &p.before
-                    && let Some(line) = crate::outline::new_syntax_error(&p.path, before, &p.after)
-                {
-                    msg.push_str(&format!(
-                        "\n\nWarning: Tree-sitter detected a syntax error at line {line} after this change (the file previously parsed cleanly). Check brackets, indentation or delimiters."
-                    ));
-                }
-                Ok(ToolOutput::ok(msg, format!("+{add} -{del}"))
-                    .with_detail(unified_diff(&p.shown, before, &p.after)))
+        let ctx = ctx.clone();
+        Box::pin(crate::registry::blocking(move || {
+            let p = plan(&args, &ctx)?;
+            if let Some(parent) = p.path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| io_msg(parent, &e))?;
+            }
+            std::fs::write(&p.path, &p.encoded).map_err(|e| io_msg(&p.path, &e))?;
+            let c = crate::text::commit(
+                &ctx,
+                &p.path,
+                &p.shown,
+                p.before.as_deref(),
+                &p.after,
+                "change",
+                false,
+            );
+            crate::hashline::saw_whole(&ctx, &p.path, &p.after);
+            let verb = if p.before.is_some() {
+                "Updated"
+            } else {
+                "Created"
             };
-            run().unwrap_or_else(ToolOutput::error)
-        })
+            let mut msg = format!("{verb} {} ({} lines).", p.shown, p.after.lines().count());
+            if let Some(warning) = &c.warning {
+                msg.push_str("\n\n");
+                msg.push_str(warning);
+            }
+            Ok(ToolOutput::ok(msg, format!("+{} -{}", c.add, c.del)).with_detail(c.detail))
+        }))
     }
 }

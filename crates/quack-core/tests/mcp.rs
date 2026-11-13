@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use common::{bodies, sse_call, sse_text, turn};
 use quack_core::protocol::{
-    Answer, ApprovalDecision, ApprovalRequest, Event, InputItem, LoadState, Op, Subsystem,
+    Answer, ApprovalDecision, ApprovalRequest, Event, InputItem, LoadState, McpServerState, Op,
+    Subsystem,
 };
 use quack_core::{Engine, EngineHandle};
 use serde_json::{Value, json};
@@ -204,7 +205,7 @@ async fn mcp_tools_are_offered_and_called() {
             break servers;
         }
     };
-    assert_eq!(servers[0].state, "ready");
+    assert_eq!(servers[0].state, McpServerState::Ready);
     assert_eq!(servers[0].tools, ["echo", "drop_table"]);
     assert!(!servers[0].deferred);
     engine.shutdown().await;

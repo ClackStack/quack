@@ -36,8 +36,33 @@ pub struct SessionStart {
     pub mcp: Vec<(String, McpServerFile)>,
 }
 
+/// Why an ACP session could not be opened or continued.
+#[derive(Debug)]
+pub enum SessionError {
+    /// Opening the session (config, model, replay) did not finish in time.
+    Timeout,
+    /// The engine task ended before the session was ready.
+    EngineStopped,
+    /// The engine reported the failure itself, as a sentence.
+    Rpc(String),
+    /// Anything else, as a sentence.
+    Other(String),
+}
+
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionError::Timeout => write!(f, "the session did not open within a minute"),
+            SessionError::EngineStopped => write!(f, "the engine stopped"),
+            SessionError::Rpc(m) | SessionError::Other(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}
+
 /// Loads the config for a session's folder and starts its engine; `Err` says why not.
-pub type Spawn = Arc<dyn Fn(SessionStart) -> Result<EngineHandle, String> + Send + Sync>;
+pub type Spawn = Arc<dyn Fn(SessionStart) -> Result<EngineHandle, SessionError> + Send + Sync>;
 
 /// Serve one editor connection until it closes its end.
 pub async fn serve<R, W>(input: R, output: W, spawn: Spawn) -> std::io::Result<()>
@@ -241,7 +266,8 @@ impl Server {
                 Err(e) => tracing::warn!(%e, "skipping an editor MCP server"),
             }
         }
-        (self.spawn)(SessionStart { cwd, resume, mcp }).map_err(RpcError::internal)
+        (self.spawn)(SessionStart { cwd, resume, mcp })
+            .map_err(|e| RpcError::internal(e.to_string()))
     }
 
     async fn new_session(&mut self, r: wire::NewSession) -> Result<Value, RpcError> {
@@ -259,7 +285,7 @@ impl Server {
             _ => None,
         })
         .await
-        .map_err(RpcError::internal)?;
+        .map_err(|e| RpcError::internal(e.to_string()))?;
         let handle = session::start(id.clone(), engine, self.peer.clone(), startup);
         self.sessions.insert(id.clone(), handle);
         Ok(json!({"sessionId": id, "modes": session::modes(&mode)}))
@@ -282,7 +308,7 @@ impl Server {
         let loaded = session::wait_for(&mut engine, &mut startup, |e| match e {
             Event::SessionResumed { items, .. } => Some(Ok(items.clone())),
             Event::Warning { message } if message.starts_with("cannot re") => {
-                Some(Err(message.clone()))
+                Some(Err(SessionError::Rpc(message.clone())))
             }
             _ => None,
         })
@@ -291,7 +317,7 @@ impl Server {
             Ok(Ok(items)) => items,
             Ok(Err(e)) | Err(e) => {
                 engine.shutdown().await;
-                return Err(RpcError::internal(e));
+                return Err(RpcError::internal(e.to_string()));
             }
         };
         for update in convert::replay(items) {

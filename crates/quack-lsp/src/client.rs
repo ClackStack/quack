@@ -313,7 +313,12 @@ impl Client {
     pub async fn sync(&self, path: &Path) -> Result<String, String> {
         let key = pos::key(path);
         let uri = pos::path_to_uri(path);
-        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let meta_path = path.to_owned();
+        let size = tokio::task::spawn_blocking(move || {
+            std::fs::metadata(&meta_path).map(|m| m.len()).unwrap_or(0)
+        })
+        .await
+        .unwrap_or(0);
         let text = if size > MAX_DOCUMENT {
             None
         } else {
@@ -321,9 +326,11 @@ impl Client {
             // holds it, mostly on Windows), so try again before giving up.
             let mut delay = Duration::from_millis(25);
             loop {
-                match std::fs::read(path) {
-                    Ok(b) => break Some(String::from_utf8_lossy(&b).into_owned()),
-                    Err(e) if delay <= Duration::from_millis(200) => {
+                let read_path = path.to_owned();
+                let read = tokio::task::spawn_blocking(move || std::fs::read(&read_path)).await;
+                match read {
+                    Ok(Ok(b)) => break Some(String::from_utf8_lossy(&b).into_owned()),
+                    Ok(Err(e)) if delay <= Duration::from_millis(200) => {
                         tracing::debug!(
                             error = %e,
                             "cannot read {} yet, retrying",
@@ -332,7 +339,7 @@ impl Client {
                         tokio::time::sleep(delay).await;
                         delay *= 2;
                     }
-                    Err(_) => break None,
+                    _ => break None,
                 }
             }
         };

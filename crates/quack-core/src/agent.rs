@@ -166,6 +166,7 @@ fn derive(base: &Setup, def: &AgentFile) -> Setup {
         permissions: base.permissions.clone(),
         budget: base.budget,
         estimator: Mutex::default(),
+        tool_block_bytes: std::sync::OnceLock::new(),
         context: base.context.clone(),
         instruction_dirs: base.instruction_dirs.clone(),
         mcp: base.mcp.clone(),

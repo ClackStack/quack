@@ -2,6 +2,7 @@
 //! (docs/plan/04-agent-loop-and-tools.md#turn-lifecycle).
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use quack_config::hooks::HookEvent;
@@ -28,6 +29,33 @@ use crate::stats::Stats;
 
 /// Identical consecutive calls before the model is told to change approach.
 const REPEAT_LIMIT: usize = 3;
+
+/// Repeated calls this turn, tracked by name and argument hash so the arguments
+/// (whole file contents for edits) are never cloned. `record` returns the length
+/// of the trailing run of the call and its total count in the turn.
+#[derive(Default)]
+struct RecentCalls {
+    counts: HashMap<(String, u64), usize>,
+    last: Option<(String, u64)>,
+    trailing: usize,
+}
+
+impl RecentCalls {
+    fn record(&mut self, name: &str, arguments: &str) -> (usize, usize) {
+        let mut hasher = DefaultHasher::new();
+        arguments.hash(&mut hasher);
+        let key = (name.to_owned(), hasher.finish());
+        let total = *self.counts.entry(key.clone()).or_insert(0) + 1;
+        self.counts.insert(key.clone(), total);
+        self.trailing = if self.last.as_ref() == Some(&key) {
+            self.trailing + 1
+        } else {
+            1
+        };
+        self.last = Some(key);
+        (self.trailing, total)
+    }
+}
 
 pub(crate) type Approvals = Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>>;
 /// `ask_user` calls waiting for the user's answers, by call id.
@@ -297,7 +325,7 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
         },
     );
     let mut total = Usage::default();
-    let mut recent: Vec<(String, String)> = Vec::new();
+    let mut recent = RecentCalls::default();
     let mut nudged = false;
     let mut overflowed = false;
     let mut dropped = 0;
@@ -401,16 +429,14 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                     threshold: crate::context::threshold(&ctx.setup),
                 });
             }
-            let calls = match &msg {
-                Message::Assistant { tool_calls, .. } => tool_calls.clone(),
-                _ => Vec::new(),
-            };
             let empty =
                 matches!(&msg, Message::Assistant { content, .. } if content.trim().is_empty());
+            let no_calls =
+                matches!(&msg, Message::Assistant { tool_calls, .. } if tool_calls.is_empty());
             let reported = usage.is_some();
             // An empty reply (common with small models after a tool result) gets one nudge.
             // The empty message itself is dropped: some chat templates reject it.
-            if calls.is_empty() && empty && !nudged {
+            if no_calls && empty && !nudged {
                 nudged = true;
                 ctx.emit(Event::Warning {
                     message: "the model returned an empty response; asking it to continue".into(),
@@ -429,6 +455,15 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                 // Servers that do not report usage still get a live context figure.
                 ctx.context_estimate(&history);
             }
+            // Move the calls out of the history entry rather than cloning them: the
+            // arguments hold whole file contents for write/edit calls. They are put
+            // back once every call has its result, so the history is unchanged.
+            let at = history.len() - 1;
+            let calls = match history.last_mut() {
+                Some(Message::Assistant { tool_calls, .. }) => std::mem::take(tool_calls),
+                _ => Vec::new(),
+            };
+            let mut interrupted = false;
             if calls.is_empty() {
                 if empty {
                     ctx.emit(Event::Warning {
@@ -451,7 +486,8 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                             },
                         );
                     }
-                    break 'steps StepEnd::Aborted("interrupted".into());
+                    interrupted = true;
+                    break;
                 }
                 // Read-only sub-agents started together run side by side.
                 let together = calls[i..].iter().take_while(|c| parallel(&ctx, c)).count();
@@ -481,17 +517,8 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                 }
                 let call = &calls[i];
                 i += 1;
-                recent.push((call.name.clone(), call.arguments.clone()));
+                let (repeats, same_count) = recent.record(&call.name, &call.arguments);
                 let mut out = run_call(&ctx, call).await;
-                let repeats = recent
-                    .iter()
-                    .rev()
-                    .take_while(|c| **c == recent[recent.len() - 1])
-                    .count();
-                let same_count = recent
-                    .iter()
-                    .filter(|c| *c == &recent[recent.len() - 1])
-                    .count();
                 if repeats >= REPEAT_LIMIT {
                     out.model.push_str(&format!(
                         "\n\nNote: this exact call has now been made {repeats} times in a row. \
@@ -513,6 +540,12 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                         images: out.images,
                     },
                 );
+            }
+            if let Some(Message::Assistant { tool_calls, .. }) = history.get_mut(at) {
+                *tool_calls = calls;
+            }
+            if interrupted {
+                break 'steps StepEnd::Aborted("interrupted".into());
             }
             // Tool output can be large; show its weight before the next request.
             ctx.context_estimate(&history);
@@ -568,10 +601,13 @@ fn raw_estimate(s: &Setup, history: &[Message]) -> u32 {
         .sum();
     let history = tokens::estimate(&json[..json.len().saturating_sub(image_bytes)])
         .saturating_add(image_tokens);
-    let tools: usize = tool_specs(s)
-        .iter()
-        .map(|t| t.description.len() + t.name.len() + t.parameters.to_string().len())
-        .sum();
+    // The tool block is constant for the setup, so its byte size is computed once.
+    let tools: usize = *s.tool_block_bytes.get_or_init(|| {
+        tool_specs(s)
+            .iter()
+            .map(|t| t.description.len() + t.name.len() + t.parameters.to_string().len())
+            .sum()
+    });
     tokens::estimate(&s.system)
         .saturating_add(tokens::estimate(&s.session_context))
         .saturating_add(history)
@@ -663,9 +699,20 @@ fn tool_specs(s: &Setup) -> Vec<ToolSpec> {
     specs
 }
 
-/// Every tool name the model may call right now.
+/// Every tool name the model may call right now: the surface's names plus the MCP
+/// tools offered at the moment. Building only the names avoids the descriptions and
+/// schemas of [`tool_specs`], which the unknown-tool path needs on every model call.
 fn tool_names(s: &Setup) -> Vec<String> {
-    tool_specs(s).into_iter().map(|t| t.name).collect()
+    let mut names: Vec<String> = s.surface.tools.iter().map(|t| t.name.clone()).collect();
+    if s.mcp_tools {
+        names.extend(
+            s.mcp
+                .offered(s.budget)
+                .into_iter()
+                .map(|t| t.name().to_owned()),
+        );
+    }
+    names
 }
 
 pub(crate) fn reasoning_format(s: &Setup) -> quack_config::provider::ReasoningFormat {
@@ -926,21 +973,23 @@ fn emit_speed(
 
 /// Servers that omit ids get `call_N`, which can collide across steps.
 fn dedupe_ids(calls: &mut [ToolCall], history: &[Message]) {
-    let mut used: HashSet<String> = history
+    // Borrowed from the history; only the current batch of ids needs owning.
+    let used: HashSet<&str> = history
         .iter()
         .filter_map(|m| match m {
-            Message::Tool { call_id, .. } => Some(call_id.clone()),
+            Message::Tool { call_id, .. } => Some(call_id.as_str()),
             _ => None,
         })
         .collect();
+    let mut added: Vec<String> = Vec::new();
     for c in calls {
         let mut n = 1;
         let base = c.id.clone();
-        while used.contains(&c.id) {
+        while used.contains(c.id.as_str()) || added.iter().any(|id| id == &c.id) {
             c.id = format!("{base}_{n}");
             n += 1;
         }
-        used.insert(c.id.clone());
+        added.push(c.id.clone());
     }
 }
 

@@ -147,7 +147,9 @@ async fn turn(engine: &mut EngineHandle, text: &str) {
 
 async fn mode(engine: &mut EngineHandle, mode: &str) {
     engine
-        .submit(Op::SetPermissionMode { mode: mode.into() })
+        .submit(Op::SetPermissionMode {
+            mode: mode.parse().expect("mode"),
+        })
         .await;
     loop {
         if let Event::PermissionMode { .. } = next(engine).await {

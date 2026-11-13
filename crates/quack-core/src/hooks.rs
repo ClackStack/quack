@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use quack_config::hooks::{HookEvent, OnError};
 use quack_config::{HookFile, ItemState, LayerKind, Loaded, glob_match, load_hooks};
-use quack_protocol::Event;
+use quack_protocol::{Event, HookOutcome};
 use quack_providers::tokens;
 use regex::Regex;
 use serde_json::{Value, json};
@@ -276,18 +276,18 @@ impl Hooks {
                         }),
                         OnError::Allow => {}
                     }
-                    ("failed", Some(e), 0)
+                    (HookOutcome::Failed, Some(e), 0)
                 }
             };
             session::record(
                 sink.log,
                 "hook",
-                json!({ "id": hook.id, "on": event.label(), "outcome": outcome, "ms": ms }),
+                json!({ "id": hook.id, "on": event.label(), "outcome": outcome.label(), "ms": ms }),
             );
             (sink.emit)(Event::HookRan {
                 id: hook.id.clone(),
                 on: event.label().into(),
-                outcome: outcome.into(),
+                outcome,
                 ms,
                 message,
                 context_tokens: tokens,
@@ -412,8 +412,8 @@ impl Outcome {
         event: HookEvent,
         reply: Reply,
         fields: &mut Value,
-    ) -> (&'static str, Option<String>, u32) {
-        let mut label = "ok";
+    ) -> (HookOutcome, Option<String>, u32) {
+        let mut label = HookOutcome::Ok;
         let mut tokens_added = 0;
         if let Some(text) = reply.context.filter(|_| event.takes_context()) {
             let text = if hook.file.full_context {
@@ -423,14 +423,14 @@ impl Outcome {
             };
             tokens_added = tokens::estimate(&text);
             self.context.push(text);
-            label = "context";
+            label = HookOutcome::Context;
         }
         if let Some(args) = reply.updated_args.filter(|_| event == HookEvent::PreTool) {
             if let Some(obj) = fields.as_object_mut() {
                 obj.insert("args".into(), args.clone());
             }
             self.updated_args = Some(args);
-            label = "updated";
+            label = HookOutcome::Updated;
         }
         // Only a call or a prompt can be stopped; elsewhere a decision means nothing.
         let guards = matches!(event, HookEvent::PreTool | HookEvent::UserPrompt);
@@ -442,15 +442,15 @@ impl Outcome {
                     reason
                 };
                 self.decide(Verdict::Deny(reason), &hook.id);
-                label = "denied";
+                label = HookOutcome::Denied;
             }
             Some(Verdict::Ask) if event == HookEvent::PreTool => {
                 self.decide(Verdict::Ask, &hook.id);
-                label = "asked";
+                label = HookOutcome::Asked;
             }
             Some(Verdict::Allow) if event == HookEvent::PreTool => {
                 self.decide(Verdict::Allow, &hook.id);
-                label = "allowed";
+                label = HookOutcome::Allowed;
             }
             _ => {}
         }

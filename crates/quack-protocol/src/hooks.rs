@@ -7,6 +7,41 @@ use serde::{Deserialize, Serialize};
 
 use crate::{KeySource, SecretText};
 
+/// What running one hook resulted in (`Event::HookRan`): `ok`, `context` (it added
+/// context for the model), `allowed`, `denied`, `asked`, `updated` (it changed a tool
+/// call's arguments) or `failed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HookOutcome {
+    Ok,
+    Context,
+    Allowed,
+    Denied,
+    Asked,
+    Updated,
+    Failed,
+}
+
+impl HookOutcome {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Context => "context",
+            Self::Allowed => "allowed",
+            Self::Denied => "denied",
+            Self::Asked => "asked",
+            Self::Updated => "updated",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl std::fmt::Display for HookOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HookDescriptor {

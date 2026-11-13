@@ -58,6 +58,12 @@ Long values wrap within the sidebar with bounded height; long paths keep the
 project folder visible. Missing Git metadata is omitted and unreported context
 usage is labeled. Themes, `NO_COLOR` and ASCII mode apply to the sidebar too.
 
+Sub-agents (`task` runs) get their own section between the folder and the model:
+one row per run with its description and state, a spinner and step count while
+it runs, then its result summary (`/tasks` keeps the full detail). Only the last
+few finished runs stay listed; older ones collapse into a `+N earlier` line so
+the rest of the panel keeps its room.
+
 The folder and branch move out of the header, and context/speed move out of
 the status bar while the sidebar is visible. Model and thinking level remain next
 to each other in the status bar and the sidebar's Model section. Permission mode, sandbox warnings,

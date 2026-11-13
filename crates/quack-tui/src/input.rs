@@ -1,5 +1,7 @@
 //! Multi-line input buffer with a char-indexed cursor, `@file` mention spans and history.
 
+use std::cell::RefCell;
+
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Default)]
@@ -9,6 +11,19 @@ pub(crate) struct Input {
     cursor: usize,
     history: Vec<String>,
     history_pos: Option<usize>,
+    /// Bumped on every text mutation, so the wrapped layout is only recomputed for text
+    /// that changed (or a new width).
+    edits: u64,
+    /// The last computed layout, valid while `(edits, cursor, width)` all hold.
+    layout_cache: RefCell<Option<CachedLayout>>,
+}
+
+#[derive(Debug)]
+struct CachedLayout {
+    edits: u64,
+    cursor: usize,
+    width: usize,
+    layout: Layout,
 }
 
 impl Input {
@@ -63,6 +78,7 @@ impl Input {
         };
         let new_byte = (start + replacement.len() + step_ws).min(self.text.len());
         self.cursor = self.text[..new_byte].chars().count();
+        self.edits = self.edits.wrapping_add(1);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -87,6 +103,7 @@ impl Input {
         self.text.insert_str(at, &s);
         self.cursor += s.chars().count();
         self.history_pos = None;
+        self.edits = self.edits.wrapping_add(1);
     }
 
     pub fn insert(&mut self, c: char) {
@@ -94,6 +111,7 @@ impl Input {
         self.text.insert(at, c);
         self.cursor += 1;
         self.history_pos = None;
+        self.edits = self.edits.wrapping_add(1);
     }
 
     pub fn backspace(&mut self) {
@@ -102,6 +120,7 @@ impl Input {
             let at = self.byte_at(self.cursor);
             self.text.remove(at);
         }
+        self.edits = self.edits.wrapping_add(1);
     }
 
     pub fn delete(&mut self) {
@@ -109,6 +128,7 @@ impl Input {
             let at = self.byte_at(self.cursor);
             self.text.remove(at);
         }
+        self.edits = self.edits.wrapping_add(1);
     }
 
     pub fn left(&mut self) {
@@ -130,20 +150,25 @@ impl Input {
     pub fn set(&mut self, text: &str) {
         self.text = text.to_owned();
         self.cursor = self.len();
+        self.edits = self.edits.wrapping_add(1);
     }
 
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
         self.history_pos = None;
+        self.edits = self.edits.wrapping_add(1);
     }
 
     /// Take the text for submission and record it in history.
     pub fn submit(&mut self) -> String {
+        // Decide before taking the text, so only a recorded entry is ever cloned.
+        let keep = !self.text.trim().is_empty() && self.history.last() != Some(&self.text);
         let text = std::mem::take(&mut self.text);
         self.cursor = 0;
         self.history_pos = None;
-        if !text.trim().is_empty() && self.history.last() != Some(&text) {
+        self.edits = self.edits.wrapping_add(1);
+        if keep {
             self.history.push(text.clone());
         }
         text
@@ -159,6 +184,7 @@ impl Input {
         self.history_pos = Some(pos);
         self.text = self.history[pos].clone();
         self.cursor = self.len();
+        self.edits = self.edits.wrapping_add(1);
     }
 
     pub fn history_next(&mut self) {
@@ -173,11 +199,32 @@ impl Input {
             self.text.clear();
         }
         self.cursor = self.len();
+        self.edits = self.edits.wrapping_add(1);
     }
 
     /// The text soft-wrapped to `width` columns, and the cursor's row and column there.
+    /// The wrapping is cached: it only runs again when the text, the cursor or the width
+    /// changes, not on every frame that draws the input.
     pub fn layout(&self, width: usize) -> Layout {
         let width = width.max(1);
+        if let Some(cached) = self.layout_cache.borrow().as_ref()
+            && cached.edits == self.edits
+            && cached.cursor == self.cursor
+            && cached.width == width
+        {
+            return cached.layout.clone();
+        }
+        let layout = self.compute_layout(width);
+        *self.layout_cache.borrow_mut() = Some(CachedLayout {
+            edits: self.edits,
+            cursor: self.cursor,
+            width,
+            layout: layout.clone(),
+        });
+        layout
+    }
+
+    fn compute_layout(&self, width: usize) -> Layout {
         let mut rows = Vec::new();
         let mut spans = Vec::new();
         let mut cursor = None;
@@ -285,7 +332,7 @@ impl Input {
 }
 
 /// The text of the input as it is drawn.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Layout {
     pub rows: Vec<String>,
     /// Each row's first char and the furthest the cursor can go on it.

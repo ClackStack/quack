@@ -8,14 +8,14 @@
 #
 # Puts a code number in a file and asks the model to read it and reply with it. Passes
 # when the model called `read` and the answer contains the number. Tiny CPU models are not
-# reliable, so a failed attempt is retried (default 3 attempts); every attempt's events are
+# reliable, so a failed attempt is retried (default 5 attempts); every attempt's events are
 # kept for debugging. The provider file is written the way a user would write it.
 set -eu
 
 kind=$1
 base_url=$2
 model=${3:-}
-attempts=${4:-3}
+attempts=${4:-5}
 bin=${QUACK_BIN:-target/debug/quack}
 word=73914
 
@@ -37,7 +37,7 @@ export QUACK_CONFIG_DIR="$tmp/user" QUACK_DATA_DIR="$tmp/data"
 export QUACK_CACHE_DIR="$tmp/cache" QUACK_SYSTEM_DIR="$tmp/system"
 export QUACK_DEFAULTS_DIR="$PWD/defaults"
 
-prompt="Use the read tool to open notes/code.txt, then reply with only the code number."
+prompt="Use the read tool to open notes/code.txt. Then reply with only the code number you saw in that file, nothing else. Do not write any files."
 n=0
 while [ "$n" -lt "$attempts" ]; do
     n=$((n + 1))

@@ -4,7 +4,9 @@ members = ["crates/*"]
 default-members = ["crates/quack-cli"]
 
 [workspace.package]
-version = "0.1.0"
+# Placeholder for local builds: the release workflow stamps the real version in
+# with scripts/set-version.sh, so an untagged tree reports 0.0.0 (a dev build).
+version = "0.0.0"
 edition = "2024"
 rust-version = "1.97"
 license = "Apache-2.0"

@@ -6,12 +6,12 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use quack_core::protocol::{Event, Op};
+use quack_core::protocol::{Event, Op, PermissionMode};
 use quack_core::{Engine, EngineHandle};
 use wiremock::MockServer;
 
 /// The next `PermissionMode` event, and whether a lock warning came before it.
-async fn next_mode(engine: &mut EngineHandle) -> (String, bool) {
+async fn next_mode(engine: &mut EngineHandle) -> (PermissionMode, bool) {
     let mut warned = false;
     loop {
         let e = tokio::time::timeout(Duration::from_secs(10), engine.events.recv())
@@ -41,17 +41,23 @@ async fn a_locked_permission_mode_cannot_be_changed_at_runtime() {
 
     for mode in ["yolo", "full-auto", "read-only"] {
         engine
-            .submit(Op::SetPermissionMode { mode: mode.into() })
+            .submit(Op::SetPermissionMode {
+                mode: mode.parse().expect("mode"),
+            })
             .await;
-        assert_eq!(next_mode(&mut engine).await, ("ask".into(), true), "{mode}");
+        assert_eq!(
+            next_mode(&mut engine).await,
+            (PermissionMode::Ask, true),
+            "{mode}"
+        );
     }
 
     // Plan mode only narrows what runs, so it stays available.
     engine
         .submit(Op::SetPermissionMode {
-            mode: "plan".into(),
+            mode: PermissionMode::Plan,
         })
         .await;
-    assert_eq!(next_mode(&mut engine).await, ("plan".into(), false));
+    assert_eq!(next_mode(&mut engine).await, (PermissionMode::Plan, false));
     engine.shutdown().await;
 }

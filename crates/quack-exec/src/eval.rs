@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 
 use quack_config::{LoadOptions, load_with};
 use quack_core::Engine;
-use quack_protocol::{ApprovalDecision, Event, InputItem, Op, StatsReport, TurnOverrides};
+use quack_protocol::{
+    ApprovalDecision, Event, InputItem, Op, PermissionMode, StatsReport, TurnOverrides,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
@@ -160,14 +162,22 @@ fn changed_files(before: &Path, after: &Path) -> Vec<String> {
     let mut out: Vec<String> = a.iter().filter(|p| !b.contains(p)).cloned().collect();
     out.extend(
         b.iter()
-            .filter(|p| {
-                !a.contains(p)
-                    || std::fs::read(before.join(p)).ok() != std::fs::read(after.join(p)).ok()
-            })
+            .filter(|p| !a.contains(p) || file_differs(before, after, p))
             .cloned(),
     );
     out.sort();
     out
+}
+
+/// Whether the same file in two trees differs. A read error on either side counts as a
+/// change (a missing file and an unreadable one are not the same); two reads that fail
+/// the same way (both missing, say) do not.
+fn file_differs(before: &Path, after: &Path, p: &str) -> bool {
+    match (std::fs::read(before.join(p)), std::fs::read(after.join(p))) {
+        (Ok(a), Ok(b)) => a != b,
+        (Err(a), Err(b)) => a.kind() != b.kind(),
+        (Ok(_), Err(_)) | (Err(_), Ok(_)) => true,
+    }
 }
 
 /// Every task under `suite`, sorted by id; `only` keeps the named ones.
@@ -696,8 +706,11 @@ pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
             Event::StartupComplete if !sent => {
                 sent = true;
                 if planning {
-                    let mode = "plan".to_owned();
-                    engine.submit(Op::SetPermissionMode { mode }).await;
+                    engine
+                        .submit(Op::SetPermissionMode {
+                            mode: PermissionMode::Plan,
+                        })
+                        .await;
                 }
                 let op = Op::UserTurn {
                     items: vec![InputItem::text(task.file.prompt.clone())],

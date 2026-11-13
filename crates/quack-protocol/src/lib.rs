@@ -13,7 +13,7 @@ mod startup;
 pub use hooks::*;
 pub use ids::{CallId, CheckpointId, EventIndex, ModelId, ProviderId, SessionId, TurnId};
 pub use image::Image;
-pub use modes::{ApprovalPolicy, WorkMode};
+pub use modes::{ApprovalPolicy, PermissionMode, WorkMode};
 pub use startup::{LoadState, Subsystem};
 
 use serde::{Deserialize, Serialize};
@@ -98,7 +98,7 @@ pub enum Op {
     /// Compatibility command: `plan`/`edit` changes work mode; other values change
     /// approvals without changing work mode. Prefer the typed operations below.
     SetPermissionMode {
-        mode: String,
+        mode: PermissionMode,
     },
     SetWorkMode {
         mode: WorkMode,
@@ -521,7 +521,7 @@ pub enum Event {
     },
     /// The session's permission mode, e.g. `ask` or `plan`.
     PermissionMode {
-        mode: String,
+        mode: PermissionMode,
     },
     /// Authoritative state of both controls; clients need not remember a previous mode.
     ModeChanged {
@@ -545,7 +545,7 @@ pub enum Event {
         id: String,
         /// The hook's event, e.g. `user_prompt`.
         on: String,
-        outcome: String,
+        outcome: HookOutcome,
         ms: u64,
         /// What the hook said, or why it failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -825,7 +825,7 @@ pub struct LspServerInfo {
     pub command: String,
     pub extensions: Vec<String>,
     /// `not installed`, `idle`, `starting`, `ready`, `indexing`, `failed` or `exited`.
-    pub state: String,
+    pub state: LspServerState,
     /// The program's path, what it is working on, or why it failed.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub detail: String,
@@ -849,7 +849,7 @@ pub struct McpServerInfo {
     pub target: String,
     pub description: String,
     /// `starting`, `ready`, `failed` or `stopped`.
-    pub state: String,
+    pub state: McpServerState,
     /// Why it failed.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
@@ -866,6 +866,89 @@ pub struct McpServerInfo {
     pub tool_tokens: u32,
     /// Last stderr lines.
     pub log: Vec<String>,
+}
+
+/// The state of a language server, as `/lsp` shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LspServerState {
+    #[serde(rename = "not installed")]
+    NotInstalled,
+    #[serde(rename = "idle")]
+    Idle,
+    #[serde(rename = "starting")]
+    Starting,
+    #[serde(rename = "ready")]
+    Ready,
+    #[serde(rename = "indexing")]
+    Indexing,
+    #[serde(rename = "failed")]
+    Failed,
+    #[serde(rename = "exited")]
+    Exited,
+}
+
+impl LspServerState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotInstalled => "not installed",
+            Self::Idle => "idle",
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Indexing => "indexing",
+            Self::Failed => "failed",
+            Self::Exited => "exited",
+        }
+    }
+}
+
+impl std::str::FromStr for LspServerState {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "not installed" => Ok(Self::NotInstalled),
+            "idle" => Ok(Self::Idle),
+            "starting" => Ok(Self::Starting),
+            "ready" => Ok(Self::Ready),
+            "indexing" => Ok(Self::Indexing),
+            "failed" => Ok(Self::Failed),
+            "exited" => Ok(Self::Exited),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for LspServerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// The state of an MCP server, as `/mcp` shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpServerState {
+    Starting,
+    Ready,
+    Failed,
+    Stopped,
+}
+
+impl McpServerState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+impl std::fmt::Display for McpServerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
 }
 
 /// A model server found on this machine.

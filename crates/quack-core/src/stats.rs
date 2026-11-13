@@ -84,7 +84,7 @@ impl Stats {
                     if let Some(u) = r
                         .data
                         .get("usage")
-                        .and_then(|v| serde_json::from_value::<Usage>(v.clone()).ok())
+                        .and_then(|v| <Usage as serde::Deserialize>::deserialize(v).ok())
                     {
                         let cost = r.data.get("cost").and_then(serde_json::Value::as_f64);
                         s.tokens(&u, cost);

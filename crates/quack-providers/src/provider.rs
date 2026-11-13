@@ -48,12 +48,14 @@ enum Api {
 #[derive(Debug, Clone)]
 pub struct Provider {
     pub id: String,
-    pub file: ProviderFile,
+    /// Shared so a clone for streaming copies one word, not the whole file.
+    pub file: Arc<ProviderFile>,
     api: Api,
     client: reqwest::Client,
     base_url: String,
     /// Shared by every clone, so a new key ([`Provider::take_key`]) reaches them all.
-    headers: Arc<RwLock<HeaderMap>>,
+    /// The map under the lock is itself shared, so a request copies one `Arc`.
+    headers: Arc<RwLock<Arc<HeaderMap>>>,
     dialect: openai_chat::Dialect,
     /// The file's `extra_body`, under each model's.
     extra: serde_json::Map<String, serde_json::Value>,
@@ -187,9 +189,9 @@ impl Provider {
             api,
             dialect: openai_chat::Dialect::of(&base_url),
             base_url,
-            file,
+            file: Arc::new(file),
             client,
-            headers: Arc::new(RwLock::new(headers)),
+            headers: Arc::new(RwLock::new(Arc::new(headers))),
             extra,
             #[cfg(feature = "proto-openai-responses")]
             route,
@@ -256,7 +258,7 @@ impl Provider {
         }
     }
 
-    fn headers(&self) -> HeaderMap {
+    fn headers(&self) -> Arc<HeaderMap> {
         match self.headers.read() {
             Ok(h) => h.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
@@ -264,15 +266,26 @@ impl Provider {
     }
 
     /// The headers for one request, with a current token for a signed-in provider.
-    async fn request_headers(&self) -> Result<HeaderMap, ProviderError> {
+    async fn request_headers(&self) -> Result<RequestHeaders, ProviderError> {
         #[cfg(feature = "auth-chatgpt")]
         if let Some(login) = &self.login {
-            let mut h = self.headers();
+            let mut h = (*self.headers()).clone();
             let token = login.bearer().await?;
             insert_header(&mut h, "Authorization", &format!("Bearer {token}"), true)?;
-            return Ok(h);
+            return Ok(RequestHeaders::Owned(h));
         }
-        Ok(self.headers())
+        Ok(RequestHeaders::Shared(self.headers()))
+    }
+
+    fn has_login(&self) -> bool {
+        #[cfg(feature = "auth-chatgpt")]
+        {
+            self.login.is_some()
+        }
+        #[cfg(not(feature = "auth-chatgpt"))]
+        {
+            false
+        }
     }
 
     /// Whether the history should only ever grow: per-request text (the plan reminder) is
@@ -328,9 +341,9 @@ impl Provider {
 
     async fn get_json_at(&self, url: String) -> Result<serde_json::Value, ProviderError> {
         let resp = self
-            .client
-            .get(url)
-            .headers(self.request_headers().await?)
+            .request_headers()
+            .await?
+            .apply(self.client.get(url))
             .timeout(self.discovery_timeout())
             .send()
             .await
@@ -389,9 +402,10 @@ impl Provider {
     #[cfg(feature = "proto-ollama")]
     async fn ollama_show(&self, model: &str) -> Option<u32> {
         let resp = self
-            .client
-            .post(self.url(ollama::SHOW_PATH))
-            .headers(self.request_headers().await.ok()?)
+            .request_headers()
+            .await
+            .ok()?
+            .apply(self.client.post(self.url(ollama::SHOW_PATH)))
             .timeout(self.discovery_timeout())
             .json(&serde_json::json!({ "model": model }))
             .send()
@@ -468,20 +482,33 @@ impl Provider {
             ),
         };
         let mut attempt = 0;
+        // A plain header set never changes mid-turn, so every retry reuses the first clone;
+        // a signed-in provider refreshes its token per attempt.
+        let mut shared: Option<RequestHeaders> = None;
         let resp = loop {
-            let headers = match self.request_headers().await {
-                Ok(h) => h,
-                Err(e) => {
-                    let _ = tx.send(Err(e)).await;
-                    return;
+            let headers = match &mut shared {
+                Some(h) => h.clone(),
+                None => {
+                    let h = match self.request_headers().await {
+                        Ok(h) => h,
+                        Err(e) => {
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+                    };
+                    if !self.has_login() {
+                        shared = Some(h.clone());
+                    }
+                    h
                 }
             };
-            let send = self
-                .client
-                .post(self.url(&path))
-                .headers(headers)
-                .header(reqwest::header::ACCEPT, accept)
-                .json(&body)
+            let send = headers
+                .apply(
+                    self.client
+                        .post(self.url(&path))
+                        .header(reqwest::header::ACCEPT, accept)
+                        .json(&body),
+                )
                 .send();
             let first_byte = self.first_byte_timeout(attempt);
             let result = match tokio::time::timeout(first_byte, send).await {
@@ -530,6 +557,9 @@ impl Provider {
             ),
         };
         let mut bytes = resp.bytes_stream();
+        // Reused across chunks, so a chunk costs no allocation of its own.
+        let mut frames: Vec<String> = Vec::new();
+        let mut parsed: Vec<Parsed> = Vec::new();
         while let Some(chunk) = bytes.next().await {
             let chunk = match chunk {
                 Ok(c) => c,
@@ -538,7 +568,8 @@ impl Provider {
                     return;
                 }
             };
-            for parsed in wire.feed(&chunk) {
+            wire.feed(&chunk, &mut frames, &mut parsed);
+            for parsed in parsed.drain(..) {
                 if !forward(parsed, tx).await {
                     return;
                 }
@@ -592,22 +623,61 @@ enum Wire {
 
 type Parsed = Result<Vec<StreamEvent>, ProviderError>;
 
-impl Wire {
-    fn feed(&mut self, bytes: &[u8]) -> Vec<Parsed> {
+/// One request's headers: the shared set, or a per-request one with a fresh token.
+#[derive(Clone)]
+enum RequestHeaders {
+    Shared(Arc<HeaderMap>),
+    /// Only a signed-in provider builds a per-request map.
+    #[cfg_attr(not(feature = "auth-chatgpt"), allow(dead_code))]
+    Owned(HeaderMap),
+}
+
+impl RequestHeaders {
+    /// Apply to a request. Per-header iteration visits the same names in the same order
+    /// as `RequestBuilder::headers` would, so the wire bytes are unchanged.
+    fn apply(self, mut rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match self {
-            Self::Sse(d, p) => d.feed(bytes).iter().map(|x| p.parse(x)).collect(),
+            Self::Owned(m) => rb.headers(m),
+            Self::Shared(m) => {
+                for (name, value) in m.iter() {
+                    rb = rb.header(name, value.clone());
+                }
+                rb
+            }
+        }
+    }
+}
+
+impl Wire {
+    fn feed(&mut self, bytes: &[u8], frames: &mut Vec<String>, out: &mut Vec<Parsed>) {
+        match self {
+            Self::Sse(d, p) => {
+                d.feed(bytes, frames);
+                out.extend(frames.drain(..).map(|x| p.parse(&x)));
+            }
             #[cfg(feature = "proto-ollama")]
-            Self::Lines(d, p) => d.feed(bytes).iter().map(|x| p.parse(x)).collect(),
+            Self::Lines(d, p) => {
+                d.feed(bytes, frames);
+                out.extend(frames.drain(..).map(|x| p.parse(&x)));
+            }
         }
     }
 
     /// End of stream: trailing frames, then text the parser still holds.
     fn finish(&mut self) -> Vec<Parsed> {
-        let mut out: Vec<Parsed> = match self {
-            Self::Sse(d, p) => d.finish().iter().map(|x| p.parse(x)).collect(),
+        let mut out: Vec<Parsed> = Vec::new();
+        let mut frames: Vec<String> = Vec::new();
+        match self {
+            Self::Sse(d, p) => {
+                d.finish(&mut frames);
+                out.extend(frames.drain(..).map(|x| p.parse(&x)));
+            }
             #[cfg(feature = "proto-ollama")]
-            Self::Lines(d, p) => d.finish().iter().map(|x| p.parse(x)).collect(),
-        };
+            Self::Lines(d, p) => {
+                frames.extend(d.finish());
+                out.extend(frames.drain(..).map(|x| p.parse(&x)));
+            }
+        }
         out.push(Ok(match self {
             Self::Sse(_, p) => p.finish(),
             #[cfg(feature = "proto-ollama")]
@@ -649,7 +719,10 @@ async fn check_status(resp: reqwest::Response) -> Result<reqwest::Response, Prov
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map(Duration::from_secs);
-    let body = resp.text().await.unwrap_or_default();
+    let body = match resp.text().await {
+        Ok(b) => b,
+        Err(e) => format!("<body unreadable: {e}>"),
+    };
     Err(ProviderError::from_status(
         status.as_u16(),
         retry_after,

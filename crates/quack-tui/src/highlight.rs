@@ -30,6 +30,9 @@ pub(crate) struct Highlights {
     pending: HashSet<u64>,
     tx: mpsc::UnboundedSender<Done>,
     rx: Option<mpsc::UnboundedReceiver<Done>>,
+    /// Bumped whenever a block's runs change, so the transcript layout cache can tell
+    /// rendered rows that used plain blocks apart from rows that could use them now.
+    version: u64,
 }
 
 fn key(lang: &str, code: &str) -> u64 {
@@ -47,7 +50,13 @@ impl Highlights {
             pending: HashSet::new(),
             tx,
             rx: Some(rx),
+            version: 0,
         }
+    }
+
+    /// How many times highlighted blocks have changed since the start.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// Where results from the blocking thread arrive; the event loop takes it once.
@@ -60,6 +69,7 @@ impl Highlights {
         self.grammars = grammars;
         self.ready.clear();
         self.pending.clear();
+        self.version = self.version.wrapping_add(1);
     }
 
     /// The runs for a block, if they are ready.
@@ -82,6 +92,7 @@ impl Highlights {
             }
             if self.ready.len() >= KEEP {
                 self.ready.clear();
+                self.version = self.version.wrapping_add(1);
             }
             let handle = tokio::runtime::Handle::try_current();
             match handle {
@@ -96,6 +107,7 @@ impl Highlights {
                 _ => {
                     if let Some(runs) = self.grammars.highlight(lang, &code) {
                         self.ready.insert(k, Arc::new(runs));
+                        self.version = self.version.wrapping_add(1);
                         changed = true;
                     }
                 }
@@ -110,6 +122,7 @@ impl Highlights {
             && let Some(runs) = runs
         {
             self.ready.insert(k, runs);
+            self.version = self.version.wrapping_add(1);
         }
     }
 }

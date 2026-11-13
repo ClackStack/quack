@@ -7,30 +7,34 @@ pub struct SseDecoder {
 }
 
 impl SseDecoder {
-    /// Feed raw bytes; returns the payloads of every event completed by them.
-    pub fn feed(&mut self, bytes: &[u8]) -> Vec<String> {
+    /// Feed raw bytes; collects the payloads of every event completed by them into `out`.
+    pub fn feed(&mut self, bytes: &[u8], out: &mut Vec<String>) {
         self.buf.extend_from_slice(bytes);
-        let mut out = Vec::new();
-        while let Some(nl) = self.buf.iter().position(|&b| b == b'\n') {
-            let mut line: Vec<u8> = self.buf.drain(..=nl).collect();
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
+        // Slice lines out by read offset and drain once, instead of one drain per line.
+        let mut pos = 0;
+        while let Some(nl) = self.buf[pos..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|i| pos + i)
+        {
+            let mut end = nl;
+            if end > pos && self.buf[end - 1] == b'\r' {
+                end -= 1;
             }
-            self.line(&String::from_utf8_lossy(&line), &mut out);
+            let line = String::from_utf8_lossy(&self.buf[pos..end]).into_owned();
+            self.line(&line, out);
+            pos = nl + 1;
         }
-        out
+        self.buf.drain(..pos);
     }
 
-    /// Flush an event left unterminated at end of stream.
-    pub fn finish(&mut self) -> Vec<String> {
-        let mut out = Vec::new();
+    /// Collect an event left unterminated at end of stream into `out`.
+    pub fn finish(&mut self, out: &mut Vec<String>) {
         if !self.buf.is_empty() {
             let rest = String::from_utf8_lossy(&std::mem::take(&mut self.buf)).into_owned();
-            self.line(rest.trim_end_matches('\r'), &mut out);
+            self.line(rest.trim_end_matches('\r'), out);
         }
-        self.line("", &mut out);
-        out
+        self.line("", out);
     }
 
     fn line(&mut self, line: &str, out: &mut Vec<String>) {
@@ -52,14 +56,25 @@ impl SseDecoder {
 mod tests {
     use super::*;
 
+    fn feed(d: &mut SseDecoder, bytes: &[u8]) -> Vec<String> {
+        let mut out = Vec::new();
+        d.feed(bytes, &mut out);
+        out
+    }
+
     #[test]
     fn splits_across_chunks_and_line_endings() {
         let mut d = SseDecoder::default();
-        assert!(d.feed(b": keep-alive\n\nda").is_empty());
-        assert_eq!(d.feed(b"ta: {\"a\":1}\r\n\r\ndata: x\n"), vec!["{\"a\":1}"]);
-        assert_eq!(d.feed(b"data: y\n\n"), vec!["x\ny"]);
-        assert!(d.feed(b"data: [DONE]").is_empty());
-        assert_eq!(d.finish(), vec!["[DONE]"]);
+        assert!(feed(&mut d, b": keep-alive\n\nda").is_empty());
+        assert_eq!(
+            feed(&mut d, b"ta: {\"a\":1}\r\n\r\ndata: x\n"),
+            vec!["{\"a\":1}"]
+        );
+        assert_eq!(feed(&mut d, b"data: y\n\n"), vec!["x\ny"]);
+        assert!(feed(&mut d, b"data: [DONE]").is_empty());
+        let mut out = Vec::new();
+        d.finish(&mut out);
+        assert_eq!(out, vec!["[DONE]"]);
     }
 
     #[test]
@@ -67,7 +82,7 @@ mod tests {
         let mut d = SseDecoder::default();
         let s = "data: héllo\n\n".as_bytes();
         let (a, b) = s.split_at(8);
-        assert!(d.feed(a).is_empty());
-        assert_eq!(d.feed(b), vec!["héllo"]);
+        assert!(feed(&mut d, a).is_empty());
+        assert_eq!(feed(&mut d, b), vec!["héllo"]);
     }
 }

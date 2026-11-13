@@ -190,7 +190,7 @@ configuration and migration from older modes.
 ### Interface
 
 - **Full-screen Ratatui TUI**: Markdown formatting, syntax-highlighted code blocks, tables, and optional ASCII mode (`--ascii`).
-- **Wide-terminal sidebar**: At 140 columns × 24 rows and above, a right sidebar shows the session title, working folder, Git branch, model, profile, context usage and generation speed. It grows from 36 up to 48 columns on wider terminals and adapts as you resize; set `ui.sidebar = false` to disable it, or toggle it in `/config`.
+- **Wide-terminal sidebar**: At 140 columns × 24 rows and above, a right sidebar shows the session title, working folder, Git branch, running sub-agents, model, profile, context usage and generation speed. It grows from 36 up to 48 columns on wider terminals and adapts as you resize; set `ui.sidebar = false` to disable it, or toggle it in `/config`.
 - **Window title**: The terminal's title shows the duck and what the session is about (`_(•)> fix the login bug`), and marks when a turn runs or quack needs you. If `[model] small` is configured, quack makes one background request to title the session from the first message. The title also appears in `/resume`. The first line serves as the fallback, and `/title` sets it manually. `ui.terminal_title = false` turns it off.
 - **Smooth scrolling and selection**: Mouse wheel scrolling, click-to-position cursor, and OSC 52 terminal copy integration.
 - **Interactive pickers**: Fast, fuzzy-filtered modals for `/models`, `/providers`, `/config`, `/context`, `/stats`, `/doctor`, and `/help`. In `/config` → Layers, inspect each layer’s status and file path, then press Enter to copy the selected path.

@@ -47,7 +47,8 @@ fn spawner(root: &Path, base_url: &str) -> Spawn {
     Arc::new(move |start: SessionStart| {
         let mut opts = LoadOptions::new(start.cwd);
         opts.mcp = start.mcp;
-        let loaded = load_with(&|k| vars.get(k).cloned(), &opts).map_err(|e| e.to_string())?;
+        let loaded = load_with(&|k| vars.get(k).cloned(), &opts)
+            .map_err(|e| quack_acp::SessionError::Other(e.to_string()))?;
         Ok(Engine::spawn_with(Arc::new(loaded), start.resume))
     })
 }

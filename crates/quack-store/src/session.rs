@@ -4,8 +4,9 @@
 //! `events.jsonl`. Every line is `{"v":1,"t":"<type>","ts":"…", …payload}`. The store
 //! does not interpret payloads; the engine owns their meaning.
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -52,18 +53,18 @@ impl ProjectSessions {
         let Ok(f) = File::open(self.index_path()) else {
             return Vec::new();
         };
-        let mut by_id: Vec<IndexEntry> = Vec::new();
-        for line in BufReader::new(f).lines().map_while(Result::ok) {
+        // Keep the last write per id, remembering its line, to break ties within a second
+        // (later line = later write, first among equal `updated`).
+        let mut by_id: HashMap<String, (usize, IndexEntry)> = HashMap::new();
+        for (line_no, line) in BufReader::new(f).lines().map_while(Result::ok).enumerate() {
             let Ok(e) = serde_json::from_str::<IndexEntry>(&line) else {
                 continue;
             };
-            // Keep entries in order of their last write, to break ties within a second.
-            by_id.retain(|x| x.id != e.id);
-            by_id.push(e);
+            by_id.insert(e.id.clone(), (line_no, e));
         }
-        by_id.reverse();
-        by_id.sort_by_key(|e| std::cmp::Reverse(e.updated));
-        by_id
+        let mut entries: Vec<(usize, IndexEntry)> = by_id.into_values().collect();
+        entries.sort_by(|a, b| b.1.updated.cmp(&a.1.updated).then(b.0.cmp(&a.0)));
+        entries.into_iter().map(|(_, e)| e).collect()
     }
 
     /// Find by exact id or unique prefix.
@@ -91,7 +92,9 @@ impl ProjectSessions {
             .create(true)
             .append(true)
             .open(self.index_path())?;
-        writeln!(f, "{}", serde_json::to_string(e).unwrap_or_default())
+        let line = serde_json::to_string(e)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        writeln!(f, "{line}")
     }
 
     /// Start a new session log.
@@ -176,7 +179,9 @@ pub fn append_history_file(path: &Path, text: &str) -> std::io::Result<()> {
     }
     let mut f = File::create(path)?;
     for entry in &all {
-        writeln!(f, "{}", serde_json::to_string(entry).unwrap_or_default())?;
+        let line = serde_json::to_string(entry)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        writeln!(f, "{line}")?;
     }
     Ok(())
 }
@@ -219,12 +224,21 @@ pub fn read_events(path: &Path) -> std::io::Result<Vec<Record>> {
     Ok(out)
 }
 
-/// An open session log. Each append is flushed; `sync` fsyncs (end of turn).
+/// Serialize one record and buffer it as a JSONL line. Serialization failures are
+/// surfaced as [`std::io::ErrorKind::InvalidData`] instead of writing a blank line.
+fn write_line<W: Write>(w: &mut W, record: &Value) -> std::io::Result<()> {
+    let mut line = serde_json::to_string(record)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    line.push('\n');
+    w.write_all(line.as_bytes())
+}
+
+/// An open session log. Appends are buffered; `sync` flushes and fsyncs (end of turn).
 #[derive(Debug)]
 pub struct SessionLog {
     project: ProjectSessions,
     pub entry: IndexEntry,
-    file: File,
+    file: BufWriter<File>,
 }
 
 impl SessionLog {
@@ -232,9 +246,10 @@ impl SessionLog {
         let path = dir.join("events.jsonl");
         // A crash can leave a partial last line; end it so the next record starts clean.
         let torn = std::fs::read(&path).is_ok_and(|b| b.last().is_some_and(|&c| c != b'\n'));
-        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut file = BufWriter::new(OpenOptions::new().create(true).append(true).open(&path)?);
         if torn {
             file.write_all(b"\n")?;
+            file.flush()?;
         }
         Ok(Self {
             project,
@@ -252,10 +267,12 @@ impl SessionLog {
     pub fn child(&self, name: &str) -> std::io::Result<SessionLog> {
         let dir = self.dir().join("agents");
         std::fs::create_dir_all(&dir)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join(format!("{name}.jsonl")))?;
+        let file = BufWriter::new(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join(format!("{name}.jsonl")))?,
+        );
         Ok(Self {
             project: self.project.clone(),
             entry: self.entry.clone(),
@@ -269,13 +286,19 @@ impl SessionLog {
         m.insert("v".into(), Value::from(FORMAT_VERSION));
         m.insert("t".into(), Value::from(kind));
         m.insert("ts".into(), Value::from(time::rfc3339(time::unix_now())));
-        if let Ok(Value::Object(fields)) = serde_json::to_value(payload) {
-            m.extend(fields);
+        match serde_json::to_value(payload) {
+            Ok(Value::Object(fields)) => m.extend(fields),
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "session payload did not serialize to a JSON object",
+                ));
+            }
+            Err(e) => {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+            }
         }
-        let mut line = serde_json::to_string(&Value::Object(m)).unwrap_or_default();
-        line.push('\n');
-        self.file.write_all(line.as_bytes())?;
-        self.file.flush()
+        write_line(&mut self.file, &Value::Object(m))
     }
 
     /// Append a record read from another log, keeping its time (`/fork`).
@@ -285,15 +308,13 @@ impl SessionLog {
         m.insert("t".into(), Value::from(r.kind.as_str()));
         m.insert("ts".into(), Value::from(r.ts.as_str()));
         m.extend(r.data.clone());
-        let mut line = serde_json::to_string(&Value::Object(m)).unwrap_or_default();
-        line.push('\n');
-        self.file.write_all(line.as_bytes())?;
-        self.file.flush()
+        write_line(&mut self.file, &Value::Object(m))
     }
 
     /// Durably store everything so far and update the index (end of each turn).
     pub fn sync(&mut self, title: Option<&str>, turns: u32) -> std::io::Result<()> {
-        self.file.sync_data()?;
+        self.file.flush()?;
+        self.file.get_ref().sync_data()?;
         self.entry.updated = time::unix_now();
         self.entry.turns = turns;
         if let Some(t) = title {
@@ -370,6 +391,8 @@ mod tests {
         again
             .append("usage", serde_json::json!({"prompt_tokens": 3}))
             .expect("append");
+        // Appends are buffered; they reach the file at sync (end of turn).
+        again.sync(None, 2).expect("sync");
         let recs = ps.read(&entry).expect("read");
         assert_eq!(recs.len(), 2);
         assert_eq!(recs[1].kind, "usage");

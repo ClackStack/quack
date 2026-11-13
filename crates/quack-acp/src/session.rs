@@ -7,13 +7,14 @@ use std::time::Duration;
 use quack_core::EngineHandle;
 use quack_protocol::{
     ApprovalDecision, ApprovalPolicy, ApprovalRequest, CallId, Event, InputItem, LoadState,
-    ModelId, Op, ProviderId, ProviderModels, Subsystem, TurnOverrides, WriteScope,
+    ModelId, Op, PermissionMode, ProviderId, ProviderModels, Subsystem, TurnOverrides, WriteScope,
 };
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::SessionError;
 use crate::convert::{self, chunk, text_content, tool_content};
 use crate::rpc::{Peer, RpcError};
 use crate::wire::{PermissionOutcome, PermissionResponse};
@@ -85,7 +86,7 @@ pub(crate) async fn wait_for<T>(
     engine: &mut EngineHandle,
     startup: &mut Startup,
     mut want: impl FnMut(&Event) -> Option<T>,
-) -> Result<T, String> {
+) -> Result<T, SessionError> {
     let wait = async {
         loop {
             match engine.events.recv().await {
@@ -96,13 +97,13 @@ pub(crate) async fn wait_for<T>(
                     }
                 }
                 Err(RecvError::Lagged(_)) => {}
-                Err(RecvError::Closed) => return Err("the engine stopped".to_owned()),
+                Err(RecvError::Closed) => return Err(SessionError::EngineStopped),
             }
         }
     };
     tokio::time::timeout(OPEN_TIMEOUT, wait)
         .await
-        .unwrap_or_else(|_| Err("the session did not open within a minute".to_owned()))
+        .unwrap_or_else(|_| Err(SessionError::Timeout))
 }
 
 fn mcp_settled(e: &Event) -> bool {
@@ -222,7 +223,10 @@ impl Run {
                 }
             }
             Cmd::Mode(mode) => {
-                let _ = self.ops.send(Op::SetPermissionMode { mode }).await;
+                // Editors pick from the offered mode ids; anything else has no meaning.
+                if let Ok(mode) = mode.parse::<PermissionMode>() {
+                    let _ = self.ops.send(Op::SetPermissionMode { mode }).await;
+                }
             }
             Cmd::Approvals { value, reply } => {
                 let result = match serde_json::from_value::<ApprovalPolicy>(json!(value)) {

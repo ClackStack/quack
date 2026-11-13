@@ -119,7 +119,10 @@ pub(crate) fn info(manager: &LspManager) -> Vec<LspServerInfo> {
             id: s.id,
             command: s.command,
             extensions: s.extensions,
-            state: s.state,
+            state: s
+                .state
+                .parse()
+                .unwrap_or(quack_protocol::LspServerState::Idle),
             detail: s.detail,
             root: s
                 .root

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use common::{bodies, sse_call, sse_text, turn};
 use quack_core::Engine;
 use quack_core::protocol::{
-    ApprovalDecision, ApprovalRequest, Event, InputItem, Op, TurnOverrides,
+    ApprovalDecision, ApprovalRequest, Event, InputItem, Op, PermissionMode, TurnOverrides,
 };
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer};
@@ -93,7 +93,7 @@ async fn edit_reports_diagnostics(sandbox: bool) {
     let mut engine = Engine::spawn(Arc::new(loaded));
     engine
         .submit(Op::SetPermissionMode {
-            mode: "full-auto".into(),
+            mode: PermissionMode::Allow,
         })
         .await;
     turn(&mut engine, "break it").await;

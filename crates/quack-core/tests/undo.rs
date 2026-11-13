@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::{bodies, sse_call, sse_text, turn};
 use quack_core::Engine;
-use quack_core::protocol::{Event, Op};
+use quack_core::protocol::{Event, Op, PermissionMode};
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer};
 
@@ -40,7 +40,7 @@ async fn undo_reverts_the_last_edit_and_tells_the_model() {
     let mut engine = Engine::spawn(Arc::new(loaded));
     engine
         .submit(Op::SetPermissionMode {
-            mode: "full-auto".into(),
+            mode: PermissionMode::Allow,
         })
         .await;
     turn(&mut engine, "first").await;

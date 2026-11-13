@@ -90,7 +90,7 @@ pub async fn run(
                     let r = client
                         .request("textDocument/definition", params, REQUEST_TIMEOUT)
                         .await?;
-                    Ok(locations(&client, &r, display, "No definition found."))
+                    Ok(locations(&client, &r, display, "No definition found.").await)
                 }
                 Operation::References => {
                     need(&client, "referencesProvider", "references")?;
@@ -99,7 +99,7 @@ pub async fn run(
                     let r = client
                         .request("textDocument/references", params, REQUEST_TIMEOUT)
                         .await?;
-                    Ok(locations(&client, &r, display, "No references found."))
+                    Ok(locations(&client, &r, display, "No references found.").await)
                 }
                 _ => {
                     need(&client, "hoverProvider", "hover")?;
@@ -380,7 +380,7 @@ fn location(v: &Value) -> Option<(PathBuf, u32, u32)> {
     ))
 }
 
-fn locations(client: &Client, r: &Value, display: Display<'_>, none: &str) -> String {
+async fn locations(client: &Client, r: &Value, display: Display<'_>, none: &str) -> String {
     let items: Vec<&Value> = match r {
         Value::Array(a) => a.iter().collect(),
         Value::Object(_) => vec![r],
@@ -395,23 +395,26 @@ fn locations(client: &Client, r: &Value, display: Display<'_>, none: &str) -> St
     let total = found.len();
     let mut out = Vec::new();
     let mut current: Option<PathBuf> = None;
-    let mut text_cache: Option<(PathBuf, Vec<String>)> = None;
+    let mut text_cache: Option<(PathBuf, String)> = None;
     for (path, line, col) in found.into_iter().take(MAX_LOCATIONS) {
         if current.as_ref() != Some(&path) {
             out.push(display(&path));
             current = Some(path.clone());
         }
         if text_cache.as_ref().is_none_or(|(p, _)| *p != path) {
-            let lines = std::fs::read_to_string(&path)
-                .map(|t| t.lines().map(str::to_owned).collect())
+            let read_path = path.clone();
+            let text = tokio::task::spawn_blocking(move || std::fs::read_to_string(&read_path))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
                 .unwrap_or_default();
-            text_cache = Some((path.clone(), lines));
+            text_cache = Some((path.clone(), text));
         }
         let text = text_cache
             .as_ref()
-            .and_then(|(_, l)| l.get(line as usize).cloned())
+            .and_then(|(_, t)| t.lines().nth(line as usize))
             .unwrap_or_default();
-        let ch = client.encoding().from_lsp(&text, col);
+        let ch = client.encoding().from_lsp(text, col);
         out.push(format!(
             "  {}:{}: {}",
             line + 1,
