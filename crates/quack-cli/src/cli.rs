@@ -122,6 +122,11 @@ pub(crate) enum Cmd {
     /// Add a provider (a server on this machine, a hosted service, or a URL) and pick the
     /// default model.
     Setup,
+    /// List, add, enable, or disable MCP servers.
+    Mcp {
+        #[command(subcommand)]
+        cmd: McpCmd,
+    },
     /// The catalog of model prices and context windows.
     Catalog {
         #[command(subcommand)]
@@ -230,6 +235,71 @@ impl From<TrustArg> for quack_config::TrustDecision {
             TrustArg::Ignored => Self::Ignored,
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum McpCmd {
+    /// List configured MCP servers and bundled disabled examples.
+    List,
+    /// Add a local stdio or remote HTTP MCP server (interactive without `--url` / `--`).
+    Add(McpAddArgs),
+    /// Enable a bundled example or disabled MCP server by id.
+    Enable {
+        /// Server id (see `quack mcp list`).
+        id: String,
+    },
+    /// Disable an MCP server without deleting its config.
+    Disable {
+        /// Server id.
+        id: String,
+    },
+    /// Remove a user or project MCP server TOML file.
+    Remove {
+        /// Server id.
+        id: String,
+        /// Remove only from workspace `.quack/mcp.d/`.
+        #[arg(long)]
+        project: bool,
+    },
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct McpAddArgs {
+    /// Server id (`[A-Za-z0-9_-]+`); derived from the URL or command if omitted.
+    pub id: Option<String>,
+    /// Remote streamable HTTP endpoint (`https://...` or `http://...`).
+    #[arg(long)]
+    pub url: Option<String>,
+    /// HTTP header (`Name: Value`, `Name=env:VAR`, or `Name=Bearer {env:VAR}`). Repeatable.
+    #[arg(long = "header", value_name = "HEADER")]
+    pub headers: Vec<String>,
+    /// Stdio env var (`KEY=VALUE`, `KEY=env:HOST_VAR`, or `KEY` forwarded from host env).
+    #[arg(short = 'e', long = "env", value_name = "ENV")]
+    pub envs: Vec<String>,
+    /// Short description shown in `quack mcp list` and `/mcp`.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Tool name globs to auto-approve (`*`, `read_*`, ...). Repeatable or comma-separated.
+    #[arg(long, value_delimiter = ',')]
+    pub auto_approve: Vec<String>,
+    /// Startup timeout in seconds.
+    #[arg(long)]
+    pub startup_timeout_secs: Option<u64>,
+    /// Run a local stdio server inside the OS sandbox.
+    #[arg(long)]
+    pub sandbox: bool,
+    /// Working directory for a stdio server.
+    #[arg(long)]
+    pub cwd: Option<String>,
+    /// Write to `.quack/mcp.d/` in the workspace instead of user config.
+    #[arg(long)]
+    pub project: bool,
+    /// Overwrite an existing file with the same id.
+    #[arg(long)]
+    pub force: bool,
+    /// Local command and arguments for a stdio server (after `--`), e.g. `-- npx -y @playwright/mcp@latest`.
+    #[arg(last = true, value_name = "COMMAND")]
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]

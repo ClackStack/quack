@@ -62,6 +62,8 @@ pub struct AppInfo {
     pub hooks: Vec<quack_config::Item<quack_config::HookFile>>,
     /// `[hooks] disabled` as configured, including names not installed.
     pub hooks_disabled: Vec<String>,
+    /// Configured and bundled MCP servers, for `/mcp`.
+    pub mcp_items: Vec<quack_config::McpSummary>,
     /// Prompt history loaded for this project at startup.
     pub history: Vec<String>,
     /// Where new prompt history entries for this project are appended.
@@ -99,6 +101,7 @@ impl AppInfo {
             bundles_disabled: config.settings.bundles.disabled.clone(),
             hooks: quack_config::load_hooks(config),
             hooks_disabled: config.settings.hooks.disabled.clone(),
+            mcp_items: config.mcp_summaries(),
             history,
             history_path: Some(history_path),
             rules: {
@@ -434,6 +437,20 @@ enum PromptThen {
     NewKey {
         id: String,
     },
+    McpTransport,
+    McpHttpUrl,
+    McpHttpId {
+        url: String,
+    },
+    McpHttpAuth {
+        id: String,
+        url: String,
+    },
+    McpStdioCmd,
+    McpStdioId {
+        command: String,
+        args: Vec<String>,
+    },
 }
 
 /// Never shows the text: it may be a key.
@@ -450,7 +467,11 @@ impl Prompt {
     /// What Enter does: send the answer, or ask the next question.
     pub(crate) fn enter_does(&self) -> &'static str {
         match self.then {
-            PromptThen::ServerUrl => "next",
+            PromptThen::ServerUrl
+            | PromptThen::McpTransport
+            | PromptThen::McpHttpUrl
+            | PromptThen::McpHttpId { .. }
+            | PromptThen::McpStdioCmd => "next",
             PromptThen::NewKey { .. } => "replace",
             _ => "add",
         }
@@ -551,6 +572,102 @@ impl Prompt {
             text: String::new(),
             error: None,
             then: PromptThen::ServiceKey { id: id.to_owned() },
+        }
+    }
+
+    fn mcp_transport() -> Self {
+        Self {
+            title: "Add an MCP server".into(),
+            label: "Transport (1 = remote HTTP, 2 = local command)".into(),
+            help: vec![
+                "Choose `1` / `http` for a remote endpoint URL (e.g. Context7, Roost), or \
+                 `2` / `stdio` for a local process (e.g. npx, uvx)."
+                    .into(),
+            ],
+            secret: false,
+            text: String::new(),
+            error: None,
+            then: PromptThen::McpTransport,
+        }
+    }
+
+    fn mcp_http_url() -> Self {
+        Self {
+            title: "Add remote MCP server · 1 of 3".into(),
+            label: "Endpoint URL".into(),
+            help: vec![
+                "Must start with http:// or https://, e.g. https://mcp.context7.com/mcp".into(),
+            ],
+            secret: false,
+            text: String::new(),
+            error: None,
+            then: PromptThen::McpHttpUrl,
+        }
+    }
+
+    fn mcp_http_id(url: String) -> Self {
+        let suggested = quack_config::derive_mcp_id_from_url(&url);
+        let hint = match &suggested {
+            Some(s) => format!(
+                "Leave empty to use `{s}`, or enter a custom id (letters, digits, `-`, `_`)."
+            ),
+            None => "Enter a short id using ASCII letters, digits, `-`, or `_`.".into(),
+        };
+        Self {
+            title: "Add remote MCP server · 2 of 3".into(),
+            label: "Server id".into(),
+            help: vec![hint],
+            secret: false,
+            text: suggested.unwrap_or_default(),
+            error: None,
+            then: PromptThen::McpHttpId { url },
+        }
+    }
+
+    fn mcp_http_auth(id: String, url: String) -> Self {
+        Self {
+            title: "Add remote MCP server · 3 of 3".into(),
+            label: "Bearer token or env:VAR (optional)".into(),
+            help: vec![
+                "Type env:VAR_NAME (for example env:ROOST_TOKEN), paste a Bearer token to store \
+                 in the OS credential store / key file, or press Enter for no auth header."
+                    .into(),
+            ],
+            secret: true,
+            text: String::new(),
+            error: None,
+            then: PromptThen::McpHttpAuth { id, url },
+        }
+    }
+
+    fn mcp_stdio_cmd() -> Self {
+        Self {
+            title: "Add local MCP server · 1 of 2".into(),
+            label: "Command and args".into(),
+            help: vec!["Example: npx -y @playwright/mcp@latest   or   uvx mcp-server-fetch".into()],
+            secret: false,
+            text: String::new(),
+            error: None,
+            then: PromptThen::McpStdioCmd,
+        }
+    }
+
+    fn mcp_stdio_id(command: String, args: Vec<String>) -> Self {
+        let suggested = quack_config::derive_mcp_id_from_command(&command, &args);
+        let hint = match &suggested {
+            Some(s) => format!(
+                "Leave empty to use `{s}`, or enter a custom id (letters, digits, `-`, `_`)."
+            ),
+            None => "Enter a short id using ASCII letters, digits, `-`, or `_`.".into(),
+        };
+        Self {
+            title: "Add local MCP server · 2 of 2".into(),
+            label: "Server id".into(),
+            help: vec![hint],
+            secret: false,
+            text: suggested.unwrap_or_default(),
+            error: None,
+            then: PromptThen::McpStdioId { command, args },
         }
     }
 }
@@ -1182,6 +1299,13 @@ impl App {
                             .keep_place(self.modal.as_ref()),
                     );
                 }
+                if self.modal.as_ref().is_some_and(|m| m.title == "MCP") {
+                    self.modal = Some(
+                        modal::mcp(None, &self.info.mcp_items, &self.theme)
+                            .keep_place(self.modal.as_ref()),
+                    );
+                    self.ops.push(Op::ListMcp);
+                }
             }
             Event::ProjectTrust {
                 path,
@@ -1335,8 +1459,14 @@ impl App {
             }
             Event::McpServers { servers } => {
                 if self.modal.as_ref().is_some_and(|m| m.title == "MCP") {
-                    self.modal = Some(modal::mcp(Some(&servers), &self.theme));
+                    self.modal = Some(
+                        modal::mcp(Some(&servers), &self.info.mcp_items, &self.theme)
+                            .keep_place(self.modal.as_ref()),
+                    );
                 }
+            }
+            Event::McpChanged { message, .. } => {
+                self.note(message);
             }
             Event::LspServers { servers } => {
                 if self.modal.as_ref().is_some_and(|m| m.title == "LSP") {
@@ -2335,10 +2465,27 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc => {
-                let back = !matches!(p.then, PromptThen::NewKey { .. });
+                let back_setup = matches!(
+                    p.then,
+                    PromptThen::ServerUrl
+                        | PromptThen::ServerKey { .. }
+                        | PromptThen::ServiceKey { .. }
+                );
+                let back_mcp = matches!(
+                    p.then,
+                    PromptThen::McpTransport
+                        | PromptThen::McpHttpUrl
+                        | PromptThen::McpHttpId { .. }
+                        | PromptThen::McpHttpAuth { .. }
+                        | PromptThen::McpStdioCmd
+                        | PromptThen::McpStdioId { .. }
+                );
                 self.prompt = None;
-                if back {
+                if back_setup {
                     self.open_setup();
+                } else if back_mcp {
+                    self.modal = Some(modal::mcp(None, &self.info.mcp_items, &self.theme));
+                    self.ops.push(Op::ListMcp);
                 }
             }
             KeyCode::Enter => self.answer_prompt(),
@@ -2406,6 +2553,100 @@ impl App {
                     key: SecretText(text),
                 });
                 None
+            }
+            PromptThen::McpTransport => match text.to_ascii_lowercase().as_str() {
+                "1" | "http" | "remote" | "url" => Some(Prompt::mcp_http_url()),
+                "2" | "stdio" | "local" | "cmd" => Some(Prompt::mcp_stdio_cmd()),
+                _ => retry(p, "enter `1` (remote HTTP) or `2` (local command)"),
+            },
+            PromptThen::McpHttpUrl if text.is_empty() => {
+                retry(p, "enter an http:// or https:// URL, or press esc")
+            }
+            PromptThen::McpHttpUrl
+                if !(text.starts_with("http://") || text.starts_with("https://")) =>
+            {
+                retry(p, "the URL must start with http:// or https://")
+            }
+            PromptThen::McpHttpUrl => Some(Prompt::mcp_http_id(text)),
+            PromptThen::McpHttpId { url } => {
+                let id = if text.is_empty() {
+                    quack_config::derive_mcp_id_from_url(url).unwrap_or_default()
+                } else {
+                    text
+                };
+                match quack_config::check_mcp_id(&id) {
+                    Ok(()) => Some(Prompt::mcp_http_auth(id, url.clone())),
+                    Err(e) => retry(p, &e),
+                }
+            }
+            PromptThen::McpHttpAuth { id, url } => {
+                if let Some(env_name) = text
+                    .strip_prefix("env:")
+                    .or_else(|| text.strip_prefix("ENV:"))
+                {
+                    let var = env_name.trim().to_owned();
+                    if var.is_empty() {
+                        retry(p, "enter an environment variable name after `env:`")
+                    } else {
+                        self.note(format!("adding MCP server `{id}`…"));
+                        self.ops.push(Op::AddMcp {
+                            id: id.clone(),
+                            url: url.clone(),
+                            command: String::new(),
+                            args: Vec::new(),
+                            bearer_env: Some(var),
+                            bearer_token: None,
+                        });
+                        None
+                    }
+                } else {
+                    self.note(format!("adding MCP server `{id}`…"));
+                    self.ops.push(Op::AddMcp {
+                        id: id.clone(),
+                        url: url.clone(),
+                        command: String::new(),
+                        args: Vec::new(),
+                        bearer_env: None,
+                        bearer_token: (!text.is_empty()).then_some(SecretText(text)),
+                    });
+                    None
+                }
+            }
+            PromptThen::McpStdioCmd if text.is_empty() => retry(
+                p,
+                "enter a command line (e.g. npx -y @playwright/mcp@latest)",
+            ),
+            PromptThen::McpStdioCmd => match quack_config::split_command_words(&text) {
+                Ok(parts) if !parts.is_empty() => {
+                    let mut iter = parts.into_iter();
+                    let command = iter.next().unwrap_or_default();
+                    let args = iter.collect();
+                    Some(Prompt::mcp_stdio_id(command, args))
+                }
+                Ok(_) => retry(p, "enter a command line"),
+                Err(e) => retry(p, &e),
+            },
+            PromptThen::McpStdioId { command, args } => {
+                let id = if text.is_empty() {
+                    quack_config::derive_mcp_id_from_command(command, args).unwrap_or_default()
+                } else {
+                    text
+                };
+                match quack_config::check_mcp_id(&id) {
+                    Ok(()) => {
+                        self.note(format!("adding MCP server `{id}`…"));
+                        self.ops.push(Op::AddMcp {
+                            id,
+                            url: String::new(),
+                            command: command.clone(),
+                            args: args.clone(),
+                            bearer_env: None,
+                            bearer_token: None,
+                        });
+                        None
+                    }
+                    Err(e) => retry(p, &e),
+                }
             }
         };
     }
@@ -3010,14 +3251,39 @@ impl App {
                 ));
                 self.ops.push(Op::ListModels);
             }
+            "mcp" if args.is_empty() => {
+                self.modal = Some(modal::mcp(None, &self.info.mcp_items, &self.theme));
+                self.ops.push(Op::ListMcp);
+            }
+            "mcp" if args == "add" => {
+                self.prompt = Some(Prompt::mcp_transport());
+            }
+            "mcp" if args == "add http" || args == "add remote" => {
+                self.prompt = Some(Prompt::mcp_http_url());
+            }
+            "mcp" if args == "add stdio" || args == "add local" => {
+                self.prompt = Some(Prompt::mcp_stdio_cmd());
+            }
+            "mcp" if args.starts_with("enable ") => {
+                let id = args["enable ".len()..].trim().to_owned();
+                self.note(format!("enabling MCP server {id}…"));
+                self.ops.push(Op::EnableMcp { id });
+            }
+            "mcp" if args.starts_with("disable ") => {
+                let id = args["disable ".len()..].trim().to_owned();
+                self.note(format!("disabling MCP server {id}…"));
+                self.ops.push(Op::DisableMcp { id });
+            }
             "mcp" if args.starts_with("restart ") => {
                 let id = args["restart ".len()..].trim().to_owned();
                 self.note(format!("restarting MCP server {id}…"));
                 self.ops.push(Op::RestartMcp { id });
             }
             "mcp" => {
-                self.modal = Some(modal::mcp(None, &self.theme));
-                self.ops.push(Op::ListMcp);
+                self.note(
+                    "usage: /mcp [add [http|stdio] | enable <id> | disable <id> | restart <id>]"
+                        .into(),
+                );
             }
             "lsp" => {
                 self.modal = Some(modal::lsp(None, &self.theme));
@@ -3588,6 +3854,7 @@ mod tests {
             bundles_disabled: Vec::new(),
             hooks: Vec::new(),
             hooks_disabled: Vec::new(),
+            mcp_items: Vec::new(),
             history: Vec::new(),
             history_path: None,
         }
@@ -4752,5 +5019,78 @@ mod tests {
             items: vec![],
         });
         assert_eq!(app.resume_id().as_deref(), Some("bbbbbbbbbbbb"));
+    }
+
+    #[test]
+    fn mcp_modal_enables_examples_disables_active_and_runs_add_prompts() {
+        let mut info = info();
+        info.mcp_items = vec![quack_config::McpSummary {
+            id: "context7".into(),
+            layer: quack_config::LayerKind::Defaults,
+            path: "/tmp/defaults/mcp.d/context7.toml".into(),
+            enabled: false,
+            disabled_reason: Some("enabled = false".into()),
+            parse_error: None,
+            description: "Library docs".into(),
+            transport: "http".into(),
+            target: "https://mcp.context7.com/mcp".into(),
+            env_vars: Vec::new(),
+        }];
+
+        let mut app = App::new(info);
+        type_str(&mut app, "/mcp");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![Op::ListMcp]);
+
+        // With no active servers yet, the modal shows the bundled example and Enter enables it.
+        app.on_engine(Event::McpServers {
+            servers: Vec::new(),
+        });
+        assert_eq!(app.modal.as_ref().map(|m| m.title.as_str()), Some("MCP"));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::EnableMcp {
+                id: "context7".into(),
+            }]
+        );
+
+        // Remote HTTP add prompt: URL -> ID (prefilled) -> env:ROOST_TOKEN.
+        type_str(&mut app, "/mcp add http");
+        press(&mut app, KeyCode::Enter);
+        type_str(&mut app, "https://roost.internal:8484/mcp");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+        type_str(&mut app, "env:ROOST_TOKEN");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::AddMcp {
+                id: "roost".into(),
+                url: "https://roost.internal:8484/mcp".into(),
+                command: String::new(),
+                args: Vec::new(),
+                bearer_env: Some("ROOST_TOKEN".into()),
+                bearer_token: None,
+            }]
+        );
+
+        // Local stdio add prompt: command -> prefilled id -> Op::AddMcp.
+        type_str(&mut app, "/mcp add stdio");
+        press(&mut app, KeyCode::Enter);
+        type_str(&mut app, "npx -y @playwright/mcp@latest");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::AddMcp {
+                id: "playwright".into(),
+                url: String::new(),
+                command: "npx".into(),
+                args: vec!["-y".into(), "@playwright/mcp@latest".into()],
+                bearer_env: None,
+                bearer_token: None,
+            }]
+        );
     }
 }

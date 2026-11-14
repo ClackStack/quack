@@ -729,3 +729,227 @@ impl Tool for ReadResource {
         })
     }
 }
+
+pub(crate) struct AddMcpInput {
+    pub id: String,
+    pub url: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub bearer_env: Option<String>,
+    pub bearer_token: Option<String>,
+}
+
+/// Enable an MCP server on disk and return its path plus a summary with any unset env vars.
+pub(crate) fn enable_mcp_in_config_detail(
+    config: &Loaded,
+    id: &str,
+    env_exists: &dyn Fn(&str) -> bool,
+) -> Result<(std::path::PathBuf, String), String> {
+    let out = config.enable_mcp(id)?;
+    let missing: Vec<&str> = out
+        .env_vars
+        .iter()
+        .map(String::as_str)
+        .filter(|v| !env_exists(v))
+        .collect();
+    let msg = if missing.is_empty() {
+        format!("{} ({}); reloading…", out.action, out.file.display())
+    } else {
+        format!(
+            "{} ({}) — set {} in your environment if needed; reloading…",
+            out.action,
+            out.file.display(),
+            missing.join(", ")
+        )
+    };
+    Ok((out.file, msg))
+}
+
+/// Enable an MCP server on disk and summarize what changed plus any unset env vars.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn enable_mcp_in_config(
+    config: &Loaded,
+    id: &str,
+    env_exists: &dyn Fn(&str) -> bool,
+) -> Result<String, String> {
+    enable_mcp_in_config_detail(config, id, env_exists).map(|(_, msg)| msg)
+}
+
+/// Disable an MCP server on disk without removing its config.
+pub(crate) fn disable_mcp_in_config(config: &Loaded, id: &str) -> Result<String, String> {
+    let out = config.disable_mcp(id)?;
+    Ok(format!(
+        "{} ({}); reloading…",
+        out.action,
+        out.path.display()
+    ))
+}
+
+/// Write a new user-layer `mcp.d/<id>.toml` file and store any bearer secret safely.
+pub(crate) fn add_mcp_in_config(config: &Loaded, input: AddMcpInput) -> Result<String, String> {
+    use std::collections::BTreeMap;
+
+    use quack_config::{NewMcpServer, NewMcpTransport, Secret};
+
+    let transport = if !input.url.trim().is_empty() {
+        let mut headers = BTreeMap::new();
+        if let Some(env_var) = input
+            .bearer_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            headers.insert(
+                "Authorization".into(),
+                Secret::Env {
+                    env: env_var.to_owned(),
+                    format: Some("Bearer {}".into()),
+                },
+            );
+        } else if let Some(tok) = input
+            .bearer_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let secret = store_mcp_bearer(config, &input.id, tok)?;
+            headers.insert("Authorization".into(), secret);
+        }
+        NewMcpTransport::Http {
+            url: input.url.trim().to_owned(),
+            headers,
+        }
+    } else {
+        NewMcpTransport::Stdio {
+            command: input.command.trim().to_owned(),
+            args: input.args,
+            env: BTreeMap::new(),
+            cwd: None,
+            sandbox: None,
+        }
+    };
+
+    let spec = NewMcpServer {
+        id: input.id.clone(),
+        description: None,
+        transport,
+        auto_approve: Vec::new(),
+        startup_timeout_secs: None,
+        project: false,
+        overwrite: false,
+    };
+    let path = config.add_mcp_server(&spec)?;
+    Ok(format!(
+        "added MCP server `{}` ({}); reloading…",
+        input.id,
+        path.display()
+    ))
+}
+
+fn store_mcp_bearer(
+    config: &Loaded,
+    id: &str,
+    token: &str,
+) -> Result<quack_config::Secret, String> {
+    let header_val = if token.to_ascii_lowercase().starts_with("bearer ") {
+        token.to_owned()
+    } else {
+        format!("Bearer {token}")
+    };
+    let store_id = format!("mcp-{id}");
+    match crate::setup::key_store(config, &store_id)? {
+        (crate::setup::KeyStore::Keyring, _) => {
+            quack_config::keyring_set(&store_id, &header_val).map_err(|e| e.to_string())?;
+            Ok(quack_config::Secret::Keyring { keyring: store_id })
+        }
+        (crate::setup::KeyStore::File(path), _) => {
+            crate::setup::write_key_file(&path, &header_val)?;
+            Ok(quack_config::Secret::File {
+                file: path.display().to_string(),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod manage_tests {
+    use super::*;
+    use quack_config::{LoadOptions, load_with};
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        root: std::path::PathBuf,
+        vars: HashMap<String, OsString>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = tmp.path().to_path_buf();
+            std::fs::create_dir_all(root.join("repo")).expect("repo");
+            let mut vars = HashMap::new();
+            vars.insert(
+                "QUACK_DEFAULTS_DIR".into(),
+                root.join("defaults").into_os_string(),
+            );
+            vars.insert(
+                "QUACK_CONFIG_DIR".into(),
+                root.join("user").into_os_string(),
+            );
+            vars.insert("QUACK_DATA_DIR".into(), root.join("data").into_os_string());
+            Self {
+                _tmp: tmp,
+                root,
+                vars,
+            }
+        }
+
+        fn write(&self, rel: &str, text: &str) {
+            let path = self.root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, text).expect("write");
+        }
+
+        fn load(&self) -> Loaded {
+            let opts = LoadOptions::new(self.root.join("repo"));
+            let vars = self.vars.clone();
+            load_with(&move |k| vars.get(k).cloned(), &opts).expect("load")
+        }
+    }
+
+    #[test]
+    fn enable_disable_and_add_mcp_helpers_work_and_remind_missing_env() {
+        let f = Fixture::new();
+        f.write(
+            "defaults/mcp.d/roost.toml",
+            "enabled = false\n\
+             url = \"https://roost.internal:8484/mcp\"\n\
+             headers = { Authorization = { env = \"ROOST_TOKEN\", format = \"Bearer {}\" } }\n",
+        );
+
+        let msg = enable_mcp_in_config(&f.load(), "roost", &|_| false).expect("enable");
+        assert!(msg.contains("ROOST_TOKEN"), "{msg}");
+
+        let msg = disable_mcp_in_config(&f.load(), "roost").expect("disable");
+        assert!(msg.contains("disabled"), "{msg}");
+
+        let added = add_mcp_in_config(
+            &f.load(),
+            AddMcpInput {
+                id: "context7".into(),
+                url: "https://mcp.context7.com/mcp".into(),
+                command: String::new(),
+                args: Vec::new(),
+                bearer_env: Some("CONTEXT7_API_KEY".into()),
+                bearer_token: None,
+            },
+        )
+        .expect("add");
+        assert!(added.contains("context7"), "{added}");
+        let saved = std::fs::read_to_string(f.root.join("user/mcp.d/context7.toml")).expect("read");
+        assert!(saved.contains("https://mcp.context7.com/mcp"), "{saved}");
+        assert!(saved.contains("CONTEXT7_API_KEY"), "{saved}");
+    }
+}

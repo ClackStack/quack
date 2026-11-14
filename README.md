@@ -67,6 +67,7 @@ Evaluations consume plan allowance or API credit, depending on the provider.
 | `quack` | Launch interactive terminal UI |
 | `quack setup` | Terminal wizard to add providers and models |
 | `quack doctor` | Diagnose environment, sandbox, tools, and provider connections |
+| `quack mcp ...` | List, add, enable, disable, or remove MCP servers (`list`, `add`, `enable`, `disable`, `remove`) |
 | `quack exec "..."` | Run a single turn headlessly for scripts or CI pipelines |
 | `quack acp` | Start an Agent Client Protocol server for Zed, JetBrains, Neovim, or VS Code |
 | `quack-gui` | Open the desktop app (Tauri): the same engine in a window, one tab per folder |
@@ -88,7 +89,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 - **Smart context distillation**: Automatically folds passing test sequences (Cargo, Pytest, Go, Jest) and verbose build logs, keeping context compact and prompt caches warm.
 - **Transactional multi-file refactoring**: Atomic multi-file changes automatically roll back if any write fails. Revert edits instantly with `/undo` or `/rewind`.
 - **Plan with fewer prompts**: Plan + Allow reads and searches automatically, then presents proposed changes and test commands for review. Accepting the plan starts implementation with the same approval policy. A separate planner model is optional.
-- **Extensible with MCP & LSP**: Native Model Context Protocol (stdio & HTTP) support, background language servers for 10+ languages, sub-agents, and custom slash commands.
+- **Extensible with MCP & LSP**: Native Model Context Protocol (stdio & HTTP) support, background language servers for 10+ languages, sub-agents, generic standard Agent Skills (`SKILL.md`), and custom slash commands.
 - **Editor integration (ACP)**: Connect quack directly into your editor panel via the Agent Client Protocol.
 - **Desktop app**: `quack-gui` opens the same engine in a native window — first-run provider setup (API keys or browser subscription sign-in), project trust, a clickable **Network & Sandbox Boundary** header passport with strict-offline toggle, streamed transcript with tree-sitter fenced code highlighting and inline headings, turn rewind (`Files + conversation`, `Conversation only`, `Files only`, external-conflict overwrite) and *Try another model* session branching, collaborative approvals (`DenyWithFeedback`, scoped `AlwaysAllow`, plain-English shell risk summaries), step-limit pause recovery, unfocused OS attention notifications, header LSP diagnostics count, `@` workspace file and `/` slash-command/skill/MCP-prompt autocomplete, image paste/drop/picker, sidebar file reveal and Markdown/JSON field-note export, separate plan/edit and planner-model controls, thinking-level picker, session sidebar, a project & global memory viewer/editor (`MemoryModal`), a unified **Settings** page (resolved paths like `memory.path` and `sessions.path`, `quack setup` options, profiles, bundles, rules, Hooks & MCP server setup/toggles, and raw `config.toml` key editing), and workspace prompt input history (`history.jsonl`) shared with the TUI. Failed sends preserve drafts and pending answers; session changes wait for engine confirmation. Slow tab startup or shutdown leaves other tabs responsive, and reloading the UI shuts down its previous engines before reconnecting. Native bundles include `defaults/`; login-shell PATH recovery has bounded time and output. The desktop client is an MVP in progress: one live engine per workspace, with separate tabs for separate folders. See [desktop progress and remaining work](docs/plan/15-desktop-client.md#settings-panel-resolved-paths-hooks--mcp-servers-2026-11-14).
 
@@ -181,9 +182,10 @@ configuration and migration from older modes.
 
 ### MCP & Extensibility
 
-- **Model Context Protocol (MCP)**: Supports stdio and streamable HTTP MCP servers configured as simple TOML files.
+- **Model Context Protocol (MCP)**: Supports stdio and streamable HTTP MCP servers with bundled disabled examples (`context7`, `roost`, `github`, `fetch`, `playwright`, `filesystem`, `time`, `everything`), guided setup (`quack mcp add`, `/mcp`), one-command enabling (`quack mcp enable <id>`), deferred tools (`tool_search`), prompts as `/<server>:<prompt>`, resources, and elicitation/sampling.
 - **Deferred discovery**: Large tool surfaces are indexed and searched dynamically (`tool_search`), avoiding context bloat.
 - **Event hooks**: Run custom scripts on session events (`session_start`, `user_prompt`, `pre_tool`, `post_tool`, `turn_end`) configured in `hooks.d/`. `/hooks` configures linked Jira issues and GitHub, GitLab, Gitea/Forgejo or Bitbucket reviews, including private repositories and multiple self-hosted instances. Enter credentials in a masked field, then **Save and enable**; the next prompt uses them. [Setup and examples](defaults/hooks.d/README.md).
+- **Standard Agent Skills (`SKILL.md`)**: Reads generic, standard Agent Skills (`SKILL.md` with YAML frontmatter) automatically from `.agents/skills/` (project) and `~/.agents/skills/` (user), alongside `skills/` in your config layers and bundles—plus extra folders such as `.claude/skills` via `[skills] compat_paths`. Only names and descriptions sit in the prompt index; the model loads full instructions on demand with the `skill` tool, or you can browse and invoke them via `/skills` and `/<name>`.
 - **Custom slash commands**: Place markdown prompt templates in `commands/` (e.g. `commands/git/pr.md` becomes `/git:pr`).
 - **Bundles**: Group skills, commands, MCP servers, and hooks into shareable directory bundles.
 
@@ -270,7 +272,7 @@ Every layer shares an identical layout:
 ├── agents.d/*.toml      # Sub-agent configurations
 ├── profiles.d/<id>/     # Model family prompt templates and tool mappings
 ├── commands/*.md        # Custom slash commands
-├── skills/<name>/       # SKILL.md task skill definitions
+├── skills/<name>/       # Standard Agent Skills (SKILL.md; also read from .agents/skills/ and ~/.agents/skills/)
 ├── bundles/<name>/      # Modular packages grouping any of the above
 └── AGENTS.md            # Project and workspace instructions
 ```
@@ -437,7 +439,9 @@ alias for Allow; existing flags and saved sessions still load without increasing
 | `instructions.files` | `["AGENTS.md"]` | Instruction filenames checked in workspace root |
 | `instructions.other_agents` | `true` | Read existing `CLAUDE.md`, `GEMINI.md`, or `.cursorrules` if `AGENTS.md` is absent |
 | `instructions.max_bytes` | `32768` | Maximum byte limit per instruction file |
-| `skills.compat_paths` | `[]` | Additional skill discovery directories |
+| `skills.compat_paths` | `[]` | Extra `SKILL.md` directories beyond `.agents/skills/`, `~/.agents/skills/`, and `skills/` (e.g. `.claude/skills`) |
+| `skills.disabled` | `[]` | Skill names to skip |
+| `skills.index_max_tokens` | `1500` | Maximum token budget for the skill index in the prompt |
 | `memory.path` | `""` | Directory for persistent memory files (defaults to user data directory) |
 | `memory.project_scope` | `"data-dir"` | Memory storage scope: `data-dir` or `repo` (`.quack/memory`) |
 | `memory.writes` | `"auto"` | Approval policy for new memory notes: `auto` or `ask` |
@@ -489,17 +493,63 @@ ChatGPT models declare their supported levels. Selections apply between turns;
 
 ### `mcp.d/<id>.toml`
 
+MCP servers live as individual `<id>.toml` files in your user config folder (`mcp.d/<id>.toml`, printed by `quack config paths`) or, per repository, in `.quack/mcp.d/<id>.toml` (requires `quack trust`). Bundled examples ship in `defaults/mcp.d/` with `enabled = false` (`context7`, `roost`, `github`, `fetch`, `playwright`, `filesystem`, `time`, `everything`).
+
+**Three ways to add or enable an MCP server:**
+
+1. **In the TUI (`/mcp`)**: Open `/mcp` to browse live servers alongside bundled disabled examples and `+ Add remote MCP server (HTTP)` / `+ Add local MCP server (stdio)`. Pressing `Enter` on an example copies, enables, and connects it right away without restarting quack; `/mcp add`, `/mcp enable <id>`, `/mcp disable <id>`, and `/mcp restart <id>` also work directly.
+2. **From the CLI (`quack mcp`)**:
+   ```sh
+   quack mcp list                                       # show configured servers & bundled examples
+   quack mcp add                                        # interactive guided setup
+   quack mcp enable context7                            # enable a bundled example
+   quack mcp add context7 --url https://mcp.context7.com/mcp
+   quack mcp add roost --url https://roost.internal:8484/mcp \
+     --header "Authorization=Bearer {env:ROOST_TOKEN}" --auto-approve "list_*,search_*,get_*,read_*"
+   quack mcp add playwright -- npx -y @playwright/mcp@latest
+   ```
+3. **By editing TOML directly**:
+
+   Remote HTTP example (`~/.config/quack/mcp.d/context7.toml`):
+   ```toml
+   description = "Up-to-date library documentation"
+   url = "https://mcp.context7.com/mcp"
+   # Optional higher rate limits:
+   # headers = { CONTEXT7_API_KEY = { env = "CONTEXT7_API_KEY" } }
+
+   [tools]
+   auto_approve = ["*"]
+   ```
+
+   Self-hosted HTTP example (`~/.config/quack/mcp.d/roost.toml`, or run `quack mcp enable roost`):
+   ```toml
+   description = "Self-hosted internal document search (Roost)"
+   url = "https://roost.internal:8484/mcp"
+   headers = { Authorization = { env = "ROOST_TOKEN", format = "Bearer {}" } }
+
+   [tools]
+   auto_approve = ["list_*", "search_*", "get_*", "read_*"]
+   ```
+
+   Values in `headers` and `env` support `{ env = "VAR", format = "Bearer {}" }`, `{ keyring = "quack/name" }`, `{ file = "~/token.txt" }`, `{ cmd = ["pass", "show", "..."] }`, or a plain string.
+
 | Key | Default | Description |
 |---|---|---|
+| `enabled` | `true` | Set `false` to keep the config without connecting |
+| `description` | `""` | Shown in `quack mcp list`, `/mcp`, and `tool_search` |
+| `id` | file stem | Override server id used in tool/command names |
 | `command`, `args` | | Executable path and arguments for stdio MCP servers |
-| `url` | | Endpoint URL for remote HTTP MCP servers |
-| `headers` | `{}` | HTTP headers for remote servers |
-| `env` | `{}` | Environment variables passed to stdio server process |
-| `cwd` | workspace root | Process working directory |
-| `sandbox` | `false` | Run local server inside the OS sandbox |
+| `url` | | Endpoint URL for remote streamable HTTP MCP servers |
+| `headers` | `{}` | HTTP headers for remote servers (`Secret` values supported) |
+| `env` | `{}` | Environment variables passed to stdio server process (`Secret` values supported) |
+| `cwd` | workspace root | Process working directory (`~/` expanded) |
+| `inherit_env` | OS safe defaults | Explicit list of host env var names to pass through |
+| `sandbox` | `false` | Run local stdio server inside the OS sandbox |
 | `tools.allow`, `tools.deny` | `[]` | Globs filtering exposed tool definitions |
 | `tools.auto_approve` | `[]` | Globs of tool names that execute without asking approval |
 | `startup_timeout_secs` | `20` | Server initialization timeout |
+| `call_timeout_secs` | `120` | Per-tool-call timeout (`0` disables) |
+| `max_output_tokens` | `25000` | Token cap applied to MCP tool and resource outputs |
 
 ---
 

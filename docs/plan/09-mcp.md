@@ -97,6 +97,8 @@ Large MCP servers can carry 20–100 tools and over 10k tokens of schemas, which
 
 `defaults/mcp.d/` contains **examples only**, and all are disabled (`enabled = false`): `filesystem.example.toml`, `github.example.toml`, `postgres.example.toml`, `playwright.example.toml`. We don't enable any third-party server by default.
 
+- **`/mcp` & `quack mcp` (2026-11-14).** Added `quack mcp {list, add, enable, disable, remove}` (with non-interactive `--url`/`--header`/`--env`/`-- <cmd>` flags and an interactive wizard), expanded `/mcp` in the TUI to show bundled disabled examples alongside live servers with `Enter` to enable/disable, `^s` to restart, and guided `/mcp add [http|stdio]` prompts that store literal bearer tokens in the OS keyring or private key files and hot-reload connections live (`Op::{Enable,Disable,Add}Mcp`). Shipped disabled examples in `defaults/mcp.d/`: `context7`, `roost`, `github`, `fetch`, `playwright`, `filesystem`, `time`, and `everything`.
+
 ## As implemented (2026-10-18)
 
 M3 MCP landed early, with these parts:

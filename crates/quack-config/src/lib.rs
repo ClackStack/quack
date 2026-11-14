@@ -22,6 +22,7 @@ mod list;
 mod load;
 pub mod lsp;
 pub mod mcp;
+pub mod mcp_manage;
 mod merge;
 mod paths;
 pub mod profile;
@@ -38,7 +39,7 @@ pub use bundle::{Bundle, BundleFile};
 pub use catalog::{Catalog, Catalogs};
 pub use diagnostic::FileDiagnostic;
 pub use edit::{SettingRow, set_in_file, write_atomic};
-pub use enable::{HookEnableOutcome, HookEnabled, McpEnabled, NewMcpServer};
+pub use enable::{HookEnableOutcome, HookEnabled};
 pub use hooks::HookFile;
 pub use items::{
     Item, ItemState, glob_match, is_loopback, load_dir_items, load_items, load_items_merging,
@@ -49,7 +50,12 @@ pub use load::{
     load_with,
 };
 pub use lsp::LspServerFile;
-pub use mcp::McpServerFile;
+pub use mcp::{McpServerFile, McpTools};
+pub use mcp_manage::{
+    McpDisabled, McpEnabled, McpSummary, NewMcpServer, NewMcpTransport, check_mcp_id,
+    collect_mcp_env_vars, collect_secret_env_vars, derive_mcp_id_from_command,
+    derive_mcp_id_from_url, split_command_words,
+};
 pub use paths::{Dirs, Env, LayerKind, find_workspace_root, user_data_dir};
 pub use provider::ProviderFile;
 pub use secret::{

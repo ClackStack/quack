@@ -77,7 +77,7 @@ hooks.d/*.toml       programs that run on agent events
 agents.d/*.toml      sub-agents for the task tool
 profiles.d/<id>/     prompts and tool shapes per model family
 commands/*.md        your slash commands
-skills/<name>/       SKILL.md skills
+skills/<name>/       standard Agent Skills (SKILL.md)
 bundles/<name>/      groups of the above
 AGENTS.md            instructions for every project`;
 
@@ -178,8 +178,9 @@ export const reference: Group[] = [
 			['instructions.files', '["AGENTS.md"]', 'Instruction file names, in order of preference'],
 			['instructions.other_agents', 'true', 'Read CLAUDE.md, GEMINI.md, `.cursorrules` where there’s no AGENTS.md'],
 			['instructions.max_bytes', '32768', 'Cap on each instruction file'],
-			['skills.compat_paths', '[]', 'More skill folders, e.g. `.claude/skills`'],
+			['skills.compat_paths', '[]', 'Extra `SKILL.md` folders beyond `.agents/skills/`, `~/.agents/skills/` and `skills/`, e.g. `.claude/skills`'],
 			['skills.disabled', '[]', 'Skill names to skip'],
+			['skills.index_max_tokens', '1500', 'Token cap for the skill index in the prompt'],
 			['memory.path', '""', 'Where notes live, e.g. a synced folder'],
 			['memory.project_scope', '"data-dir"', '`repo` keeps project notes in `.quack/memory`'],
 			['memory.writes', '"auto"', '`ask` makes each note ask first'],
@@ -222,11 +223,13 @@ export const reference: Group[] = [
 	},
 	{
 		title: 'An MCP server',
-		file: 'mcp.d/<id>.toml',
+		file: 'mcp.d/<id>.toml (or `quack mcp add` / `/mcp`)',
 		rows: [
+			['enabled', 'true', 'Set `false` to keep the file without connecting'],
+			['description', '', 'Shown in `quack mcp list`, `/mcp`, and `tool_search`'],
 			['command / args', '', 'A local server, over stdio'],
 			['url', '', 'A remote streamable HTTP server, instead'],
-			['headers / env', '{}', 'Values may be secrets'],
+			['headers / env', '{}', 'Values may be secrets (`env`, `keyring`, `file`, `cmd`)'],
 			['sandbox', 'false', 'Run a local server in the OS sandbox'],
 			['tools.allow / deny', '[]', 'Tool name globs to offer or hide'],
 			['tools.auto_approve', '[]', 'Tool name globs that run without asking']

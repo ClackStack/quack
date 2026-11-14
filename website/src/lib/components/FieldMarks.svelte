@@ -58,7 +58,8 @@
 			items: [
 				['MCP', 'Local and remote servers, deferred tool search, prompts as slash commands, forms and sampling.'],
 				['Hooks', 'Programs in any language on seven agent events; they can add context, block or rewrite calls.'],
-				['Skills and commands', 'SKILL.md skills, and any markdown file in `commands/` becomes a slash command.'],
+				['Agent skills', 'Reads generic, standard Agent Skills (`SKILL.md`) from `.agents/skills/`, `~/.agents/skills/` and `skills/` (plus `compat_paths`), loaded on demand with `skill` or `/<name>`.'],
+				['Slash commands', 'Any markdown file in `commands/` becomes a slash command (for example, `commands/git/pr.md` becomes `/git:pr`).'],
 				['Your agent files', 'Reads AGENTS.md, CLAUDE.md, GEMINI.md, `.cursorrules` and Copilot instructions.'],
 				['Memory', 'Notes per project and global, with configurable write approvals. Plan never writes them.'],
 				['Your own queries', 'Drop in `tags.scm` or `highlights.scm` to outline or colour a framework’s macros.']
@@ -143,7 +144,7 @@
 							<div>
 								<dt class="inline font-bold">{term}.</dt>
 								<dd class="inline text-ink-2">
-									{#each parts(text) as p (p)}{#if p.startsWith('`')}<code class="text-[0.9em] text-ink bg-paper px-1 rounded border border-rule">{p.slice(1, -1)}</code>{:else}{p}{/if}{/each}
+									{#each parts(text) as p, i (i)}{#if p.startsWith('`')}<code class="text-[0.9em] text-ink bg-paper px-1 rounded border border-rule">{p.slice(1, -1)}</code>{:else}{p}{/if}{/each}
 								</dd>
 							</div>
 						{/each}

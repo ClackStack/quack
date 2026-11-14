@@ -184,8 +184,8 @@ pub(crate) const COMMANDS: &[Command] = &[
     c(
         "mcp",
         &[],
-        "[restart <id>]",
-        "MCP servers: state, tools, token cost, logs; ^s restarts one",
+        "[add | enable <id> | disable <id> | restart <id>]",
+        "MCP servers: status, examples, enable/disable, add; ^s restarts one",
         None,
     ),
     c(

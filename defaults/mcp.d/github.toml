@@ -2,6 +2,7 @@
 # GitHub's hosted MCP server (issues, pull requests, code search). Needs a token in
 # GITHUB_TOKEN. This sends requests to api.githubcopilot.com.
 enabled = false
+description = "GitHub repositories, issues, and pull requests via GitHub MCP"
 url = "https://api.githubcopilot.com/mcp/"
 headers = { Authorization = { env = "GITHUB_TOKEN", format = "Bearer {}" } }
 [tools]

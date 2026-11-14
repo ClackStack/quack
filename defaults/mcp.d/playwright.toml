@@ -1,0 +1,8 @@
+#:schema ../schemas/mcp.json
+# Playwright MCP: browser automation and accessibility-tree inspection.
+# Requires Node.js (`npx`). To enable: run `quack mcp enable playwright` or `/mcp`.
+enabled = false
+description = "Browser automation and web page inspection via Playwright"
+command = "npx"
+args = ["-y", "@playwright/mcp@latest"]
+startup_timeout_secs = 60

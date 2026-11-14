@@ -1,0 +1,15 @@
+#:schema ../schemas/mcp.json
+# Context7: up-to-date library and framework documentation (resolve-library-id, query-docs).
+# Works out of the box without a key (rate-limited). For higher limits, add:
+#   headers = { CONTEXT7_API_KEY = { env = "CONTEXT7_API_KEY" } }
+# Or use the local stdio server instead of `url`:
+#   command = "npx"
+#   args = ["-y", "@upstash/context7-mcp"]
+#   startup_timeout_secs = 60
+# To enable: run `quack mcp enable context7` or use `/mcp` in the TUI.
+enabled = false
+description = "Up-to-date library and framework documentation (Context7)"
+url = "https://mcp.context7.com/mcp"
+
+[tools]
+auto_approve = ["*"]

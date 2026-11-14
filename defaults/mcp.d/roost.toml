@@ -6,7 +6,9 @@
 # as ROOST_TOKEN. Point `url` at your server; for an index on this machine use
 # the stdio form instead: command = "roost", args = ["mcp", "--config",
 # "/etc/roost/roost.toml"], env = { ROOST_TOKEN = "roost_..." }.
+# To enable: run `quack mcp enable roost` (or `/mcp` in the TUI), then update `url` if needed.
 enabled = false
+description = "Self-hosted internal document search over Office, PDF, and text files (Roost)"
 url = "https://roost.internal:8484/mcp"
 headers = { Authorization = { env = "ROOST_TOKEN", format = "Bearer {}" } }
 [tools]

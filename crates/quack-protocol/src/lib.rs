@@ -132,9 +132,29 @@ pub enum Op {
         id: String,
     },
     /// Enable a disabled MCP server (copying a defaults file or setting `enabled = true`
-    /// and removing `[mcp] disabled` entries) and reload config.
+    /// and removing `[mcp] disabled` entries) and reload MCP connections.
     EnableMcp {
         id: String,
+    },
+    /// Disable an MCP server without deleting its config and reload MCP connections.
+    DisableMcp {
+        id: String,
+    },
+    /// Write a user-layer `mcp.d/<id>.toml` server and reload MCP connections.
+    AddMcp {
+        id: String,
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        bearer_env: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        bearer_token: Option<SecretText>,
     },
     /// Create or update `<scope>/mcp.d/<id>.toml`, unlist it from `[mcp] disabled`, and
     /// reload config.
@@ -528,6 +548,10 @@ pub enum Event {
     },
     McpServers {
         servers: Vec<McpServerInfo>,
+    },
+    McpChanged {
+        id: String,
+        message: String,
     },
     LspServers {
         servers: Vec<LspServerInfo>,
