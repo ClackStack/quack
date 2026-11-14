@@ -24,7 +24,7 @@ import type {
 import type { AppInfo, ClientEvent, ClientOp, Transport } from '#lib/transport/types';
 import type { HookRunEntry } from './extensions';
 import { recordModelSpeed } from './modelStats';
-import { formatTomlStringArray, type SettingsSectionId } from './settings';
+import { formatTomlStringArray, parseTomlString, type SettingsSectionId } from './settings';
 
 /**
  * One tab's view of one engine (docs/plan/15-desktop-client.md#the-ui): a reducer from
@@ -187,6 +187,27 @@ function summarySubjects(summary: string): string[] {
 	return named && !named[1].endsWith(' files') ? [named[1]] : [];
 }
 
+export interface UpdateNoticeState {
+	current: string;
+	latest: string | null;
+	updateAvailable: boolean;
+	url: string | null;
+	error: string | null;
+	source: 'auto' | 'manual';
+	checkedAt: number;
+}
+
+function readUpdatesUrl(info: AppInfo | null): string | null {
+	const row = info?.settings.find((r) => r.key === 'updates.url');
+	if (!row) return null;
+	const parsed = parseTomlString(row.value).trim();
+	return parsed || null;
+}
+
+export function isHttpUrl(url: string | null | undefined): url is string {
+	return Boolean(url && /^https?:\/\//i.test(url));
+}
+
 export class Session {
 	tab = $state(0);
 	/** Real filesystem folder used to open/reopen this tab (never `~`-collapsed). */
@@ -291,6 +312,9 @@ export class Session {
 	hookSetupPendingRequest = $state<number | null>(null);
 	hookSetupStatus = $state<{ kind: 'ok' | 'fail' | 'notice'; text: string } | null>(null);
 	hookSetupError = $state<string | null>(null);
+	updateChecking = $state(false);
+	updateState = $state<UpdateNoticeState | null>(null);
+	updateDismissed = $state(false);
 	mcpSaving = $state(false);
 	mcpFeedback = $state<string | null>(null);
 	mcpError = $state<string | null>(null);
@@ -341,6 +365,13 @@ export class Session {
 		this.sandboxOff = info.sandbox.mode === 'off';
 		this.sandboxAvailable = info.sandbox.os_supported;
 		if (info.history) this.inputHistory = [...info.history];
+		if (this.updateState?.source === 'auto' && !info.egress.updates_check) {
+			this.updateState = null;
+			this.updateDismissed = false;
+		} else if (this.updateState && !this.updateState.url) {
+			const url = readUpdatesUrl(info);
+			if (url) this.updateState = { ...this.updateState, url };
+		}
 	}
 
 	/** Feed one protocol event; the only place transcript state is written. */
@@ -844,6 +875,38 @@ export class Session {
 				this.#sealStreams();
 				this.items.push({ kind: 'system', id: nextId(), tone: 'notice', text: ev.message });
 				break;
+			case 'update_available': {
+				// Auto-check notices apply only when `[updates] check` allows it.
+				if (this.info && !this.info.egress.updates_check) break;
+				const wasDismissed =
+					this.updateDismissed &&
+					this.updateState?.updateAvailable === true &&
+					this.updateState.latest === ev.latest;
+				this.updateState = {
+					current: ev.current,
+					latest: ev.latest,
+					updateAvailable: true,
+					url: readUpdatesUrl(this.info),
+					error: null,
+					source: 'auto',
+					checkedAt: Date.now()
+				};
+				if (!wasDismissed) this.updateDismissed = false;
+				break;
+			}
+			case 'update_check_result':
+				this.updateChecking = false;
+				this.updateState = {
+					current: ev.current,
+					latest: ev.latest ?? null,
+					updateAvailable: ev.update_available,
+					url: ev.url ?? readUpdatesUrl(this.info),
+					error: ev.error ?? null,
+					source: 'manual',
+					checkedAt: Date.now()
+				};
+				if (ev.update_available) this.updateDismissed = false;
+				break;
 			case 'warning':
 				this.#sealStreams();
 				this.turnPending = false;
@@ -916,6 +979,7 @@ export class Session {
 		this.detecting = false;
 		this.starting = false;
 		this.startupDetail = null;
+		this.updateChecking = false;
 		this.streaming = false;
 		this.signingIn = null;
 		this.stepLimit = null;
@@ -1689,6 +1753,25 @@ export class Session {
 		this.hookSetupChecking = false;
 		this.hookSetupStatus = { kind: 'notice', text: 'Connection check cancelled.' };
 		return this.#send({ op: 'cancel_hook_check', request });
+	}
+
+	async checkForUpdates() {
+		if (this.closed || this.starting || this.updateChecking) return false;
+		this.updateChecking = true;
+		const sent = await this.#send({ op: 'check_updates' });
+		if (!sent) this.updateChecking = false;
+		return sent;
+	}
+
+	dismissUpdateBanner() {
+		this.updateDismissed = true;
+	}
+
+	async openReleasePage() {
+		const url = this.updateState?.url ?? readUpdatesUrl(this.info);
+		if (!isHttpUrl(url)) return false;
+		await this.#transport.openUrl(url);
+		return true;
 	}
 
 	closeHookSetup() {

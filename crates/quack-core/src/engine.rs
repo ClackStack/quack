@@ -337,6 +337,7 @@ impl Engine {
                             self.on_reloaded(*outcome);
                             self.reloading = false;
                             self.emit(Event::StartupComplete);
+                            crate::checks::background(self.config.clone(), self.tx.clone());
                         }
                         Reload::HookSaved { request, id, result } => {
                             self.reloading = false;
@@ -1971,6 +1972,9 @@ impl Engine {
                     let _ = tx.send(Event::DoctorReport { checks });
                 });
             }
+            Op::CheckUpdates => {
+                crate::checks::check_updates_now(self.config.clone(), self.tx.clone());
+            }
             Op::InitInstructions => {
                 let prompt = init_prompt(&self.config);
                 return Box::pin(self.handle(
@@ -3169,6 +3173,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::ListMemory => "list_memory",
         Op::SaveMemory { .. } => "save_memory",
         Op::RunDoctor => "run_doctor",
+        Op::CheckUpdates => "check_updates",
         Op::DetectServers => "detect_servers",
         Op::ListMcp => "list_mcp",
         Op::ListLsp => "list_lsp",

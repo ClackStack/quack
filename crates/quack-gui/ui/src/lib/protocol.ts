@@ -582,7 +582,7 @@ model: string, } | { "event": "agent", id: string, inner: Event, } | { "event": 
 /**
  * e.g. `12 steps · 34.5k tokens`.
  */
-summary: string, } | { "event": "plan", checklist: string, } | { "event": "diagnostics", errors: number, warnings: number, } | { "event": "notice", message: string, } | { "event": "update_available", current: string, latest: string, } | { "event": "warning", message: string, } | { "event": "error", error: EngineError, };
+summary: string, } | { "event": "plan", checklist: string, } | { "event": "diagnostics", errors: number, warnings: number, } | { "event": "notice", message: string, } | { "event": "update_available", current: string, latest: string, } | { "event": "update_check_result", current: string, latest: string | null, update_available: boolean, url: string | null, error: string | null, } | { "event": "warning", message: string, } | { "event": "error", error: EngineError, };
 /**
  * A request from a client to the engine.
  */
@@ -594,4 +594,4 @@ mode: string, } | { "op": "run_doctor" } | { "op": "list_mcp" } | { "op": "resta
 /**
  * None keeps the current enabled state.
  */
-enable: boolean | null, replace_payload: boolean | null, } | { "op": "check_hook_setup", id: string, request: number, revision: string, connection: HookConnectionDraft, url: string, } | { "op": "cancel_hook_check", request: number, } | { "op": "shutdown" };
+enable: boolean | null, replace_payload: boolean | null, } | { "op": "check_hook_setup", id: string, request: number, revision: string, connection: HookConnectionDraft, url: string, } | { "op": "cancel_hook_check", request: number, } | { "op": "check_updates" } | { "op": "shutdown" };

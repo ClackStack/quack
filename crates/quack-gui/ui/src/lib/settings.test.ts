@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render } from 'svelte/server';
+import EgressModal from './components/EgressModal.svelte';
 import SettingsFieldRow from './components/SettingsFieldRow.svelte';
 import SettingsPanel from './components/SettingsPanel.svelte';
 import SetupPanel from './components/SetupPanel.svelte';
@@ -460,5 +461,39 @@ describe('SettingsPanel & SettingsFieldRow rendering', () => {
 		expect(body).toContain('Locked');
 		expect(body).toContain('Used by the terminal UI client');
 		expect(body).toContain('disabled');
+	});
+
+	it('renders Check for updates button and status in Setup settings and EgressModal', () => {
+		const session = makeSession();
+		session.onEvent({ event: 'startup_complete' });
+		session.settingsTab = 'setup';
+		const enabledView = render(SettingsPanel, { props: { session } }).body;
+		expect(enabledView).toContain('Software updates');
+		expect(enabledView).toContain('Check for updates');
+		expect(enabledView).toContain('Daily auto-check is enabled');
+
+		session.onInfo({
+			...session.info!,
+			egress: { ...session.info!.egress, updates_check: false }
+		});
+		const disabledView = render(SettingsPanel, { props: { session } }).body;
+		expect(disabledView).toContain('Auto-check is off');
+
+		session.onEvent({
+			event: 'update_check_result',
+			current: '0.1.0',
+			latest: '0.2.0',
+			update_available: true,
+			url: 'https://github.com/ClackStack/quack/releases/latest',
+			error: null
+		});
+		const available = render(SettingsPanel, { props: { session } }).body;
+		expect(available).toContain('quack 0.2.0 is available');
+		expect(available).toContain('Open release page');
+
+		const modal = render(EgressModal, { props: { session, onClose: () => {} } }).body;
+		expect(modal).toContain('Check for updates');
+		expect(modal).toContain('Update available:');
+		expect(modal).toContain('quack 0.2.0');
 	});
 });

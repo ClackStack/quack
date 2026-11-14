@@ -1,6 +1,7 @@
 import type { Event, HookSetupInfo, McpServerInfo, MemoryNote } from '#lib/protocol';
 import {
 	SETTING_FIELDS,
+	extractUrlHost,
 	formatTomlStringArray,
 	parseTomlString,
 	parseTomlStringArray
@@ -1566,6 +1567,44 @@ export function devTransport(): Transport {
 						event: 'memory_notes',
 						notes: [...state.memoryNotes],
 						index_fill: memoryIndexFill(state.memoryNotes)
+					});
+					break;
+				}
+				case 'check_updates': {
+					const updatesUrl = state ? parseTomlString(devSetting(state, 'updates.url')).trim() : '';
+					const offline = state ? devSetting(state, 'network.offline') === 'true' : false;
+					if (!updatesUrl) {
+						send(tab, {
+							event: 'update_check_result',
+							current: INFO.version,
+							latest: null,
+							update_available: false,
+							url: null,
+							error: 'no update source is set · set updates.url'
+						});
+						break;
+					}
+					const host = extractUrlHost(updatesUrl) ?? updatesUrl;
+					const loopback =
+						host.startsWith('localhost') || host.startsWith('127.') || host.startsWith('[::1]');
+					if (offline && !loopback) {
+						send(tab, {
+							event: 'update_check_result',
+							current: INFO.version,
+							latest: null,
+							update_available: false,
+							url: updatesUrl,
+							error: `blocked by network.offline: add \`${host}\` to network.egress_allow to use it`
+						});
+						break;
+					}
+					send(tab, {
+						event: 'update_check_result',
+						current: INFO.version,
+						latest: INFO.version,
+						update_available: false,
+						url: updatesUrl,
+						error: null
 					});
 					break;
 				}

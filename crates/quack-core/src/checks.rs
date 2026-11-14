@@ -213,6 +213,39 @@ pub(crate) fn background(config: Arc<Loaded>, tx: broadcast::Sender<Event>) {
     });
 }
 
+/// Run an explicit update check on demand (ignoring `updates.check` and the daily cadence),
+/// still honouring `network.offline`, `updates.url` and system policy via `fetch::get`.
+pub(crate) fn check_updates_now(config: Arc<Loaded>, tx: broadcast::Sender<Event>) {
+    tokio::spawn(async move {
+        let configured = config.settings.updates.url.trim();
+        let url = (!configured.is_empty()).then(|| configured.to_owned());
+        let event = match latest_version(&config).await {
+            Ok(latest) => {
+                let mut state = State::load(&config.dirs);
+                state.updates_checked = now();
+                state.latest = latest.clone();
+                state.save(&config.dirs);
+                let update_available = latest.as_deref().is_some_and(|l| is_newer(l, CURRENT));
+                Event::UpdateCheckResult {
+                    current: CURRENT.to_owned(),
+                    latest,
+                    update_available,
+                    url,
+                    error: None,
+                }
+            }
+            Err(error) => Event::UpdateCheckResult {
+                current: CURRENT.to_owned(),
+                latest: None,
+                update_available: false,
+                url,
+                error: Some(error),
+            },
+        };
+        let _ = tx.send(event);
+    });
+}
+
 fn wanted_catalog(config: &Loaded) -> bool {
     let catalog = &config.settings.catalog;
     catalog.refresh && !catalog.url.is_empty()

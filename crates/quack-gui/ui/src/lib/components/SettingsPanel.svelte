@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { WriteScope } from '#lib/protocol';
-	import type { Session } from '../session.svelte';
+	import { isHttpUrl, type Session } from '../session.svelte';
 	import {
 		SETTING_FIELDS,
 		SETTING_FIELD_MAP,
@@ -485,6 +485,72 @@
 					{/if}
 
 					{#if session.settingsTab === 'setup'}
+						<section class="plate" aria-label="Software updates">
+							<div class="plate-head">
+								<div>
+									<h4 class="plate-title">Software updates</h4>
+									<p class="plate-sub">
+										Running quack <code>{info?.version ?? 'unknown'}</code> ·
+										{info?.egress.updates_check
+											? 'Daily auto-check is enabled'
+											: 'Auto-check is off (opt-in)'}
+									</p>
+								</div>
+								<button
+									type="button"
+									class="btn"
+									disabled={session.closed || session.starting || session.updateChecking}
+									onclick={() => void session.checkForUpdates()}
+								>
+									{session.updateChecking ? 'Checking…' : 'Check for updates'}
+								</button>
+							</div>
+							{#if session.updateChecking || session.updateState}
+								<div class="callouts">
+									{#if session.updateChecking}
+										<p class="callout" role="status">
+											Checking <code>{updatesHost ?? 'release source'}</code> for a newer release…
+										</p>
+									{:else if session.updateState?.error}
+										<p class="callout fail" role="status">
+											<strong>Update check failed:</strong>
+											{session.updateState.error}
+										</p>
+									{:else if session.updateState?.updateAvailable}
+										<div class="callout info" role="status">
+											<div class="update-callout-row">
+												<span>
+													<strong>quack {session.updateState.latest} is available</strong>
+													(you have <code>{session.updateState.current}</code>). quack does not
+													self-update; install the new release from your package manager, release
+													page, or run <code>quack update</code>.
+												</span>
+												{#if isHttpUrl(session.updateState.url)}
+													<button
+														type="button"
+														class="btn btn-sm"
+														onclick={() => void session.openReleasePage()}
+													>
+														Open release page
+													</button>
+												{/if}
+											</div>
+										</div>
+									{:else if session.updateState}
+										<p class="callout ok" role="status">
+											{#if session.updateState.latest}
+												<strong>quack {session.updateState.current} is up to date</strong>
+												(latest published: <code>{session.updateState.latest}</code>).
+											{:else}
+												<strong>quack {session.updateState.current}</strong> — no release has been
+												published at this source yet.
+											{/if}
+										</p>
+									{/if}
+								</div>
+							{/if}
+						</section>
+
 						<section class="plate" aria-label="Provider and check details">
 							<div class="plate-head">
 								<div>
@@ -1098,6 +1164,31 @@
 		background: var(--beak-soft);
 		border-color: color-mix(in srgb, var(--beak) 45%, var(--rule));
 		color: var(--beak-ink);
+	}
+	.callout.info {
+		background: var(--sky-soft);
+		border-color: color-mix(in srgb, var(--sky) 55%, var(--rule));
+		color: var(--sky-ink);
+	}
+	.callout.ok {
+		background: var(--ok-soft);
+		border-color: color-mix(in srgb, var(--ok) 45%, var(--rule));
+		color: var(--ok);
+	}
+	.callout.fail {
+		background: var(--fail-soft);
+		border-color: color-mix(in srgb, var(--fail) 45%, var(--rule));
+		color: var(--fail);
+	}
+	.update-callout-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--sp-sm);
+		flex-wrap: wrap;
+	}
+	.update-callout-row > span {
+		flex: 1 1 240px;
 	}
 
 	.endpoints-grid {

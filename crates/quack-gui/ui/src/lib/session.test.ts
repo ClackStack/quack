@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Session } from './session.svelte';
-import type { AppInfo, Transport } from './transport/types';
+import { devTransport } from './transport/dev';
+import type { AppInfo, TabMessage, Transport } from './transport/types';
 
 const info: AppInfo = {
 	version: 'test',
@@ -927,5 +928,147 @@ describe('field notes: skills, stats and specimens', () => {
 		expect(session.hookSetupSaving).toBe(false);
 		expect(session.hookSetup?.enabled).toBe(true);
 		expect(session.hookSetupStatus).toEqual({ kind: 'ok', text: 'Saved' });
+	});
+});
+
+describe('update checks', () => {
+	it('ignores auto update_available when updates_check is disabled and honors it when enabled', async () => {
+		const { session, openUrl } = fixture();
+		session.onEvent({ event: 'startup_complete' });
+
+		// When updates_check is false, auto-check events must not surface a banner.
+		session.onEvent({ event: 'update_available', current: '0.1.0', latest: '0.2.0' });
+		expect(session.updateState).toBeNull();
+		expect(session.updateDismissed).toBe(false);
+
+		// Turning updates.check on (and providing updates.url) surfaces the auto-check notice.
+		session.onInfo({
+			...info,
+			egress: { ...info.egress, updates_check: true },
+			settings: [
+				{
+					key: 'updates.url',
+					value: '"https://github.com/ClackStack/quack/releases/latest"',
+					origin: 'defaults',
+					description: '',
+					is_bool: false,
+					locked: false
+				}
+			]
+		});
+		session.onEvent({ event: 'update_available', current: '0.1.0', latest: '0.2.0' });
+		expect(session.updateState).toMatchObject({
+			current: '0.1.0',
+			latest: '0.2.0',
+			updateAvailable: true,
+			url: 'https://github.com/ClackStack/quack/releases/latest',
+			source: 'auto',
+			error: null
+		});
+		expect(session.updateDismissed).toBe(false);
+
+		// Dismissing remembers the dismissal for the same release if reloaded, then clears if turned off.
+		session.dismissUpdateBanner();
+		session.onEvent({ event: 'update_available', current: '0.1.0', latest: '0.2.0' });
+		expect(session.updateDismissed).toBe(true);
+
+		expect(await session.openReleasePage()).toBe(true);
+		expect(openUrl).toHaveBeenCalledWith('https://github.com/ClackStack/quack/releases/latest');
+
+		session.onInfo({
+			...info,
+			egress: { ...info.egress, updates_check: false }
+		});
+		expect(session.updateState).toBeNull();
+		expect(session.updateDismissed).toBe(false);
+	});
+
+	it('sends check_updates manually even with auto-check off and tracks results', async () => {
+		const { session, send, openUrl } = fixture();
+		session.onEvent({ event: 'startup_complete' });
+
+		expect(await session.checkForUpdates()).toBe(true);
+		expect(session.updateChecking).toBe(true);
+		expect(send).toHaveBeenCalledWith(3, { op: 'check_updates' });
+		// Guard against duplicate in-flight clicks.
+		expect(await session.checkForUpdates()).toBe(false);
+
+		session.onEvent({
+			event: 'update_check_result',
+			current: '0.1.0',
+			latest: '0.1.0',
+			update_available: false,
+			url: 'https://releases.example/latest',
+			error: null
+		});
+		expect(session.updateChecking).toBe(false);
+		expect(session.updateState).toMatchObject({
+			current: '0.1.0',
+			latest: '0.1.0',
+			updateAvailable: false,
+			url: 'https://releases.example/latest',
+			source: 'manual',
+			error: null
+		});
+
+		// Manual check errors surface without leaving updateChecking stuck.
+		expect(await session.checkForUpdates()).toBe(true);
+		session.onEvent({
+			event: 'update_check_result',
+			current: '0.1.0',
+			latest: null,
+			update_available: false,
+			url: 'javascript:alert(1)',
+			error: 'blocked by network.offline'
+		});
+		expect(session.updateChecking).toBe(false);
+		expect(session.updateState?.error).toBe('blocked by network.offline');
+		expect(await session.openReleasePage()).toBe(false);
+		expect(openUrl).not.toHaveBeenCalled();
+
+		// Closing resets in-flight state cleanly.
+		expect(await session.checkForUpdates()).toBe(true);
+		expect(session.updateChecking).toBe(true);
+		session.onClosed(null);
+		expect(session.updateChecking).toBe(false);
+	});
+
+	it('handles manual check_updates in dev transport cleanly without auto-checking when off', async () => {
+		const dev = devTransport();
+		const events: unknown[] = [];
+		const off = dev.listen((msg: TabMessage) => {
+			if ('event' in msg) events.push(msg.event);
+		});
+		const opened = await dev.openFolder('~/demo', { resume: 'latest' });
+		expect(opened.info.egress.updates_check).toBe(false);
+
+		// Default dev state has offline = true, so check_updates reports the offline block.
+		await dev.sendOp(opened.tab, { op: 'check_updates' });
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				event: 'update_check_result',
+				update_available: false,
+				error: expect.stringContaining('network.offline')
+			})
+		);
+
+		// Turning offline off yields an up-to-date check_updates response.
+		events.length = 0;
+		await dev.sendOp(opened.tab, {
+			op: 'save_setting',
+			key: 'network.offline',
+			value: 'false',
+			scope: 'user'
+		});
+		await dev.sendOp(opened.tab, { op: 'check_updates' });
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				event: 'update_check_result',
+				update_available: false,
+				error: null
+			})
+		);
+		off();
+		await dev.closeTab(opened.tab);
 	});
 });

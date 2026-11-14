@@ -827,3 +827,64 @@ async fn opening_new_project_with_latest_emits_no_warning() {
     assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
     registry.close(tab).await;
 }
+
+#[tokio::test]
+async fn bridge_respects_updates_check_off_and_runs_manual_check_updates() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(r#"{"data":[]}"#))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/releases/latest"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(302).insert_header("location", "/releases/tag/v99.0.0"),
+        )
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut loaded = common::workspace(tmp.path(), &server.uri());
+    loaded.settings.updates.check = false;
+    loaded.settings.updates.url = format!("{}/releases/latest", server.uri());
+    let registry = Registry::with_parts(fixed_loader(loaded), tmp.path().join("gui-data"));
+    let (sink, mut rx) = collecting_sink();
+    let tab = registry
+        .open(ws_of(tmp.path()), Resume::New, sink)
+        .await
+        .expect("open");
+    match next(&mut rx).await.payload {
+        Payload::Info { info } => assert!(!info.egress.updates_check),
+        other => panic!("expected AppInfo first, got {other:?}"),
+    }
+    let _ = collect_until(&mut rx, |e| matches!(e, Event::StartupComplete)).await;
+    let before = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path().contains("releases"))
+        .count();
+    assert_eq!(
+        before, 0,
+        "auto-check must stay off when updates.check = false"
+    );
+
+    registry
+        .send_op(tab, serde_json::json!({ "op": "check_updates" }))
+        .await
+        .expect("send check_updates");
+    let (_, result) =
+        collect_until(&mut rx, |e| matches!(e, Event::UpdateCheckResult { .. })).await;
+    assert_eq!(
+        result,
+        Event::UpdateCheckResult {
+            current: quack_core::checks::CURRENT.to_owned(),
+            latest: Some("99.0.0".to_owned()),
+            update_available: true,
+            url: Some(format!("{}/releases/latest", server.uri())),
+            error: None,
+        }
+    );
+    registry.close(tab).await;
+}

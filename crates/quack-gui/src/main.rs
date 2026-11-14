@@ -109,11 +109,14 @@ async fn input_history(
     state.input_history_for(client, tab).await
 }
 
-/// Opens a subscription sign-in address in the user's browser. The only URL the webview
-/// may open is one the engine handed over `Event::SignInUrl`; no arbitrary `fetch` or
-/// shell access is granted to it.
+/// Opens an external browser URL handed over by the engine (subscription sign-in or
+/// the configured release page). Restricts to `http://`/`https://` URLs; no arbitrary
+/// `fetch` or shell access is granted to the webview.
 #[tauri::command]
 fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("refusing to open a non-http(s) URL".into());
+    }
     use tauri_plugin_opener::OpenerExt;
     app.opener()
         .open_url(url, None::<&str>)

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { summarizeJobs, type JobActionTarget } from '#lib/jobs';
-	import type { Session } from '#lib/session.svelte';
+	import { isHttpUrl, type Session } from '#lib/session.svelte';
 	import type { SidebarProject } from '#lib/workspaces.svelte';
 	import { theme } from '#lib/theme.svelte';
 	import Header from './Header.svelte';
@@ -147,6 +147,40 @@
 					>
 				</div>
 			{/if}
+			{#if session.updateState?.updateAvailable && !session.updateDismissed}
+				<div class="update-banner" role="status">
+					<span class="pill pill-info">Update</span>
+					<span class="update-banner-text">
+						quack <strong>{session.updateState.latest}</strong> is available (running
+						<code>{session.updateState.current}</code>).
+					</span>
+					<div class="update-banner-actions">
+						{#if isHttpUrl(session.updateState.url)}
+							<button
+								type="button"
+								class="btn"
+								onclick={() => void session.openReleasePage()}
+							>
+								Open release
+							</button>
+						{/if}
+						<button
+							type="button"
+							class="btn"
+							onclick={() => session.openSettings('setup')}
+						>
+							Settings
+						</button>
+						<button
+							type="button"
+							class="btn"
+							onclick={() => session.dismissUpdateBanner()}
+						>
+							Dismiss
+						</button>
+					</div>
+				</div>
+			{/if}
 			{#if session.trust}
 				<TrustPanel {session} />
 			{:else if session.settingsOpen}
@@ -276,6 +310,38 @@
 	}
 	.action-error span {
 		flex: 1;
+	}
+	.update-banner {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		flex-wrap: wrap;
+		padding: 8px 24px;
+		border-bottom: 1px solid var(--rule);
+		background: var(--sky-soft);
+		color: var(--sky-ink);
+		font-size: 0.8125rem;
+	}
+	.pill-info {
+		background: var(--bg-raised);
+		border: 1px solid var(--sky);
+		color: var(--sky-ink);
+	}
+	.update-banner-text {
+		flex: 1 1 220px;
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+	.update-banner-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex: none;
+	}
+	.update-banner-actions .btn {
+		padding: 3px 10px;
+		min-height: 1.625rem;
+		font-size: 0.75rem;
 	}
 
 	.sidebar {

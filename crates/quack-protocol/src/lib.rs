@@ -320,6 +320,9 @@ pub enum Op {
     CancelHookCheck {
         request: u64,
     },
+    /// Look for a newer release at the configured `updates.url` now; answered with
+    /// `Event::UpdateCheckResult`.
+    CheckUpdates,
     Shutdown,
 }
 
@@ -679,6 +682,14 @@ pub enum Event {
     UpdateAvailable {
         current: String,
         latest: String,
+    },
+    /// Result of an explicit [`Op::CheckUpdates`] release check.
+    UpdateCheckResult {
+        current: String,
+        latest: Option<String>,
+        update_available: bool,
+        url: Option<String>,
+        error: Option<String>,
     },
     Warning {
         message: String,

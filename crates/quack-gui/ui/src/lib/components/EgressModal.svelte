@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { Session } from '#lib/session.svelte';
+	import { isHttpUrl, type Session } from '#lib/session.svelte';
 
 	let {
 		session,
@@ -152,6 +152,50 @@
 							</span>
 						</div>
 					{/if}
+				</div>
+
+				<div class="update-row">
+					<div class="update-row-info">
+						<span class="label">Version {session.info?.version ?? 'unknown'}</span>
+						{#if session.updateChecking}
+							<span class="update-row-status">Checking for updates…</span>
+						{:else if session.updateState?.error}
+							<span class="update-row-status fail">{session.updateState.error}</span>
+						{:else if session.updateState?.updateAvailable}
+							<span class="update-row-status info">
+								Update available: <strong>quack {session.updateState.latest}</strong>
+							</span>
+						{:else if session.updateState}
+							<span class="update-row-status ok">
+								{session.updateState.latest
+									? `Up to date (${session.updateState.current})`
+									: 'No release published yet'}
+							</span>
+						{:else}
+							<span class="update-row-status">
+								{egress?.updates_check ? 'Auto-checks daily' : 'Auto-check is off'}
+							</span>
+						{/if}
+					</div>
+					<div class="update-row-actions">
+						{#if session.updateState?.updateAvailable && isHttpUrl(session.updateState.url)}
+							<button
+								type="button"
+								class="btn"
+								onclick={() => void session.openReleasePage()}
+							>
+								Open release
+							</button>
+						{/if}
+						<button
+							type="button"
+							class="btn"
+							disabled={session.closed || session.starting || session.updateChecking}
+							onclick={() => void session.checkForUpdates()}
+						>
+							{session.updateChecking ? 'Checking…' : 'Check for updates'}
+						</button>
+					</div>
 				</div>
 			</section>
 
@@ -440,6 +484,49 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
+		flex: none;
+	}
+
+	.update-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+		flex-wrap: wrap;
+		padding-top: 8px;
+		border-top: 1px solid var(--rule-soft);
+	}
+
+	.update-row-info {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+		flex: 1 1 200px;
+	}
+
+	.update-row-status {
+		font-size: 0.78125rem;
+		color: var(--ink-2);
+		overflow-wrap: anywhere;
+	}
+
+	.update-row-status.ok {
+		color: var(--ok);
+	}
+
+	.update-row-status.info {
+		color: var(--sky-ink);
+	}
+
+	.update-row-status.fail {
+		color: var(--fail);
+	}
+
+	.update-row-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
 		flex: none;
 	}
 </style>

@@ -353,3 +353,204 @@ async fn an_older_or_absent_release_says_nothing() {
         engine.shutdown().await;
     }
 }
+
+async fn next_check_result(engine: &mut EngineHandle) -> Event {
+    let wait = Duration::from_secs(2);
+    while let Ok(e) = tokio::time::timeout(wait, engine.events.recv()).await {
+        if let Ok(ev @ Event::UpdateCheckResult { .. }) = e {
+            return ev;
+        }
+    }
+    panic!("timed out waiting for UpdateCheckResult");
+}
+
+#[tokio::test]
+async fn manual_update_check_works_with_auto_check_off_without_enabling_auto_announcements() {
+    let server = chat_server().await;
+    Mock::given(path("/releases/latest"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/releases/tag/v99.0.0"))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = format!(
+        "[updates]\ncheck = false\nurl = \"{}/releases/latest\"\n",
+        server.uri()
+    );
+    let loaded = load(tmp.path(), &server.uri(), "models = [\"tiny\"]", &config);
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    // Auto-check must remain completely quiet when `updates.check = false`.
+    assert_eq!(next_update(&mut engine).await, None);
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r.url.path().contains("releases"))
+            .count(),
+        0
+    );
+
+    engine.submit(Op::CheckUpdates).await;
+    let ev = next_check_result(&mut engine).await;
+    assert_eq!(
+        ev,
+        Event::UpdateCheckResult {
+            current: checks::CURRENT.to_owned(),
+            latest: Some("99.0.0".to_owned()),
+            update_available: true,
+            url: Some(format!("{}/releases/latest", server.uri())),
+            error: None,
+        }
+    );
+    engine.shutdown().await;
+
+    // A later start with `updates.check = false` must still neither fetch nor announce.
+    let loaded = load(tmp.path(), &server.uri(), "models = [\"tiny\"]", &config);
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    assert_eq!(next_update(&mut engine).await, None);
+    engine.shutdown().await;
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r.url.path().contains("releases"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn manual_update_check_reports_up_to_date_empty_url_and_offline() {
+    let server = chat_server().await;
+    Mock::given(path("/releases/latest"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("location", "/releases/tag/v0.0.0-rc1"),
+        )
+        .mount(&server)
+        .await;
+
+    // 1. Up to date
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = format!(
+        "[updates]\ncheck = false\nurl = \"{}/releases/latest\"\n",
+        server.uri()
+    );
+    let mut engine = Engine::spawn(Arc::new(load(
+        tmp.path(),
+        &server.uri(),
+        "models = [\"tiny\"]",
+        &config,
+    )));
+    engine.submit(Op::CheckUpdates).await;
+    assert_eq!(
+        next_check_result(&mut engine).await,
+        Event::UpdateCheckResult {
+            current: checks::CURRENT.to_owned(),
+            latest: Some("0.0.0-rc1".to_owned()),
+            update_available: false,
+            url: Some(format!("{}/releases/latest", server.uri())),
+            error: None,
+        }
+    );
+    engine.shutdown().await;
+
+    // 2. Empty updates.url
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut engine = Engine::spawn(Arc::new(load(
+        tmp.path(),
+        &server.uri(),
+        "models = [\"tiny\"]",
+        "[updates]\ncheck = false\nurl = \"\"\n",
+    )));
+    engine.submit(Op::CheckUpdates).await;
+    match next_check_result(&mut engine).await {
+        Event::UpdateCheckResult {
+            latest,
+            update_available,
+            url,
+            error: Some(err),
+            ..
+        } => {
+            assert_eq!(latest, None);
+            assert!(!update_available);
+            assert_eq!(url, None);
+            assert!(err.contains("updates.url"), "{err}");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    engine.shutdown().await;
+
+    // 3. network.offline = true blocks non-loopback update URLs on manual check too
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let before = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path().contains("releases"))
+        .count();
+    let offline_cfg = "[network]\noffline = true\n[updates]\ncheck = false\nurl = \"https://releases.example/latest\"\n";
+    let mut engine = Engine::spawn(Arc::new(load(
+        tmp.path(),
+        &server.uri(),
+        "models = [\"tiny\"]",
+        offline_cfg,
+    )));
+    engine.submit(Op::CheckUpdates).await;
+    match next_check_result(&mut engine).await {
+        Event::UpdateCheckResult {
+            update_available,
+            error: Some(err),
+            ..
+        } => {
+            assert!(!update_available);
+            assert!(err.contains("offline"), "{err}");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    engine.shutdown().await;
+    let after = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path().contains("releases"))
+        .count();
+    assert_eq!(before, after, "offline mode must not make HTTP requests");
+}
+
+#[tokio::test]
+async fn reloading_after_enabling_updates_check_runs_auto_check() {
+    let server = chat_server().await;
+    Mock::given(path("/releases/latest"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/releases/tag/v99.0.0"))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let off = format!(
+        "[updates]\ncheck = false\nurl = \"{}/releases/latest\"\n",
+        server.uri()
+    );
+    let mut engine = Engine::spawn(Arc::new(load(
+        tmp.path(),
+        &server.uri(),
+        "models = [\"tiny\"]",
+        &off,
+    )));
+    assert_eq!(next_update(&mut engine).await, None);
+
+    // Enabling updates.check and reloading starts the auto-check cleanly.
+    let on = format!(
+        "[updates]\ncheck = true\nurl = \"{}/releases/latest\"\n",
+        server.uri()
+    );
+    std::fs::write(tmp.path().join("user").join("config.toml"), on).expect("config");
+    engine.submit(Op::ReloadConfig).await;
+    let (current, latest) = next_update(&mut engine)
+        .await
+        .expect("announced after reload");
+    assert_eq!(
+        (current.as_str(), latest.as_str()),
+        (checks::CURRENT, "99.0.0")
+    );
+    engine.shutdown().await;
+}
