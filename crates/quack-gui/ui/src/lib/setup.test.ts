@@ -11,14 +11,36 @@ const info: AppInfo = {
 	cwd: '/workspace',
 	branch: null,
 	model: null,
+	planner_model: null,
+	planner_locked: false,
 	permission_mode: 'ask',
 	work_mode: 'edit',
 	ui: { theme: 'auto', reduced_motion: false },
+	egress: {
+		offline: false,
+		offline_locked: false,
+		egress_allow: [],
+		providers: [],
+		mcp_remote: [],
+		http1_only: false,
+		has_proxy: false,
+		updates_check: false,
+		catalog_refresh: false,
+		telemetry_enabled: false
+	},
+	sandbox: {
+		mode: 'auto',
+		os_supported: true,
+		status_detail: 'active',
+		writable: [],
+		locked: false
+	},
 	settings: [],
 	layers: [],
 	rules: [],
 	bundles: [],
-	bundles_disabled: []
+	bundles_disabled: [],
+	history: []
 };
 
 function makeSession(providers: ProviderModels[], services: ServiceInfo[] = []): Session {

@@ -100,6 +100,15 @@ async fn recent_folders(
     Ok(state.recent_folders(limit.unwrap_or(10).max(1) as usize))
 }
 
+#[tauri::command]
+async fn input_history(
+    state: State<'_, Registry>,
+    client: u64,
+    tab: u64,
+) -> Result<Vec<String>, String> {
+    state.input_history_for(client, tab).await
+}
+
 /// Opens a subscription sign-in address in the user's browser. The only URL the webview
 /// may open is one the engine handed over `Event::SignInUrl`; no arbitrary `fetch` or
 /// shell access is granted to it.
@@ -109,6 +118,66 @@ fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_workspace_files(
+    state: State<'_, Registry>,
+    client: u64,
+    tab: u64,
+    limit: Option<u32>,
+) -> Result<Vec<String>, String> {
+    state
+        .list_files_for(client, tab, limit.unwrap_or(5000).clamp(1, 20_000) as usize)
+        .await
+}
+
+#[tauri::command]
+async fn reveal_path(
+    app: tauri::AppHandle,
+    state: State<'_, Registry>,
+    client: u64,
+    tab: u64,
+    path: String,
+    open_file: Option<bool>,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let resolved = state.resolve_workspace_path_for(client, tab, std::path::Path::new(&path))?;
+    if open_file.unwrap_or(false) {
+        app.opener()
+            .open_path(resolved.display().to_string(), None::<&str>)
+            .map_err(|e| e.to_string())
+    } else {
+        app.opener()
+            .reveal_item_in_dir(resolved)
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+async fn highlight_code(lang: String, code: String) -> Option<Vec<quack_gui::HighlightSpan>> {
+    tokio::task::spawn_blocking(move || quack_gui::highlight_code(&lang, &code))
+        .await
+        .ok()
+        .flatten()
+}
+
+#[tauri::command]
+fn stage_pasted_image(
+    state: State<'_, Registry>,
+    client: u64,
+    tab: u64,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    state.save_pasted_image_for(client, tab, &bytes)
+}
+
+#[tauri::command]
+fn notify_attention(app: tauri::AppHandle, title: String, body: String) {
+    use tauri_plugin_notification::NotificationExt;
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        tracing::debug!(%e, "desktop attention notification skipped");
+    }
 }
 
 fn main() {
@@ -145,7 +214,13 @@ fn main() {
             send_op,
             close_tab,
             recent_folders,
-            open_url
+            input_history,
+            open_url,
+            list_workspace_files,
+            reveal_path,
+            highlight_code,
+            stage_pasted_image,
+            notify_attention
         ])
         .build(tauri::generate_context!())
         .expect("the tauri application builds")

@@ -113,11 +113,11 @@ pub async fn collect_until(
         let quack_gui::Payload::Event { event } = m.payload else {
             continue;
         };
-        match &event {
+        match &*event {
             Event::Error { error } => panic!("engine error: {}", error.message),
             Event::TurnAborted { reason, .. } => panic!("aborted: {reason}"),
-            e if want(e) => return (seen, event),
-            _ => seen.push(event),
+            e if want(e) => return (seen, *event),
+            _ => seen.push(*event),
         }
     }
 }

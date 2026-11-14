@@ -1,6 +1,9 @@
-import type { Event, Op } from '#lib/protocol';
+import type { Event, MemoryNote } from '#lib/protocol';
 import type {
 	AppInfo,
+	ClientEvent,
+	ClientOp,
+	HighlightSpan,
 	OpenedTab,
 	RecentFolder,
 	ResumeRequest,
@@ -22,14 +25,36 @@ const INFO: AppInfo = {
 	cwd: '~/Development/demo-pond',
 	branch: 'main',
 	model: 'dev-local/tiny',
+	planner_model: 'dev-local/thinker',
+	planner_locked: false,
 	permission_mode: 'ask',
 	work_mode: 'edit',
 	ui: { theme: 'auto', reduced_motion: false },
+	egress: {
+		offline: true,
+		offline_locked: false,
+		egress_allow: [],
+		providers: [{ id: 'dev-local', host: 'localhost:11434', local: true, enabled: true }],
+		mcp_remote: [],
+		http1_only: false,
+		has_proxy: false,
+		updates_check: false,
+		catalog_refresh: false,
+		telemetry_enabled: false
+	},
+	sandbox: {
+		mode: 'auto',
+		os_supported: true,
+		status_detail: 'active (Landlock + seccomp)',
+		writable: [],
+		locked: false
+	},
 	settings: [],
 	layers: [{ layer: 'user', status: 'no config.toml', file: null }],
 	rules: [],
 	bundles: [],
-	bundles_disabled: []
+	bundles_disabled: [],
+	history: ['Check test failures in the pond module', 'Explain how session memory works']
 };
 
 const SESSION = { id: 'dev-session-0000', cwd: INFO.cwd, model: INFO.model, profile: 'generic' };
@@ -53,7 +78,7 @@ export function devTransport(): Transport {
 	const fan = (message: TabMessage) => {
 		for (const listener of listeners) listener(message);
 	};
-	const send = (tab: number, event: Event) => fan({ tab, event });
+	const send = (tab: number, event: ClientEvent) => fan({ tab, event });
 	let nextTab = 0;
 	type TabState = {
 		cwd: string;
@@ -61,9 +86,69 @@ export function devTransport(): Transport {
 		workMode: import('#lib/protocol').WorkMode;
 		approvals: import('#lib/protocol').ApprovalPolicy;
 		effort: string | null;
+		offline: boolean;
+		sandboxOff: boolean;
+		plannerModel: string | null;
 		resolveApproval: (() => void) | null;
+		userTurns: string[];
+		inputHistory: string[];
+		memoryNotes: MemoryNote[];
 	};
 	const tabs = new Map<number, TabState>();
+
+	function formatDemoNote(
+		name: string,
+		description: string,
+		kind: string,
+		body: string,
+		updated = '2026-11-12'
+	): string {
+		return `---\nname: ${name}\ndescription: ${description}\ntype: ${kind}\nupdated: ${updated}\n---\n\n${body.trim()}\n`;
+	}
+
+	function seedMemoryNotes(cwd: string): MemoryNote[] {
+		const base = cwd.replace(/^~\//, '/home/you/');
+		return [
+			{
+				scope: 'project',
+				name: 'rust-conventions',
+				description: 'Workspace build flags and test conventions',
+				path: `${base}/.quack/memory/notes/rust-conventions.md`,
+				text: formatDemoNote(
+					'rust-conventions',
+					'Workspace build flags and test conventions',
+					'project',
+					'- Always run `cargo clippy --workspace --all-targets --locked` with `-D warnings`.\n- Never leave `.unwrap()` in library or bridge code; return errors or use `expect` with context.'
+				)
+			},
+			{
+				scope: 'global',
+				name: 'editor-preferences',
+				description: 'User preference for concise diffs and direct tests',
+				path: '/home/you/.local/share/quack/memory/notes/editor-preferences.md',
+				text: formatDemoNote(
+					'editor-preferences',
+					'User preference for concise diffs and direct tests',
+					'user',
+					'Keep helpers small and verify behavior with unit tests before claiming fixes.',
+					'2026-11-10'
+				)
+			}
+		];
+	}
+
+	function memoryIndexFill(notes: MemoryNote[]): number {
+		let maxFill = 0;
+		for (const scope of ['project', 'global'] as const) {
+			const scoped = notes.filter((n) => n.scope === scope);
+			if (scoped.length === 0) continue;
+			const lines = scoped.length;
+			const bytes = scoped.reduce((acc, n) => acc + `- [${n.name}](notes/${n.name}.md) — ${n.description}\n`.length, 0);
+			const fill = Math.max(Math.round((lines / 200) * 100), Math.round((bytes / 25_000) * 100), 1);
+			if (fill > maxFill) maxFill = fill;
+		}
+		return Math.min(100, maxFill);
+	}
 	const demoFolders = [
 		'/home/you/Development/demo-pond',
 		'/home/you/Development/quack',
@@ -401,10 +486,16 @@ export function devTransport(): Transport {
 				workMode: 'edit',
 				approvals: 'ask',
 				effort: null,
-				resolveApproval: null
+				offline: true,
+				sandboxOff: false,
+				plannerModel: INFO.planner_model,
+				resolveApproval: null,
+				userTurns: [],
+				inputHistory: [...INFO.history],
+				memoryNotes: seedMemoryNotes(cwd)
 			};
 			tabs.set(tab, tabState);
-			const info = { ...INFO, cwd, branch };
+			const info = { ...INFO, cwd, branch, history: [...tabState.inputHistory] };
 			fan({ tab, info });
 			fan({
 				tab,
@@ -415,6 +506,13 @@ export function devTransport(): Transport {
 			});
 			send(tab, { event: 'model_catalog', ...catalog() });
 			send(tab, { event: 'mode_changed', work_mode: tabState.workMode, approvals: tabState.approvals });
+			send(tab, {
+				event: 'commands',
+				commands: [
+					{ name: 'review', description: 'Review current diff for regressions (demo).', args: '[scope]', source: 'demo', path: 'commands/review.md' },
+					{ name: 'compact', description: 'Summarize history to reclaim context.', args: '[focus]', source: 'built-in', path: '' }
+				]
+			});
 			send(tab, {
 				event: 'skills',
 				skills: [
@@ -432,6 +530,22 @@ export function devTransport(): Transport {
 					}
 				]
 			});
+			send(tab, {
+				event: 'lsp_servers',
+				servers: [
+					{
+						id: 'rust-analyzer',
+						command: 'rust-analyzer',
+						extensions: ['rs'],
+						state: 'ready',
+						detail: 'workspace indexed',
+						errors: 0,
+						warnings: 1,
+						log: []
+					}
+				]
+			});
+			send(tab, { event: 'diagnostics', errors: 0, warnings: 1 });
 			send(tab, { event: 'session_list', sessions: savedSessions() });
 			send(tab, { event: 'startup_complete' });
 			if (autoDemo) setTimeout(() => void runDemoTurn(tab), 500);
@@ -439,11 +553,133 @@ export function devTransport(): Transport {
 			return { tab, info };
 		},
 
-		async sendOp(tab: number, op: Op): Promise<void> {
+		async sendOp(tab: number, op: ClientOp): Promise<void> {
 			const state = tabs.get(tab);
 			switch (op.op) {
-				case 'user_turn':
+				case 'user_turn': {
+					const text = op.items
+						.map((item) => (item.type === 'text' ? item.text : ''))
+						.filter(Boolean)
+						.join('\n');
+					if (state && text.trim()) {
+						state.userTurns.push(text);
+						if (state.inputHistory.at(-1) !== text) {
+							state.inputHistory = [...state.inputHistory, text].slice(-100);
+						}
+						fan({ tab, history: [...state.inputHistory] });
+					}
 					void runDemoTurn(tab);
+					break;
+				}
+				case 'continue_turn':
+					if (op.proceed) {
+						send(tab, { event: 'notice', message: `Granted another batch of steps (turn ${op.turn}).` });
+					} else {
+						send(tab, { event: 'turn_aborted', turn: op.turn, reason: 'Stopped at step pause.' });
+					}
+					break;
+				case 'set_sandbox':
+					if (state) state.sandboxOff = op.off;
+					send(tab, { event: 'sandbox', off: op.off });
+					break;
+				case 'list_rewind_points':
+					send(tab, {
+						event: 'rewind_points',
+						points: (state?.userTurns ?? ['Check the pond module'])
+							.slice()
+							.reverse()
+							.map((text, idx) => ({
+								back: idx + 1,
+								text,
+								files: idx === 0 ? ['src/pond/ducks.ts'] : ['CHANGELOG.md']
+							}))
+					});
+					break;
+				case 'rewind':
+					if (op.files) {
+						send(tab, {
+							event: 'files_restored',
+							restored: ['src/pond/ducks.ts'],
+							conflicts: []
+						});
+					}
+					if (op.conversation) {
+						const removed = state ? state.userTurns.splice(Math.max(0, state.userTurns.length - op.back)) : [];
+						send(tab, { event: 'rewound', back: op.back, text: removed[0] ?? 'Previous turn' });
+					}
+					break;
+				case 'fork_session':
+					send(tab, {
+						event: 'session_configured',
+						session: {
+							...SESSION,
+							cwd: state?.cwd ?? INFO.cwd,
+							id: `${SESSION.id}-fork-${Date.now()}`
+						}
+					});
+					send(tab, {
+						event: 'notice',
+						message: 'Forked: working in a branched session; original saved.'
+					});
+					break;
+				case 'export':
+					send(tab, {
+						event: 'notice',
+						message: `Exported transcript (${op.format}) to ${op.path ?? 'field-notes.' + (op.format === 'json' ? 'json' : 'md')}`
+					});
+					break;
+				case 'save_setting':
+					if (state && op.key === 'network.offline') state.offline = op.value === 'true';
+					if (state && op.key === 'model.planner') {
+						state.plannerModel = op.value === '""' ? null : op.value.replace(/^"|"$/g, '');
+					}
+					send(tab, {
+						event: 'setting_saved',
+						key: op.key,
+						value: op.value,
+						path: '~/.config/quack/config.toml'
+					});
+					break;
+				case 'reload_config':
+					if (state) {
+						fan({
+							tab,
+							info: {
+								...INFO,
+								cwd: state.cwd,
+								branch: state.branch,
+								planner_model: state.plannerModel,
+								egress: { ...INFO.egress, offline: state.offline },
+								sandbox: {
+									...INFO.sandbox,
+									mode: state.sandboxOff ? 'off' : 'auto',
+									status_detail: state.sandboxOff ? 'disabled (sandbox.mode = off)' : 'active (Landlock + seccomp)'
+								}
+							}
+						});
+					}
+					send(tab, { event: 'config_reloaded' });
+					send(tab, { event: 'startup_complete' });
+					break;
+				case 'list_mcp':
+					send(tab, { event: 'mcp_servers', servers: [] });
+					break;
+				case 'list_lsp':
+					send(tab, {
+						event: 'lsp_servers',
+						servers: [
+							{
+								id: 'rust-analyzer',
+								command: 'rust-analyzer',
+								extensions: ['rs'],
+								state: 'ready',
+								detail: 'workspace indexed',
+								errors: 0,
+								warnings: 1,
+								log: []
+							}
+						]
+					});
 					break;
 				case 'interrupt':
 					send(tab, { event: 'turn_aborted', turn: 1, reason: 'Stopped by user' });
@@ -620,6 +856,90 @@ export function devTransport(): Transport {
 						}
 					});
 					break;
+				case 'list_memory': {
+					const notes = state?.memoryNotes ?? [];
+					send(tab, { event: 'memory_notes', notes: [...notes], index_fill: memoryIndexFill(notes) });
+					break;
+				}
+				case 'save_memory': {
+					if (!state) break;
+					const { scope, name, description, kind, body, previous_scope, previous_name } = op;
+					if (scope !== 'project' && scope !== 'global') {
+						send(tab, { event: 'warning', message: `cannot save note: unknown scope \`${scope}\`` });
+						break;
+					}
+					if (!['user', 'project', 'feedback', 'reference'].includes(kind)) {
+						send(tab, { event: 'warning', message: `cannot save note: unknown type \`${kind}\`` });
+						break;
+					}
+					if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) {
+						send(tab, {
+							event: 'warning',
+							message: 'cannot save note: note name must be 1–64 lowercase letters, digits, or hyphens'
+						});
+						break;
+					}
+					if (!description.trim() || !body.trim()) {
+						send(tab, { event: 'warning', message: 'cannot save note: description and body cannot be empty' });
+						break;
+					}
+					const hasPrev = previous_scope !== undefined && previous_name !== undefined;
+					if ((previous_scope !== undefined) !== (previous_name !== undefined)) {
+						send(tab, {
+							event: 'warning',
+							message: 'cannot save note: previous_scope and previous_name must both be set when moving a note'
+						});
+						break;
+					}
+					const renaming = hasPrev && (previous_scope !== scope || previous_name !== name);
+					if (renaming && state.memoryNotes.some((n) => n.scope === scope && n.name === name)) {
+						send(tab, {
+							event: 'warning',
+							message: `cannot save note: a ${scope} note named \`${name}\` already exists`
+						});
+						break;
+					}
+					const base = state.cwd.replace(/^~\//, '/home/you/');
+					const path =
+						scope === 'project'
+							? `${base}/.quack/memory/notes/${name}.md`
+							: `/home/you/.local/share/quack/memory/notes/${name}.md`;
+					const today = new Date().toISOString().slice(0, 10);
+					const nextNote: MemoryNote = {
+						scope,
+						name,
+						description: description.trim(),
+						path,
+						text: formatDemoNote(name, description.trim(), kind, body, today)
+					};
+					state.memoryNotes = state.memoryNotes.filter((n) => {
+						if (n.scope === scope && n.name === name) return false;
+						if (hasPrev && n.scope === previous_scope && n.name === previous_name) return false;
+						return true;
+					});
+					state.memoryNotes.push(nextNote);
+					send(tab, {
+						event: 'memory_notes',
+						notes: [...state.memoryNotes],
+						index_fill: memoryIndexFill(state.memoryNotes)
+					});
+					break;
+				}
+				case 'delete_memory': {
+					if (!state) break;
+					const idx = state.memoryNotes.findIndex((n) => n.scope === op.scope && n.name === op.name);
+					if (idx === -1) {
+						send(tab, { event: 'warning', message: `no ${op.scope} note named \`${op.name}\`` });
+						break;
+					}
+					state.memoryNotes.splice(idx, 1);
+					send(tab, {
+						event: 'memory_notes',
+						notes: [...state.memoryNotes],
+						index_fill: memoryIndexFill(state.memoryNotes)
+					});
+					break;
+				}
 				default:
 					send(tab, { event: 'notice', message: `the dev transport ignores ${op.op}` });
 			}
@@ -635,6 +955,43 @@ export function devTransport(): Transport {
 			// desktop shell's system browser.
 			window.open(url, '_blank', 'noopener');
 		},
+
+		async listFiles(): Promise<string[]> {
+			return [
+				'src/main.rs',
+				'src/export.rs',
+				'src/pond/ducks.ts',
+				'CHANGELOG.md',
+				'Cargo.toml',
+				'README.md'
+			];
+		},
+
+		async inputHistory(tab: number): Promise<string[]> {
+			return [...(tabs.get(tab)?.inputHistory ?? INFO.history)];
+		},
+
+		async revealPath(tab: number, path: string): Promise<void> {
+			send(tab, { event: 'notice', message: `Desktop app reveals "${path}" in your file manager.` });
+		},
+
+		async highlightCode(): Promise<HighlightSpan[] | null> {
+			return null;
+		},
+
+		async pickImages(): Promise<string[]> {
+			return [];
+		},
+
+		async pickSavePath(defaultName: string): Promise<string | null> {
+			return defaultName;
+		},
+
+		async stagePastedImage(): Promise<string> {
+			throw new Error('Pasting image bytes requires the desktop app.');
+		},
+
+		async notifyAttention(): Promise<void> {},
 
 		async recentFolders(_limit = 10): Promise<RecentFolder[]> {
 			return [

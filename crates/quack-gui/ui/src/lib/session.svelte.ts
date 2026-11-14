@@ -1,18 +1,24 @@
 import type {
 	ApprovalRequest,
+	CommandInfo,
 	ContextSegment,
 	DetectedServer,
+	LspServerInfo,
+	McpServerInfo,
+	MemoryNote,
 	Op,
 	ServiceInfo,
-	Event,
 	ProviderModels,
 	Question,
 	ReplayItem,
+	RewindPoint,
 	SessionSummary,
 	SkillInfo,
-	StatsReport
+	StatsReport,
+	WriteScope
 } from '#lib/protocol';
-import type { AppInfo, Transport } from '#lib/transport/types';
+import type { AppInfo, ClientEvent, ClientOp, Transport } from '#lib/transport/types';
+import { recordModelSpeed } from './modelStats';
 
 /**
  * One tab's view of one engine (docs/plan/15-desktop-client.md#the-ui): a reducer from
@@ -39,7 +45,8 @@ export type Item =
 			subjects: string[];
 	  }
 	| { kind: 'system'; id: number; tone: 'notice' | 'warning' | 'error'; text: string }
-	| { kind: 'compacted'; id: number };
+	| { kind: 'compacted'; id: number }
+	| { kind: 'pruned'; id: number; removedTokens: number; items: string[] };
 
 export interface AgentRun {
 	id: string;
@@ -232,8 +239,34 @@ export class Session {
 	detecting = $state(false);
 	/** Skills the engine loaded for this project; arrives at startup. */
 	skills = $state<SkillInfo[]>([]);
+	/** Custom slash commands loaded from command folders. */
+	commands = $state<CommandInfo[]>([]);
+	/** MCP prompt shortcuts (`/server:prompt`). */
+	mcpPrompts = $state<CommandInfo[]>([]);
+	mcpServers = $state<McpServerInfo[]>([]);
+	lspServers = $state<LspServerInfo[]>([]);
+	diagnostics = $state<{ errors: number; warnings: number }>({ errors: 0, warnings: 0 });
+	/** Turn paused at `agent.max_steps`; awaiting `Op::ContinueTurn`. */
+	stepLimit = $state<{ turn: number; limit: number } | null>(null);
+	/** Turn-level rewind points fetched from the engine. */
+	rewindPoints = $state<RewindPoint[] | null>(null);
+	rewindLoading = $state(false);
+	rewindConflict = $state<{ back: number; conversation: boolean; files: boolean; conflicts: string[] } | null>(null);
+	forking = $state(false);
+	/** Set when "Branch & try another model" asked to open the model picker after fork lands. */
+	modelPickerAfterFork = $state(false);
+	settingSaving = $state(false);
+	egressOpen = $state(false);
+	workspaceFiles = $state<string[] | null>(null);
+	loadingFiles = $state(false);
 	/** The engine's `/stats` report, fetched after each turn. */
 	stats = $state<StatsReport | null>(null);
+	memoryNotes = $state<MemoryNote[]>([]);
+	memoryLoaded = $state(false);
+	memoryIndexFill = $state(0);
+	memorySaving = $state(false);
+	memoryError = $state<string | null>(null);
+	inputHistory = $state<string[]>([]);
 
 	get canSubmit() {
 		return (
@@ -246,6 +279,7 @@ export class Session {
 			!this.turnPending &&
 			!this.approval &&
 			!this.questions &&
+			!this.stepLimit &&
 			!this.trust &&
 			!!this.currentModel
 		);
@@ -253,6 +287,9 @@ export class Session {
 
 	#transport: Transport;
 	#progressSinceWarning = false;
+	#pendingForkOpenPicker = false;
+	#reloadAfterSettingSaved = false;
+	#lastRewindAttempt: { back: number; conversation: boolean; files: boolean } | null = null;
 
 	constructor(transport: Transport, tab: number, info: AppInfo, cwd?: string) {
 		this.#transport = transport;
@@ -262,13 +299,27 @@ export class Session {
 		this.currentModel = info.model;
 		this.approvals = info.permission_mode as ApprovalPolicy;
 		this.workMode = info.work_mode === 'plan' ? 'plan' : 'edit';
+		this.sandboxOff = info.sandbox.mode === 'off';
+		this.sandboxAvailable = info.sandbox.os_supported;
+		this.inputHistory = [...(info.history ?? [])];
+	}
+
+	onInfo(info: AppInfo) {
+		this.info = info;
+		this.sandboxOff = info.sandbox.mode === 'off';
+		this.sandboxAvailable = info.sandbox.os_supported;
+		if (info.history) this.inputHistory = [...info.history];
 	}
 
 	/** Feed one protocol event; the only place transcript state is written. */
-	onEvent(ev: Event) {
+	onEvent(ev: ClientEvent) {
 		switch (ev.event) {
-			case 'session_configured':
-				if (this.sessionId !== null && this.sessionId !== ev.session.id) this.#resetConversation();
+			case 'session_configured': {
+				const wasForking = this.forking;
+				if (this.sessionId !== null && this.sessionId !== ev.session.id && !wasForking) {
+					this.#resetConversation();
+				}
+				this.forking = false;
 				this.sessionId = ev.session.id;
 				this.switching = false;
 				this.currentModel = ev.session.model ?? null;
@@ -277,6 +328,13 @@ export class Session {
 				if (this.currentModel) {
 					this.setupWorking = false;
 					this.setupOpen = false;
+				}
+				if (wasForking) {
+					void this.listSessions();
+					if (this.#pendingForkOpenPicker) {
+						this.#pendingForkOpenPicker = false;
+						this.modelPickerAfterFork = true;
+					}
 				}
 				// Switching to a model that declares thinking levels asks for one: the level
 				// changes both how the model works and what it costs.
@@ -289,6 +347,7 @@ export class Session {
 				}
 				this.#pickThinkingFor = null;
 				break;
+			}
 			case 'startup_progress':
 				if (ev.state.state === 'running') {
 					this.startupDetail = ev.state.detail || ev.subsystem;
@@ -313,6 +372,7 @@ export class Session {
 				this.starting = true;
 				this.startupDetail = null;
 				this.issue = null;
+				void this.listMemory();
 				break;
 			case 'project_trust':
 				this.trust = { path: ev.path, summary: ev.summary, changed: ev.changed };
@@ -390,6 +450,8 @@ export class Session {
 				this.#sealStreams();
 				this.approval = null;
 				this.questions = null;
+				this.stepLimit = null;
+				this.workspaceFiles = null;
 				if (this.issue?.kind === 'warning' && this.#progressSinceWarning) this.issue = null;
 				this.lastUsage = {
 					prompt: ev.usage.prompt_tokens,
@@ -399,6 +461,15 @@ export class Session {
 				// Usage and context re-read after every turn.
 				void this.#send({ op: 'get_stats' });
 				void this.refreshContext();
+				void this.listMemory();
+				break;
+			case 'step_limit_reached':
+				this.turnPending = false;
+				this.streaming = false;
+				this.#sealStreams();
+				this.approval = null;
+				this.questions = null;
+				this.stepLimit = { turn: ev.turn, limit: ev.limit };
 				break;
 			case 'turn_aborted':
 				this.turnPending = false;
@@ -406,6 +477,7 @@ export class Session {
 				this.#sealStreams();
 				this.approval = null;
 				this.questions = null;
+				this.stepLimit = null;
 				if (this.issue?.kind !== 'error') this.issue = { kind: 'aborted', message: ev.reason };
 				this.items.push({
 					kind: 'system',
@@ -416,6 +488,9 @@ export class Session {
 				break;
 			case 'speed':
 				this.speed = { ttftMs: ev.ttft_ms, tokensPerSec: ev.tokens_per_sec ?? null };
+				if (this.currentModel) {
+					recordModelSpeed(this.currentModel, ev.ttft_ms, ev.tokens_per_sec ?? null);
+				}
 				break;
 			case 'context_update':
 				this.context = {
@@ -493,6 +568,37 @@ export class Session {
 			case 'skills':
 				this.skills = ev.skills;
 				break;
+			case 'commands':
+				this.commands = ev.commands;
+				break;
+			case 'mcp_prompts':
+				this.mcpPrompts = ev.prompts;
+				break;
+			case 'mcp_servers':
+				this.mcpServers = ev.servers;
+				break;
+			case 'lsp_servers':
+				this.lspServers = ev.servers;
+				break;
+			case 'diagnostics':
+				this.diagnostics = { errors: ev.errors, warnings: ev.warnings };
+				break;
+			case 'context_pruned':
+				this.#sealStreams();
+				this.items.push({
+					kind: 'pruned',
+					id: nextId(),
+					removedTokens: ev.report.removed_tokens,
+					items: ev.report.items
+				});
+				break;
+			case 'setting_saved':
+				this.settingSaving = false;
+				if (this.#reloadAfterSettingSaved) {
+					this.#reloadAfterSettingSaved = false;
+					void this.#send({ op: 'reload_config' });
+				}
+				break;
 			case 'stats':
 				this.stats = ev.report;
 				break;
@@ -536,15 +642,63 @@ export class Session {
 				this.#sealStreams();
 				this.items.push({ kind: 'compacted', id: nextId() });
 				break;
-			case 'rewound':
-				// The transcript above the rewind point stays visible; the next turn
-				// continues from the shorter history (G2 adds item surgery).
+			case 'rewind_points':
+				this.rewindLoading = false;
+				this.rewindPoints = ev.points;
+				break;
+			case 'files_restored':
+				if (ev.conflicts.length > 0 && ev.restored.length === 0) {
+					if (this.#lastRewindAttempt) {
+						this.rewindConflict = { ...this.#lastRewindAttempt, conflicts: ev.conflicts };
+					}
+				} else if (ev.restored.length > 0) {
+					this.rewindConflict = null;
+					this.items.push({
+						kind: 'system',
+						id: nextId(),
+						tone: 'notice',
+						text: `Restored ${ev.restored.length} file${ev.restored.length === 1 ? '' : 's'}: ${ev.restored.join(', ')}`
+					});
+				}
+				break;
+			case 'rewound': {
+				this.#sealStreams();
+				this.rewindConflict = null;
+				this.rewindPoints = null;
+				this.rewindLoading = false;
+				let seenUsers = 0;
+				let cutIndex = -1;
+				for (let i = this.items.length - 1; i >= 0; i--) {
+					if (this.items[i].kind === 'user') {
+						seenUsers += 1;
+						if (seenUsers === ev.back) {
+							cutIndex = i;
+							break;
+						}
+					}
+				}
+				if (cutIndex >= 0) {
+					this.items = this.items.slice(0, cutIndex);
+				}
+				if (!this.draft.trim() && ev.text) {
+					this.draft = ev.text;
+				}
 				this.items.push({
 					kind: 'system',
 					id: nextId(),
 					tone: 'notice',
-					text: `Rewound ${ev.back} turn${ev.back === 1 ? '' : 's'} — the conversation continues from “${ev.text.slice(0, 80)}”`
+					text: `Rewound ${ev.back} turn${ev.back === 1 ? '' : 's'} — edit the prompt below or branch cleanly.`
 				});
+				void this.refreshContext();
+				void this.refreshStats();
+				break;
+			}
+			case 'memory_notes':
+				this.memoryNotes = ev.notes;
+				this.memoryIndexFill = ev.index_fill;
+				this.memoryLoaded = true;
+				this.memorySaving = false;
+				this.memoryError = null;
 				break;
 			case 'notice':
 				this.#sealStreams();
@@ -553,6 +707,14 @@ export class Session {
 			case 'warning':
 				this.#sealStreams();
 				this.turnPending = false;
+				this.settingSaving = false;
+				this.rewindLoading = false;
+				this.forking = false;
+				if (this.memorySaving) {
+					this.memorySaving = false;
+					this.memoryError = ev.message;
+				}
+				this.#reloadAfterSettingSaved = false;
 				this.#progressSinceWarning = false;
 				if (this.switching || this.setupWorking) this.actionError = ev.message;
 				if (this.issue?.kind !== 'error') this.issue = { kind: 'warning', message: ev.message };
@@ -563,6 +725,11 @@ export class Session {
 			case 'error':
 				this.#sealStreams();
 				this.turnPending = false;
+				this.settingSaving = false;
+				this.rewindLoading = false;
+				this.forking = false;
+				this.memorySaving = false;
+				this.#reloadAfterSettingSaved = false;
 				this.actionError = ev.error.message;
 				this.issue = { kind: 'error', message: ev.error.message };
 				this.switching = false;
@@ -595,6 +762,13 @@ export class Session {
 		this.startupDetail = null;
 		this.streaming = false;
 		this.signingIn = null;
+		this.stepLimit = null;
+		this.rewindPoints = null;
+		this.rewindLoading = false;
+		this.rewindConflict = null;
+		this.forking = false;
+		this.settingSaving = false;
+		this.memorySaving = false;
 		this.#sealStreams();
 		this.approval = null;
 		this.questions = null;
@@ -619,6 +793,10 @@ export class Session {
 		this.stats = null;
 		this.approval = null;
 		this.questions = null;
+		this.stepLimit = null;
+		this.rewindPoints = null;
+		this.rewindLoading = false;
+		this.rewindConflict = null;
 		this.resumed = false;
 		this.issue = null;
 		this.actionError = null;
@@ -677,7 +855,7 @@ export class Session {
 	// ---- actions ----
 
 	/** IPC success means queued; engine events acknowledge the resulting state. */
-	async #send(op: Op): Promise<boolean> {
+	async #send(op: ClientOp): Promise<boolean> {
 		if (this.closed) {
 			this.actionError = 'This workspace has stopped · close and reopen the folder.';
 			return false;
@@ -694,16 +872,20 @@ export class Session {
 
 	async submit(text: string, files: string[] = [], images: string[] = []) {
 		if (!this.canSubmit) return false;
+		const cleanText = text.trim();
+		if (!cleanText && files.length === 0 && images.length === 0) return false;
 		this.sending = true;
 		this.#sealStreams();
 		this.turnPending = true;
 		const id = nextId();
-		this.items.push({ kind: 'user', id, text, files, images });
+		this.items.push({ kind: 'user', id, text: cleanText || text, files, images });
+		// Core ignores InputItem::File; inject `@path` mentions into InputItem::Text cleanly.
+		const extraRefs = files.filter((f) => !text.includes(`@${f}`)).map((f) => `@${f}`);
+		const wireText = [cleanText, extraRefs.join(' ')].filter(Boolean).join('\n\n');
 		const sent = await this.#send({
 			op: 'user_turn',
 			items: [
-				...(text ? [{ type: 'text' as const, text }] : []),
-				...files.map((path) => ({ type: 'file' as const, path })),
+				...(wireText ? [{ type: 'text' as const, text: wireText }] : []),
 				...images.map((path) => ({ type: 'image' as const, path }))
 			],
 			overrides: {}
@@ -711,6 +893,8 @@ export class Session {
 		if (!sent) {
 			this.items = this.items.filter((item) => item.id !== id);
 			this.turnPending = false;
+		} else if (wireText.trim() && this.inputHistory.at(-1) !== wireText) {
+			this.inputHistory = [...this.inputHistory, wireText].slice(-100);
 		}
 		this.sending = false;
 		return sent;
@@ -720,17 +904,37 @@ export class Session {
 		return this.#send({ op: 'interrupt' });
 	}
 
-	async answerApproval(decision: 'allow_once' | 'allow_session' | 'deny', feedback?: string) {
+	async continueTurn(proceed: boolean) {
+		const pending = this.stepLimit;
+		if (!pending || this.sending) return false;
+		this.sending = true;
+		const sent = await this.#send({ op: 'continue_turn', turn: pending.turn, proceed });
+		if (sent && this.stepLimit?.turn === pending.turn) {
+			this.stepLimit = null;
+			if (proceed) this.streaming = true;
+		}
+		this.sending = false;
+		return sent;
+	}
+
+	async answerApproval(
+		decision: 'allow_once' | 'allow_session' | 'always_allow' | 'deny',
+		feedback?: string,
+		scope: WriteScope = 'project'
+	) {
 		const callId = this.approval?.callId;
 		if (!callId || this.sending) return false;
 		this.sending = true;
+		const wireDecision: import('#lib/protocol').ApprovalDecision =
+			decision === 'deny' && feedback?.trim()
+				? { decision: 'deny_with_feedback', feedback: feedback.trim() }
+				: decision === 'always_allow'
+					? { decision: 'always_allow', scope }
+					: { decision };
 		const sent = await this.#send({
 			op: 'approval_response',
 			call_id: callId,
-			decision:
-				decision === 'deny' && feedback
-					? { decision: 'deny_with_feedback', feedback }
-					: { decision }
+			decision: wireDecision
 		});
 		if (sent && this.approval?.callId === callId) this.approval = null;
 		this.sending = false;
@@ -859,6 +1063,118 @@ export class Session {
 		return this.#send({ op: 'undo', checkpoint: null, force: false });
 	}
 
+	async listRewindPoints() {
+		if (this.rewindLoading) return false;
+		this.rewindLoading = true;
+		this.rewindConflict = null;
+		const sent = await this.#send({ op: 'list_rewind_points' });
+		if (!sent) this.rewindLoading = false;
+		return sent;
+	}
+
+	async rewind(back: number, conversation = true, files = true, force = false) {
+		if (this.streaming || this.turnPending) return false;
+		this.#lastRewindAttempt = { back, conversation, files };
+		this.rewindConflict = null;
+		return this.#send({ op: 'rewind', back, conversation, files, force });
+	}
+
+	clearRewind() {
+		this.rewindPoints = null;
+		this.rewindLoading = false;
+		this.rewindConflict = null;
+		this.#lastRewindAttempt = null;
+	}
+
+	async forkSession(openModelPicker = false) {
+		if (this.forking || this.switching || this.streaming || this.turnPending || this.starting) {
+			return false;
+		}
+		this.forking = true;
+		this.#pendingForkOpenPicker = openModelPicker;
+		const sent = await this.#send({ op: 'fork_session' });
+		if (!sent) {
+			this.forking = false;
+			this.#pendingForkOpenPicker = false;
+		}
+		return sent;
+	}
+
+	async exportTranscript(format: 'markdown' | 'json' = 'markdown') {
+		const ext = format === 'json' ? 'json' : 'md';
+		const slug = (this.title || 'session').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'session';
+		let path: string | undefined;
+		if (this.#transport.pickSavePath) {
+			const picked = await this.#transport.pickSavePath(`quack-${slug}.${ext}`);
+			if (!picked) return false;
+			path = picked;
+		}
+		return this.#send({ op: 'export', format, ...(path ? { path } : {}) });
+	}
+
+	async setSandbox(off: boolean) {
+		return this.#send({ op: 'set_sandbox', off });
+	}
+
+	async saveSetting(
+		key: string,
+		value: string,
+		scope: WriteScope = 'user',
+		reload = true
+	) {
+		if (this.settingSaving || this.streaming || this.turnPending) return false;
+		this.settingSaving = true;
+		this.#reloadAfterSettingSaved = reload;
+		const sent = await this.#send({ op: 'save_setting', key, value, scope });
+		if (!sent) {
+			this.settingSaving = false;
+			this.#reloadAfterSettingSaved = false;
+		}
+		return sent;
+	}
+
+	async setPlannerModel(providerModel: string | null, scope: WriteScope = 'user') {
+		return this.saveSetting(
+			'model.planner',
+			providerModel ? JSON.stringify(providerModel) : '""',
+			scope,
+			true
+		);
+	}
+
+	async refreshMcp() {
+		return this.#send({ op: 'list_mcp' });
+	}
+
+	async refreshLsp() {
+		return this.#send({ op: 'list_lsp' });
+	}
+
+	async refreshWorkspaceFiles(force = false) {
+		if (!this.#transport.listFiles) return [];
+		if (!force && this.workspaceFiles !== null) return this.workspaceFiles;
+		if (this.loadingFiles) return this.workspaceFiles ?? [];
+		this.loadingFiles = true;
+		try {
+			const files = await this.#transport.listFiles(this.tab, 5000);
+			this.workspaceFiles = files;
+			return files;
+		} catch {
+			return this.workspaceFiles ?? [];
+		} finally {
+			this.loadingFiles = false;
+		}
+	}
+
+	async revealFile(path: string, openFile = false) {
+		if (!this.#transport.revealPath) return;
+		try {
+			await this.#transport.revealPath(this.tab, path, openFile);
+		} catch (error) {
+			this.actionError = error instanceof Error ? error.message : String(error);
+		}
+	}
+
 	/** Files this session has written into, newest evidence last. Derived from the
 	 * transcript's edit and write calls, so it needs no engine round trip. */
 	get editedFiles(): EditedFile[] {
@@ -935,6 +1251,65 @@ export class Session {
 		this.setupNotice = '';
 		const sent = await this.#send(op);
 		if (!sent) this.setupWorking = false;
+		return sent;
+	}
+
+	setInputHistory(history: string[]) {
+		this.inputHistory = [...history];
+	}
+
+	async refreshInputHistory() {
+		if (this.closed || !this.#transport.inputHistory) return false;
+		try {
+			const history = await this.#transport.inputHistory(this.tab);
+			if (!this.closed) this.inputHistory = history;
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	async listMemory() {
+		return this.#send({ op: 'list_memory' });
+	}
+
+	clearMemoryError() {
+		this.memoryError = null;
+	}
+
+	async saveMemory(args: {
+		scope: string;
+		name: string;
+		description: string;
+		kind: string;
+		body: string;
+		previousScope?: string;
+		previousName?: string;
+	}) {
+		if (this.closed || this.memorySaving) return false;
+		this.memorySaving = true;
+		this.memoryError = null;
+		const sent = await this.#send({
+			op: 'save_memory',
+			scope: args.scope,
+			name: args.name,
+			description: args.description,
+			kind: args.kind,
+			body: args.body,
+			...(args.previousScope && args.previousName
+				? { previous_scope: args.previousScope, previous_name: args.previousName }
+				: {})
+		});
+		if (!sent) this.memorySaving = false;
+		return sent;
+	}
+
+	async deleteMemory(scope: string, name: string) {
+		if (this.closed || this.memorySaving) return false;
+		this.memorySaving = true;
+		this.memoryError = null;
+		const sent = await this.#send({ op: 'delete_memory', scope, name });
+		if (!sent) this.memorySaving = false;
 		return sent;
 	}
 }

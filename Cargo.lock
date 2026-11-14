@@ -3951,6 +3951,7 @@ dependencies = [
  "quack-core",
  "quack-protocol",
  "quack-providers",
+ "quack-sandbox",
  "quack-tools",
  "serde",
  "serde_json",

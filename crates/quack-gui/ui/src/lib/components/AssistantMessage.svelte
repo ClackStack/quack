@@ -1,17 +1,76 @@
 <script lang="ts">
 	import { renderMarkdown } from '#lib/markdown';
+	import { getTransport, type HighlightSpan } from '#lib/transport';
 
 	let { text, streaming = false }: { text: string; streaming?: boolean } = $props();
 
 	const blocks = $derived(renderMarkdown(text));
+	const spanCache = new Map<string, HighlightSpan[] | null>();
+	let highlighted = $state<Record<string, HighlightSpan[] | null>>({});
+	let copiedIndex = $state<number | null>(null);
+
+	$effect(() => {
+		const list = blocks;
+		const isStreaming = streaming;
+		const hl = getTransport().highlightCode;
+		if (!hl) return;
+
+		for (let i = 0; i < list.length; i++) {
+			const block = list[i];
+			if (block.type !== 'code' || !block.lang) continue;
+			// Wait until the fence stabilizes or streaming ends before invoking tree-sitter.
+			if (isStreaming && i === list.length - 1) continue;
+			const key = `${block.lang}\0${block.text}`;
+			if (spanCache.has(key)) continue;
+			spanCache.set(key, null);
+			void hl(block.lang, block.text)
+				.then((spans) => {
+					spanCache.set(key, spans);
+					if (spans) highlighted = { ...highlighted, [key]: spans };
+				})
+				.catch(() => {
+					spanCache.set(key, null);
+				});
+		}
+	});
+
+	function spansFor(lang: string, code: string): HighlightSpan[] | null {
+		if (!lang) return null;
+		return highlighted[`${lang}\0${code}`] ?? spanCache.get(`${lang}\0${code}`) ?? null;
+	}
+
+	async function copyCode(code: string, index: number) {
+		try {
+			await navigator.clipboard.writeText(code);
+			copiedIndex = index;
+			setTimeout(() => {
+				if (copiedIndex === index) copiedIndex = null;
+			}, 1600);
+		} catch {
+			// Ignore clipboard failures in restricted environments.
+		}
+	}
 </script>
 
 <div class="prose" class:streaming>
 	{#each blocks as block, i (i)}
 		{#if block.type === 'h'}
-			<svelte:element this={`h${block.level}`}>{block.spans}</svelte:element>
+			<svelte:element this={`h${block.level}`}>{@html block.spans}</svelte:element>
 		{:else if block.type === 'code'}
-			<pre class="code" lang={block.lang}><code>{block.text}</code></pre>
+			{@const spans = spansFor(block.lang, block.text)}
+			<div class="code-wrap">
+				<div class="code-head">
+					<span class="code-lang">{block.lang || 'text'}</span>
+					<button
+						type="button"
+						class="code-copy"
+						onclick={() => void copyCode(block.text, i)}
+					>
+						{copiedIndex === i ? 'Copied' : 'Copy'}
+					</button>
+				</div>
+				<pre class="code" lang={block.lang}><code>{#if spans}{#each spans as span, j (j)}{#if span.kind}<span class={`tok-${span.kind.replace(/\./g, '-')}`}>{span.text}</span>{:else}{span.text}{/if}{/each}{:else}{block.text}{/if}</code></pre>
+			</div>
 		{:else if block.type === 'ul'}
 			<ul>{#each block.items as item (item)}<li>{@html item}</li>{/each}</ul>
 		{:else if block.type === 'ol'}
@@ -84,13 +143,45 @@
 		color: var(--ink-2);
 	}
 
-	.code {
+	.code-wrap {
 		background: var(--term);
 		color: var(--term-text);
 		border-radius: var(--r-lg);
-		padding: 12px 14px;
-		overflow-x: auto;
 		margin: 0 0 0.8em;
+		overflow: hidden;
+		border: 1px solid color-mix(in srgb, var(--plate-line) 55%, transparent);
+	}
+
+	.code-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 4px 10px 4px 12px;
+		background: color-mix(in srgb, var(--term) 78%, #000 22%);
+		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--term-dim);
+	}
+
+	.code-copy {
+		color: var(--term-dim);
+		font-size: 11px;
+		padding: 1px 6px;
+		border-radius: var(--r-sm);
+	}
+
+	.code-copy:hover {
+		color: var(--term-text);
+		background: rgba(255, 255, 255, 0.08);
+	}
+
+	.code {
+		background: transparent;
+		color: var(--term-text);
+		padding: 11px 14px;
+		overflow-x: auto;
+		margin: 0;
 		line-height: 1.55;
 	}
 

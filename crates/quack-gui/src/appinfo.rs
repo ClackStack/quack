@@ -1,12 +1,13 @@
 //! The `AppInfo` snapshot (docs/plan/15-desktop-client.md#the-bridge): the static facts
 //! a webview needs about its engine's config, sent at tab start and after
 //! `StartupComplete` (which also follows `Op::ReloadConfig`). Mirrors the TUI's
-//! `AppInfo::from_config` without the terminal-only parts (history, hooks, grammar
-//! dirs); the rest of the same data reaches the GUI through `Op`s and `Event`s.
+//! `AppInfo::from_config` without the terminal-only parts (hooks, grammar dirs);
+//! the rest of the same data reaches the GUI through `Op`s and `Event`s.
 
 use std::path::Path;
 
 use quack_config::Loaded;
+use quack_config::settings::SandboxMode;
 use serde::Serialize;
 
 /// A serializable snapshot of `Loaded`, built once per tab and on reload.
@@ -19,12 +20,20 @@ pub struct AppInfo {
     pub branch: Option<String>,
     /// `<provider>/<model>` the session starts on.
     pub model: Option<String>,
+    /// `<provider>/<model>` used in Plan mode, if configured.
+    pub planner_model: Option<String>,
+    /// Whether `model.planner` is locked by system policy.
+    pub planner_locked: bool,
     /// The approval policy label, e.g. `ask` or `allow`.
     pub permission_mode: String,
     /// The work mode label: `plan` or `edit`.
     pub work_mode: String,
     /// `theme` and motion settings the webview honors (dark/light and reduced motion).
     pub ui: UiSnapshot,
+    /// Outbound destination & background check summary.
+    pub egress: EgressSnapshot,
+    /// OS sandbox configuration & runtime support summary.
+    pub sandbox: SandboxSnapshot,
     /// Effective settings for the settings table (`Op::SaveSetting` edits them).
     pub settings: Vec<SettingRowView>,
     /// `(layer, status and file)` rows, lowest first.
@@ -35,6 +44,8 @@ pub struct AppInfo {
     pub bundles: Vec<BundleRow>,
     /// `[bundles] disabled` as configured, including names not installed.
     pub bundles_disabled: Vec<String>,
+    /// Recent submitted prompts for this workspace (`history.jsonl`), oldest first.
+    pub history: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -43,6 +54,38 @@ pub struct UiSnapshot {
     pub theme: String,
     /// Replace animation with static indicators.
     pub reduced_motion: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EgressEndpoint {
+    pub id: String,
+    pub host: String,
+    /// `true` when loopback (`localhost`, `127.*`, `[::1]`).
+    pub local: bool,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EgressSnapshot {
+    pub offline: bool,
+    pub offline_locked: bool,
+    pub egress_allow: Vec<String>,
+    pub providers: Vec<EgressEndpoint>,
+    pub mcp_remote: Vec<EgressEndpoint>,
+    pub http1_only: bool,
+    pub has_proxy: bool,
+    pub updates_check: bool,
+    pub catalog_refresh: bool,
+    pub telemetry_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SandboxSnapshot {
+    pub mode: String,
+    pub os_supported: bool,
+    pub status_detail: String,
+    pub writable: Vec<String>,
+    pub locked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -99,12 +142,16 @@ impl AppInfo {
             branch: git_branch(&config.dirs.workspace_root),
             cwd,
             model: Some(config.settings.model.default.clone()).filter(|m| !m.is_empty()),
+            planner_model: Some(config.settings.model.planner.clone()).filter(|m| !m.is_empty()),
+            planner_locked: config.settings.policy.locks("model.planner"),
             permission_mode: permissions.mode.label().to_owned(),
             work_mode: permissions.work_mode.label().to_owned(),
             ui: UiSnapshot {
                 theme: config.settings.ui.theme.clone(),
                 reduced_motion: config.settings.ui.reduced_motion,
             },
+            egress: egress_snapshot(config),
+            sandbox: sandbox_snapshot(config),
             settings: config
                 .setting_rows()
                 .into_iter()
@@ -160,7 +207,76 @@ impl AppInfo {
                 })
                 .collect(),
             bundles_disabled: config.settings.bundles.disabled.clone(),
+            history: quack_core::load_history(&quack_core::history_path(config)),
         }
+    }
+}
+
+fn egress_snapshot(config: &Loaded) -> EgressSnapshot {
+    let providers = quack_config::load_providers(config)
+        .into_iter()
+        .filter_map(|item| {
+            let file = item.loaded()?;
+            let id = file.id.clone().unwrap_or_else(|| item.id.clone());
+            let host = quack_config::url_host(&file.base_url).to_owned();
+            if host.is_empty() {
+                return None;
+            }
+            Some(EgressEndpoint {
+                id,
+                host,
+                local: quack_config::is_loopback(&file.base_url),
+                enabled: file.enabled,
+            })
+        })
+        .collect();
+    let mcp_remote = quack_config::load_mcp(config)
+        .into_iter()
+        .filter_map(|item| {
+            let file = item.loaded()?;
+            if file.url.is_empty() {
+                return None;
+            }
+            let id = file.id.clone().unwrap_or_else(|| item.id.clone());
+            let host = quack_config::url_host(&file.url).to_owned();
+            Some(EgressEndpoint {
+                id,
+                host,
+                local: quack_config::is_loopback(&file.url),
+                enabled: file.enabled,
+            })
+        })
+        .collect();
+    let net = &config.settings.network;
+    EgressSnapshot {
+        offline: net.offline,
+        offline_locked: config.settings.policy.locks("network.offline"),
+        egress_allow: net.egress_allow.clone(),
+        providers,
+        mcp_remote,
+        http1_only: net.http1_only,
+        has_proxy: !net.proxy.trim().is_empty(),
+        updates_check: config.settings.updates.check,
+        catalog_refresh: config.settings.catalog.refresh,
+        telemetry_enabled: !config.settings.telemetry.otel_endpoint.trim().is_empty(),
+    }
+}
+
+fn sandbox_snapshot(config: &Loaded) -> SandboxSnapshot {
+    let sb = &config.settings.sandbox;
+    let avail = quack_sandbox::available();
+    let os_supported = avail.is_ok();
+    let status_detail = match (sb.mode, avail) {
+        (SandboxMode::Off, _) => "disabled (sandbox.mode = off)".to_owned(),
+        (_, Ok(mech)) => format!("active ({mech})"),
+        (_, Err(why)) => why,
+    };
+    SandboxSnapshot {
+        mode: sb.mode.label().to_owned(),
+        os_supported,
+        status_detail,
+        writable: sb.writable.clone(),
+        locked: config.settings.policy.locks("sandbox.mode"),
     }
 }
 

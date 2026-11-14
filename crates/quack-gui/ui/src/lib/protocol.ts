@@ -55,6 +55,26 @@ export type WorkMode = "plan" | "edit";
  * Read-only and auto-edit remain available for existing configurations.
  */
 export type ApprovalPolicy = "read-only" | "ask" | "auto-edit" | "allow" | "yolo";
+/**
+ * The legacy compatibility value of `Op::SetPermissionMode` and `Event::PermissionMode`:
+ * either a work mode (`plan`/`edit`) or an approval policy, spelled as the engine has
+ * always serialized it.
+ */
+export type PermissionMode = "plan" | "edit" | "read-only" | "ask" | "auto-edit" | "allow" | "yolo";
+/**
+ * What running one hook resulted in (`Event::HookRan`): `ok`, `context` (it added
+ * context for the model), `allowed`, `denied`, `asked`, `updated` (it changed a tool
+ * call's arguments) or `failed`.
+ */
+export type HookOutcome = "ok" | "context" | "allowed" | "denied" | "asked" | "updated" | "failed";
+/**
+ * The state of a language server, as `/lsp` shows it.
+ */
+export type LspServerState = "not installed" | "idle" | "starting" | "ready" | "indexing" | "failed" | "exited";
+/**
+ * The state of an MCP server, as `/mcp` shows it.
+ */
+export type McpServerState = "starting" | "ready" | "failed" | "stopped";
 export type HookCredentialChange = { "action": "keep" } | { "action": "remove" } | { "action": "replace", value: SecretText, } | { "action": "external", source: string, location: SecretText, };
 /**
  * Per-turn overrides of session settings.
@@ -286,7 +306,7 @@ command: string, extensions: Array<string>,
 /**
  * `not installed`, `idle`, `starting`, `ready`, `indexing`, `failed` or `exited`.
  */
-state: string,
+state: LspServerState,
 /**
  * The program's path, what it is working on, or why it failed.
  */
@@ -314,7 +334,7 @@ target: string, description: string,
 /**
  * `starting`, `ready`, `failed` or `stopped`.
  */
-state: string,
+state: McpServerState,
 /**
  * Why it failed.
  */
@@ -518,7 +538,11 @@ forced: boolean, profiles: Array<ProfileInfo>, } | { "event": "session_resumed",
  * The allow rules "always allow" would save (`shell:cargo test`); empty when no
  * rule can allow this call, so only "allow for this session" is offered.
  */
-always?: Array<string>, } | { "event": "questions", call_id: CallId, questions: Array<Question>, } | { "event": "turn_complete", turn: TurnId, usage: Usage, } | { "event": "turn_aborted", turn: TurnId, reason: string, } | { "event": "context_update", used: number, budget: number, window?: number, cache_hit_tokens: number | null,
+always?: Array<string>, } | { "event": "questions", call_id: CallId, questions: Array<Question>, } | { "event": "step_limit_reached", turn: TurnId,
+/**
+ * The limit reached; continuing grants as many model calls again.
+ */
+limit: number, } | { "event": "turn_complete", turn: TurnId, usage: Usage, } | { "event": "turn_aborted", turn: TurnId, reason: string, } | { "event": "context_update", used: number, budget: number, window?: number, cache_hit_tokens: number | null,
 /**
  * Above this the next request is pruned, then compacted.
  */
@@ -530,7 +554,7 @@ tokens_per_sec?: number, } | { "event": "compacting", reason: string, } | { "eve
 /**
  * How full the memory index is, as a percentage of `memory.index_max_tokens`.
  */
-index_fill: number, } | { "event": "doctor_report", checks: Array<DoctorCheck>, } | { "event": "mcp_servers", servers: Array<McpServerInfo>, } | { "event": "lsp_servers", servers: Array<LspServerInfo>, } | { "event": "servers_detected", servers: Array<DetectedServer>, } | { "event": "services", services: Array<ServiceInfo>, } | { "event": "sign_in_url", id: string, url: string, } | { "event": "sign_in_result", id: string, error: string | null, } | { "event": "provider_added", id: string, path?: string, note?: string | null, } | { "event": "skills", skills: Array<SkillInfo>, } | { "event": "rewind_points", points: Array<RewindPoint>, } | { "event": "rewound", back: number, text: string, } | { "event": "files_restored", restored: Array<string>, conflicts: Array<string>, } | { "event": "permission_mode", mode: string, } | { "event": "mode_changed", work_mode: WorkMode, approvals: ApprovalPolicy, } | { "event": "sandbox", off: boolean, } | { "event": "compacted", summary_tokens: number,
+index_fill: number, } | { "event": "doctor_report", checks: Array<DoctorCheck>, } | { "event": "mcp_servers", servers: Array<McpServerInfo>, } | { "event": "lsp_servers", servers: Array<LspServerInfo>, } | { "event": "servers_detected", servers: Array<DetectedServer>, } | { "event": "services", services: Array<ServiceInfo>, } | { "event": "sign_in_url", id: string, url: string, } | { "event": "sign_in_result", id: string, error: string | null, } | { "event": "provider_added", id: string, path?: string, note?: string | null, } | { "event": "skills", skills: Array<SkillInfo>, } | { "event": "rewind_points", points: Array<RewindPoint>, } | { "event": "rewound", back: number, text: string, } | { "event": "files_restored", restored: Array<string>, conflicts: Array<string>, } | { "event": "permission_mode", mode: PermissionMode, } | { "event": "mode_changed", work_mode: WorkMode, approvals: ApprovalPolicy, } | { "event": "sandbox", off: boolean, } | { "event": "compacted", summary_tokens: number,
 /**
  * History messages the summary replaced.
  */
@@ -538,7 +562,7 @@ replaced: number, } | { "event": "hook_ran", id: string,
 /**
  * The hook's event, e.g. `user_prompt`.
  */
-on: string, outcome: string, ms: number,
+on: string, outcome: HookOutcome, ms: number,
 /**
  * What the hook said, or why it failed.
  */
@@ -558,11 +582,11 @@ summary: string, } | { "event": "plan", checklist: string, } | { "event": "diagn
 /**
  * A request from a client to the engine.
  */
-export type Op = { "op": "user_turn", items: Array<InputItem>, overrides: TurnOverrides, } | { "op": "interrupt" } | { "op": "approval_response", call_id: CallId, decision: ApprovalDecision, } | { "op": "answer_questions", call_id: CallId, answers: Array<Answer>, stop_asking?: boolean, } | { "op": "set_model", provider: ProviderId, model: ModelId, } | { "op": "set_reasoning_effort", effort: string | null, } | { "op": "list_models" } | { "op": "list_instructions" } | { "op": "list_profiles" } | { "op": "set_profile", id: string, } | { "op": "compact", focus?: string, } | { "op": "undo", checkpoint: CheckpointId | null, force: boolean, } | { "op": "resume_session", id: SessionId, } | { "op": "new_session" } | { "op": "list_sessions" } | { "op": "get_context" } | { "op": "get_stats" } | { "op": "set_permission_mode", mode: string, } | { "op": "set_work_mode", mode: WorkMode, } | { "op": "set_approval_policy", policy: ApprovalPolicy, } | { "op": "set_sandbox", off: boolean, } | { "op": "accept_plan",
+export type Op = { "op": "user_turn", items: Array<InputItem>, overrides: TurnOverrides, } | { "op": "interrupt" } | { "op": "approval_response", call_id: CallId, decision: ApprovalDecision, } | { "op": "answer_questions", call_id: CallId, answers: Array<Answer>, stop_asking?: boolean, } | { "op": "continue_turn", turn: TurnId, proceed: boolean, } | { "op": "set_model", provider: ProviderId, model: ModelId, } | { "op": "set_reasoning_effort", effort: string | null, } | { "op": "list_models" } | { "op": "list_instructions" } | { "op": "list_profiles" } | { "op": "set_profile", id: string, } | { "op": "compact", focus?: string, } | { "op": "undo", checkpoint: CheckpointId | null, force: boolean, } | { "op": "resume_session", id: SessionId, } | { "op": "new_session" } | { "op": "list_sessions" } | { "op": "get_context" } | { "op": "get_stats" } | { "op": "set_permission_mode", mode: PermissionMode, } | { "op": "set_work_mode", mode: WorkMode, } | { "op": "set_approval_policy", policy: ApprovalPolicy, } | { "op": "set_sandbox", off: boolean, } | { "op": "accept_plan",
 /**
  * Empty preserves the current approval policy; legacy callers may choose one.
  */
-mode: string, } | { "op": "run_doctor" } | { "op": "list_mcp" } | { "op": "restart_mcp", id: string, } | { "op": "list_lsp" } | { "op": "init_instructions" } | { "op": "detect_servers" } | { "op": "add_provider", id: string, base_url: string, api?: string, model: string, } | { "op": "list_services" } | { "op": "sign_in", id: string | null, } | { "op": "set_provider_key", id: string, key: SecretText, } | { "op": "add_server", base_url: string, key?: SecretText, } | { "op": "list_memory" } | { "op": "delete_memory", scope: string, name: string, } | { "op": "set_title", title: string, } | { "op": "save_setting", key: string, value: string, scope: WriteScope, } | { "op": "fork_session" } | { "op": "export", format: ExportFormat, path?: string, } | { "op": "list_rewind_points" } | { "op": "rewind", back: number, conversation: boolean, files: boolean, force: boolean, } | { "op": "reload_config" } | { "op": "trust_project", decision: string, } | { "op": "enable_hook", id: string, replace_payload?: boolean | null, } | { "op": "inspect_hook_setup", id: string, request: number, } | { "op": "save_hook_setup", id: string, request: number, revision: string, connections: Array<HookConnectionDraft>,
+mode: string, } | { "op": "run_doctor" } | { "op": "list_mcp" } | { "op": "restart_mcp", id: string, } | { "op": "list_lsp" } | { "op": "init_instructions" } | { "op": "detect_servers" } | { "op": "add_provider", id: string, base_url: string, api?: string, model: string, } | { "op": "list_services" } | { "op": "sign_in", id: string | null, } | { "op": "set_provider_key", id: string, key: SecretText, } | { "op": "add_server", base_url: string, key?: SecretText, } | { "op": "list_memory" } | { "op": "save_memory", scope: string, name: string, description: string, kind: string, body: string, previous_scope?: string, previous_name?: string, } | { "op": "delete_memory", scope: string, name: string, } | { "op": "set_title", title: string, } | { "op": "save_setting", key: string, value: string, scope: WriteScope, } | { "op": "fork_session" } | { "op": "export", format: ExportFormat, path?: string, } | { "op": "list_rewind_points" } | { "op": "rewind", back: number, conversation: boolean, files: boolean, force: boolean, } | { "op": "reload_config" } | { "op": "trust_project", decision: string, } | { "op": "enable_hook", id: string, replace_payload?: boolean | null, } | { "op": "inspect_hook_setup", id: string, request: number, } | { "op": "save_hook_setup", id: string, request: number, revision: string, connections: Array<HookConnectionDraft>,
 /**
  * None keeps the current enabled state.
  */

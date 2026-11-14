@@ -313,9 +313,53 @@ export class Workspaces {
 			this.#ensureProject(realCwd);
 		}
 		if (!session) return;
-		if ('event' in msg) session.onEvent(msg.event);
-		else if ('info' in msg) session.info = msg.info;
+		if ('event' in msg) {
+			session.onEvent(msg.event);
+			this.#maybeNotifyAttention(session, msg.event);
+		} else if ('info' in msg) session.onInfo(msg.info);
+		else if ('history' in msg) session.setInputHistory(msg.history);
 		else session.onClosed(msg.closed.reason);
+	}
+
+	#maybeNotifyAttention(session: Session, event: import('#lib/transport/types').ClientEvent) {
+		if (!this.#transport.notifyAttention) return;
+		const isActive = this.sessions[this.activeIndex]?.tab === session.tab;
+		const docHidden =
+			typeof document !== 'undefined' && (document.hidden || !document.hasFocus());
+		if (isActive && !docHidden) return;
+		const name = session.title || session.cwd.split(/[\\/]/).filter(Boolean).pop() || 'quack';
+		switch (event.event) {
+			case 'approval_request':
+				void this.#transport.notifyAttention(
+					`${name} needs approval`,
+					event.request.kind === 'shell'
+						? event.request.command
+						: event.request.kind === 'edit'
+							? event.request.path
+							: event.request.name
+				);
+				break;
+			case 'questions':
+				void this.#transport.notifyAttention(
+					`${name} has a question`,
+					event.questions[0]?.question ?? 'Waiting for your answer.'
+				);
+				break;
+			case 'step_limit_reached':
+				void this.#transport.notifyAttention(
+					`${name} paused`,
+					`Reached ${event.limit} steps — choose continue or stop.`
+				);
+				break;
+			case 'error':
+				void this.#transport.notifyAttention(`${name} hit an error`, event.error.message);
+				break;
+			case 'turn_complete':
+				void this.#transport.notifyAttention(`${name} finished`, 'Ready for your next instruction.');
+				break;
+			default:
+				break;
+		}
 	}
 
 	async open(cwd: string, resume: ResumeRequest = { resume: 'new' }) {
@@ -337,6 +381,7 @@ export class Workspaces {
 			this.activeIndex = this.sessions.findIndex((s) => s.tab === tab);
 			await this.sessions[this.activeIndex].listModels();
 			await this.sessions[this.activeIndex].listSessions();
+			await this.sessions[this.activeIndex].listMemory();
 		} catch (error) {
 			if (isAlreadyOpen(error)) {
 				this.activeIndex = this.sessions.findIndex((s) => s.tab === error.detail.tab);

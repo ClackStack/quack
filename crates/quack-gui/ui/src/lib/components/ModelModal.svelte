@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { getModelSpeed, isLocalProvider } from '#lib/modelStats';
 	import type { Session } from '#lib/session.svelte';
 
 	let { session, onClose }: { session: Session; onClose: () => void } = $props();
@@ -6,6 +7,10 @@
 	let query = $state('');
 	let dialogEl: HTMLElement | undefined = $state();
 	let filterEl: HTMLInputElement | undefined = $state();
+
+	const egress = $derived(session.info?.egress);
+	const plannerModel = $derived(session.info?.planner_model ?? null);
+	const plannerLocked = $derived(session.info?.planner_locked ?? false);
 
 	const disabled = $derived(
 		session.closed ||
@@ -78,6 +83,25 @@
 						No model selected yet
 					{/if}
 				</p>
+				<p class="sub">
+					{#if plannerModel}
+						Plan mode architect: <span class="mono">{plannerModel}</span>
+						{#if !plannerLocked}
+							<button
+								type="button"
+								class="inline-link"
+								disabled={disabled || session.settingSaving}
+								onclick={() => void session.setPlannerModel(null)}
+							>
+								Use active model
+							</button>
+						{:else}
+							<span class="locked-note">(locked)</span>
+						{/if}
+					{:else}
+						Plan mode uses the active model
+					{/if}
+				</p>
 			</div>
 			<button class="close-btn" aria-label="Close model picker" onclick={onClose}>×</button>
 		</div>
@@ -97,9 +121,13 @@
 
 		<div class="modal-body">
 			{#each filteredProviders as provider (provider.id)}
+				{@const local = isLocalProvider(egress, provider.id)}
 				<section class="provider" class:unavailable={!provider.available}>
 					<div class="provider-head">
-						<h3>{provider.id}</h3>
+						<div class="provider-left">
+							<h3>{provider.id}</h3>
+							<span class="p-tag" class:local>{local ? 'Local / Free' : 'Hosted'}</span>
+						</div>
 						{#if !provider.available}
 							<span class="provider-note">{provider.note}</span>
 						{/if}
@@ -108,30 +136,57 @@
 						{#each provider.models as model (model.id)}
 							{@const fullId = `${provider.id}/${model.id}`}
 							{@const active = session.currentModel === fullId}
+							{@const isPlanner = plannerModel === fullId}
+							{@const speed = getModelSpeed(fullId)}
+							{@const speedText = speed?.tokensPerSec
+								? `~${speed.tokensPerSec.toFixed(0)} tok/s`
+								: speed?.ttftMs
+									? `~${speed.ttftMs} ms first token`
+									: null}
 							{@const meta = [
+								local ? 'local' : model.price,
 								fmtWindow(model.context_window),
-								model.price,
+								speedText,
 								model.reasoning_efforts?.length
 									? `thinking: ${model.reasoning_efforts.join(' · ')}`
 									: null
 							]
 								.filter(Boolean)
 								.join(' · ')}
-							<button
-								class="model-row"
-								class:active
-								disabled={!provider.available || disabled}
-								onclick={() => {
-									void session.setModel(fullId);
-									onClose();
-								}}
-							>
-								<span class="row-top">
-									<span class="model-id">{fullId}</span>
-									{#if active}<span class="badge">Current</span>{/if}
-								</span>
-								<span class="note">{meta || 'Select model'}</span>
-							</button>
+							<div class="model-item" class:active>
+								<button
+									type="button"
+									class="model-row"
+									disabled={!provider.available || disabled}
+									onclick={() => {
+										void session.setModel(fullId);
+										onClose();
+									}}
+								>
+									<span class="row-top">
+										<span class="model-id">{fullId}</span>
+										<span class="row-badges">
+											{#if active}<span class="badge">Current</span>{/if}
+											{#if isPlanner}<span class="badge planner">Planner</span>{/if}
+										</span>
+									</span>
+									<span class="note">{meta || 'Select model'}</span>
+								</button>
+								<button
+									type="button"
+									class="planner-btn"
+									class:selected={isPlanner}
+									disabled={!provider.available || disabled || session.settingSaving || plannerLocked}
+									title={plannerLocked
+										? 'model.planner is locked by system policy'
+										: isPlanner
+											? 'Clear dedicated Plan-mode architect model'
+											: 'Use this model in Plan mode (saved to user config)'}
+									onclick={() => void session.setPlannerModel(isPlanner ? null : fullId)}
+								>
+									{isPlanner ? 'Planner ✓' : 'Planner'}
+								</button>
+							</div>
 						{/each}
 					</div>
 				</section>
@@ -275,9 +330,43 @@
 
 	.provider-head {
 		display: flex;
-		align-items: baseline;
+		align-items: center;
 		justify-content: space-between;
 		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.provider-left {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.p-tag {
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		padding: 1px 7px;
+		border-radius: 999px;
+		border: 1px solid var(--rule);
+		color: var(--ink-3);
+	}
+
+	.p-tag.local {
+		color: var(--ok);
+		background: var(--ok-soft);
+		border-color: color-mix(in srgb, var(--ok) 45%, var(--rule));
+	}
+
+	.inline-link {
+		margin-left: 8px;
+		color: var(--sky-ink);
+		font-size: 11.5px;
+		text-decoration: underline;
+	}
+
+	.locked-note {
+		margin-left: 6px;
+		color: var(--ink-3);
 	}
 
 	.provider-head h3 {
@@ -303,28 +392,68 @@
 		gap: 4px;
 	}
 
-	.model-row {
-		width: 100%;
-		display: grid;
-		gap: 2px;
-		text-align: left;
-		padding: 8px 10px;
+	.model-item {
+		display: flex;
+		align-items: stretch;
+		gap: 4px;
 		border: 1px solid var(--rule-soft);
 		border-radius: var(--r-lg);
 		background: var(--bg-panel);
+		overflow: hidden;
 		transition:
 			background-color 120ms ease-out,
 			border-color 120ms ease-out;
 	}
 
-	.model-row:hover:not(:disabled) {
+	.model-item:hover {
 		background: var(--bg-soft);
 		border-color: var(--rule);
 	}
 
-	.model-row.active {
+	.model-item.active {
 		background: var(--sky-soft);
 		border-color: var(--sky-ink);
+	}
+
+	.model-row {
+		flex: 1;
+		min-width: 0;
+		display: grid;
+		gap: 2px;
+		text-align: left;
+		padding: 8px 10px;
+	}
+
+	.planner-btn {
+		flex: none;
+		padding: 0 10px;
+		border-left: 1px solid var(--rule-soft);
+		font-size: 11px;
+		font-family: var(--font-mono);
+		color: var(--ink-3);
+	}
+
+	.planner-btn:hover:not(:disabled) {
+		color: var(--ink);
+		background: var(--bg-raised);
+	}
+
+	.planner-btn.selected {
+		color: var(--duck-ink);
+		background: var(--duck-soft);
+		font-weight: 600;
+	}
+
+	.row-badges {
+		display: inline-flex;
+		gap: 5px;
+		flex: none;
+	}
+
+	.badge.planner {
+		color: var(--duck-ink);
+		border-color: var(--duck-line);
+		background: var(--duck-soft);
 	}
 
 	.row-top {

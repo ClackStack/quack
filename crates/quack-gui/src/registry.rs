@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use quack_config::LoadOptions;
 use quack_core::{Engine, EngineHandle, Resume};
-use quack_protocol::{Event, Op, SessionId};
+use quack_protocol::{Event, InputItem, Op, SessionId};
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -56,8 +56,9 @@ pub struct TabMessage {
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum Payload {
-    Event { event: Event },
-    Info { info: AppInfo },
+    Event { event: Box<Event> },
+    Info { info: Box<AppInfo> },
+    History { history: Vec<String> },
     Closed { closed: Closed },
 }
 
@@ -71,14 +72,25 @@ impl TabMessage {
     pub fn event(tab: TabId, event: Event) -> Self {
         Self {
             tab,
-            payload: Payload::Event { event },
+            payload: Payload::Event {
+                event: Box::new(event),
+            },
         }
     }
 
     pub fn info(tab: TabId, info: AppInfo) -> Self {
         Self {
             tab,
-            payload: Payload::Info { info },
+            payload: Payload::Info {
+                info: Box::new(info),
+            },
+        }
+    }
+
+    pub fn history(tab: TabId, history: Vec<String>) -> Self {
+        Self {
+            tab,
+            payload: Payload::History { history },
         }
     }
 
@@ -128,6 +140,7 @@ struct Tab {
     session: watch::Receiver<Option<SessionId>>,
     cwd: PathBuf,
     workspace: PathBuf,
+    history_path: Arc<std::sync::RwLock<PathBuf>>,
     ops: mpsc::Sender<Op>,
     stop: watch::Sender<bool>,
     done: watch::Receiver<bool>,
@@ -390,6 +403,99 @@ impl Registry {
             .map(|t| t.cwd.clone())
     }
 
+    /// List workspace-relative files for `@` mentions off the async runtime.
+    pub async fn list_files_for(
+        &self,
+        client: u64,
+        tab: TabId,
+        limit: usize,
+    ) -> Result<Vec<String>, String> {
+        let Some(tab) = self.get_tab(client, tab)? else {
+            return Err("this workspace tab is closed".to_owned());
+        };
+        let root = tab_root(&tab);
+        tokio::task::spawn_blocking(move || quack_tools::workspace_files(&root, limit))
+            .await
+            .map_err(|e| format!("could not list workspace files: {e}"))
+    }
+
+    /// Read shared workspace prompt history (`history.jsonl`), oldest first.
+    pub async fn input_history(&self, tab: TabId) -> Result<Vec<String>, String> {
+        let client = self.tabs.lock().expect("tab map lock").client;
+        self.input_history_for(client, tab).await
+    }
+
+    pub async fn input_history_for(&self, client: u64, tab: TabId) -> Result<Vec<String>, String> {
+        let Some(tab) = self.get_tab(client, tab)? else {
+            return Err("this workspace tab is closed".to_owned());
+        };
+        let path = read_history_path(&tab.history_path);
+        tokio::task::spawn_blocking(move || quack_core::load_history(&path))
+            .await
+            .map_err(|e| format!("could not load input history: {e}"))
+    }
+
+    /// Resolve a user-clicked relative or workspace path, refusing anything outside
+    /// the active tab's workspace root.
+    pub fn resolve_workspace_path_for(
+        &self,
+        client: u64,
+        tab: TabId,
+        path: &Path,
+    ) -> Result<PathBuf, String> {
+        let Some(tab) = self.get_tab(client, tab)? else {
+            return Err("this workspace tab is closed".to_owned());
+        };
+        if path.as_os_str().is_empty() {
+            return Err("empty path".to_owned());
+        }
+        let root = std::fs::canonicalize(tab_root(&tab))
+            .map_err(|e| format!("cannot locate workspace: {e}"))?;
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        let resolved = std::fs::canonicalize(&candidate)
+            .map_err(|e| format!("cannot locate {}: {e}", path.display()))?;
+        if !resolved.starts_with(&root) {
+            return Err(format!("{} is outside this workspace", path.display()));
+        }
+        Ok(resolved)
+    }
+
+    /// Validate an image pasted from the clipboard (format + 3 MB cap) and stage it as a
+    /// temporary file so the engine's `InputItem::Image` can load it natively.
+    pub fn save_pasted_image_for(
+        &self,
+        client: u64,
+        tab: TabId,
+        bytes: &[u8],
+    ) -> Result<String, String> {
+        if self.get_tab(client, tab)?.is_none() {
+            return Err("this workspace tab is closed".to_owned());
+        }
+        let image = quack_protocol::image::Image::from_bytes(bytes)?;
+        let ext = match image.media_type.as_str() {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            other => return Err(format!("unsupported image type: {other}")),
+        };
+        static NEXT_PASTE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let seq = NEXT_PASTE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join("quack-gui-paste");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create paste folder: {e}"))?;
+        let file = dir.join(format!("paste-{}-{stamp}-{seq}.{ext}", std::process::id()));
+        std::fs::write(&file, bytes).map_err(|e| format!("cannot stage pasted image: {e}"))?;
+        Ok(file.display().to_string())
+    }
+
     /// Close a tab and await engine shutdown. The reservation remains until done.
     pub async fn close(&self, tab: TabId) {
         let client = self.tabs.lock().expect("tab map lock").client;
@@ -433,6 +539,14 @@ impl Registry {
     }
 }
 
+fn tab_root(tab: &Tab) -> PathBuf {
+    if tab.workspace.is_dir() {
+        tab.workspace.clone()
+    } else {
+        tab.cwd.clone()
+    }
+}
+
 impl Default for Registry {
     fn default() -> Self {
         Self::new()
@@ -461,20 +575,56 @@ fn spawn_tab(
     let (done, done_rx) = watch::channel(false);
     let (session, session_rx) = watch::channel(None);
     let (started, started_rx) = oneshot::channel();
+    let history_path = Arc::new(std::sync::RwLock::new(quack_core::history_path(&loaded)));
     let tab = Arc::new(Tab {
         session: session_rx,
         cwd,
         workspace,
+        history_path: Arc::clone(&history_path),
         ops,
         stop,
         done: done_rx,
     });
+    let rt = TabRuntime {
+        id,
+        sink,
+        session,
+        history_path,
+    };
     tokio::spawn(async move {
         let engine = Engine::spawn_with(loaded, resume);
-        run_tab(id, engine, sink, ops_rx, stop_rx, session, started).await;
+        run_tab(rt, engine, ops_rx, stop_rx, started).await;
         done.send_replace(true);
     });
     (tab, started_rx)
+}
+
+struct TabRuntime {
+    id: TabId,
+    sink: Arc<dyn Sink>,
+    session: watch::Sender<Option<SessionId>>,
+    history_path: Arc<std::sync::RwLock<PathBuf>>,
+}
+
+fn read_history_path(lock: &std::sync::RwLock<PathBuf>) -> PathBuf {
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+fn user_turn_prompt(op: &Op) -> Option<String> {
+    let Op::UserTurn { items, .. } = op else {
+        return None;
+    };
+    let text: String = items
+        .iter()
+        .filter_map(|item| match item {
+            InputItem::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// Return no watch borrow, so callers can select on this more than once.
@@ -484,12 +634,10 @@ async fn stopping(stop: &mut watch::Receiver<bool>) {
 
 /// The task owns startup and shutdown, even if an IPC command is cancelled.
 async fn run_tab(
-    tab: TabId,
+    rt: TabRuntime,
     mut engine: EngineHandle,
-    sink: Arc<dyn Sink>,
     mut ops: mpsc::Receiver<Op>,
     mut stop: watch::Receiver<bool>,
-    session: watch::Sender<Option<SessionId>>,
     started: oneshot::Sender<Result<(), String>>,
 ) {
     let mut startup = Vec::new();
@@ -501,7 +649,7 @@ async fn run_tab(
                 event = engine.events.recv() => match event {
                     Ok(event) => {
                         if let Event::SessionConfigured { session: info } = &event {
-                            session.send_replace(Some(info.id.clone()));
+                            rt.session.send_replace(Some(info.id.clone()));
                             startup.push(event);
                             return Ok(());
                         }
@@ -518,17 +666,17 @@ async fn run_tab(
         let _ = started.send(Err(error));
         return;
     }
-    sink.send(TabMessage::info(
-        tab,
+    rt.sink.send(TabMessage::info(
+        rt.id,
         AppInfo::from_config(&engine.config()),
     ));
     for event in startup {
-        sink.send(TabMessage::event(tab, event));
+        rt.sink.send(TabMessage::event(rt.id, event));
     }
     if started.send(Ok(())).is_err() {
         engine.shutdown().await;
-        sink.send(TabMessage::closed(
-            tab,
+        rt.sink.send(TabMessage::closed(
+            rt.id,
             Some("the open request was cancelled".to_owned()),
         ));
         return;
@@ -541,16 +689,36 @@ async fn run_tab(
         tokio::select! {
             _ = stopping(&mut stop) => break,
             _ = tick.tick() => {
-                for event in coalescer.flush() { sink.send(TabMessage::event(tab, event)); }
+                for event in coalescer.flush() { rt.sink.send(TabMessage::event(rt.id, event)); }
             }
             op = ops.recv() => match op {
                 Some(Op::Shutdown) | None => break,
                 Some(op) => {
+                    let prompt = user_turn_prompt(&op);
                     // A full engine queue must not prevent close/quit/reconnect.
-                    tokio::select! {
+                    let accepted = tokio::select! {
                         biased;
                         _ = stopping(&mut stop) => break,
-                        accepted = engine.submit(op) => if !accepted { break; },
+                        accepted = engine.submit(op) => accepted,
+                    };
+                    if !accepted {
+                        break;
+                    }
+                    if let Some(prompt) = prompt {
+                        let path = read_history_path(&rt.history_path);
+                        let history = tokio::select! {
+                            biased;
+                            _ = stopping(&mut stop) => break,
+                            res = tokio::task::spawn_blocking(move || {
+                                if let Err(e) = quack_core::append_history(&path, &prompt) {
+                                    tracing::warn!(%e, path = %path.display(), "cannot append input history");
+                                }
+                                quack_core::load_history(&path)
+                            }) => res,
+                        };
+                        if let Ok(history) = history {
+                            rt.sink.send(TabMessage::history(rt.id, history));
+                        }
                     }
                 }
             },
@@ -558,14 +726,19 @@ async fn run_tab(
                 Ok(event) => {
                     if let Event::SessionConfigured { session: info }
                         | Event::SessionResumed { session: info, .. } = &event {
-                        session.send_replace(Some(info.id.clone()));
+                        rt.session.send_replace(Some(info.id.clone()));
                     }
                     if matches!(event, Event::StartupComplete) {
-                        sink.send(TabMessage::info(tab, AppInfo::from_config(&engine.config())));
+                        let cfg = engine.config();
+                        *rt.history_path
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            quack_core::history_path(&cfg);
+                        rt.sink.send(TabMessage::info(rt.id, AppInfo::from_config(&cfg)));
                     }
                     if coalescer.on(&event) {
-                        for merged in coalescer.flush() { sink.send(TabMessage::event(tab, merged)); }
-                        sink.send(TabMessage::event(tab, event));
+                        for merged in coalescer.flush() { rt.sink.send(TabMessage::event(rt.id, merged)); }
+                        rt.sink.send(TabMessage::event(rt.id, event));
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -577,10 +750,10 @@ async fn run_tab(
         }
     }
     for merged in coalescer.flush() {
-        sink.send(TabMessage::event(tab, merged));
+        rt.sink.send(TabMessage::event(rt.id, merged));
     }
     engine.shutdown().await;
-    sink.send(TabMessage::closed(tab, reason));
+    rt.sink.send(TabMessage::closed(rt.id, reason));
 }
 
 /// Keep native resource resolution local to this client, with no process-wide

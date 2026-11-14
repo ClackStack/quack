@@ -1,5 +1,6 @@
 <script lang="ts">
-	import type { ApprovalRequest } from '#lib/protocol';
+	import type { ApprovalRequest, WriteScope } from '#lib/protocol';
+	import { summarizeShellCommand } from '#lib/shellRisk';
 
 	let {
 		approval,
@@ -8,8 +9,29 @@
 	}: {
 		approval: { callId: string; request: ApprovalRequest; always: string[] };
 		busy?: boolean;
-		onAnswer: (decision: 'allow_once' | 'allow_session' | 'deny') => void;
+		onAnswer: (
+			decision: 'allow_once' | 'allow_session' | 'always_allow' | 'deny',
+			feedback?: string,
+			scope?: WriteScope
+		) => void;
 	} = $props();
+
+	let feedbackOpen = $state(false);
+	let feedbackText = $state('');
+	let saveOpen = $state(false);
+	let saveScope = $state<'project' | 'user'>('project');
+	let feedbackEl = $state<HTMLInputElement | null>(null);
+
+	$effect(() => {
+		void approval.callId;
+		feedbackOpen = false;
+		feedbackText = '';
+		saveOpen = false;
+	});
+
+	$effect(() => {
+		if (feedbackOpen) feedbackEl?.focus();
+	});
 
 	const title = $derived(
 		approval.request.kind === 'shell'
@@ -17,6 +39,12 @@
 			: approval.request.kind === 'edit'
 				? 'quack asks to change a file'
 				: `quack asks to use ${approval.request.name}`
+	);
+
+	const shellRisk = $derived(
+		approval.request.kind === 'shell'
+			? summarizeShellCommand(approval.request.command, approval.request.outside_sandbox ?? false)
+			: null
 	);
 
 	const diffRows = $derived.by(() => {
@@ -60,10 +88,23 @@
 	<h2>{title}</h2>
 
 	{#if approval.request.kind === 'shell'}
-		<pre class="command">{approval.request.command}</pre>
-		{#if approval.request.outside_sandbox}
-			<p class="lead">This command runs <strong>outside the sandbox</strong>.</p>
+		{#if shellRisk}
+			<div class={`risk risk-${shellRisk.level}`}>
+				<div class="risk-head">
+					<span class="risk-pill">{shellRisk.level === 'high' ? 'High impact' : shellRisk.level === 'medium' ? 'Moderate impact' : 'Workspace command'}</span>
+					<span class="risk-title">{shellRisk.summary}</span>
+				</div>
+				<ul class="risk-list">
+					{#each shellRisk.reasons as reason (reason)}
+						<li>{reason}</li>
+					{/each}
+				</ul>
+			</div>
 		{/if}
+		<pre class="command">{approval.request.command}</pre>
+		<p class="lead">
+			Runs in <code>{approval.request.cwd}</code>. Approve if this step matches what you asked for.
+		</p>
 	{:else if approval.request.kind === 'edit'}
 		<p class="lead">
 			Review the change below; the circled numbers mark each addition and deletion.
@@ -97,11 +138,86 @@
 			>
 				Allow for this session
 			</button>
+			<button
+				class="btn"
+				disabled={busy}
+				aria-expanded={saveOpen}
+				onclick={() => (saveOpen = !saveOpen)}
+				title={approval.always.join('\n')}
+			>
+				Save rule…
+			</button>
 		{/if}
+		<button
+			class="btn"
+			disabled={busy}
+			aria-expanded={feedbackOpen}
+			onclick={() => (feedbackOpen = !feedbackOpen)}
+		>
+			Not this — tell quack why…
+		</button>
 		<button class="btn btn-danger" disabled={busy} onclick={() => onAnswer('deny')}>
 			Not this <span class="kbd">esc</span>
 		</button>
 	</div>
+
+	{#if saveOpen && approval.always.length > 0}
+		<div class="subpanel">
+			<div class="subpanel-row">
+				<span class="sub-label">Remember rule:</span>
+				<code class="rule-code">{approval.always.join(', ')}</code>
+			</div>
+			<div class="subpanel-row">
+				<label class="scope-opt">
+					<input type="radio" name="rule-scope" value="project" bind:group={saveScope} />
+					<span>This project only</span>
+				</label>
+				<label class="scope-opt">
+					<input type="radio" name="rule-scope" value="user" bind:group={saveScope} />
+					<span>All my projects (user settings)</span>
+				</label>
+				<div class="grow"></div>
+				<button
+					class="btn btn-primary"
+					disabled={busy}
+					onclick={() => onAnswer('always_allow', undefined, saveScope)}
+				>
+					Save &amp; allow
+				</button>
+			</div>
+		</div>
+	{/if}
+
+	{#if feedbackOpen}
+		<form
+			class="subpanel"
+			onsubmit={(e) => {
+				e.preventDefault();
+				if (feedbackText.trim()) onAnswer('deny', feedbackText.trim());
+			}}
+		>
+			<label class="sub-label" for="approval-feedback">What should quack do instead?</label>
+			<div class="feedback-row">
+				<input
+					id="approval-feedback"
+					type="text"
+					class="feedback-input"
+					placeholder="e.g. Use cargo check instead of modifying that file…"
+					bind:value={feedbackText}
+					bind:this={feedbackEl}
+					onkeydown={(e) => {
+						if (e.key === 'Escape') {
+							e.preventDefault();
+							feedbackOpen = false;
+						}
+					}}
+				/>
+				<button type="submit" class="btn btn-primary" disabled={busy || !feedbackText.trim()}>
+					Send guidance
+				</button>
+			</div>
+		</form>
+	{/if}
 	<p class="waiting" role="status">
 		<svg viewBox="0 0 24 24" aria-hidden="true"
 			><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg
@@ -314,5 +430,140 @@
 		width: 14px;
 		height: 14px;
 		flex: none;
+	}
+
+	.risk {
+		margin: 10px 0 6px;
+		padding: 10px 12px;
+		border-radius: var(--r-lg);
+		border: 1px solid var(--rule);
+		background: var(--bg-panel);
+	}
+
+	.risk-high {
+		border-color: var(--fail);
+		background: var(--fail-soft);
+	}
+
+	.risk-medium {
+		border-color: var(--duck-line);
+		background: var(--duck-soft);
+	}
+
+	.risk-low {
+		border-color: color-mix(in srgb, var(--sky) 45%, var(--rule));
+		background: var(--sky-soft);
+	}
+
+	.risk-head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.risk-pill {
+		font-size: 10.5px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		padding: 1px 7px;
+		border-radius: 999px;
+		border: 1px solid currentColor;
+	}
+
+	.risk-high .risk-pill,
+	.risk-high .risk-title {
+		color: var(--fail);
+	}
+
+	.risk-medium .risk-pill,
+	.risk-medium .risk-title {
+		color: var(--duck-ink);
+	}
+
+	.risk-low .risk-pill,
+	.risk-low .risk-title {
+		color: var(--sky-ink);
+	}
+
+	.risk-title {
+		font-size: 13px;
+		font-weight: 600;
+	}
+
+	.risk-list {
+		margin: 6px 0 0;
+		padding-left: 18px;
+		font-size: 12.5px;
+		color: var(--ink-2);
+	}
+
+	.subpanel {
+		margin-top: 12px;
+		padding: 10px 12px;
+		border-radius: var(--r-lg);
+		border: 1px solid var(--rule);
+		background: var(--bg-panel);
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.subpanel-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		flex-wrap: wrap;
+	}
+
+	.sub-label {
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--ink-2);
+	}
+
+	.rule-code {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		color: var(--ink);
+		background: var(--bg-soft);
+		padding: 1px 6px;
+		border-radius: var(--r-sm);
+	}
+
+	.scope-opt {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		font-size: 12.5px;
+		color: var(--ink);
+		cursor: pointer;
+	}
+
+	.grow {
+		flex: 1;
+	}
+
+	.feedback-row {
+		display: flex;
+		gap: 8px;
+		align-items: center;
+		flex-wrap: wrap;
+	}
+
+	.feedback-input {
+		flex: 1 1 240px;
+		padding: 7px 10px;
+		border-radius: var(--r-md);
+		border: 1px solid var(--rule);
+		background: var(--bg-raised);
+		color: var(--ink);
+		font-size: 13px;
+	}
+
+	.feedback-input:focus {
+		outline: none;
+		border-color: var(--focus);
 	}
 </style>

@@ -7,11 +7,58 @@
 
 	let scroller: HTMLElement | undefined = $state();
 	let pinned = $state(true);
+	let rewindTargetBack = $state<number | null>(null);
+
+	const idle = $derived(
+		!session.closed &&
+			!session.starting &&
+			!session.switching &&
+			!session.streaming &&
+			!session.turnPending &&
+			!session.approval &&
+			!session.questions &&
+			!session.stepLimit
+	);
+
+	const userBackById = $derived.by(() => {
+		const map = new Map<number, number>();
+		let back = 0;
+		for (let i = session.items.length - 1; i >= 0; i--) {
+			const it = session.items[i];
+			if (it.kind === 'user') {
+				back += 1;
+				map.set(it.id, back);
+			}
+		}
+		return map;
+	});
+
+	function toggleRewind(back: number) {
+		if (!idle) return;
+		if (rewindTargetBack === back) {
+			rewindTargetBack = null;
+			session.clearRewind();
+			return;
+		}
+		rewindTargetBack = back;
+		void session.listRewindPoints();
+	}
+
+	function cancelRewind() {
+		rewindTargetBack = null;
+		session.clearRewind();
+	}
 
 	function onScroll() {
 		if (!scroller) return;
 		pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
 	}
+
+	$effect(() => {
+		if (!idle && rewindTargetBack !== null) {
+			rewindTargetBack = null;
+		}
+	});
 
 	$effect(() => {
 		void session.items.length;
@@ -43,8 +90,33 @@ ask quack to do something in this folder</pre>
 	{:else}
 		{#each session.items as item (item.id)}
 			{#if item.kind === 'user'}
-				<div class="user-row">
-					<div class="cap">You</div>
+				{@const back = userBackById.get(item.id) ?? 0}
+				<div class="user-row" class:rewinding={rewindTargetBack === back}>
+					<div class="user-head">
+						<div class="cap">You</div>
+						{#if idle && back > 0}
+							<div class="turn-tools">
+								<button
+									type="button"
+									class="turn-btn"
+									onclick={() => toggleRewind(back)}
+								>
+									{rewindTargetBack === back ? 'Close restore' : 'Restore to here…'}
+								</button>
+								{#if back === 1}
+									<button
+										type="button"
+										class="turn-btn"
+										disabled={session.forking}
+										title="Fork this conversation into a fresh copy and switch models"
+										onclick={() => void session.forkSession(true)}
+									>
+										{session.forking ? 'Forking…' : 'Try another model'}
+									</button>
+								{/if}
+							</div>
+						{/if}
+					</div>
 					<p>{item.text}</p>
 					{#if item.files.length > 0}
 						<div class="chips">
@@ -54,6 +126,73 @@ ask quack to do something in this folder</pre>
 					{#if item.images.length > 0}
 						<div class="chips">
 							{#each item.images as image (image)}<span class="chip mono">🖼 {image}</span>{/each}
+						</div>
+					{/if}
+					{#if rewindTargetBack === back}
+						{@const point = session.rewindPoints?.find((p) => p.back === back) ?? null}
+						{@const conflict = session.rewindConflict?.back === back ? session.rewindConflict : null}
+						<div class="rewind-box" role="region" aria-label="Restore checkpoint">
+							{#if session.rewindLoading && !session.rewindPoints}
+								<p class="rewind-note">Inspecting checkpoint files…</p>
+							{:else if point && point.files.length > 0}
+								<p class="rewind-note">
+									Modified after this note ({point.files.length}):
+								</p>
+								<div class="chips">
+									{#each point.files as file (file)}<span class="chip mono">{file}</span>{/each}
+								</div>
+							{:else if point}
+								<p class="rewind-note">No edited files tracked after this note.</p>
+							{:else}
+								<p class="rewind-note">No file diff snapshot for this earlier note; conversation history can still rewind.</p>
+							{/if}
+
+							{#if conflict}
+								<div class="rewind-conflict" role="alert">
+									<span>
+										External edits detected in <code>{conflict.conflicts.join(', ')}</code>. Overwrite them or cancel?
+									</span>
+									<div class="rewind-actions">
+										<button
+											type="button"
+											class="btn danger-btn"
+											onclick={() => void session.rewind(conflict.back, conflict.conversation, conflict.files, true)}
+										>
+											Overwrite external changes
+										</button>
+										<button type="button" class="btn" onclick={cancelRewind}>Cancel</button>
+									</div>
+								</div>
+							{:else}
+								<div class="rewind-actions">
+									{#if !point || point.files.length > 0}
+										<button
+											type="button"
+											class="btn btn-primary"
+											onclick={() => void session.rewind(back, true, true)}
+										>
+											Files + conversation
+										</button>
+									{/if}
+									<button
+										type="button"
+										class="btn"
+										onclick={() => void session.rewind(back, true, false)}
+									>
+										Conversation only
+									</button>
+									{#if point && point.files.length > 0}
+										<button
+											type="button"
+											class="btn"
+											onclick={() => void session.rewind(back, false, true)}
+										>
+											Files only
+										</button>
+									{/if}
+									<button type="button" class="btn" onclick={cancelRewind}>Cancel</button>
+								</div>
+							{/if}
 						</div>
 					{/if}
 				</div>
@@ -82,6 +221,20 @@ ask quack to do something in this folder</pre>
 				<ToolCard item={item} />
 			{:else if item.kind === 'compacted'}
 				<div class="compacted">older notes summarized for the trail ahead</div>
+			{:else if item.kind === 'pruned'}
+				<details class="pruned">
+					<summary>
+						trimmed ~{item.removedTokens.toLocaleString()} tokens from earlier context
+						{#if item.items.length > 0}({item.items.length} items){/if}
+					</summary>
+					{#if item.items.length > 0}
+						<ul class="pruned-list">
+							{#each item.items as prunedItem, idx (`${item.id}-${idx}`)}
+								<li>{prunedItem}</li>
+							{/each}
+						</ul>
+					{/if}
+				</details>
 			{:else}
 				<div class="system {item.tone}" role={item.tone === 'error' ? 'alert' : 'status'}>
 					{item.text}
@@ -147,6 +300,86 @@ ask quack to do something in this folder</pre>
 		letter-spacing: 0.1em;
 		text-transform: uppercase;
 		color: var(--ver);
+	}
+
+	.user-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+	}
+
+	.turn-tools {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		opacity: 0;
+		transition: opacity 140ms ease;
+	}
+
+	.user-row:hover .turn-tools,
+	.user-row:focus-within .turn-tools,
+	.user-row.rewinding .turn-tools {
+		opacity: 1;
+	}
+
+	.turn-btn {
+		font-size: 11px;
+		color: var(--ink-3);
+		padding: 1px 7px;
+		border-radius: var(--r-md);
+		border: 1px solid transparent;
+	}
+
+	.turn-btn:hover:not(:disabled) {
+		color: var(--ink);
+		background: var(--bg-panel);
+		border-color: var(--rule);
+	}
+
+	.rewind-box {
+		margin-top: 10px;
+		padding-top: 10px;
+		border-top: 1px solid var(--rule-soft);
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.rewind-note {
+		margin: 0;
+		font-family: var(--font-sans);
+		font-size: 12px;
+		color: var(--ink-2);
+	}
+
+	.rewind-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+
+	.rewind-actions .btn {
+		font-size: 12px;
+		padding: 4px 10px;
+	}
+
+	.rewind-conflict {
+		padding: 8px 10px;
+		border-radius: var(--r-md);
+		border: 1px solid color-mix(in srgb, var(--fail) 45%, var(--rule));
+		background: var(--fail-soft);
+		color: var(--fail);
+		font-family: var(--font-sans);
+		font-size: 12px;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.danger-btn {
+		border-color: var(--fail);
+		color: var(--fail);
 	}
 
 	.user-row p {
@@ -236,6 +469,31 @@ ask quack to do something in this folder</pre>
 		border: 1px dashed var(--rule);
 		border-radius: 999px;
 		padding: 3px 12px;
+	}
+
+	.pruned {
+		align-self: center;
+		max-width: 72ch;
+		border: 1px dashed var(--rule);
+		border-radius: var(--r-lg);
+		padding: 4px 12px;
+		color: var(--ink-3);
+		font-size: 12px;
+	}
+
+	.pruned summary {
+		cursor: pointer;
+		font-family: var(--font-serif);
+		font-style: italic;
+		user-select: none;
+	}
+
+	.pruned-list {
+		margin: 6px 0 2px;
+		padding-left: 18px;
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--ink-2);
 	}
 
 	.system {

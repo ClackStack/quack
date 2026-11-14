@@ -11,12 +11,13 @@ use quack_protocol::{
     Answer, ApprovalDecision, ApprovalPolicy, ApprovalRequest, CallId, CheckStatus, CheckpointId,
     CommandInfo, ContextReport, ContextSegment, DetectedServer, DoctorCheck, EngineError,
     EngineErrorKind, Event, EventIndex, ExportFormat, HookConnection, HookConnectionDraft,
-    HookConnectionInfo, HookCredentialChange, HookDescriptor, HookField, HookPreset, HookSetupInfo,
-    Image, InputItem, InstructionFile, KeySource, LoadState, LspServerInfo, McpServerInfo,
-    MemoryNote, ModelId, ModelInfo, Op, ProfileInfo, ProviderId, ProviderModels, PruneReport,
-    Question, QuestionOption, ReplayItem, RequestStat, RewindPoint, SecretText, ServiceInfo,
-    SessionId, SessionInfo, SessionSummary, SkillInfo, StatsReport, Subsystem, ToolCallInfo,
-    ToolResultSummary, ToolStat, TurnId, TurnOverrides, Usage, WorkMode, WriteScope,
+    HookConnectionInfo, HookCredentialChange, HookDescriptor, HookField, HookOutcome, HookPreset,
+    HookSetupInfo, Image, InputItem, InstructionFile, KeySource, LoadState, LspServerInfo,
+    LspServerState, McpServerInfo, McpServerState, MemoryNote, ModelId, ModelInfo, Op,
+    PermissionMode, ProfileInfo, ProviderId, ProviderModels, PruneReport, Question, QuestionOption,
+    ReplayItem, RequestStat, RewindPoint, SecretText, ServiceInfo, SessionId, SessionInfo,
+    SessionSummary, SkillInfo, StatsReport, Subsystem, ToolCallInfo, ToolResultSummary, ToolStat,
+    TurnId, TurnOverrides, Usage, WorkMode, WriteScope,
 };
 use ts_rs::TS;
 
@@ -113,6 +114,26 @@ fn export_protocol_ts() {
             "ApprovalPolicy",
             ApprovalPolicy::docs().unwrap_or_default(),
             ApprovalPolicy::decl(&cfg),
+        ),
+        (
+            "PermissionMode",
+            PermissionMode::docs().unwrap_or_default(),
+            PermissionMode::decl(&cfg),
+        ),
+        (
+            "HookOutcome",
+            HookOutcome::docs().unwrap_or_default(),
+            HookOutcome::decl(&cfg),
+        ),
+        (
+            "LspServerState",
+            LspServerState::docs().unwrap_or_default(),
+            LspServerState::decl(&cfg),
+        ),
+        (
+            "McpServerState",
+            McpServerState::docs().unwrap_or_default(),
+            McpServerState::decl(&cfg),
         ),
         (
             "HookCredentialChange",

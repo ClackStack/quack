@@ -309,7 +309,7 @@ Corners are soft and graded by scale: plates 24px, cards and the grinder detail 
 ## Components
 
 ### Plate
-The page unit. Paper, 24px corners, 1px Hairline frame, a tab-colour notch top right, then its children; no foot caption. Tab colours follow the plate order: quack duck, grinder beak, in the wild sky, field marks leaf, measured pink, teams duck, install beak.
+The page unit. Paper, 24px corners, 1px Hairline frame, a tab-colour notch top right, then its children; no foot caption. Tab colours follow the plate order: quack duck, grinder beak, in the wild sky, desktop app duck, field marks leaf, measured pink, teams duck, config sky, install beak.
 
 ### Specimen and field marks (signature)
 The welcome duck from quack-tui, frame for frame (16 steps of 128ms; reduced motion holds step 0), in bold mono with an orange beak and sky waves. Its parts carry `data-part` anchors. On lg and up, four field marks sit two above and two below it, and an SVG overlay measures each mark's orange dot to its duck part and draws a 2px orange line ending in a 3.5px dot, short of the glyph by its height times the mark's `clear` factor (at least 16px). The beak and water use 0.62; the eye (1.7) and body (1.5) sit among other glyphs, the cap and the bill, so their lines stop further out. Lines draw once on load (0.9s, cubic-bezier(0.16, 1, 0.3, 1), staggered 120ms). Each mark is a Title Mark term plus a Slate Ink note, linking to its account in the grinder.

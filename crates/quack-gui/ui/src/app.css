@@ -426,3 +426,48 @@ kbd {
 		repeating-linear-gradient(0deg, rgba(240, 248, 252, 0.03) 0 1px, transparent 1px 4px),
 		repeating-linear-gradient(90deg, rgba(6, 16, 24, 0.08) 0 1px, transparent 1px 4px);
 }
+
+/* Tree-sitter syntax highlight tokens inside dark `.code` plates. */
+.tok-keyword,
+.tok-tag {
+	color: #edc65a;
+}
+.tok-operator {
+	color: #d99a52;
+}
+.tok-function,
+.tok-function-builtin,
+.tok-function-macro,
+.tok-constructor {
+	color: #9cc4d6;
+}
+.tok-string,
+.tok-string-special,
+.tok-escape {
+	color: #a9d186;
+}
+.tok-comment {
+	color: #8f8a76;
+	font-style: italic;
+}
+.tok-number,
+.tok-constant,
+.tok-constant-builtin,
+.tok-label {
+	color: #e3b283;
+}
+.tok-type,
+.tok-type-builtin,
+.tok-module,
+.tok-attribute {
+	color: #c8d7e0;
+}
+.tok-property,
+.tok-variable-builtin,
+.tok-variable-parameter,
+.tok-embedded {
+	color: #e8e3d0;
+}
+.tok-punctuation {
+	color: #a8a28d;
+}

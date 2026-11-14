@@ -190,6 +190,18 @@ function classifyJob(
 		};
 	}
 
+	if (session.stepLimit) {
+		return {
+			...base,
+			category: 'input',
+			statusLabel: 'Step pause',
+			compactStatus: 'step pause',
+			detail: `Reached ${session.stepLimit.limit} model steps — choose continue or stop here.`,
+			actionLabel: 'Continue?',
+			actionTarget: 'workspace'
+		};
+	}
+
 	if (session.trust) {
 		return {
 			...base,

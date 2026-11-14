@@ -322,3 +322,133 @@ async fn custom_commands_expand_into_their_prompt() {
     );
     engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn save_memory_op_creates_updates_renames_and_guards_collisions() {
+    use quack_core::protocol::{Event, Op};
+
+    let server = MockServer::start().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    let mut engine = Engine::spawn(Arc::new(loaded));
+
+    loop {
+        let e = tokio::time::timeout(std::time::Duration::from_secs(10), engine.events.recv())
+            .await
+            .expect("event")
+            .expect("open");
+        if matches!(e, Event::StartupComplete) {
+            break;
+        }
+    }
+
+    async fn next_notes(
+        engine: &mut quack_core::EngineHandle,
+    ) -> Vec<quack_core::protocol::MemoryNote> {
+        loop {
+            let e = tokio::time::timeout(std::time::Duration::from_secs(10), engine.events.recv())
+                .await
+                .expect("event")
+                .expect("open");
+            if let Event::MemoryNotes { notes, .. } = e {
+                return notes;
+            }
+        }
+    }
+
+    async fn next_warning(engine: &mut quack_core::EngineHandle) -> String {
+        loop {
+            let e = tokio::time::timeout(std::time::Duration::from_secs(10), engine.events.recv())
+                .await
+                .expect("event")
+                .expect("open");
+            if let Event::Warning { message } = e {
+                return message;
+            }
+        }
+    }
+
+    // Create a project note.
+    assert!(
+        engine
+            .submit(Op::SaveMemory {
+                scope: "project".into(),
+                name: "rust-style".into(),
+                description: "Prefer Result".into(),
+                kind: "project".into(),
+                body: "Use expect or ?.".into(),
+                previous_scope: None,
+                previous_name: None,
+            })
+            .await
+    );
+    let notes = next_notes(&mut engine).await;
+    assert_eq!(notes.len(), 1);
+    assert_eq!(
+        (notes[0].scope.as_str(), notes[0].name.as_str()),
+        ("project", "rust-style")
+    );
+    assert!(notes[0].text.contains("Use expect or ?."));
+    let orig_path = std::path::PathBuf::from(&notes[0].path);
+    assert!(orig_path.exists());
+
+    // Create a global note with a distinct name.
+    assert!(
+        engine
+            .submit(Op::SaveMemory {
+                scope: "global".into(),
+                name: "taken-global".into(),
+                description: "Existing note".into(),
+                kind: "user".into(),
+                body: "Keep intact.".into(),
+                previous_scope: None,
+                previous_name: None,
+            })
+            .await
+    );
+    let notes = next_notes(&mut engine).await;
+    assert_eq!(notes.len(), 2);
+
+    // Moving onto an existing note's (scope, name) warns and preserves both notes.
+    assert!(
+        engine
+            .submit(Op::SaveMemory {
+                scope: "global".into(),
+                name: "taken-global".into(),
+                description: "Overwrite attempt".into(),
+                kind: "project".into(),
+                body: "Should not overwrite.".into(),
+                previous_scope: Some("project".into()),
+                previous_name: Some("rust-style".into()),
+            })
+            .await
+    );
+    let warning = next_warning(&mut engine).await;
+    assert!(warning.contains("already exists"), "{warning}");
+    assert!(orig_path.exists());
+
+    // Move + rename from project/rust-style -> global/rust-notes succeeds and deletes old file.
+    assert!(
+        engine
+            .submit(Op::SaveMemory {
+                scope: "global".into(),
+                name: "rust-notes".into(),
+                description: "Workspace Rust conventions".into(),
+                kind: "reference".into(),
+                body: "Updated body.".into(),
+                previous_scope: Some("project".into()),
+                previous_name: Some("rust-style".into()),
+            })
+            .await
+    );
+    let notes = next_notes(&mut engine).await;
+    assert!(!orig_path.exists());
+    let moved = notes
+        .iter()
+        .find(|n| n.scope == "global" && n.name == "rust-notes")
+        .expect("moved note");
+    assert!(moved.text.contains("type: reference"));
+    assert!(moved.text.contains("Updated body."));
+
+    engine.shutdown().await;
+}

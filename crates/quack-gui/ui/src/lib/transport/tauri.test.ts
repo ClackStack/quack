@@ -62,11 +62,50 @@ describe('desktop connection and open handshake', () => {
 			.rejects.toBe('cannot open folder');
 	});
 
+	it('routes desktop helper commands cleanly through Tauri IPC', async () => {
+		invoke.mockImplementation(async (command) => {
+			if (command === 'connect') return 9;
+			if (command === 'list_workspace_files') return ['src/lib.rs'];
+			if (command === 'highlight_code') return [{ text: 'fn', kind: 'keyword' }];
+			if (command === 'stage_pasted_image') return '/tmp/quack-gui-paste/paste.png';
+			return undefined;
+		});
+		const transport = tauriTransport();
+		await expect(transport.listFiles?.(4)).resolves.toEqual(['src/lib.rs']);
+		await transport.revealPath?.(4, 'src/lib.rs', true);
+		await expect(transport.highlightCode?.('rust', 'fn')).resolves.toEqual([{ text: 'fn', kind: 'keyword' }]);
+		await expect(transport.stagePastedImage?.(4, new Uint8Array([1, 2, 3]))).resolves.toBe(
+			'/tmp/quack-gui-paste/paste.png'
+		);
+		await transport.notifyAttention?.('quack', 'Approval needed');
+		expect(invoke).toHaveBeenCalledWith('reveal_path', {
+			client: 9,
+			tab: 4,
+			path: 'src/lib.rs',
+			openFile: true
+		});
+		expect(invoke).toHaveBeenCalledWith('notify_attention', {
+			title: 'quack',
+			body: 'Approval needed'
+		});
+	});
+
 	it('does not send commands after connection failure', async () => {
 		invoke.mockRejectedValue('connection was replaced');
 		const transport = tauriTransport();
 		await expect(transport.openFolder('/workspace', { resume: 'new' })).rejects.toBe('connection was replaced');
 		await expect(transport.sendOp(7, { op: 'interrupt' })).rejects.toBe('connection was replaced');
 		expect(invoke).toHaveBeenCalledOnce();
+	});
+
+	it('reads shared input history via IPC', async () => {
+		invoke.mockImplementation(async (cmd: string) => {
+			if (cmd === 'connect') return 11;
+			if (cmd === 'input_history') return ['first', 'second'];
+			return undefined;
+		});
+		const transport = tauriTransport();
+		await expect(transport.inputHistory?.(5)).resolves.toEqual(['first', 'second']);
+		expect(invoke).toHaveBeenCalledWith('input_history', { client: 11, tab: 5 });
 	});
 });

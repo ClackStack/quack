@@ -65,6 +65,17 @@ async fn appinfo_snapshot_carries_the_static_facts() {
         info.permission_mode
     );
     assert!(info.settings.iter().any(|s| s.key == "model.default"));
+    assert!(!info.egress.offline);
+    assert!(!info.egress.telemetry_enabled);
+    assert!(
+        info.egress
+            .providers
+            .iter()
+            .any(|p| p.id == "mock" && p.local && p.enabled),
+        "{:?}",
+        info.egress
+    );
+    assert_eq!(info.sandbox.mode, "auto");
 }
 
 #[tokio::test]
@@ -434,5 +445,138 @@ async fn project_trust_choices_round_trip_through_ipc_and_reload_the_snapshot() 
         unreachable!()
     };
     assert_eq!(info.ui.theme, "dark");
+    registry.close(tab).await;
+}
+
+#[tokio::test]
+async fn workspace_files_path_resolution_and_clipboard_image_staging_stay_safe() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ws = ws_of(tmp.path());
+    std::fs::create_dir_all(ws.join("src")).expect("mkdir src");
+    std::fs::write(ws.join("src/main.rs"), "fn main() {}\n").expect("write main.rs");
+    std::fs::write(tmp.path().join("outside.txt"), "secret").expect("write outside");
+
+    let loaded = common::workspace(tmp.path(), &server.uri());
+    let registry = Registry::with_parts(fixed_loader(loaded), tmp.path().join("gui-data"));
+    let client = registry.connect().await.expect("connect");
+    let (sink, _rx) = collecting_sink();
+    let tab = registry
+        .open_for(client, ws.clone(), Resume::New, sink)
+        .await
+        .expect("open");
+
+    let files = registry
+        .list_files_for(client, tab, 50)
+        .await
+        .expect("list files");
+    assert!(files.iter().any(|f| f == "src/main.rs"), "{files:?}");
+
+    let resolved = registry
+        .resolve_workspace_path_for(client, tab, Path::new("src/main.rs"))
+        .expect("resolve inside workspace");
+    assert!(resolved.ends_with("src/main.rs"));
+
+    let escaped = registry.resolve_workspace_path_for(client, tab, Path::new("../outside.txt"));
+    assert!(escaped.is_err(), "path escape must fail: {escaped:?}");
+
+    let png: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, b'I', b'H', b'D', b'R', 0,
+        0, 0, 2, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0x7D, 0x0C, 0xC0, 0xFA,
+    ];
+    let staged = registry
+        .save_pasted_image_for(client, tab, png)
+        .expect("stage valid png");
+    assert!(Path::new(&staged).is_file());
+    let _ = std::fs::remove_file(&staged);
+    assert!(
+        registry
+            .save_pasted_image_for(client, tab, b"not an image")
+            .is_err()
+    );
+
+    registry.close(tab).await;
+}
+
+#[tokio::test]
+async fn shares_input_history_and_memory_edits_with_tui() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse_text("ok"))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = common::workspace(tmp.path(), &server.uri());
+    let hist_path = quack_core::history_path(&loaded);
+    quack_core::append_history(&hist_path, "from-tui").expect("seed tui prompt");
+
+    let registry = Registry::with_parts(fixed_loader(loaded), tmp.path().join("gui-data"));
+    let client = registry.connect().await.expect("connect");
+    let (sink, mut rx) = collecting_sink();
+    let tab = registry
+        .open_for(client, ws_of(tmp.path()), Resume::New, sink)
+        .await
+        .expect("open");
+
+    let info_msg = until(&mut rx, |m| matches!(m.payload, Payload::Info { .. })).await;
+    let Payload::Info { info } = info_msg.payload else {
+        unreachable!()
+    };
+    assert_eq!(info.history, vec!["from-tui"]);
+
+    collect_until(&mut rx, |e| matches!(e, Event::StartupComplete)).await;
+
+    registry
+        .send_op_for(
+            client,
+            tab,
+            serde_json::json!({
+                "op": "user_turn",
+                "items": [{"type": "text", "text": "from-gui"}],
+                "overrides": {}
+            }),
+        )
+        .await
+        .expect("user_turn");
+    let hist_msg = until(&mut rx, |m| matches!(m.payload, Payload::History { .. })).await;
+    let Payload::History { history } = hist_msg.payload else {
+        unreachable!()
+    };
+    assert_eq!(history, vec!["from-tui", "from-gui"]);
+    collect_until(&mut rx, |e| matches!(e, Event::TurnComplete { .. })).await;
+    assert_eq!(
+        quack_core::load_history(&hist_path),
+        vec!["from-tui", "from-gui"]
+    );
+
+    quack_core::append_history(&hist_path, "later-from-tui").expect("tui append");
+    let refreshed = registry
+        .input_history_for(client, tab)
+        .await
+        .expect("refresh history");
+    assert_eq!(refreshed, vec!["from-tui", "from-gui", "later-from-tui"]);
+
+    registry
+        .send_op_for(
+            client,
+            tab,
+            serde_json::json!({
+                "op": "save_memory",
+                "scope": "project",
+                "name": "bridge-note",
+                "description": "Created via bridge",
+                "kind": "project",
+                "body": "Remember this across TUI and GUI."
+            }),
+        )
+        .await
+        .expect("save_memory");
+    let (_, mem_ev) = collect_until(&mut rx, |e| matches!(e, Event::MemoryNotes { .. })).await;
+    let Event::MemoryNotes { notes, .. } = mem_ev else {
+        unreachable!()
+    };
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].name, "bridge-note");
+
     registry.close(tab).await;
 }

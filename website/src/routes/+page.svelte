@@ -3,6 +3,7 @@
 	import Hero from '#lib/components/Hero.svelte';
 	import GrinderComparison from '#lib/components/GrinderComparison.svelte';
 	import Session from '#lib/components/Session.svelte';
+	import DesktopApp from '#lib/components/DesktopApp.svelte';
 	import FieldMarks from '#lib/components/FieldMarks.svelte';
 	import Measured from '#lib/components/Measured.svelte';
 	import Organisations from '#lib/components/Organisations.svelte';
@@ -35,6 +36,7 @@
 	<Hero />
 	<GrinderComparison />
 	<Session />
+	<DesktopApp />
 	<FieldMarks />
 	<Measured />
 	<Organisations />

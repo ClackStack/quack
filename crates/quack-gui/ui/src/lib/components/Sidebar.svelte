@@ -11,6 +11,7 @@
 		type JobActionTarget
 	} from '#lib/jobs';
 	import type { Session } from '#lib/session.svelte';
+	import { sortMemoryNotes } from '#lib/memory';
 	import { samePath, type SidebarProject } from '#lib/workspaces.svelte';
 
 	let {
@@ -27,7 +28,8 @@
 		onDismissIssue,
 		onReopenJob,
 		onCloseJob,
-		onNewTab
+		onNewTab,
+		onOpenMemory = () => {}
 	}: {
 		session: Session;
 		sessions: Session[];
@@ -43,7 +45,10 @@
 		onReopenJob: (tab: number) => void;
 		onCloseJob: (tab: number) => void;
 		onNewTab: () => void;
+		onOpenMemory?: (target?: { scope: string; name: string; create?: boolean }) => void;
 	} = $props();
+
+	const sortedMemory = $derived(sortMemoryNotes(session.memoryNotes));
 
 	let contextOpen = $state(false);
 	let projectsTabBtn: HTMLButtonElement | undefined = $state();
@@ -239,12 +244,37 @@
 										<button class="mini" {disabled} onclick={() => void session.newSession()}>New job</button>
 										<button
 											class="mini"
+											disabled={disabled || session.forking || session.items.length === 0}
+											onclick={() => void session.forkSession(false)}
+											title="Branch this conversation into a copy">Branch</button
+										>
+										<button
+											class="mini"
 											disabled={session.closed}
 											onclick={() => void session.listSessions()}
 											title="Refresh the job list">Refresh</button
 										>
 									</span>
 								</div>
+								{#if session.items.length > 0}
+									<div class="notes-row">
+										<span class="j-note">Save field notes</span>
+										<span class="tools">
+											<button
+												class="mini"
+												disabled={session.closed}
+												onclick={() => void session.exportTranscript('markdown')}
+												title="Save conversation as Markdown">Markdown</button
+											>
+											<button
+												class="mini"
+												disabled={session.closed}
+												onclick={() => void session.exportTranscript('json')}
+												title="Save conversation as JSON">JSON</button
+											>
+										</span>
+									</div>
+								{/if}
 								<p class="s-note jobs-hint">each job is one conversation in this project</p>
 								<div
 									class="job live"
@@ -414,7 +444,9 @@
 						<rect x={i * 8 + 1} y={26 - (bar.cached + bar.fresh) * 24} width="6" height={bar.fresh * 24} class="sp-fresh" />
 					{/each}
 				</svg>
-				<p class="s-note">each bar one model call · lighter share served from cache</p>
+				<p class="s-note">each bar one call · lighter share reused from cache (faster &amp; cheaper)</p>
+			{:else if cachedShare !== null && cachedShare > 0}
+				<p class="s-note">reused from memory — faster &amp; lower cost</p>
 			{/if}
 		</section>
 	{/if}
@@ -434,7 +466,7 @@
 			<p class="s-note">files this job has changed</p>
 			<ul class="files">
 				{#each files as file (file.path)}
-					<li>
+					<li class="file-row">
 						<details>
 							<summary>
 								<span class="f-path">{file.path}</span>
@@ -443,12 +475,40 @@
 									<span class="f-del">−{file.dels}</span>
 								</span>
 							</summary>
+							<div class="f-actions">
+								<button
+									type="button"
+									class="mini"
+									disabled={session.closed}
+									onclick={() => void session.revealFile(file.path, false)}
+								>
+									Reveal in folder
+								</button>
+								<button
+									type="button"
+									class="mini"
+									disabled={session.closed}
+									onclick={() => void session.revealFile(file.path, true)}
+								>
+									Open file
+								</button>
+							</div>
 							{#if file.diff}
 								<pre class="f-diff">{file.diff}</pre>
 							{:else}
 								<p class="s-note">{file.ops} change{file.ops === 1 ? '' : 's'}</p>
 							{/if}
 						</details>
+						<button
+							type="button"
+							class="f-reveal"
+							disabled={session.closed}
+							title={`Reveal ${file.path} in file manager`}
+							aria-label={`Reveal ${file.path} in file manager`}
+							onclick={() => void session.revealFile(file.path, false)}
+						>
+							↗
+						</button>
 					</li>
 				{/each}
 			</ul>
@@ -470,6 +530,63 @@
 			</details>
 		</section>
 	{/if}
+
+	<section>
+		<h2>
+			Memory
+			{#if sortedMemory.length > 0}<span class="count">{sortedMemory.length}</span>{/if}
+			<button
+				type="button"
+				class="mini"
+				disabled={session.closed || session.starting}
+				onclick={() => onOpenMemory()}
+				title="Open memory viewer and editor"
+			>
+				Manage
+			</button>
+		</h2>
+		{#if session.memoryIndexFill >= 80}
+			<p class="s-note mem-warn">Index {session.memoryIndexFill}% full</p>
+		{/if}
+		{#if sortedMemory.length > 0}
+			<ul class="mem-list">
+				{#each sortedMemory.slice(0, 6) as note (`${note.scope}:${note.name}`)}
+					<li>
+						<button
+							type="button"
+							class="mem-item"
+							disabled={session.closed || session.starting}
+							title={note.description ? `${note.description} (${note.path})` : note.path}
+							onclick={() => onOpenMemory({ scope: note.scope, name: note.name })}
+						>
+							<span class="mem-name">{note.name}</span>
+							<span class="mem-scope" class:project={note.scope === 'project'}>{note.scope}</span>
+						</button>
+					</li>
+				{/each}
+			</ul>
+			{#if sortedMemory.length > 6}
+				<button
+					type="button"
+					class="mini wide"
+					disabled={session.closed || session.starting}
+					onclick={() => onOpenMemory()}
+				>
+					Show all {sortedMemory.length} notes
+				</button>
+			{/if}
+		{:else}
+			<p class="s-note">no notes saved yet</p>
+			<button
+				type="button"
+				class="mini"
+				disabled={session.closed || session.starting}
+				onclick={() => onOpenMemory({ scope: 'project', name: '', create: true })}
+			>
+				+ Add note
+			</button>
+		{/if}
+	</section>
 
 	{#if planItems.length > 0}
 		<section>
@@ -678,6 +795,14 @@
 		margin-left: auto;
 		display: inline-flex;
 		gap: 6px;
+		flex-wrap: wrap;
+	}
+
+	.notes-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-top: 6px;
 	}
 
 	.mini {
@@ -1232,6 +1357,42 @@
 		gap: 4px;
 	}
 
+	.file-row {
+		display: flex;
+		align-items: flex-start;
+		gap: 4px;
+	}
+
+	.file-row details {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.f-reveal {
+		flex: none;
+		width: 28px;
+		height: 30px;
+		display: grid;
+		place-items: center;
+		border: 1px solid rgba(219, 228, 233, 0.25);
+		border-radius: 8px;
+		background: rgba(240, 248, 252, 0.04);
+		color: var(--cloth-mut);
+		font-size: 12px;
+	}
+
+	.f-reveal:hover:not(:disabled) {
+		color: var(--cloth-ink);
+		border-color: rgba(219, 228, 233, 0.65);
+		background: rgba(240, 248, 252, 0.08);
+	}
+
+	.f-actions {
+		display: flex;
+		gap: 6px;
+		padding: 0 10px 8px;
+	}
+
 	.files details {
 		border: 1px solid rgba(219, 228, 233, 0.25);
 		border-radius: 8px;
@@ -1469,5 +1630,55 @@
 		font-family: var(--font-mono);
 		font-size: 10.5px;
 		color: var(--cloth-mut);
+	}
+
+	.mem-warn {
+		color: var(--duck);
+	}
+
+	.mem-list {
+		list-style: none;
+		margin: 6px 0 0;
+		padding: 0;
+		display: grid;
+		gap: 3px;
+	}
+
+	.mem-item {
+		width: 100%;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		padding: 5px 8px;
+		border-radius: var(--r-sm);
+		text-align: left;
+		color: var(--cloth-ink);
+		background: rgba(240, 248, 252, 0.04);
+		border: 1px solid rgba(219, 228, 233, 0.14);
+	}
+
+	.mem-item:hover:not(:disabled) {
+		background: rgba(240, 248, 252, 0.1);
+		border-color: rgba(219, 228, 233, 0.28);
+	}
+
+	.mem-name {
+		font-family: var(--font-mono);
+		font-size: 11.5px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.mem-scope {
+		font-family: var(--font-mono);
+		font-size: 10px;
+		color: var(--cloth-mut);
+		flex: none;
+	}
+
+	.mem-scope.project {
+		color: var(--duck);
 	}
 </style>

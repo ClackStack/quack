@@ -57,6 +57,7 @@ impl ApprovalPolicy {
 /// either a work mode (`plan`/`edit`) or an approval policy, spelled as the engine has
 /// always serialized it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionMode {
     Plan,

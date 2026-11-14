@@ -72,6 +72,17 @@ impl EngineHandle {
     }
 }
 
+#[derive(Debug)]
+struct SaveMemoryArgs {
+    scope: String,
+    name: String,
+    description: String,
+    kind: String,
+    body: String,
+    previous_scope: Option<String>,
+    previous_name: Option<String>,
+}
+
 /// Work that waits for startup or the running turn.
 #[derive(Debug)]
 enum Queued {
@@ -1193,6 +1204,54 @@ impl Engine {
         });
     }
 
+    fn save_memory(&self, note: SaveMemoryArgs) {
+        let store = crate::env::memory_store(&self.config);
+        let result = (|| -> Result<(), String> {
+            let target = Scope::parse(&note.scope)
+                .ok_or_else(|| format!("unknown scope `{}`", note.scope))?;
+            let prev = match (&note.previous_scope, &note.previous_name) {
+                (Some(ps), Some(pn)) => Some((
+                    Scope::parse(ps).ok_or_else(|| format!("unknown scope `{ps}`"))?,
+                    pn.as_str(),
+                )),
+                (None, None) => None,
+                _ => {
+                    return Err(
+                        "previous_scope and previous_name must both be set when moving a note"
+                            .into(),
+                    );
+                }
+            };
+            if let Some((ps, pn)) = prev
+                && (ps, pn) != (target, note.name.as_str())
+                && store.exists(target, &note.name)
+            {
+                return Err(format!(
+                    "a {} note named `{}` already exists",
+                    target.label(),
+                    note.name
+                ));
+            }
+            store.write(
+                target,
+                &note.name,
+                &note.description,
+                &note.kind,
+                &note.body,
+            )?;
+            if let Some((ps, pn)) = prev
+                && (ps, pn) != (target, note.name.as_str())
+            {
+                let _ = store.delete(ps, pn);
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.list_memory(),
+            Err(e) => self.warn(format!("cannot save note: {e}")),
+        }
+    }
+
     fn list_memory(&self) {
         let store = crate::env::memory_store(&self.config);
         let mut notes = Vec::new();
@@ -2036,6 +2095,23 @@ impl Engine {
                 self.queued.push_back(Queued::Accept(mode));
                 self.next_queued(done, reload);
             }
+            Op::SaveMemory {
+                scope,
+                name,
+                description,
+                kind,
+                body,
+                previous_scope,
+                previous_name,
+            } => self.save_memory(SaveMemoryArgs {
+                scope,
+                name,
+                description,
+                kind,
+                body,
+                previous_scope,
+                previous_name,
+            }),
             Op::DeleteMemory { scope, name } => {
                 let store = crate::env::memory_store(&self.config);
                 let result = Scope::parse(&scope)
@@ -2939,6 +3015,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::GetContext => "get_context",
         Op::GetStats => "get_stats",
         Op::ListMemory => "list_memory",
+        Op::SaveMemory { .. } => "save_memory",
         Op::RunDoctor => "run_doctor",
         Op::DetectServers => "detect_servers",
         Op::ListMcp => "list_mcp",

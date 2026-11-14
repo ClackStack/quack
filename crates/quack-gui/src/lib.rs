@@ -18,6 +18,7 @@
 
 pub mod appinfo;
 pub mod coalesce;
+pub mod highlight;
 #[cfg(feature = "desktop")]
 pub mod path_env;
 pub mod recent;
@@ -25,5 +26,6 @@ pub mod registry;
 
 pub use appinfo::AppInfo;
 pub use coalesce::DeltaCoalescer;
+pub use highlight::{HighlightSpan, highlight_code};
 pub use recent::{RecentFolder, RecentFolders};
 pub use registry::{OpenError, Payload, Registry, Sink, TabId, TabMessage};

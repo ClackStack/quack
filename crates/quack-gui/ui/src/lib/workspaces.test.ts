@@ -12,8 +12,14 @@ import type { AppInfo, TabMessage, Transport } from './transport/types';
 function makeInfo(cwd = '/workspace'): AppInfo {
 	return {
 		version: 'test', cwd, branch: null, model: 'mock/org/model',
+		planner_model: null, planner_locked: false,
 		permission_mode: 'ask', work_mode: 'edit', ui: { theme: 'auto', reduced_motion: false },
-		settings: [], layers: [], rules: [], bundles: [], bundles_disabled: []
+		egress: {
+			offline: false, offline_locked: false, egress_allow: [], providers: [], mcp_remote: [],
+			http1_only: false, has_proxy: false, updates_check: false, catalog_refresh: false, telemetry_enabled: false
+		},
+		sandbox: { mode: 'auto', os_supported: true, status_detail: 'active', writable: [], locked: false },
+		settings: [], layers: [], rules: [], bundles: [], bundles_disabled: [], history: []
 	};
 }
 
@@ -298,5 +304,20 @@ describe('workspace lifecycle', () => {
 		expect(workspaces.sessions[0].tab).toBe(2);
 		expect(workspaces.selectTab(2)).toBe(true);
 		expect(workspaces.selectTab(999)).toBe(false);
+	});
+
+	it('updates session inputHistory from TabMessage history payloads and loads memory on open', async () => {
+		const { transport, workspaces, receive } = fixture();
+		vi.mocked(transport.openFolder).mockResolvedValue({
+			tab: 3,
+			info: { ...makeInfo('/workspace/m'), history: ['initial tui prompt'] }
+		});
+
+		await workspaces.open('/workspace/m', { resume: 'latest' });
+		expect(transport.sendOp).toHaveBeenCalledWith(3, { op: 'list_memory' });
+		expect(workspaces.sessions[0].inputHistory).toEqual(['initial tui prompt']);
+
+		receive({ tab: 3, history: ['initial tui prompt', 'gui turn'] });
+		expect(workspaces.sessions[0].inputHistory).toEqual(['initial tui prompt', 'gui turn']);
 	});
 });

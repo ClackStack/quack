@@ -11,6 +11,7 @@ use crate::{KeySource, SecretText};
 /// context for the model), `allowed`, `denied`, `asked`, `updated` (it changed a tool
 /// call's arguments) or `failed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum HookOutcome {
     Ok,

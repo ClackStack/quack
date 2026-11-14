@@ -176,6 +176,24 @@ pub enum Op {
     },
     /// Ask for the memory notes; answered with `Event::MemoryNotes`.
     ListMemory,
+    /// Create or update a memory note and reconcile `MEMORY.md`; answered with
+    /// `Event::MemoryNotes`. `scope` is `global` or `project`; `kind` is one of
+    /// `user`, `project`, `feedback`, `reference`. When `previous_scope` and
+    /// `previous_name` name a different existing note, that old note is removed after
+    /// writing the replacement so renames and scope moves keep one note.
+    SaveMemory {
+        scope: String,
+        name: String,
+        description: String,
+        kind: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        previous_scope: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        previous_name: Option<String>,
+    },
     /// Delete a memory note. `scope` is `global` or `project`.
     DeleteMemory {
         scope: String,
@@ -870,6 +888,7 @@ pub struct McpServerInfo {
 
 /// The state of a language server, as `/lsp` shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum LspServerState {
     #[serde(rename = "not installed")]
     NotInstalled,
@@ -926,6 +945,7 @@ impl std::fmt::Display for LspServerState {
 
 /// The state of an MCP server, as `/mcp` shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum McpServerState {
     Starting,
@@ -1452,6 +1472,31 @@ mod tests {
                 text: "thinking".into(),
             }),
             r#"{"kind":"reasoning","text":"thinking"}"#
+        );
+
+        assert_eq!(
+            wire_json(&Op::SaveMemory {
+                scope: "project".into(),
+                name: "rust-conventions".into(),
+                description: "Workspace style notes".into(),
+                kind: "project".into(),
+                body: "Prefer Result over unwrap.".into(),
+                previous_scope: None,
+                previous_name: None,
+            }),
+            r#"{"op":"save_memory","scope":"project","name":"rust-conventions","description":"Workspace style notes","kind":"project","body":"Prefer Result over unwrap."}"#
+        );
+        assert_eq!(
+            wire_json(&Op::SaveMemory {
+                scope: "global".into(),
+                name: "rust-conventions".into(),
+                description: "Workspace style notes".into(),
+                kind: "reference".into(),
+                body: "Body".into(),
+                previous_scope: Some("project".into()),
+                previous_name: Some("old-name".into()),
+            }),
+            r#"{"op":"save_memory","scope":"global","name":"rust-conventions","description":"Workspace style notes","kind":"reference","body":"Body","previous_scope":"project","previous_name":"old-name"}"#
         );
     }
 }

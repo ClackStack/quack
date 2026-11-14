@@ -6,13 +6,65 @@
 		session,
 		sidebarOpen = false,
 		attentionCount = 0,
-		onToggleSidebar = () => {}
+		onToggleSidebar = () => {},
+		onOpenEgress = () => {},
+		onOpenMemory = () => {}
 	}: {
 		session: Session;
 		sidebarOpen?: boolean;
 		attentionCount?: number;
 		onToggleSidebar?: () => void;
+		onOpenEgress?: () => void;
+		onOpenMemory?: () => void;
 	} = $props();
+
+	const egress = $derived(session.info?.egress);
+	const sandbox = $derived(session.info?.sandbox);
+	const activeProviderId = $derived(session.currentModel?.split('/')[0] ?? null);
+	const activeEndpoint = $derived(
+		activeProviderId ? (egress?.providers.find((p) => p.id === activeProviderId) ?? null) : null
+	);
+	const remoteMcpCount = $derived(egress?.mcp_remote.filter((m) => m.enabled).length ?? 0);
+	const sandboxWeak = $derived(session.sandboxOff || (sandbox ? !sandbox.os_supported : false));
+
+	const egressPill = $derived.by(() => {
+		if (!egress) return null;
+		const sandboxNote = session.sandboxOff
+			? 'Sandbox: off'
+			: sandbox && !sandbox.os_supported
+				? 'Sandbox: unsupported'
+				: sandbox
+					? `Sandbox: ${sandbox.mode}`
+					: 'Sandbox: unknown';
+		if (egress.offline) {
+			return {
+				label: 'Offline',
+				tone: 'local' as const,
+				title: `Strict offline mode · ${sandboxNote}. Click to inspect Network & Sandbox Boundary.`
+			};
+		}
+		if (activeEndpoint?.local && remoteMcpCount === 0) {
+			return {
+				label: 'Local',
+				tone: 'local' as const,
+				title: `Local endpoint (${activeEndpoint.host}) with zero remote MCP · ${sandboxNote}. Click to inspect.`
+			};
+		}
+		const target = activeEndpoint
+			? `${activeEndpoint.host}${remoteMcpCount > 0 ? ` + ${remoteMcpCount} remote MCP` : ''}`
+			: 'Configured endpoints only';
+		return {
+			label: 'Bounded',
+			tone: 'bounded' as const,
+			title: `No implicit egress (${target}) · ${sandboxNote}. Click to inspect Network & Sandbox Boundary.`
+		};
+	});
+
+	const lspTitle = $derived(
+		session.lspServers.length > 0
+			? `LSP servers: ${session.lspServers.map((s) => `${s.id} (${s.state})`).join(', ')}. Click to refresh diagnostics.`
+			: 'Workspace diagnostics reported by LSP. Click to refresh.'
+	);
 
 	const disabled = $derived(
 		session.closed ||
@@ -80,6 +132,56 @@
 
 	<div class="grow"></div>
 
+	{#if session.diagnostics.errors > 0 || session.diagnostics.warnings > 0}
+		<button
+			type="button"
+			class="diag-pill"
+			class:has-errors={session.diagnostics.errors > 0}
+			disabled={session.closed}
+			title={lspTitle}
+			onclick={() => void session.refreshLsp()}
+		>
+			{#if session.diagnostics.errors > 0}
+				<span>{session.diagnostics.errors} err</span>
+			{/if}
+			{#if session.diagnostics.warnings > 0}
+				<span>{session.diagnostics.warnings} warn</span>
+			{/if}
+		</button>
+	{/if}
+
+	{#if egressPill}
+		<button
+			type="button"
+			class="egress-pill"
+			class:local={egressPill.tone === 'local'}
+			class:warn={sandboxWeak}
+			title={egressPill.title}
+			onclick={onOpenEgress}
+		>
+			<span class="egress-dot" aria-hidden="true"></span>
+			<span>{egressPill.label}</span>
+			{#if sandboxWeak}
+				<span class="sandbox-state">· No sandbox</span>
+			{/if}
+		</button>
+	{/if}
+
+	<button
+		type="button"
+		class="btn memory-btn"
+		class:warn={session.memoryIndexFill >= 80}
+		disabled={session.closed || session.starting}
+		title={session.memoryIndexFill >= 80
+			? `Memory (${session.memoryNotes.length} notes · index ${session.memoryIndexFill}% full)`
+			: `View and edit shared project & global memory notes (${session.memoryNotes.length})`}
+		onclick={onOpenMemory}
+	>
+		<span>Memory</span>
+		{#if session.memoryNotes.length > 0}
+			<span class="mem-count">{session.memoryNotes.length}</span>
+		{/if}
+	</button>
 	<button class="btn providers-btn" {disabled} onclick={() => session.openSetup()}>Providers</button>
 	<ThemeToggle />
 </header>
@@ -192,9 +294,91 @@
 		flex: 1;
 	}
 
-	.providers-btn {
+	.egress-pill,
+	.diag-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 3px 9px;
+		border-radius: 999px;
+		border: 1px solid var(--rule);
+		background: var(--bg-raised);
+		color: var(--ink-2);
+		font-family: var(--font-mono);
+		font-size: 11px;
+		font-weight: 500;
+		flex: none;
+		white-space: nowrap;
+	}
+
+	.egress-pill:hover,
+	.diag-pill:hover:not(:disabled) {
+		border-color: var(--sky);
+		color: var(--ink);
+	}
+
+	.egress-dot {
+		width: 7px;
+		height: 7px;
+		border-radius: 999px;
+		background: var(--sky);
+	}
+
+	.egress-pill.local {
+		color: var(--ok);
+		border-color: color-mix(in srgb, var(--ok) 40%, var(--rule));
+		background: var(--ok-soft);
+	}
+
+	.egress-pill.local .egress-dot {
+		background: var(--ok);
+	}
+
+	.egress-pill.warn .sandbox-state {
+		color: var(--beak-ink);
+	}
+
+	.diag-pill {
+		color: var(--beak-ink);
+		background: var(--duck-soft);
+		border-color: var(--duck-line);
+	}
+
+	.diag-pill.has-errors {
+		color: var(--fail);
+		background: var(--fail-soft);
+		border-color: color-mix(in srgb, var(--fail) 45%, var(--rule));
+	}
+
+	@media (max-width: 680px) {
+		.sandbox-state {
+			display: none;
+		}
+	}
+
+	.providers-btn,
+	.memory-btn {
 		padding: 4px 11px;
 		font-size: 12.5px;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.memory-btn.warn {
+		border-color: var(--duck-line);
+		background: var(--duck-soft);
+		color: var(--duck-ink);
+	}
+
+	.mem-count {
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		line-height: 1;
+		padding: 2px 5px;
+		border-radius: 999px;
+		background: var(--bg-soft);
+		color: var(--ink-2);
 	}
 
 	.waterline {

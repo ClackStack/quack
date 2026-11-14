@@ -109,7 +109,8 @@
 					<InstallBox />
 					<p class="mt-3 text-sm text-ink-2">
 						Then run <code class="font-semibold text-ink">quack</code>; it finds model servers on this machine or walks you
-						through adding one.
+						through adding one. Prefer a window? See the
+						<a href="#desktop" class="text-sky-ink font-semibold underline underline-offset-2">desktop app preview</a>.
 					</p>
 				</div>
 			</div>

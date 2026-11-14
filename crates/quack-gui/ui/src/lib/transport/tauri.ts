@@ -1,7 +1,8 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import type { Op } from '#lib/protocol';
 import type {
 	AppInfo,
+	ClientOp,
+	HighlightSpan,
 	OpenedTab,
 	RecentFolder,
 	ResumeRequest,
@@ -54,7 +55,7 @@ export function tauriTransport(): Transport {
 			return { tab, info: await infoReady };
 		},
 
-		async sendOp(tab: number, op: Op): Promise<void> {
+		async sendOp(tab: number, op: ClientOp): Promise<void> {
 			await invoke('send_op', { client: await connect(), tab, op });
 		},
 
@@ -68,6 +69,51 @@ export function tauriTransport(): Transport {
 
 		async openUrl(url: string): Promise<void> {
 			await invoke('open_url', { url });
+		},
+
+		async listFiles(tab: number, limit = 5000): Promise<string[]> {
+			return await invoke<string[]>('list_workspace_files', { client: await connect(), tab, limit });
+		},
+
+		async inputHistory(tab: number): Promise<string[]> {
+			return await invoke<string[]>('input_history', { client: await connect(), tab });
+		},
+
+		async revealPath(tab: number, path: string, openFile = false): Promise<void> {
+			await invoke('reveal_path', { client: await connect(), tab, path, openFile });
+		},
+
+		async highlightCode(lang: string, code: string): Promise<HighlightSpan[] | null> {
+			return await invoke<HighlightSpan[] | null>('highlight_code', { lang, code });
+		},
+
+		async pickImages(): Promise<string[]> {
+			const { open } = await import('@tauri-apps/plugin-dialog');
+			const picked = await open({
+				directory: false,
+				multiple: true,
+				filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }]
+			});
+			if (typeof picked === 'string') return [picked];
+			return Array.isArray(picked) ? picked : [];
+		},
+
+		async pickSavePath(defaultName: string): Promise<string | null> {
+			const { save } = await import('@tauri-apps/plugin-dialog');
+			const picked = await save({ defaultPath: defaultName });
+			return typeof picked === 'string' ? picked : null;
+		},
+
+		async stagePastedImage(tab: number, bytes: Uint8Array): Promise<string> {
+			return await invoke<string>('stage_pasted_image', {
+				client: await connect(),
+				tab,
+				bytes: Array.from(bytes)
+			});
+		},
+
+		async notifyAttention(title: string, body: string): Promise<void> {
+			await invoke('notify_attention', { title, body });
 		},
 
 		listen(listener: (message: TabMessage) => void): () => void {

@@ -7,14 +7,36 @@ const info: AppInfo = {
 	cwd: '/workspace',
 	branch: null,
 	model: 'mock/org/model',
+	planner_model: null,
+	planner_locked: false,
 	permission_mode: 'ask',
 	work_mode: 'edit',
 	ui: { theme: 'auto', reduced_motion: false },
+	egress: {
+		offline: false,
+		offline_locked: false,
+		egress_allow: [],
+		providers: [],
+		mcp_remote: [],
+		http1_only: false,
+		has_proxy: false,
+		updates_check: false,
+		catalog_refresh: false,
+		telemetry_enabled: false
+	},
+	sandbox: {
+		mode: 'auto',
+		os_supported: true,
+		status_detail: 'active (Landlock + seccomp)',
+		writable: [],
+		locked: false
+	},
 	settings: [],
 	layers: [],
 	rules: [],
 	bundles: [],
-	bundles_disabled: []
+	bundles_disabled: [],
+	history: []
 };
 const sessionInfo = { id: 'original', cwd: '/workspace', model: info.model, profile: 'generic' };
 function fixture(model: string | null = info.model) {
@@ -468,5 +490,208 @@ describe('field notes: skills, stats and specimens', () => {
 		session.onClosed('Process terminated with exit code 1');
 		expect(session.closed).toBe(true);
 		expect(session.closedReason).toBe('Process terminated with exit code 1');
+	});
+
+	it('tracks memory notes, handles save/delete errors, and persists input history across sessions', async () => {
+		const sent: unknown[] = [];
+		const externalHistory = ['from tui 1', 'from tui 2'];
+		const initialSession = new Session(
+			{
+				kind: 'tauri',
+				pickFolder: vi.fn(),
+				openFolder: vi.fn(),
+				sendOp: vi.fn(async (_tab, op) => {
+					sent.push(op);
+				}),
+				closeTab: vi.fn(),
+				recentFolders: vi.fn(),
+				openUrl: vi.fn(),
+				listen: () => () => {},
+				inputHistory: vi.fn(async () => [...externalHistory, 'later tui'])
+			},
+			2,
+			{ ...info, history: externalHistory }
+		);
+		expect(initialSession.inputHistory).toEqual(externalHistory);
+
+		initialSession.onEvent({ event: 'startup_complete' });
+		await initialSession.listMemory();
+		expect(sent.at(-1)).toEqual({ op: 'list_memory' });
+
+		await initialSession.saveMemory({
+			scope: 'project',
+			name: 'style',
+			description: 'Style notes',
+			kind: 'project',
+			body: 'Use snake_case'
+		});
+		expect(initialSession.memorySaving).toBe(true);
+		expect(sent.at(-1)).toEqual({
+			op: 'save_memory',
+			scope: 'project',
+			name: 'style',
+			description: 'Style notes',
+			kind: 'project',
+			body: 'Use snake_case'
+		});
+
+		// A warning while saving clears memorySaving and surfaces memoryError.
+		initialSession.onEvent({ event: 'warning', message: 'cannot save note: duplicate' });
+		expect(initialSession.memorySaving).toBe(false);
+		expect(initialSession.memoryError).toBe('cannot save note: duplicate');
+
+		// Receiving memory_notes populates notes and clears errors.
+		const sample = {
+			scope: 'project',
+			name: 'style',
+			description: 'Style notes',
+			path: '/workspace/.quack/memory/notes/style.md',
+			text: '---\nname: style\ndescription: Style notes\ntype: project\n---\n\nUse snake_case\n'
+		};
+		initialSession.onEvent({ event: 'memory_notes', notes: [sample], index_fill: 12 });
+		expect(initialSession.memoryLoaded).toBe(true);
+		expect(initialSession.memoryIndexFill).toBe(12);
+		expect(initialSession.memoryNotes).toEqual([sample]);
+		expect(initialSession.memoryError).toBeNull();
+
+		// Submit adds prompt to inputHistory and keeps it across new_session.
+		expect(await initialSession.submit('from gui')).toBe(true);
+		expect(initialSession.inputHistory).toEqual(['from tui 1', 'from tui 2', 'from gui']);
+
+		initialSession.onEvent({
+			event: 'session_configured',
+			session: { ...sessionInfo, id: 'fresh-session' }
+		});
+		expect(initialSession.inputHistory).toEqual(['from tui 1', 'from tui 2', 'from gui']);
+		expect(initialSession.memoryNotes).toEqual([sample]);
+
+		expect(await initialSession.refreshInputHistory()).toBe(true);
+		expect(initialSession.inputHistory).toEqual([...externalHistory, 'later tui']);
+	});
+
+	it('handles step limits, feedback denials, scoped always-allow, rewind conflicts, and fork', async () => {
+		const { session, send } = fixture();
+		session.onEvent({ event: 'startup_complete' });
+
+		// Submit injects unmentioned attached files into InputItem::Text without duplicating `@path` already present.
+		expect(
+			await session.submit('Review @src/main.rs please', ['src/main.rs', 'src/lib.rs'], ['/tmp/img.png'])
+		).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({
+			op: 'user_turn',
+			items: [
+				{ type: 'text', text: 'Review @src/main.rs please\n\n@src/lib.rs' },
+				{ type: 'image', path: '/tmp/img.png' }
+			],
+			overrides: {}
+		});
+
+		// Approval: feedback denial + project-scoped AlwaysAllow.
+		session.onEvent({
+			event: 'approval_request',
+			call_id: 'call-1',
+			request: { kind: 'shell', command: 'cargo test', cwd: '/workspace', outside_sandbox: false },
+			always: ['cargo test']
+		});
+		expect(await session.answerApproval('deny', 'Run clippy first')).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({
+			op: 'approval_response',
+			call_id: 'call-1',
+			decision: { decision: 'deny_with_feedback', feedback: 'Run clippy first' }
+		});
+
+		session.onEvent({
+			event: 'approval_request',
+			call_id: 'call-2',
+			request: { kind: 'shell', command: 'cargo clippy', cwd: '/workspace', outside_sandbox: false },
+			always: ['cargo clippy']
+		});
+		expect(await session.answerApproval('always_allow', undefined, 'project')).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({
+			op: 'approval_response',
+			call_id: 'call-2',
+			decision: { decision: 'always_allow', scope: 'project' }
+		});
+
+		// Step limit pause & continueTurn.
+		session.onEvent({ event: 'step_limit_reached', turn: 1, limit: 15 });
+		expect(session.stepLimit).toEqual({ turn: 1, limit: 15 });
+		expect(await session.continueTurn(true)).toBe(true);
+		expect(session.stepLimit).toBeNull();
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({
+			op: 'continue_turn',
+			turn: 1,
+			proceed: true
+		});
+
+		// Pruning, diagnostics, and turn completion settle state.
+		session.onEvent({ event: 'diagnostics', errors: 2, warnings: 1 });
+		expect(session.diagnostics).toEqual({ errors: 2, warnings: 1 });
+		session.onEvent({
+			event: 'context_pruned',
+			report: {
+				removed_tokens: 1200,
+				items: ['older shell output']
+			}
+		});
+		expect(session.items.some((it) => it.kind === 'pruned' && it.removedTokens === 1200)).toBe(true);
+		session.onEvent({ event: 'turn_complete', turn: 1, usage: { prompt_tokens: 100, completion_tokens: 20 } });
+
+		// Fork preserves transcript items and flags modelPickerAfterFork when requested.
+		const itemCountBeforeFork = session.items.length;
+		expect(await session.forkSession(true)).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({ op: 'fork_session' });
+		session.onEvent({
+			event: 'session_configured',
+			session: { ...sessionInfo, id: 'forked-session' }
+		});
+		expect(session.items.length).toBe(itemCountBeforeFork);
+		expect(session.modelPickerAfterFork).toBe(true);
+
+		// Rewind points, file conflict detection, and forced overwrite.
+		expect(await session.listRewindPoints()).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({ op: 'list_rewind_points' });
+		session.onEvent({
+			event: 'rewind_points',
+			points: [{ back: 1, text: 'Review @src/main.rs please', files: ['src/lib.rs'] }]
+		});
+		expect(session.rewindPoints).toHaveLength(1);
+
+		expect(await session.rewind(1, true, true)).toBe(true);
+		session.onEvent({ event: 'files_restored', restored: [], conflicts: ['src/lib.rs'] });
+		expect(session.rewindConflict).toEqual({
+			back: 1,
+			conversation: true,
+			files: true,
+			conflicts: ['src/lib.rs']
+		});
+
+		expect(await session.rewind(1, true, true, true)).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({
+			op: 'rewind',
+			back: 1,
+			conversation: true,
+			files: true,
+			force: true
+		});
+		session.onEvent({ event: 'rewound', back: 1, text: 'Review @src/main.rs please' });
+		expect(session.draft).toBe('Review @src/main.rs please');
+		expect(session.items.filter((i) => i.kind === 'user')).toHaveLength(0);
+
+		// saveSetting triggers reload_config when setting_saved arrives.
+		expect(await session.setPlannerModel('anthropic/claude-opus')).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({
+			op: 'save_setting',
+			key: 'model.planner',
+			value: '"anthropic/claude-opus"',
+			scope: 'user'
+		});
+		session.onEvent({
+			event: 'setting_saved',
+			key: 'model.planner',
+			value: '"anthropic/claude-opus"',
+			path: '/home/user/.config/quack/config.toml'
+		});
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({ op: 'reload_config' });
 	});
 });

@@ -2,7 +2,22 @@ import type { Transport } from './types';
 import { devTransport } from './dev';
 import { tauriTransport } from './tauri';
 
-export type { AppInfo, OpenedTab, RecentFolder, ResumeRequest, TabMessage, Transport } from './types';
+export type {
+	AppInfo,
+	ClientEvent,
+	ClientOp,
+	ContinueTurnOp,
+	EgressEndpoint,
+	EgressSnapshot,
+	HighlightSpan,
+	OpenedTab,
+	RecentFolder,
+	ResumeRequest,
+	SandboxSnapshot,
+	StepLimitEvent,
+	TabMessage,
+	Transport
+} from './types';
 
 let transport: Transport | undefined;
 

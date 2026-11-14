@@ -40,4 +40,13 @@ describe('renderMarkdown', () => {
 		const blocks = renderMarkdown('hello\nworld <tag>');
 		expect(blocks[0]).toEqual({ type: 'p', spans: 'hello\nworld &lt;tag&gt;' });
 	});
+
+	it('renders headings with escaped HTML and inline spans for {@html}', () => {
+		const blocks = renderMarkdown('## Step **1**: check <config> & `path`');
+		expect(blocks[0]).toEqual({
+			type: 'h',
+			level: 2,
+			spans: 'Step <strong>1</strong>: check &lt;config&gt; &amp; <code>path</code>'
+		});
+	});
 });
