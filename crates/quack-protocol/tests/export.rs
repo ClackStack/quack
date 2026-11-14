@@ -13,11 +13,11 @@ use quack_protocol::{
     EngineErrorKind, Event, EventIndex, ExportFormat, HookConnection, HookConnectionDraft,
     HookConnectionInfo, HookCredentialChange, HookDescriptor, HookField, HookOutcome, HookPreset,
     HookSetupInfo, Image, InputItem, InstructionFile, KeySource, LoadState, LspServerInfo,
-    LspServerState, McpServerInfo, McpServerState, MemoryNote, ModelId, ModelInfo, Op,
-    PermissionMode, ProfileInfo, ProviderId, ProviderModels, PruneReport, Question, QuestionOption,
-    ReplayItem, RequestStat, RewindPoint, SecretText, ServiceInfo, SessionId, SessionInfo,
-    SessionSummary, SkillInfo, StatsReport, Subsystem, ToolCallInfo, ToolResultSummary, ToolStat,
-    TurnId, TurnOverrides, Usage, WorkMode, WriteScope,
+    LspServerState, McpSecretValue, McpServerInfo, McpServerState, MemoryNote, ModelId, ModelInfo,
+    Op, PermissionMode, ProfileInfo, ProviderId, ProviderModels, PruneReport, Question,
+    QuestionOption, ReplayItem, RequestStat, RewindPoint, SecretText, ServiceInfo, SessionId,
+    SessionInfo, SessionSummary, SkillInfo, StatsReport, Subsystem, ToolCallInfo,
+    ToolResultSummary, ToolStat, TurnId, TurnOverrides, Usage, WorkMode, WriteScope,
 };
 use ts_rs::TS;
 
@@ -215,6 +215,11 @@ fn export_protocol_ts() {
             "HookSetupInfo",
             HookSetupInfo::docs().unwrap_or_default(),
             HookSetupInfo::decl(&cfg),
+        ),
+        (
+            "McpSecretValue",
+            McpSecretValue::docs().unwrap_or_default(),
+            McpSecretValue::decl(&cfg),
         ),
         (
             "ToolCallInfo",

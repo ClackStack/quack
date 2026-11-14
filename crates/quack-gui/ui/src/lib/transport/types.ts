@@ -55,6 +55,61 @@ export type ClientOp = Op | ContinueTurnOp;
  * desktop bridge pushes across the IPC carries the tab it belongs to plus an untagged
  * payload, matching `quack_gui::TabMessage`.
  */
+export interface PathsSnapshot {
+	defaults: string | null;
+	system: string;
+	user_config: string;
+	user_data: string;
+	user_cache: string;
+	project: string;
+	memory_global: string;
+	memory_project: string;
+	sessions_root: string;
+	sessions_project: string;
+}
+
+export interface HookRow {
+	id: string;
+	layer: string;
+	file: string;
+	state: string;
+	detail: string;
+	enabled: boolean;
+	can_toggle: boolean;
+	has_setup: boolean;
+	description: string;
+	event: string | null;
+	command: string[];
+	matcher_tool: string;
+	matcher_pattern: string;
+	matcher_prompt: string;
+	timeout_secs: number | null;
+	on_error: string | null;
+	full_context: boolean;
+	connections_count: number;
+}
+
+export interface McpRow {
+	id: string;
+	layer: string;
+	file: string;
+	state: string;
+	detail: string;
+	enabled: boolean;
+	can_toggle: boolean;
+	blocked_by_policy: boolean;
+	transport: string | null;
+	target: string;
+	description: string;
+	sandbox: boolean | null;
+	startup_timeout_secs: number | null;
+	call_timeout_secs: number | null;
+	max_output_tokens: number | null;
+	auto_approve: string[];
+	env_keys: string[];
+	header_keys: string[];
+}
+
 export interface AppInfo {
 	version: string;
 	cwd: string;
@@ -81,6 +136,12 @@ export interface AppInfo {
 	rules: { list: string; rule: string }[];
 	bundles: { id: string; layer: string; enabled: boolean; contents: string }[];
 	bundles_disabled: string[];
+	hooks?: HookRow[];
+	hooks_disabled?: string[];
+	mcp?: McpRow[];
+	mcp_disabled?: string[];
+	project_status?: string;
+	paths?: PathsSnapshot;
 	history: string[];
 }
 

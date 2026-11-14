@@ -160,13 +160,13 @@
 		background: color-mix(in srgb, var(--term) 78%, #000 22%);
 		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 		font-family: var(--font-mono);
-		font-size: 11px;
+		font-size: 0.6875rem;
 		color: var(--term-dim);
 	}
 
 	.code-copy {
 		color: var(--term-dim);
-		font-size: 11px;
+		font-size: 0.6875rem;
 		padding: 1px 6px;
 		border-radius: var(--r-sm);
 	}

@@ -308,7 +308,7 @@
 
 	h2 {
 		margin: 0;
-		font-size: 11px;
+		font-size: 0.6875rem;
 		font-weight: 600;
 		letter-spacing: 0.14em;
 		text-transform: uppercase;
@@ -316,7 +316,7 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		min-height: 22px;
+		min-height: 1.375rem;
 	}
 
 	.count {
@@ -333,7 +333,7 @@
 	}
 
 	.mini {
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		font-weight: 500;
 		color: var(--cloth-ink);
 		border: 1px solid rgba(219, 228, 233, 0.35);
@@ -358,7 +358,7 @@
 	}
 
 	.triage-banner {
-		font-size: 12px;
+		font-size: 0.75rem;
 		font-weight: 500;
 		color: #ffefc2;
 		background: rgba(232, 178, 26, 0.18);
@@ -389,7 +389,7 @@
 		border: 1px solid rgba(219, 228, 233, 0.24);
 		background: rgba(240, 248, 252, 0.04);
 		color: var(--cloth-dim);
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		font-weight: 500;
 		transition:
 			border-color 120ms ease-out,
@@ -410,7 +410,7 @@
 
 	.pill-n {
 		font-family: var(--font-mono);
-		font-size: 10px;
+		font-size: 0.625rem;
 		color: var(--cloth-mut);
 	}
 
@@ -486,7 +486,7 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 5px;
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		font-weight: 600;
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
@@ -524,7 +524,7 @@
 	.j-viewing {
 		margin-left: auto;
 		font-family: var(--font-mono);
-		font-size: 9.5px;
+		font-size: 0.59375rem;
 		letter-spacing: 0.06em;
 		text-transform: uppercase;
 		color: var(--cloth-dim);
@@ -537,7 +537,7 @@
 
 	.j-title {
 		font-family: var(--font-serif);
-		font-size: 13.5px;
+		font-size: 0.84375rem;
 		font-weight: 600;
 		line-height: 1.3;
 		color: var(--cloth-ink);
@@ -552,7 +552,7 @@
 		gap: 6px;
 		min-width: 0;
 		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		color: var(--cloth-mut);
 	}
 
@@ -564,7 +564,7 @@
 
 	.j-branch {
 		flex: none;
-		max-width: 110px;
+		max-width: 132px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -595,7 +595,7 @@
 
 	.j-detail {
 		margin: 0;
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		line-height: 1.4;
 		color: var(--cloth-dim);
 		background: var(--cloth-job);
@@ -635,7 +635,7 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 8px;
-		font-size: 11px;
+		font-size: 0.6875rem;
 		color: var(--cloth-dim);
 		background: rgba(240, 248, 252, 0.04);
 		border: 1px solid rgba(219, 228, 233, 0.14);
@@ -645,7 +645,7 @@
 
 	.j-agents li.more {
 		font-family: var(--font-mono);
-		font-size: 10px;
+		font-size: 0.625rem;
 		color: var(--cloth-mut);
 	}
 
@@ -661,7 +661,7 @@
 	.j-agent-meta {
 		flex: none;
 		font-family: var(--font-mono);
-		font-size: 10px;
+		font-size: 0.625rem;
 		color: var(--cloth-mut);
 	}
 
@@ -674,7 +674,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		color: var(--cloth-mut);
 	}
 
@@ -702,12 +702,12 @@
 		align-items: center;
 		gap: 4px 8px;
 		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		color: var(--cloth-mut);
 	}
 
 	.j-model {
-		max-width: 145px;
+		max-width: 175px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -726,7 +726,7 @@
 	}
 
 	.act {
-		font-size: 11px;
+		font-size: 0.6875rem;
 		font-weight: 600;
 		padding: 3.5px 9px;
 		border-radius: 999px;
@@ -775,7 +775,7 @@
 		padding: 10px;
 		border: 1px dashed rgba(219, 228, 233, 0.24);
 		border-radius: 9px;
-		font-size: 12px;
+		font-size: 0.75rem;
 		line-height: 1.45;
 		color: var(--cloth-mut);
 	}

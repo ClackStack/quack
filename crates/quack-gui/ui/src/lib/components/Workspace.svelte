@@ -15,6 +15,7 @@
 	import ContextModal from './ContextModal.svelte';
 	import EgressModal from './EgressModal.svelte';
 	import MemoryModal from './MemoryModal.svelte';
+	import SettingsPanel from './SettingsPanel.svelte';
 
 	let {
 		session,
@@ -148,6 +149,8 @@
 			{/if}
 			{#if session.trust}
 				<TrustPanel {session} />
+			{:else if session.settingsOpen}
+				{#key session.tab}<SettingsPanel {session} />{/key}
 			{:else if session.setupOpen}
 				{#key session.tab}<SetupPanel {session} />{/key}
 			{:else}
@@ -228,7 +231,14 @@
 {:else if activeModal === 'context'}
 	<ContextModal {session} onClose={() => (activeModal = null)} />
 {:else if activeModal === 'egress'}
-	<EgressModal {session} onClose={() => (activeModal = null)} />
+	<EgressModal
+		{session}
+		onClose={() => (activeModal = null)}
+		onOpenSettings={() => {
+			activeModal = null;
+			session.openSettings('network');
+		}}
+	/>
 {:else if activeModal === 'memory'}
 	<MemoryModal
 		{session}
@@ -236,6 +246,11 @@
 		onClose={() => {
 			activeModal = null;
 			memoryTarget = null;
+		}}
+		onOpenSettings={() => {
+			activeModal = null;
+			memoryTarget = null;
+			session.openSettings('paths');
 		}}
 	/>
 {/if}
@@ -326,7 +341,7 @@
 	.plan-bar p {
 		margin: 0;
 		font-family: var(--font-serif);
-		font-size: 13px;
+		font-size: 0.8125rem;
 		white-space: pre-wrap;
 		color: var(--duck-ink);
 		display: -webkit-box;
@@ -363,7 +378,7 @@
 
 	.step-kicker {
 		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		font-weight: 700;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
@@ -377,13 +392,13 @@
 	.step-head h3 {
 		margin: 0;
 		font-family: var(--font-serif);
-		font-size: 15px;
+		font-size: 0.9375rem;
 		color: var(--ink);
 	}
 
 	.step-body {
 		margin: 0;
-		font-size: 13px;
+		font-size: 0.8125rem;
 		color: var(--ink-2);
 	}
 

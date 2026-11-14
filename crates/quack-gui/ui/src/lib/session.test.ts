@@ -694,4 +694,238 @@ describe('field notes: skills, stats and specimens', () => {
 		});
 		expect(send.mock.calls.at(-1)?.[1]).toEqual({ op: 'reload_config' });
 	});
+
+	it('manages settings panel state, config feedback/errors, profiles, and folder picker', async () => {
+		const { session, send } = fixture();
+
+		expect(session.settingsOpen).toBe(false);
+		session.openSettings('paths');
+		expect(session.settingsOpen).toBe(true);
+		expect(session.settingsTab).toBe('paths');
+		expect(session.setupOpen).toBe(false);
+
+		expect(await session.saveSetting('memory.path', '"/tmp/mem"', 'user')).toBe(true);
+		expect(session.settingSaving).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({
+			op: 'save_setting',
+			key: 'memory.path',
+			value: '"/tmp/mem"',
+			scope: 'user'
+		});
+
+		session.onEvent({
+			event: 'setting_saved',
+			key: 'memory.path',
+			value: '"/tmp/mem"',
+			path: '/home/user/.config/quack/config.toml'
+		});
+		expect(session.settingSaving).toBe(false);
+		expect(session.settingError).toBeNull();
+		expect(session.settingFeedback).toEqual({
+			key: 'memory.path',
+			value: '"/tmp/mem"',
+			path: '/home/user/.config/quack/config.toml'
+		});
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({ op: 'reload_config' });
+
+		session.onEvent({ event: 'error', error: { kind: 'config', message: 'setting is locked' } });
+		expect(session.settingSaving).toBe(false);
+		expect(session.settingError).toBe('setting is locked');
+
+		expect(await session.listProfiles()).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({ op: 'list_profiles' });
+		session.onEvent({
+			event: 'profiles',
+			active: 'generic',
+			forced: false,
+			profiles: [
+				{
+					id: 'cc-style',
+					description: 'CC Style',
+					source: 'defaults',
+					matches: false,
+					edit_format: 'str_replace',
+					tools: ['read', 'edit', 'shell'],
+					system: 'Prompt'
+				}
+			]
+		});
+		expect(session.profiles?.profiles).toHaveLength(1);
+
+		expect(await session.setProfile('cc-style')).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({ op: 'set_profile', id: 'cc-style' });
+
+		expect(await session.reloadConfig()).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({ op: 'reload_config' });
+
+		session.closeSettings();
+		expect(session.settingsOpen).toBe(false);
+		session.openSetup();
+		expect(session.settingsOpen).toBe(false);
+		expect(session.setupOpen).toBe(true);
+	});
+
+	it('manages MCP servers, hooks, hook payload choices, and declarative hook setups', async () => {
+		const { session, send } = fixture();
+
+		session.openSettings('extensions');
+		expect(session.settingsTab).toBe('extensions');
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({ op: 'list_mcp' });
+
+		expect(await session.enableMcp('github')).toBe(true);
+		expect(session.mcpSaving).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({ op: 'enable_mcp', id: 'github' });
+		session.onEvent({ event: 'mcp_enabled', id: 'github', path: '~/.config/quack/mcp.d/github.toml' });
+		expect(session.mcpSaving).toBe(false);
+		expect(session.mcpFeedback).toContain('github');
+
+		expect(
+			await session.saveMcpServer({
+				id: 'custom-http',
+				scope: 'user',
+				description: 'Custom MCP',
+				command: '',
+				args: [],
+				cwd: '',
+				url: 'https://mcp.example.com/mcp',
+				env: {},
+				headers: { Authorization: { kind: 'env', env: 'MCP_TOKEN', format: 'Bearer {}' } }
+			})
+		).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({
+			op: 'save_mcp_server',
+			id: 'custom-http',
+			scope: 'user',
+			description: 'Custom MCP',
+			command: '',
+			args: [],
+			cwd: '',
+			url: 'https://mcp.example.com/mcp',
+			env: {},
+			headers: { Authorization: { kind: 'env', env: 'MCP_TOKEN', format: 'Bearer {}' } }
+		});
+		session.onEvent({
+			event: 'mcp_server_saved',
+			id: 'custom-http',
+			path: '~/.config/quack/mcp.d/custom-http.toml'
+		});
+		expect(session.mcpSaving).toBe(false);
+		expect(session.mcpFeedback).toContain('custom-http');
+
+		expect(await session.restartMcp('custom-http')).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({ op: 'restart_mcp', id: 'custom-http' });
+
+		expect(await session.disableMcp('github', 'user')).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({
+			op: 'save_setting',
+			key: 'mcp.disabled',
+			value: '["github"]',
+			scope: 'user'
+		});
+
+		expect(await session.enableHook('jira')).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({ op: 'enable_hook', id: 'jira' });
+		session.onEvent({ event: 'hook_payload_choice', id: 'jira', path: '~/.config/quack/hooks.d/jira.mjs' });
+		expect(session.hookPayloadChoice).toEqual({
+			id: 'jira',
+			path: '~/.config/quack/hooks.d/jira.mjs'
+		});
+		expect(await session.enableHook('jira', false)).toBe(true);
+		expect(send.mock.calls.at(-1)?.[1]).toEqual({
+			op: 'enable_hook',
+			id: 'jira',
+			replace_payload: false
+		});
+		session.onEvent({
+			event: 'hook_enabled',
+			id: 'jira',
+			path: '~/.config/quack/hooks.d/jira.toml',
+			note: null
+		});
+		expect(session.hookPayloadChoice).toBeNull();
+		expect(session.hookFeedback).toContain('jira');
+
+		session.onEvent({
+			event: 'hook_ran',
+			id: 'jira',
+			on: 'user_prompt',
+			outcome: 'context',
+			ms: 28,
+			message: 'Fetched ENG-12',
+			context_tokens: 140
+		});
+		expect(session.hookRuns).toHaveLength(1);
+		expect(session.hookRuns[0].id).toBe('jira');
+		expect(session.hookRuns[0].contextTokens).toBe(140);
+
+		expect(await session.inspectHookSetup('jira')).toBe(true);
+		const inspectReq = (send.mock.calls.at(-1)?.[1] as { request: number }).request;
+		expect(session.hookSetupLoading).toBe(true);
+		session.onEvent({
+			event: 'hook_setup',
+			request: inspectReq,
+			info: {
+				id: 'jira',
+				revision: 'r1',
+				descriptor: { version: 1, scope_field: 'web_url', fields: [], presets: [] },
+				connections: [],
+				enabled: false,
+				source: 'defaults',
+				writable: true,
+				problem: null
+			}
+		});
+		expect(session.hookSetupLoading).toBe(false);
+		expect(session.hookSetup?.id).toBe('jira');
+
+		const draftConn = {
+			connection: { id: 'default', preset: 'cloud', enabled: true, values: { web_url: 'https://co.atlassian.net' } },
+			credentials: { token: { action: 'replace' as const, value: 'secret' } }
+		};
+		expect(
+			await session.checkHookSetup({
+				id: 'jira',
+				revision: 'r1',
+				connection: draftConn,
+				url: 'https://co.atlassian.net'
+			})
+		).toBe(true);
+		const checkReq = (send.mock.calls.at(-1)?.[1] as { request: number }).request;
+		session.onEvent({
+			event: 'hook_check_result',
+			request: checkReq,
+			status: 'ok',
+			message: 'Connected!'
+		});
+		expect(session.hookSetupChecking).toBe(false);
+		expect(session.hookSetupStatus).toEqual({ kind: 'ok', text: 'Connected!' });
+
+		expect(
+			await session.saveHookSetup({
+				id: 'jira',
+				revision: 'r1',
+				connections: [draftConn],
+				enable: true
+			})
+		).toBe(true);
+		const saveReq = (send.mock.calls.at(-1)?.[1] as { request: number }).request;
+		session.onEvent({
+			event: 'hook_setup_saved',
+			request: saveReq,
+			info: {
+				id: 'jira',
+				revision: 'r2',
+				descriptor: { version: 1, scope_field: 'web_url', fields: [], presets: [] },
+				connections: [],
+				enabled: true,
+				source: 'user',
+				writable: true,
+				problem: null
+			},
+			note: 'Saved'
+		});
+		expect(session.hookSetupSaving).toBe(false);
+		expect(session.hookSetup?.enabled).toBe(true);
+		expect(session.hookSetupStatus).toEqual({ kind: 'ok', text: 'Saved' });
+	});
 });

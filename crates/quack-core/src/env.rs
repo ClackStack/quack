@@ -138,6 +138,12 @@ pub(crate) fn rules(config: &Loaded) -> agents_md::Rules {
     }
 }
 
+/// Resolved `(global, project)` memory directories for this config and workspace.
+pub fn memory_dirs(config: &Loaded) -> (std::path::PathBuf, std::path::PathBuf) {
+    let store = memory_store(config);
+    (store.global, store.project)
+}
+
 /// Memory notes: `[memory] path` (default `<user data>/memory`) for global notes; project
 /// notes under it in `projects/<key>/`, or in the repository with `project_scope = "repo"`.
 pub(crate) fn memory_store(config: &Loaded) -> MemoryStore {

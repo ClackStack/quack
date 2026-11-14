@@ -103,14 +103,14 @@
 		align-items: center;
 		justify-content: center;
 		gap: 5px;
-		height: 24px;
+		min-height: 1.5rem;
 		padding: 0 7px;
 		border-radius: var(--r-md);
 		border: 1px solid transparent;
 		background: transparent;
 		color: var(--ink-3);
 		cursor: pointer;
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		font-weight: 500;
 		transition:
 			color 120ms ease-out,

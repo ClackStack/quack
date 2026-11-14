@@ -17,6 +17,13 @@
 			: null
 	);
 	const expert = $derived(partitionExpertProviders(session.providers, session.services));
+	const setupSummaryKeys = ['model.default', 'model.profile', 'catalog.refresh', 'updates.check'];
+	const setupSettings = $derived(
+		setupSummaryKeys.map((key) => {
+			const row = session.info?.settings.find((item) => item.key === key);
+			return { key, value: row?.value ?? '—' };
+		})
+	);
 	const hasExpert = $derived(
 		expert.envProviders.length > 0 || expert.otherUnavailable.length > 0
 	);
@@ -207,6 +214,34 @@
 		</form>
 	</section>
 
+	<section class="defaults-section" aria-labelledby="defaults-heading">
+		<div class="defaults-head">
+			<div>
+				<h2 id="defaults-heading">Defaults, profiles &amp; background checks</h2>
+				<p class="defaults-sub">
+					Settings from <code>quack setup</code> and TOML config — default model, prompt profile,
+					catalog/update intervals, memory folders, and sandbox rules.
+				</p>
+			</div>
+			<button
+				type="button"
+				class="btn"
+				disabled={session.closed || session.starting}
+				onclick={() => session.openSettings('setup')}
+			>
+				Open Settings
+			</button>
+		</div>
+		<dl class="defaults-grid">
+			{#each setupSettings as item (item.key)}
+				<div class="defaults-item">
+					<dt class="mono">{item.key}</dt>
+					<dd class="mono">{item.value}</dd>
+				</div>
+			{/each}
+		</dl>
+	</section>
+
 	{#if hasExpert}
 		<section class="expert" aria-labelledby="expert-heading">
 			<details class="accordion">
@@ -325,18 +360,18 @@
 	}
 	h1 {
 		font-family: var(--font-serif);
-		font-size: 24px;
+		font-size: 1.5rem;
 		font-weight: 600;
 		margin: 0 0 8px;
 	}
 	h2 {
 		font-family: var(--font-serif);
-		font-size: 17px;
+		font-size: 1.0625rem;
 		font-weight: 600;
 		margin: 0 0 8px;
 	}
 	h3 {
-		font-size: 14px;
+		font-size: 0.875rem;
 		margin: 0 0 4px;
 	}
 	p {
@@ -349,19 +384,26 @@
 		display: grid;
 		gap: var(--sp-sm);
 		max-width: 480px;
+		margin-top: var(--sp-sm);
 	}
 	label {
 		display: grid;
 		gap: 4px;
+		max-width: 480px;
 	}
 	input,
 	select {
 		width: 100%;
-		padding: 8px;
+		min-height: 2.25rem;
+		padding: 6px 10px;
 		border: 1px solid var(--rule);
 		border-radius: var(--r-md);
-		background: var(--bg-panel);
+		background-color: var(--bg-panel);
 		color: var(--ink);
+		line-height: 1.4;
+	}
+	select {
+		padding-right: 30px;
 	}
 	form .btn {
 		justify-self: start;
@@ -385,7 +427,7 @@
 	}
 	.note {
 		color: var(--ink-2);
-		font-size: 12px;
+		font-size: 0.75rem;
 	}
 	.path {
 		font-family: var(--font-mono);
@@ -394,7 +436,7 @@
 		color: var(--ok);
 	}
 	.status {
-		font-size: 12px;
+		font-size: 0.75rem;
 	}
 	.accordion {
 		border: 1px solid var(--rule);
@@ -431,12 +473,12 @@
 	}
 	.accordion-title {
 		font-family: var(--font-serif);
-		font-size: 15.5px;
+		font-size: 0.96875rem;
 		font-weight: 600;
 		color: var(--ink);
 	}
 	.accordion-sub {
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink-3);
 	}
 	.accordion-chevron {
@@ -468,7 +510,7 @@
 	}
 	.expert-intro {
 		margin: 0;
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		color: var(--ink-2);
 	}
 	.other-group {
@@ -478,7 +520,7 @@
 	.subhead {
 		margin: 0;
 		font-family: var(--font-ui);
-		font-size: 11px;
+		font-size: 0.6875rem;
 		font-weight: 600;
 		letter-spacing: 0.1em;
 		text-transform: uppercase;
@@ -516,18 +558,18 @@
 	}
 	.provider-name {
 		font-family: var(--font-serif);
-		font-size: 14px;
+		font-size: 0.875rem;
 		font-weight: 600;
 		color: var(--ink);
 	}
 	.provider-id {
 		font-family: var(--font-mono);
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink-3);
 		overflow-wrap: anywhere;
 	}
 	.provider-id.solo {
-		font-size: 13px;
+		font-size: 0.8125rem;
 		font-weight: 500;
 		color: var(--ink);
 	}
@@ -539,7 +581,7 @@
 	}
 	.env-var {
 		font-family: var(--font-mono);
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink);
 		background: var(--bg-soft);
 		border: 1px solid var(--rule-soft);
@@ -548,7 +590,7 @@
 		overflow-wrap: anywhere;
 	}
 	.state-badge {
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		font-weight: 600;
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
@@ -571,17 +613,62 @@
 	}
 	.expert-note {
 		margin: 0;
-		font-size: 12px;
+		font-size: 0.75rem;
 		line-height: 1.45;
 		color: var(--ink-2);
 		overflow-wrap: anywhere;
 	}
 	.expert-note code {
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--ink);
 		background: var(--bg-soft);
 		border: 1px solid var(--rule-soft);
 		border-radius: var(--r-sm);
 		padding: 1px 5px;
+	}
+	.defaults-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: var(--sp-md);
+		flex-wrap: wrap;
+	}
+	.defaults-sub {
+		margin: 4px 0 0;
+		font-size: 0.78125rem;
+		color: var(--ink-2);
+	}
+	.defaults-sub code {
+		font-size: 0.71875rem;
+		color: var(--ink);
+		background: var(--bg-soft);
+		border: 1px solid var(--rule-soft);
+		border-radius: var(--r-sm);
+		padding: 1px 5px;
+	}
+	.defaults-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 8px;
+		margin: 12px 0 0;
+	}
+	.defaults-item {
+		margin: 0;
+		padding: 8px 10px;
+		border: 1px solid var(--rule-soft);
+		border-radius: var(--r-md);
+		background: var(--bg-panel);
+		display: grid;
+		gap: 3px;
+	}
+	.defaults-item dt {
+		font-size: 0.6875rem;
+		color: var(--ink-3);
+	}
+	.defaults-item dd {
+		margin: 0;
+		font-size: 0.78125rem;
+		color: var(--ink);
+		overflow-wrap: anywhere;
 	}
 </style>

@@ -40,14 +40,25 @@ pub enum Resume {
 
 pub(crate) type SharedLog = Arc<Mutex<SessionLog>>;
 
-pub(crate) fn project_sessions(config: &Loaded) -> ProjectSessions {
+fn sessions_root_dir(config: &Loaded) -> PathBuf {
     let configured = &config.settings.sessions.path;
-    let root = if configured.is_empty() {
+    if configured.is_empty() {
         config.dirs.user_data.join("sessions")
     } else {
         expand_home(configured, &|k| std::env::var_os(k))
-    };
+    }
+}
+
+pub(crate) fn project_sessions(config: &Loaded) -> ProjectSessions {
+    let root = sessions_root_dir(config);
     ProjectSessions::new(&root, &config.dirs.workspace_root)
+}
+
+/// Resolved `(root, project)` session directories for this config and workspace.
+pub fn sessions_dirs(config: &Loaded) -> (PathBuf, PathBuf) {
+    let root = sessions_root_dir(config);
+    let project = ProjectSessions::new(&root, &config.dirs.workspace_root).dir;
+    (root, project)
 }
 
 /// Sessions of this workspace, most recent first (for `quack sessions`).
@@ -70,10 +81,8 @@ pub(crate) fn find(config: &Loaded, resume: &Resume) -> Result<Option<IndexEntry
     let ps = project_sessions(config);
     match resume {
         Resume::New => Ok(None),
-        Resume::Latest => ps
-            .latest()
-            .map(Some)
-            .ok_or_else(|| "no saved sessions in this project yet".to_owned()),
+        // Nothing saved in this project yet is normal on first open; start a new session silently.
+        Resume::Latest => Ok(ps.latest()),
         Resume::Id(id) => ps.find(id).map(Some),
     }
 }

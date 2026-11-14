@@ -192,14 +192,14 @@
 	.modal-head h2 {
 		margin: 0;
 		font-family: var(--font-serif);
-		font-size: 19px;
+		font-size: 1.1875rem;
 		font-weight: 600;
 		color: var(--ink);
 	}
 
 	.sub {
 		margin: 3px 0 0;
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink-3);
 	}
 
@@ -209,11 +209,11 @@
 	}
 
 	.close-btn {
-		width: 28px;
-		height: 28px;
+		width: 1.75rem;
+		height: 1.75rem;
 		border-radius: var(--r-md);
 		color: var(--ink-3);
-		font-size: 18px;
+		font-size: 1.125rem;
 		line-height: 1;
 		display: grid;
 		place-items: center;
@@ -254,13 +254,13 @@
 
 	.gauge-nums {
 		font-family: var(--font-mono);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		color: var(--ink);
 	}
 
 	.pct {
 		font-family: var(--font-mono);
-		font-size: 13px;
+		font-size: 0.8125rem;
 		font-weight: 600;
 		color: var(--sky-ink);
 	}
@@ -302,7 +302,7 @@
 
 	.thresh-note {
 		margin: 0;
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--ink-3);
 	}
 
@@ -334,19 +334,19 @@
 
 	.seg-tokens {
 		font-family: var(--font-mono);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		color: var(--ink-2);
 	}
 
 	.seg-detail {
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink-3);
 	}
 
 	.report-note,
 	.empty {
 		margin: 0;
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		color: var(--ink-3);
 	}
 

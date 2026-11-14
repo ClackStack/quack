@@ -183,6 +183,17 @@
 		{/if}
 	</button>
 	<button class="btn providers-btn" {disabled} onclick={() => session.openSetup()}>Providers</button>
+	<button
+		type="button"
+		class="btn settings-btn"
+		class:active={session.settingsOpen}
+		aria-pressed={session.settingsOpen}
+		disabled={session.closed || session.starting}
+		title="Configure paths, setup defaults, permissions, and TOML config"
+		onclick={() => (session.settingsOpen ? session.closeSettings() : session.openSettings())}
+	>
+		Settings
+	</button>
 	<ThemeToggle />
 </header>
 
@@ -194,7 +205,7 @@
 
 <style>
 	header {
-		height: var(--header-h);
+		min-height: var(--header-h);
 		display: flex;
 		align-items: center;
 		gap: var(--sp-sm);
@@ -207,12 +218,12 @@
 		display: none;
 		align-items: center;
 		gap: 7px;
-		height: 30px;
+		min-height: 1.875rem;
 		padding: 0 10px;
 		border: 1px solid var(--rule);
 		border-radius: var(--r-lg);
 		color: var(--ink-2);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		font-weight: 500;
 		flex: none;
 	}
@@ -224,7 +235,7 @@
 
 	.menu-badge {
 		font-family: var(--font-mono);
-		font-size: 10px;
+		font-size: 0.625rem;
 		font-weight: 700;
 		line-height: 1;
 		padding: 2px 6px;
@@ -249,7 +260,7 @@
 
 	.job-name {
 		font-family: var(--font-serif);
-		font-size: 14.5px;
+		font-size: 0.90625rem;
 		font-weight: 600;
 		color: var(--ink);
 		overflow: hidden;
@@ -264,7 +275,7 @@
 
 	.folder {
 		font-family: var(--font-mono);
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink-3);
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -273,7 +284,7 @@
 
 	.branch {
 		font-family: var(--font-mono);
-		font-size: 11px;
+		font-size: 0.6875rem;
 		color: var(--sky-ink);
 		background: var(--sky-soft);
 		border: 1px solid color-mix(in srgb, var(--sky) 35%, var(--rule));
@@ -305,7 +316,7 @@
 		background: var(--bg-raised);
 		color: var(--ink-2);
 		font-family: var(--font-mono);
-		font-size: 11px;
+		font-size: 0.6875rem;
 		font-weight: 500;
 		flex: none;
 		white-space: nowrap;
@@ -357,12 +368,19 @@
 	}
 
 	.providers-btn,
+	.settings-btn,
 	.memory-btn {
 		padding: 4px 11px;
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		display: inline-flex;
 		align-items: center;
 		gap: 6px;
+	}
+
+	.settings-btn.active {
+		border-color: var(--beak-line);
+		background: var(--beak-soft);
+		color: var(--beak-ink);
 	}
 
 	.memory-btn.warn {
@@ -373,7 +391,7 @@
 
 	.mem-count {
 		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		line-height: 1;
 		padding: 2px 5px;
 		border-radius: 999px;

@@ -22,11 +22,13 @@
 	let {
 		session,
 		initialTarget = null,
-		onClose
+		onClose,
+		onOpenSettings
 	}: {
 		session: Session;
 		initialTarget?: MemoryTarget | null;
 		onClose: () => void;
+		onOpenSettings?: () => void;
 	} = $props();
 
 	let dialogEl: HTMLElement | undefined = $state();
@@ -341,6 +343,17 @@
 				</p>
 			</div>
 			<div class="head-actions">
+				{#if onOpenSettings}
+					<button
+						type="button"
+						class="btn"
+						disabled={session.closed || session.memorySaving}
+						onclick={onOpenSettings}
+						title="Configure memory.path, extraction settings, and storage directories"
+					>
+						Paths…
+					</button>
+				{/if}
 				<button
 					type="button"
 					class="btn"
@@ -368,6 +381,24 @@
 				</button>
 			</div>
 		</div>
+
+		{#if session.info?.paths}
+			<div class="paths-strip">
+				<span class="paths-item" title={session.info.paths.memory_project}>
+					<span class="paths-k">Project</span>
+					<span class="mono">{session.info.paths.memory_project}</span>
+				</span>
+				<span class="paths-item" title={session.info.paths.memory_global}>
+					<span class="paths-k">Global</span>
+					<span class="mono">{session.info.paths.memory_global}</span>
+				</span>
+				{#if onOpenSettings}
+					<button type="button" class="link-btn" onclick={onOpenSettings}>
+						Change directory…
+					</button>
+				{/if}
+			</div>
+		{/if}
 
 		{#if fillWarning}
 			<div class="fill-banner" role="status">
@@ -801,14 +832,14 @@
 	.modal-head h2 {
 		margin: 0;
 		font-family: var(--font-serif);
-		font-size: 19px;
+		font-size: 1.1875rem;
 		font-weight: 600;
 		color: var(--ink);
 	}
 
 	.fill-chip {
 		font-family: var(--font-mono);
-		font-size: 11px;
+		font-size: 0.6875rem;
 		padding: 2px 8px;
 		border-radius: 999px;
 		border: 1px solid var(--rule);
@@ -824,8 +855,59 @@
 
 	.sub {
 		margin: 4px 0 0;
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink-3);
+	}
+
+	.paths-strip {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 6px 14px;
+		padding: 6px var(--sp-md);
+		background: var(--bg-soft);
+		border-bottom: 1px solid var(--rule-soft);
+		font-size: 0.71875rem;
+		color: var(--ink-2);
+	}
+
+	.paths-item {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+		max-width: 100%;
+	}
+
+	.paths-k {
+		font-size: 0.65625rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--ink-3);
+		flex: none;
+	}
+
+	.paths-item .mono {
+		font-family: var(--font-mono);
+		font-size: 0.6875rem;
+		color: var(--ink);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.link-btn {
+		margin-left: auto;
+		font-size: 0.71875rem;
+		font-weight: 500;
+		color: var(--beak-ink);
+		text-decoration: underline;
+		text-underline-offset: 2px;
+	}
+
+	.link-btn:hover {
+		color: var(--ink);
 	}
 
 	.head-actions {
@@ -836,11 +918,11 @@
 	}
 
 	.close-btn {
-		width: 28px;
-		height: 28px;
+		width: 1.75rem;
+		height: 1.75rem;
 		border-radius: var(--r-md);
 		color: var(--ink-3);
-		font-size: 18px;
+		font-size: 1.125rem;
 		line-height: 1;
 		display: grid;
 		place-items: center;
@@ -859,7 +941,7 @@
 		justify-content: space-between;
 		gap: 12px;
 		padding: 8px var(--sp-md);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		border-bottom: 1px solid var(--rule-soft);
 	}
 
@@ -917,10 +999,22 @@
 		padding: 7px 10px;
 		border: 1px solid var(--rule);
 		border-radius: var(--r-md);
-		background: var(--bg-raised);
+		background-color: var(--bg-raised);
 		color: var(--ink);
 		font: inherit;
-		font-size: 13px;
+		font-size: 0.8125rem;
+	}
+
+	.search,
+	.field input,
+	.field select {
+		min-height: 2.125rem;
+		padding: 6px 10px;
+		line-height: 1.4;
+	}
+
+	.field select {
+		padding-right: 30px;
 	}
 
 	.search:focus,
@@ -952,7 +1046,7 @@
 	.view-tabs button {
 		padding: 4px 9px;
 		border-radius: var(--r-sm);
-		font-size: 12px;
+		font-size: 0.75rem;
 		font-weight: 500;
 		color: var(--ink-2);
 	}
@@ -967,7 +1061,7 @@
 
 	.tab-n {
 		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		color: var(--ink-3);
 	}
 
@@ -983,7 +1077,7 @@
 
 	.list-empty {
 		margin: 16px 8px;
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		color: var(--ink-3);
 		text-align: center;
 	}
@@ -1018,7 +1112,7 @@
 
 	.item-name {
 		font-family: var(--font-mono);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		font-weight: 600;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1026,7 +1120,7 @@
 	}
 
 	.item-desc {
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink-2);
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
@@ -1037,7 +1131,7 @@
 
 	.item-kind {
 		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		color: var(--ink-3);
 	}
 
@@ -1045,7 +1139,7 @@
 	.kind-tag,
 	.date-tag {
 		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		padding: 1px 6px;
 		border-radius: 999px;
 		border: 1px solid var(--rule-soft);
@@ -1101,7 +1195,7 @@
 	.detail-title {
 		margin: 0;
 		font-family: var(--font-serif);
-		font-size: 18px;
+		font-size: 1.125rem;
 		font-weight: 600;
 		color: var(--ink);
 		overflow-wrap: anywhere;
@@ -1109,7 +1203,7 @@
 
 	.detail-desc {
 		margin: 0;
-		font-size: 13px;
+		font-size: 0.8125rem;
 		color: var(--ink-2);
 	}
 
@@ -1122,7 +1216,7 @@
 
 	.detail-path {
 		margin: 0;
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--ink-3);
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1136,7 +1230,7 @@
 
 	.mini-copy,
 	.slug-btn {
-		font-size: 11px;
+		font-size: 0.6875rem;
 		font-family: var(--font-mono);
 		color: var(--sky-ink);
 		padding: 1px 6px;
@@ -1164,7 +1258,7 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 8px;
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		color: var(--fail);
 	}
 
@@ -1184,7 +1278,7 @@
 	}
 
 	.note-prose {
-		font-size: 13.5px;
+		font-size: 0.84375rem;
 		line-height: 1.6;
 		color: var(--ink);
 	}
@@ -1192,7 +1286,7 @@
 	.raw-note {
 		margin: 0;
 		font-family: var(--font-mono);
-		font-size: 12px;
+		font-size: 0.75rem;
 		line-height: 1.55;
 		color: var(--ink-2);
 		white-space: pre-wrap;
@@ -1219,7 +1313,7 @@
 	}
 
 	.f-label {
-		font-size: 12px;
+		font-size: 0.75rem;
 		font-weight: 500;
 		color: var(--ink-2);
 	}
@@ -1233,14 +1327,14 @@
 
 	.hint-mono {
 		font-family: var(--font-mono);
-		font-size: 11px;
+		font-size: 0.6875rem;
 		font-weight: 400;
 		color: var(--ink-3);
 	}
 
 	.kind-hint {
 		margin: -6px 0 0;
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--ink-3);
 	}
 
@@ -1249,7 +1343,7 @@
 		min-height: 160px;
 		resize: none;
 		font-family: var(--font-mono);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		line-height: 1.55;
 	}
 
@@ -1262,7 +1356,7 @@
 	}
 
 	.kbd-hint {
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--ink-3);
 	}
 
@@ -1289,7 +1383,7 @@
 	.empty-title {
 		margin: 0;
 		font-family: var(--font-serif);
-		font-size: 17px;
+		font-size: 1.0625rem;
 		font-weight: 600;
 		color: var(--ink);
 	}
@@ -1298,7 +1392,7 @@
 	.preview-empty {
 		margin: 0;
 		max-width: 44ch;
-		font-size: 13px;
+		font-size: 0.8125rem;
 		color: var(--ink-3);
 	}
 

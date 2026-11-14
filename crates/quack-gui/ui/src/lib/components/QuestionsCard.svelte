@@ -95,7 +95,7 @@
 	.q p {
 		margin: 0;
 		font-family: var(--font-serif);
-		font-size: 14.5px;
+		font-size: 0.90625rem;
 	}
 
 	.options {
@@ -132,7 +132,7 @@
 
 	.desc {
 		color: var(--ink-3);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 	}
 
 	.text {

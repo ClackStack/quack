@@ -16,6 +16,8 @@ pub use image::Image;
 pub use modes::{ApprovalPolicy, PermissionMode, WorkMode};
 pub use startup::{LoadState, Subsystem};
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// A request from a client to the engine.
@@ -128,6 +130,34 @@ pub enum Op {
     /// Stop and start an MCP server again.
     RestartMcp {
         id: String,
+    },
+    /// Enable a disabled MCP server (copying a defaults file or setting `enabled = true`
+    /// and removing `[mcp] disabled` entries) and reload config.
+    EnableMcp {
+        id: String,
+    },
+    /// Create or update `<scope>/mcp.d/<id>.toml`, unlist it from `[mcp] disabled`, and
+    /// reload config.
+    SaveMcpServer {
+        id: String,
+        scope: WriteScope,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        cwd: String,
+        #[serde(default)]
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        sandbox: Option<bool>,
+        #[serde(default)]
+        env: BTreeMap<String, McpSecretValue>,
+        #[serde(default)]
+        headers: BTreeMap<String, McpSecretValue>,
     },
     /// Ask for the language servers' state; answered with `Event::LspServers`.
     ListLsp,
@@ -372,6 +402,16 @@ pub enum Event {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+    },
+    /// An MCP server was enabled (`mcp.d/` updated or unlisted from `[mcp] disabled`).
+    McpEnabled {
+        id: String,
+        path: String,
+    },
+    /// An MCP server file (`<layer>/mcp.d/<id>.toml`) was written and queued for reload.
+    McpServerSaved {
+        id: String,
+        path: String,
     },
     ShutdownComplete,
     /// The config files were read again; startup progress follows, then `StartupComplete`.
@@ -884,6 +924,25 @@ pub struct McpServerInfo {
     pub tool_tokens: u32,
     /// Last stderr lines.
     pub log: Vec<String>,
+}
+
+/// Credential/value binding used when saving an `mcp.d/<id>.toml` server entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum McpSecretValue {
+    Plain {
+        value: SecretText,
+    },
+    Env {
+        env: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        format: Option<String>,
+    },
+    Keyring {
+        keyring: String,
+    },
 }
 
 /// The state of a language server, as `/lsp` shows it.

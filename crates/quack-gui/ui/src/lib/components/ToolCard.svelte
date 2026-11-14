@@ -79,7 +79,7 @@
 		padding: 6px 12px;
 		text-align: left;
 		font-family: var(--font-mono);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 	}
 
 	.row:hover {
@@ -130,7 +130,7 @@
 
 	.hint {
 		color: var(--ink-3);
-		font-size: 11px;
+		font-size: 0.6875rem;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 	}
@@ -138,7 +138,7 @@
 	.preview {
 		padding: 0 12px 8px 30px;
 		font-family: var(--font-mono);
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--ink-3);
 		white-space: pre-wrap;
 		overflow: hidden;
@@ -154,7 +154,7 @@
 		margin: 0;
 		padding: 10px 12px;
 		font-family: var(--font-mono);
-		font-size: 12px;
+		font-size: 0.75rem;
 		line-height: 1.5;
 		overflow-x: auto;
 		max-height: 320px;

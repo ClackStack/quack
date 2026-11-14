@@ -255,7 +255,7 @@
 	h2 {
 		margin: 0;
 		font-family: var(--font-serif);
-		font-size: 21px;
+		font-size: 1.3125rem;
 		font-weight: 600;
 		color: var(--ink);
 	}
@@ -263,7 +263,7 @@
 	.lead {
 		margin: 6px 0 12px;
 		font-family: var(--font-serif);
-		font-size: 14px;
+		font-size: 0.875rem;
 		color: var(--ink-2);
 		max-width: 60ch;
 	}
@@ -271,7 +271,7 @@
 	.command {
 		margin: 12px 0;
 		padding: 12px 14px;
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		line-height: 1.5;
 		background: var(--term);
 		color: var(--term-text);
@@ -294,11 +294,11 @@
 		justify-content: space-between;
 		align-items: center;
 		gap: 12px;
-		height: 30px;
+		min-height: 1.875rem;
 		padding: 0 12px;
 		background: var(--bg-panel);
 		border-bottom: 1px solid var(--rule-soft);
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		font-weight: 600;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
@@ -307,7 +307,7 @@
 
 	.dh b {
 		font-family: var(--font-mono);
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		letter-spacing: 0;
 		text-transform: none;
 		color: var(--ink-2);
@@ -320,7 +320,7 @@
 		margin: 0;
 		padding: 6px 0;
 		font-family: var(--font-mono);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		line-height: 1.6;
 		color: var(--ink);
 		max-height: 260px;
@@ -337,7 +337,7 @@
 	.line.meta {
 		padding-left: 14px;
 		color: var(--ink-3);
-		font-size: 11px;
+		font-size: 0.6875rem;
 	}
 
 	.line.meta + .line.meta {
@@ -347,7 +347,7 @@
 	.line.hunk {
 		padding-left: 14px;
 		color: var(--ink-3);
-		font-size: 11px;
+		font-size: 0.6875rem;
 	}
 
 	.line.ctx {
@@ -376,12 +376,12 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 17px;
-		height: 17px;
+		width: 1.0625rem;
+		height: 1.0625rem;
 		border: 1.5px solid currentColor;
 		border-radius: 50%;
 		font-family: var(--font-ui);
-		font-size: 10px;
+		font-size: 0.625rem;
 		font-weight: 700;
 		line-height: 1;
 	}
@@ -398,7 +398,7 @@
 		margin: 0 0 12px;
 		font-family: var(--font-serif);
 		font-style: italic;
-		font-size: 13px;
+		font-size: 0.8125rem;
 		color: var(--ink-3);
 	}
 
@@ -422,7 +422,7 @@
 		margin: 12px 0 0;
 		font-family: var(--font-serif);
 		font-style: italic;
-		font-size: 13px;
+		font-size: 0.8125rem;
 		color: var(--ink-3);
 	}
 
@@ -463,7 +463,7 @@
 	}
 
 	.risk-pill {
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		font-weight: 700;
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
@@ -488,14 +488,14 @@
 	}
 
 	.risk-title {
-		font-size: 13px;
+		font-size: 0.8125rem;
 		font-weight: 600;
 	}
 
 	.risk-list {
 		margin: 6px 0 0;
 		padding-left: 18px;
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		color: var(--ink-2);
 	}
 
@@ -518,14 +518,14 @@
 	}
 
 	.sub-label {
-		font-size: 12px;
+		font-size: 0.75rem;
 		font-weight: 600;
 		color: var(--ink-2);
 	}
 
 	.rule-code {
 		font-family: var(--font-mono);
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink);
 		background: var(--bg-soft);
 		padding: 1px 6px;
@@ -536,7 +536,7 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 5px;
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		color: var(--ink);
 		cursor: pointer;
 	}
@@ -559,7 +559,7 @@
 		border: 1px solid var(--rule);
 		background: var(--bg-raised);
 		color: var(--ink);
-		font-size: 13px;
+		font-size: 0.8125rem;
 	}
 
 	.feedback-input:focus {

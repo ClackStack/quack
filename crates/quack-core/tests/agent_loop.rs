@@ -31,14 +31,21 @@ fn workspace(root: &Path, base_url: &str) -> Loaded {
 }
 
 fn workspace_with(root: &Path, base_url: &str, models: &str) -> Loaded {
+    let toml = format!("base_url = \"{base_url}/v1\"\nmodels = {models}\n");
+    workspace_with_provider(root, Some(&toml))
+}
+
+fn workspace_with_provider(root: &Path, provider_toml: Option<&str>) -> Loaded {
     let user = root.join("user");
     std::fs::create_dir_all(user.join("providers.d")).expect("mkdir");
-    // The short provider form: no api, no model list beyond one id.
-    std::fs::write(
-        user.join("providers.d").join("mock.toml"),
-        format!("base_url = \"{base_url}/v1\"\nmodels = {models}\n"),
-    )
-    .expect("provider");
+    let provider = user.join("providers.d").join("mock.toml");
+    match provider_toml {
+        // The short provider form: no api, no model list beyond one id.
+        Some(body) => std::fs::write(&provider, body).expect("provider"),
+        None => {
+            let _ = std::fs::remove_file(&provider);
+        }
+    }
     let mut vars: HashMap<String, OsString> = HashMap::new();
     vars.insert("QUACK_CONFIG_DIR".into(), user.into_os_string());
     for (k, sub) in [
@@ -52,6 +59,68 @@ fn workspace_with(root: &Path, base_url: &str, models: &str) -> Loaded {
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("mkdir");
     load_with(&move |k| vars.get(k).cloned(), &LoadOptions::new(ws)).expect("load")
+}
+
+async fn collect_startup(loaded: Loaded, resume: Resume) -> (bool, Vec<String>) {
+    let mut engine = Engine::spawn_with(Arc::new(loaded), resume);
+    let mut configured = false;
+    let mut warnings = Vec::new();
+    loop {
+        match next(&mut engine.events).await {
+            Event::SessionConfigured { session } if session.model.is_some() => {
+                configured = true;
+            }
+            Event::Warning { message } => warnings.push(message),
+            Event::Error { error } => panic!("unexpected error: {}", error.message),
+            Event::StartupComplete => break,
+            _ => {}
+        }
+    }
+    engine.shutdown().await;
+    (configured, warnings)
+}
+
+async fn mount_models(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"data":[]}"#))
+        .mount(server)
+        .await;
+}
+
+/// Runs one mock turn and shuts down so a saved session exists on disk; returns its id.
+async fn save_one_session(loaded: Loaded, server: &MockServer) -> String {
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"content":"Saved."},"finish_reason":"stop"}]}"#,
+        ]))
+        .mount(server)
+        .await;
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    let session_id = loop {
+        match next(&mut engine.events).await {
+            Event::SessionConfigured { session } => break session.id.0,
+            Event::StartupComplete => panic!("startup finished without SessionConfigured"),
+            _ => {}
+        }
+    };
+    engine
+        .submit(Op::UserTurn {
+            items: vec![InputItem::text("hello")],
+            overrides: TurnOverrides::default(),
+        })
+        .await;
+    loop {
+        match next(&mut engine.events).await {
+            Event::TurnComplete { .. } => break,
+            Event::TurnAborted { reason, .. } => panic!("aborted: {reason}"),
+            Event::Error { error } => panic!("error: {}", error.message),
+            _ => {}
+        }
+    }
+    engine.shutdown().await;
+    session_id
 }
 
 async fn next(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> Event {
@@ -543,5 +612,90 @@ async fn a_stalled_reply_is_sent_again() {
     assert!(
         warnings[0].contains("sending the step again"),
         "{warnings:?}"
+    );
+}
+
+#[tokio::test]
+async fn resume_latest_in_new_directory_emits_no_warning() {
+    let server = MockServer::start().await;
+    mount_models(&server).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (configured, warnings) =
+        collect_startup(workspace(tmp.path(), &server.uri()), Resume::Latest).await;
+    assert!(configured);
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[tokio::test]
+async fn resume_missing_id_warns_once_and_preserves_reason() {
+    let server = MockServer::start().await;
+    mount_models(&server).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (configured, warnings) = collect_startup(
+        workspace(tmp.path(), &server.uri()),
+        Resume::Id("missing-id".into()),
+    )
+    .await;
+    assert!(configured);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].starts_with("cannot resume:"),
+        "expected resume failure warning, got {warnings:?}"
+    );
+}
+
+#[tokio::test]
+async fn resume_latest_warns_when_saved_session_is_unreadable() {
+    let server = MockServer::start().await;
+    mount_models(&server).await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = workspace(tmp.path(), &server.uri());
+    let session_id = save_one_session(loaded.clone(), &server).await;
+
+    let (dir, entries) = quack_core::list_sessions(&loaded);
+    let entry = entries
+        .iter()
+        .find(|e| e.id == session_id)
+        .expect("saved session");
+    std::fs::remove_file(dir.join(&entry.dir).join("events.jsonl")).expect("remove events.jsonl");
+
+    let (configured, warnings) = collect_startup(loaded, Resume::Latest).await;
+    assert!(configured);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].starts_with("cannot read session "),
+        "expected read failure warning, got {warnings:?}"
+    );
+}
+
+#[tokio::test]
+async fn resume_without_model_warns_only_when_something_exists_to_resume() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (configured, warnings) =
+        collect_startup(workspace_with_provider(tmp.path(), None), Resume::Latest).await;
+    assert!(!configured);
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    let (configured, warnings) = collect_startup(
+        workspace_with_provider(tmp.path(), None),
+        Resume::Id("missing-id".into()),
+    )
+    .await;
+    assert!(!configured);
+    assert_eq!(
+        warnings,
+        vec!["cannot resume: no model is ready".to_owned()]
+    );
+
+    let server = MockServer::start().await;
+    save_one_session(workspace(tmp.path(), &server.uri()), &server).await;
+
+    let (configured, warnings) =
+        collect_startup(workspace_with_provider(tmp.path(), None), Resume::Latest).await;
+    assert!(!configured);
+    assert_eq!(
+        warnings,
+        vec!["cannot resume: no model is ready".to_owned()]
     );
 }

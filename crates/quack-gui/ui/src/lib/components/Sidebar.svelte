@@ -674,7 +674,7 @@
 	.brand-name {
 		font-family: var(--font-serif);
 		font-weight: 700;
-		font-size: 19px;
+		font-size: 1.1875rem;
 		letter-spacing: -0.01em;
 		color: #f2f6f8;
 	}
@@ -702,7 +702,7 @@
 		padding: 6px 8px;
 		border-radius: 7px;
 		border: 1px solid transparent;
-		font-size: 12px;
+		font-size: 0.75rem;
 		font-weight: 600;
 		color: var(--cloth-dim);
 		transition:
@@ -739,7 +739,7 @@
 
 	.tab-badge {
 		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		font-weight: 500;
 		line-height: 1;
 		padding: 2px 6px;
@@ -773,7 +773,7 @@
 
 	h2 {
 		margin: 0;
-		font-size: 11px;
+		font-size: 0.6875rem;
 		font-weight: 600;
 		letter-spacing: 0.14em;
 		text-transform: uppercase;
@@ -806,7 +806,7 @@
 	}
 
 	.mini {
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		font-weight: 500;
 		color: var(--cloth-ink);
 		border: 1px solid rgba(219, 228, 233, 0.35);
@@ -943,7 +943,7 @@
 	.p-go {
 		flex: none;
 		color: var(--cloth-dim);
-		font-size: 15px;
+		font-size: 0.9375rem;
 		line-height: 1;
 		transition:
 			color 120ms ease-out,
@@ -961,7 +961,7 @@
 
 	.p-name {
 		font-family: var(--font-serif);
-		font-size: 14px;
+		font-size: 0.875rem;
 		font-weight: 600;
 		line-height: 1.3;
 		color: var(--cloth-ink);
@@ -971,7 +971,7 @@
 	}
 
 	.p-note {
-		font-size: 11px;
+		font-size: 0.6875rem;
 		color: var(--cloth-mut);
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -989,7 +989,7 @@
 		margin-right: 4px;
 		border-radius: 6px;
 		color: var(--cloth-mut);
-		font-size: 14px;
+		font-size: 0.875rem;
 		line-height: 1;
 		opacity: 0.55;
 		transition:
@@ -1021,7 +1021,7 @@
 		border: 1px dashed rgba(219, 228, 233, 0.45);
 		border-radius: 9px;
 		background: rgba(240, 248, 252, 0.04);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		font-weight: 500;
 		color: var(--cloth-ink);
 		width: 100%;
@@ -1065,7 +1065,7 @@
 
 	.jobs-head h3 {
 		margin: 0;
-		font-size: 11px;
+		font-size: 0.6875rem;
 		font-weight: 600;
 		letter-spacing: 0.14em;
 		text-transform: uppercase;
@@ -1097,7 +1097,7 @@
 
 	.j-title {
 		font-family: var(--font-serif);
-		font-size: 13.5px;
+		font-size: 0.84375rem;
 		font-weight: 600;
 		line-height: 1.3;
 		color: var(--cloth-ink);
@@ -1115,7 +1115,7 @@
 		display: flex;
 		align-items: center;
 		gap: 6px;
-		font-size: 11px;
+		font-size: 0.6875rem;
 		color: var(--cloth-dim);
 	}
 
@@ -1221,7 +1221,7 @@
 	.pct {
 		margin-left: auto;
 		font-family: var(--font-mono);
-		font-size: 12px;
+		font-size: 0.75rem;
 		letter-spacing: 0;
 		color: var(--cloth-ink);
 	}
@@ -1269,7 +1269,7 @@
 	}
 
 	.g-note {
-		font-size: 11px;
+		font-size: 0.6875rem;
 		color: var(--cloth-mut);
 	}
 
@@ -1283,7 +1283,7 @@
 		display: grid;
 		grid-template-columns: 1fr auto;
 		gap: 0 8px;
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 	}
 
 	.s-name {
@@ -1298,12 +1298,12 @@
 	.s-detail {
 		grid-column: 1 / -1;
 		color: var(--cloth-mut);
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 	}
 
 	.s-note {
 		margin: 0;
-		font-size: 11px;
+		font-size: 0.6875rem;
 		color: var(--cloth-mut);
 	}
 
@@ -1321,7 +1321,7 @@
 	}
 
 	.log dt {
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
 		color: var(--cloth-mut);
@@ -1330,13 +1330,13 @@
 	.log dd {
 		margin: 0;
 		font-family: var(--font-mono);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		color: var(--cloth-ink);
 	}
 
 	.spark {
 		width: 100%;
-		height: 26px;
+		min-height: 1.625rem;
 		display: block;
 	}
 
@@ -1370,15 +1370,15 @@
 
 	.f-reveal {
 		flex: none;
-		width: 28px;
-		height: 30px;
+		width: 1.75rem;
+		height: 1.875rem;
 		display: grid;
 		place-items: center;
 		border: 1px solid rgba(219, 228, 233, 0.25);
 		border-radius: 8px;
 		background: rgba(240, 248, 252, 0.04);
 		color: var(--cloth-mut);
-		font-size: 12px;
+		font-size: 0.75rem;
 	}
 
 	.f-reveal:hover:not(:disabled) {
@@ -1417,7 +1417,7 @@
 		flex: 1;
 		min-width: 0;
 		font-family: var(--font-mono);
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--cloth-ink);
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1428,7 +1428,7 @@
 		display: inline-flex;
 		gap: 6px;
 		font-family: var(--font-mono);
-		font-size: 11px;
+		font-size: 0.6875rem;
 	}
 
 	.f-add {
@@ -1444,7 +1444,7 @@
 		max-height: 220px;
 		overflow: auto;
 		padding: 8px 10px;
-		font-size: 11px;
+		font-size: 0.6875rem;
 		line-height: 1.5;
 		background: var(--term);
 		color: var(--term-text);
@@ -1476,7 +1476,7 @@
 	.kit summary::after {
 		content: '▸';
 		color: var(--cloth-dim);
-		font-size: 11px;
+		font-size: 0.6875rem;
 		line-height: 1;
 		transition: color 120ms ease-out;
 	}
@@ -1505,12 +1505,12 @@
 
 	.k-name {
 		font-family: var(--font-mono);
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--cloth-ink);
 	}
 
 	.k-desc {
-		font-size: 11px;
+		font-size: 0.6875rem;
 		color: var(--cloth-mut);
 	}
 
@@ -1528,7 +1528,7 @@
 		display: flex;
 		align-items: baseline;
 		gap: 9px;
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		line-height: 1.35;
 		color: var(--cloth-mut);
 	}
@@ -1568,7 +1568,7 @@
 		margin-left: auto;
 		background: var(--duck);
 		color: #2b240f;
-		font-size: 9.5px;
+		font-size: 0.59375rem;
 		font-weight: 700;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
@@ -1604,20 +1604,20 @@
 	.a-name {
 		font-family: var(--font-serif);
 		font-weight: 600;
-		font-size: 13px;
+		font-size: 0.8125rem;
 		color: var(--cloth-ink);
 	}
 
 	.a-desc {
 		margin: 0;
-		font-size: 11px;
+		font-size: 0.6875rem;
 		color: var(--cloth-mut);
 	}
 
 	.a-text {
 		margin: 2px 0 0;
 		color: var(--cloth-dim);
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		display: -webkit-box;
 		-webkit-line-clamp: 3;
 		line-clamp: 3;
@@ -1628,7 +1628,7 @@
 	.a-sum {
 		margin: 2px 0 0;
 		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		color: var(--cloth-mut);
 	}
 
@@ -1665,7 +1665,7 @@
 
 	.mem-name {
 		font-family: var(--font-mono);
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -1673,7 +1673,7 @@
 
 	.mem-scope {
 		font-family: var(--font-mono);
-		font-size: 10px;
+		font-size: 0.625rem;
 		color: var(--cloth-mut);
 		flex: none;
 	}

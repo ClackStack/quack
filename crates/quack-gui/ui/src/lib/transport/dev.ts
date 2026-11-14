@@ -1,9 +1,17 @@
-import type { Event, MemoryNote } from '#lib/protocol';
+import type { Event, HookSetupInfo, McpServerInfo, MemoryNote } from '#lib/protocol';
+import {
+	SETTING_FIELDS,
+	formatTomlStringArray,
+	parseTomlString,
+	parseTomlStringArray
+} from '../settings';
 import type {
 	AppInfo,
 	ClientEvent,
 	ClientOp,
 	HighlightSpan,
+	HookRow,
+	McpRow,
 	OpenedTab,
 	RecentFolder,
 	ResumeRequest,
@@ -19,6 +27,213 @@ import type {
  */
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const DEV_INITIAL_OVERRIDES: Record<string, string> = {
+	'model.default': '"dev-local/tiny"',
+	'model.planner': '"dev-local/thinker"',
+	'network.offline': 'true',
+	'catalog.url': '"https://models.dev/api.json"',
+	'updates.url': '"https://api.github.com/repos/charmbracelet/quack/releases/latest"'
+};
+
+const DEV_HOOKS: HookRow[] = [
+	{
+		id: 'jira',
+		layer: 'defaults',
+		file: '/usr/share/quack/defaults/hooks.d/jira.toml',
+		state: 'disabled',
+		detail: 'disabled in file',
+		enabled: false,
+		can_toggle: true,
+		has_setup: true,
+		description: 'Fetch or verify referenced Jira issues before editing',
+		event: 'user_prompt',
+		command: ['node', '/usr/share/quack/defaults/hooks.d/jira.mjs'],
+		matcher_tool: '',
+		matcher_pattern: '',
+		matcher_prompt: '[A-Z]{2,}-\\d+',
+		timeout_secs: 15,
+		on_error: 'warn',
+		full_context: false,
+		connections_count: 1
+	},
+	{
+		id: 'audit-edits',
+		layer: 'user',
+		file: '/home/you/.config/quack/hooks.d/audit-edits.toml',
+		state: 'enabled',
+		detail: 'on',
+		enabled: true,
+		can_toggle: true,
+		has_setup: false,
+		description: 'Record edited paths to workspace audit trail',
+		event: 'post_tool',
+		command: ['scripts/audit-edits.sh'],
+		matcher_tool: 'edit|write',
+		matcher_pattern: '',
+		matcher_prompt: '',
+		timeout_secs: 5,
+		on_error: 'warn',
+		full_context: false,
+		connections_count: 0
+	}
+];
+
+const DEV_MCP: McpRow[] = [
+	{
+		id: 'filesystem-demo',
+		layer: 'user',
+		file: '/home/you/.config/quack/mcp.d/filesystem-demo.toml',
+		state: 'enabled',
+		detail: 'enabled',
+		enabled: true,
+		can_toggle: true,
+		blocked_by_policy: false,
+		transport: 'stdio',
+		target: 'npx -y @modelcontextprotocol/server-filesystem .',
+		description: 'Read-only project file explorer (demo)',
+		sandbox: true,
+		startup_timeout_secs: 20,
+		call_timeout_secs: 120,
+		max_output_tokens: 8000,
+		auto_approve: ['read_file', 'list_directory'],
+		env_keys: [],
+		header_keys: []
+	},
+	{
+		id: 'github',
+		layer: 'defaults',
+		file: '/usr/share/quack/defaults/mcp.d/github.toml',
+		state: 'disabled',
+		detail: 'disabled in file',
+		enabled: false,
+		can_toggle: true,
+		blocked_by_policy: false,
+		transport: 'stdio',
+		target: 'npx -y @modelcontextprotocol/server-github',
+		description: 'GitHub repositories, issues and pull requests',
+		sandbox: null,
+		startup_timeout_secs: 20,
+		call_timeout_secs: 120,
+		max_output_tokens: 8000,
+		auto_approve: [],
+		env_keys: ['GITHUB_PERSONAL_ACCESS_TOKEN'],
+		header_keys: []
+	}
+];
+
+function createJiraSetupInfo(enabled = false): HookSetupInfo {
+	return {
+		id: 'jira',
+		revision: 'rev-1',
+		descriptor: {
+			version: 1,
+			scope_field: 'web_url',
+			fields: [
+				{
+					id: 'web_url',
+					label: 'Site URL',
+					kind: 'url',
+					required: true,
+					default: 'https://company.atlassian.net',
+					help: 'Base web URL of your Jira site',
+					choices: [],
+					advanced: false,
+					credential_scope: true,
+					required_when: {}
+				},
+				{
+					id: 'email',
+					label: 'Account email',
+					kind: 'text',
+					required: false,
+					default: '',
+					help: 'Required when authenticating with an Atlassian API token',
+					choices: [],
+					advanced: false,
+					credential_scope: false,
+					required_when: { auth_mode: ['api_token'] }
+				},
+				{
+					id: 'auth_mode',
+					label: 'Auth mode',
+					kind: 'choice',
+					required: true,
+					default: 'api_token',
+					help: 'Authentication scheme for Jira REST API requests',
+					choices: ['api_token', 'bearer'],
+					advanced: false,
+					credential_scope: false,
+					required_when: {}
+				},
+				{
+					id: 'token',
+					label: 'API token / PAT',
+					kind: 'secret',
+					required: true,
+					default: '',
+					help: 'Stored in your OS keyring when available',
+					choices: [],
+					advanced: false,
+					credential_scope: false,
+					required_when: {}
+				},
+				{
+					id: 'api_url',
+					label: 'REST API URL',
+					kind: 'url',
+					required: false,
+					default: '',
+					help: 'Derived automatically from Site URL unless overridden',
+					choices: [],
+					advanced: true,
+					credential_scope: false,
+					required_when: {}
+				}
+			],
+			presets: [
+				{
+					id: 'cloud',
+					label: 'Jira Cloud',
+					help: 'Atlassian Cloud site (`*.atlassian.net`) with email + API token',
+					values: { web_url: 'https://company.atlassian.net', auth_mode: 'api_token' },
+					choices: { auth_mode: ['api_token'] },
+					derived: { api_url: '{web_url}/rest/api/3' }
+				},
+				{
+					id: 'datacenter',
+					label: 'Jira Data Center',
+					help: 'Self-hosted Jira Server / Data Center with Personal Access Token',
+					values: { web_url: 'https://jira.internal.example', auth_mode: 'bearer' },
+					choices: { auth_mode: ['bearer', 'api_token'] },
+					derived: { api_url: '{web_url}/rest/api/2' }
+				}
+			]
+		},
+		connections: [
+			{
+				connection: {
+					id: 'default',
+					preset: 'cloud',
+					enabled: true,
+					values: {
+						web_url: 'https://company.atlassian.net',
+						email: 'you@example.com',
+						auth_mode: 'api_token',
+						api_url: 'https://company.atlassian.net/rest/api/3'
+					}
+				},
+				credentials: {
+					token: { from: 'env', var: 'JIRA_API_TOKEN' }
+				}
+			}
+		],
+		enabled,
+		source: 'defaults',
+		writable: true,
+		problem: null
+	};
+}
 
 const INFO: AppInfo = {
 	version: '0.1.0-dev',
@@ -49,11 +264,47 @@ const INFO: AppInfo = {
 		writable: [],
 		locked: false
 	},
-	settings: [],
-	layers: [{ layer: 'user', status: 'no config.toml', file: null }],
+	settings: SETTING_FIELDS.filter((f) => f.key !== 'context.window').map((f) => ({
+		key: f.key,
+		value: DEV_INITIAL_OVERRIDES[f.key] ?? f.defaultValue,
+		origin: f.key in DEV_INITIAL_OVERRIDES ? 'user: ~/.config/quack/config.toml' : 'default',
+		description: f.fallbackDescription,
+		is_bool: f.kind === 'bool',
+		locked: false
+	})),
+	layers: [
+		{ layer: 'defaults', status: 'loaded', file: '/usr/share/quack/defaults/config.toml' },
+		{ layer: 'system', status: 'no config.toml', file: '/etc/quack/config.toml' },
+		{ layer: 'user', status: 'loaded', file: '/home/you/.config/quack/config.toml' },
+		{ layer: 'project', status: 'no config.toml', file: null }
+	],
 	rules: [],
-	bundles: [],
+	bundles: [
+		{
+			id: 'rust-reviewer',
+			layer: 'user',
+			enabled: true,
+			contents: '1 skill, 1 agent'
+		}
+	],
 	bundles_disabled: [],
+	hooks: DEV_HOOKS,
+	hooks_disabled: [],
+	mcp: DEV_MCP,
+	mcp_disabled: [],
+	project_status: 'none',
+	paths: {
+		defaults: '/usr/share/quack/defaults',
+		system: '/etc/quack',
+		user_config: '/home/you/.config/quack',
+		user_data: '/home/you/.local/share/quack',
+		user_cache: '/home/you/.cache/quack',
+		project: '/home/you/Development/demo-pond/.quack',
+		memory_global: '/home/you/.local/share/quack/memory',
+		memory_project: '/home/you/.local/share/quack/memory/projects/demo-pond',
+		sessions_root: '/home/you/.local/share/quack/sessions',
+		sessions_project: '/home/you/.local/share/quack/sessions/demo-pond'
+	},
 	history: ['Check test failures in the pond module', 'Explain how session memory works']
 };
 
@@ -89,10 +340,15 @@ export function devTransport(): Transport {
 		offline: boolean;
 		sandboxOff: boolean;
 		plannerModel: string | null;
+		activeProfile: string;
+		settings: AppInfo['settings'];
 		resolveApproval: (() => void) | null;
 		userTurns: string[];
 		inputHistory: string[];
 		memoryNotes: MemoryNote[];
+		hooks: HookRow[];
+		mcp: McpRow[];
+		jiraSetup: HookSetupInfo;
 	};
 	const tabs = new Map<number, TabState>();
 
@@ -464,6 +720,108 @@ export function devTransport(): Transport {
 		});
 	}
 
+	function devSetting(state: TabState, key: string): string {
+		return state.settings.find((r) => r.key === key)?.value ?? '';
+	}
+
+	function buildDevInfo(state: TabState): AppInfo {
+		const workspace = state.cwd.replace(/^~\//, '/home/you/');
+		const repoKey = workspace.split('/').filter(Boolean).pop() ?? 'workspace';
+		const memoryPath = parseTomlString(devSetting(state, 'memory.path'));
+		const memoryScope = parseTomlString(devSetting(state, 'memory.project_scope')) || 'data-dir';
+		const sessionsPath = parseTomlString(devSetting(state, 'sessions.path'));
+		const defaultsDir = parseTomlString(devSetting(state, 'defaults.dir'));
+		const memoryGlobal = memoryPath || '/home/you/.local/share/quack/memory';
+		const memoryProject =
+			memoryScope === 'repo' ? `${workspace}/.quack/memory` : `${memoryGlobal}/projects/${repoKey}`;
+		const sessionsRoot = sessionsPath || '/home/you/.local/share/quack/sessions';
+		const disabledBundles = parseTomlStringArray(devSetting(state, 'bundles.disabled'));
+		const disabledHooks = parseTomlStringArray(devSetting(state, 'hooks.disabled'));
+		const disabledMcp = parseTomlStringArray(devSetting(state, 'mcp.disabled'));
+		const sandboxMode = parseTomlString(devSetting(state, 'sandbox.mode')) || 'auto';
+		const effectiveSandbox = state.sandboxOff ? 'off' : sandboxMode;
+		const egressAllow = parseTomlStringArray(devSetting(state, 'network.egress_allow'));
+		const proxyUrl = parseTomlString(devSetting(state, 'network.proxy'));
+		const otelUrl = parseTomlString(devSetting(state, 'telemetry.otel_endpoint'));
+		const catalogRefresh = devSetting(state, 'catalog.refresh') === 'true';
+		const updatesCheck = devSetting(state, 'updates.check') === 'true';
+		const writable = parseTomlStringArray(devSetting(state, 'sandbox.writable'));
+
+		return {
+			...INFO,
+			cwd: state.cwd,
+			branch: state.branch,
+			model: parseTomlString(devSetting(state, 'model.default')) || INFO.model,
+			planner_model: state.plannerModel,
+			permission_mode: parseTomlString(devSetting(state, 'permissions.mode')) || 'ask',
+			work_mode: parseTomlString(devSetting(state, 'permissions.work_mode')) || 'edit',
+			ui: {
+				theme: parseTomlString(devSetting(state, 'ui.theme')) || 'auto',
+				reduced_motion: devSetting(state, 'ui.reduced_motion') === 'true'
+			},
+			egress: {
+				...INFO.egress,
+				offline: state.offline,
+				egress_allow: egressAllow,
+				http1_only: devSetting(state, 'network.http1_only') === 'true',
+				has_proxy: proxyUrl.length > 0,
+				catalog_refresh: catalogRefresh,
+				updates_check: updatesCheck,
+				telemetry_enabled: otelUrl.length > 0
+			},
+			sandbox: {
+				...INFO.sandbox,
+				mode: effectiveSandbox,
+				writable,
+				status_detail:
+					effectiveSandbox === 'off'
+						? 'disabled (sandbox.mode = off)'
+						: `active (${effectiveSandbox})`
+			},
+			settings: state.settings.map((r) => ({ ...r })),
+			bundles: INFO.bundles.map((b) => ({
+				...b,
+				enabled: !disabledBundles.includes(b.id)
+			})),
+			bundles_disabled: disabledBundles,
+			hooks: state.hooks.map((h) => {
+				const listed = disabledHooks.includes(h.id);
+				const enabled = h.enabled && !listed;
+				return {
+					...h,
+					enabled,
+					state: enabled ? 'enabled' : 'disabled',
+					detail: listed ? 'listed in `disabled`' : enabled ? 'on' : 'disabled in file'
+				};
+			}),
+			hooks_disabled: disabledHooks,
+			mcp: state.mcp.map((m) => {
+				const listed = disabledMcp.includes(m.id);
+				const enabled = m.enabled && !listed;
+				return {
+					...m,
+					enabled,
+					state: enabled ? 'enabled' : 'disabled',
+					detail: listed ? 'listed in `disabled`' : enabled ? 'enabled' : 'disabled in file'
+				};
+			}),
+			mcp_disabled: disabledMcp,
+			paths: {
+				defaults: defaultsDir === 'none' ? null : defaultsDir || '/usr/share/quack/defaults',
+				system: '/etc/quack',
+				user_config: '/home/you/.config/quack',
+				user_data: '/home/you/.local/share/quack',
+				user_cache: '/home/you/.cache/quack',
+				project: `${workspace}/.quack`,
+				memory_global: memoryGlobal,
+				memory_project: memoryProject,
+				sessions_root: sessionsRoot,
+				sessions_project: `${sessionsRoot}/${repoKey}`
+			},
+			history: [...state.inputHistory]
+		};
+	}
+
 	return {
 		kind: 'dev',
 
@@ -489,13 +847,23 @@ export function devTransport(): Transport {
 				offline: true,
 				sandboxOff: false,
 				plannerModel: INFO.planner_model,
+				activeProfile: 'generic',
+				settings: INFO.settings.map((row) => ({ ...row })),
 				resolveApproval: null,
 				userTurns: [],
 				inputHistory: [...INFO.history],
-				memoryNotes: seedMemoryNotes(cwd)
+				memoryNotes: seedMemoryNotes(cwd),
+				hooks: DEV_HOOKS.map((h) => ({ ...h, command: [...h.command] })),
+				mcp: DEV_MCP.map((m) => ({
+					...m,
+					auto_approve: [...m.auto_approve],
+					env_keys: [...m.env_keys],
+					header_keys: [...m.header_keys]
+				})),
+				jiraSetup: createJiraSetupInfo(false)
 			};
 			tabs.set(tab, tabState);
-			const info = { ...INFO, cwd, branch, history: [...tabState.inputHistory] };
+			const info = buildDevInfo(tabState);
 			fan({ tab, info });
 			fan({
 				tab,
@@ -628,41 +996,302 @@ export function devTransport(): Transport {
 						message: `Exported transcript (${op.format}) to ${op.path ?? 'field-notes.' + (op.format === 'json' ? 'json' : 'md')}`
 					});
 					break;
-				case 'save_setting':
-					if (state && op.key === 'network.offline') state.offline = op.value === 'true';
-					if (state && op.key === 'model.planner') {
-						state.plannerModel = op.value === '""' ? null : op.value.replace(/^"|"$/g, '');
+				case 'save_setting': {
+					const layerPath =
+						op.scope === 'project' ? `${state?.cwd ?? '~/workspace'}/.quack/config.toml` : '~/.config/quack/config.toml';
+					const layerLabel = op.scope === 'project' ? 'project' : 'user';
+					if (state) {
+						if (op.value.trim() === 'null') {
+							if (op.key === 'context.window') {
+								state.settings = state.settings.filter((r) => r.key !== 'context.window');
+							} else {
+								const def = SETTING_FIELDS.find((f) => f.key === op.key);
+								const existing = state.settings.find((r) => r.key === op.key);
+								if (existing && def) {
+									existing.value = def.defaultValue;
+									existing.origin = 'default';
+								}
+							}
+						} else {
+							const existing = state.settings.find((r) => r.key === op.key);
+							const def = SETTING_FIELDS.find((f) => f.key === op.key);
+							if (existing) {
+								existing.value = op.value;
+								existing.origin = `${layerLabel}: ${layerPath}`;
+							} else if (def) {
+								state.settings = [
+									...state.settings,
+									{
+										key: op.key,
+										value: op.value,
+										origin: `${layerLabel}: ${layerPath}`,
+										description: def.fallbackDescription,
+										is_bool: def.kind === 'bool',
+										locked: false
+									}
+								];
+							}
+						}
+						if (op.key === 'network.offline') state.offline = op.value === 'true';
+						if (op.key === 'sandbox.mode') state.sandboxOff = parseTomlString(op.value) === 'off';
+						if (op.key === 'model.planner') {
+							state.plannerModel = op.value === '""' ? null : parseTomlString(op.value) || null;
+						}
 					}
 					send(tab, {
 						event: 'setting_saved',
 						key: op.key,
 						value: op.value,
-						path: '~/.config/quack/config.toml'
+						path: layerPath
 					});
 					break;
+				}
 				case 'reload_config':
 					if (state) {
 						fan({
 							tab,
-							info: {
-								...INFO,
-								cwd: state.cwd,
-								branch: state.branch,
-								planner_model: state.plannerModel,
-								egress: { ...INFO.egress, offline: state.offline },
-								sandbox: {
-									...INFO.sandbox,
-									mode: state.sandboxOff ? 'off' : 'auto',
-									status_detail: state.sandboxOff ? 'disabled (sandbox.mode = off)' : 'active (Landlock + seccomp)'
-								}
-							}
+							info: buildDevInfo(state)
 						});
 					}
 					send(tab, { event: 'config_reloaded' });
 					send(tab, { event: 'startup_complete' });
 					break;
-				case 'list_mcp':
-					send(tab, { event: 'mcp_servers', servers: [] });
+				case 'list_profiles':
+					send(tab, {
+						event: 'profiles',
+						active: state?.activeProfile ?? 'generic',
+						forced: (state ? parseTomlString(devSetting(state, 'model.profile')) : '') !== '',
+						profiles: [
+							{
+								id: 'generic',
+								description: 'Balanced defaults across open-weight and hosted models',
+								source: 'built-in',
+								matches: true,
+								edit_format: 'str_replace',
+								tools: ['read', 'edit', 'write', 'shell', 'grep', 'glob'],
+								system: 'You are quack, a careful coding agent.'
+							},
+							{
+								id: 'cc-style',
+								description: 'Compact tool prompts tuned for GLM / DeepSeek / MiniMax',
+								source: 'defaults',
+								matches: false,
+								edit_format: 'str_replace',
+								tools: ['read', 'edit', 'write', 'shell', 'grep', 'glob'],
+								system: 'Compact cc-style prompt.'
+							},
+							{
+								id: 'codex',
+								description: 'Shell-first multi-file `apply_patch` workflow',
+								source: 'defaults',
+								matches: false,
+								edit_format: 'apply_patch',
+								tools: ['read', 'apply_patch', 'shell'],
+								system: 'Shell-first apply_patch prompt.'
+							}
+						]
+					});
+					break;
+				case 'set_profile':
+					if (state) state.activeProfile = op.id === 'auto' ? 'generic' : op.id;
+					send(tab, {
+						event: 'notice',
+						message: `Switched session profile to ${state?.activeProfile ?? op.id}.`
+					});
+					break;
+				case 'list_mcp': {
+					const disabledMcp = state
+						? parseTomlStringArray(devSetting(state, 'mcp.disabled'))
+						: [];
+					const servers: McpServerInfo[] = (state?.mcp ?? DEV_MCP)
+						.filter((m) => m.enabled && !disabledMcp.includes(m.id))
+						.map((m) => ({
+							id: m.id,
+							transport: m.transport ?? 'stdio',
+							target: m.target,
+							description: m.description,
+							state: 'ready',
+							tools: m.id === 'filesystem-demo' ? ['read_file', 'list_directory'] : ['status'],
+							prompts: m.id === 'filesystem-demo' ? ['summarize'] : [],
+							resources: m.id === 'filesystem-demo' ? ['file://README.md'] : [],
+							deferred: false,
+							tool_tokens: 420,
+							log: [`[${m.id}] ready (${m.transport ?? 'stdio'})`]
+						}));
+					send(tab, { event: 'mcp_servers', servers });
+					break;
+				}
+				case 'restart_mcp':
+					send(tab, { event: 'notice', message: `Restarted MCP server ${op.id} (demo).` });
+					break;
+				case 'enable_mcp': {
+					if (!state) break;
+					const target = state.mcp.find((m) => m.id === op.id);
+					if (!target) {
+						send(tab, {
+							event: 'error',
+							error: { kind: 'config', message: `no MCP server named \`${op.id}\`` }
+						});
+						break;
+					}
+					target.enabled = true;
+					target.state = 'enabled';
+					target.detail = 'enabled';
+					if (target.layer === 'defaults') {
+						target.layer = 'user';
+						target.file = `/home/you/.config/quack/mcp.d/${op.id}.toml`;
+					}
+					const nextDisabled = parseTomlStringArray(devSetting(state, 'mcp.disabled')).filter(
+						(x) => x !== op.id
+					);
+					const row = state.settings.find((r) => r.key === 'mcp.disabled');
+					if (row) row.value = formatTomlStringArray(nextDisabled);
+					send(tab, { event: 'mcp_enabled', id: op.id, path: target.file });
+					fan({ tab, info: buildDevInfo(state) });
+					send(tab, { event: 'config_reloaded' });
+					send(tab, { event: 'startup_complete' });
+					break;
+				}
+				case 'save_mcp_server': {
+					if (!state) break;
+					const id = op.id.trim();
+					const path =
+						op.scope === 'project'
+							? `${state.cwd}/.quack/mcp.d/${id}.toml`
+							: `/home/you/.config/quack/mcp.d/${id}.toml`;
+					const transport = op.url.trim() ? 'http' : 'stdio';
+					const target =
+						transport === 'http'
+							? op.url.trim()
+							: op.args.length > 0
+								? `${op.command.trim()} ${op.args.join(' ')}`
+								: op.command.trim();
+					const nextRow: McpRow = {
+						id,
+						layer: op.scope === 'project' ? 'project' : 'user',
+						file: path,
+						state: 'enabled',
+						detail: 'enabled',
+						enabled: true,
+						can_toggle: true,
+						blocked_by_policy: false,
+						transport,
+						target,
+						description: op.description,
+						sandbox: op.sandbox ?? null,
+						startup_timeout_secs: 20,
+						call_timeout_secs: 120,
+						max_output_tokens: 8000,
+						auto_approve: [],
+						env_keys: Object.keys(op.env),
+						header_keys: Object.keys(op.headers)
+					};
+					state.mcp = [...state.mcp.filter((m) => m.id !== id), nextRow];
+					send(tab, { event: 'mcp_server_saved', id, path });
+					fan({ tab, info: buildDevInfo(state) });
+					send(tab, { event: 'config_reloaded' });
+					send(tab, { event: 'startup_complete' });
+					break;
+				}
+				case 'enable_hook': {
+					if (!state) break;
+					const target = state.hooks.find((h) => h.id === op.id);
+					if (!target) {
+						send(tab, {
+							event: 'error',
+							error: { kind: 'config', message: `no hook named \`${op.id}\`` }
+						});
+						break;
+					}
+					target.enabled = true;
+					target.state = 'enabled';
+					target.detail = 'on';
+					if (target.layer === 'defaults') {
+						target.layer = 'user';
+						target.file = `/home/you/.config/quack/hooks.d/${op.id}.toml`;
+					}
+					if (op.id === 'jira') state.jiraSetup.enabled = true;
+					const nextDisabled = parseTomlStringArray(devSetting(state, 'hooks.disabled')).filter(
+						(x) => x !== op.id
+					);
+					const row = state.settings.find((r) => r.key === 'hooks.disabled');
+					if (row) row.value = formatTomlStringArray(nextDisabled);
+					send(tab, { event: 'hook_enabled', id: op.id, path: target.file, note: null });
+					fan({ tab, info: buildDevInfo(state) });
+					send(tab, { event: 'config_reloaded' });
+					send(tab, { event: 'startup_complete' });
+					break;
+				}
+				case 'inspect_hook_setup':
+					if (!state || op.id !== 'jira') {
+						send(tab, {
+							event: 'hook_setup_failed',
+							request: op.request,
+							message: `No interactive setup form declared for hook \`${op.id}\`.`
+						});
+					} else {
+						send(tab, {
+							event: 'hook_setup',
+							request: op.request,
+							info: structuredClone(state.jiraSetup)
+						});
+					}
+					break;
+				case 'save_hook_setup':
+					if (!state || op.id !== 'jira') {
+						send(tab, {
+							event: 'hook_setup_failed',
+							request: op.request,
+							message: `Cannot save setup for unknown hook \`${op.id}\`.`
+						});
+					} else {
+						const enabled = op.enable ?? state.jiraSetup.enabled;
+						state.jiraSetup = {
+							...state.jiraSetup,
+							revision: `rev-${Date.now()}`,
+							enabled,
+							source: 'user',
+							connections: op.connections.map((draft) => ({
+								connection: structuredClone(draft.connection),
+								credentials: Object.fromEntries(
+									Object.entries(draft.credentials).map(([key, change]) => [
+										key,
+										change.action === 'replace'
+											? { from: 'keyring', name: `quack:${op.id}:${draft.connection.id}` }
+											: { from: 'env', var: 'JIRA_API_TOKEN' }
+									])
+								)
+							}))
+						};
+						const hookRow = state.hooks.find((h) => h.id === op.id);
+						if (hookRow) {
+							hookRow.enabled = enabled;
+							hookRow.state = enabled ? 'enabled' : 'disabled';
+							hookRow.detail = enabled ? 'on' : 'disabled in file';
+							hookRow.connections_count = op.connections.length;
+							hookRow.layer = 'user';
+							hookRow.file = '/home/you/.config/quack/hooks.d/jira.toml';
+						}
+						send(tab, {
+							event: 'hook_setup_saved',
+							request: op.request,
+							info: structuredClone(state.jiraSetup),
+							note: `Saved ${op.connections.length} connection(s) in demo config.`
+						});
+						fan({ tab, info: buildDevInfo(state) });
+						send(tab, { event: 'config_reloaded' });
+						send(tab, { event: 'startup_complete' });
+					}
+					break;
+				case 'check_hook_setup':
+					send(tab, {
+						event: 'hook_check_result',
+						request: op.request,
+						status: 'ok',
+						message: `Reachable (${op.url || op.id}) — browser demo check passed.`
+					});
+					break;
+				case 'cancel_hook_check':
 					break;
 				case 'list_lsp':
 					send(tab, {

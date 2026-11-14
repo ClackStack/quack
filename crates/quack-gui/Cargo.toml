@@ -25,7 +25,7 @@ tracing.workspace = true
 # The Tauri shell (docs/plan/15-desktop-client.md). Gated behind `desktop` so the
 # default `cargo build`, `cargo test --workspace` and the MSRV check never compile
 # or resolve webkit/gtk system libraries.
-tauri = { version = "2", optional = true }
+tauri = { version = "2", optional = true , features = [] }
 tauri-plugin-clipboard-manager = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-notification = { version = "2", optional = true }
@@ -37,7 +37,7 @@ tauri-plugin-window-state = { version = "2", optional = true }
 nix = { version = "0.31.3", default-features = false, features = ["signal"], optional = true }
 
 [build-dependencies]
-tauri-build = { version = "2", optional = true }
+tauri-build = { version = "2", optional = true , features = [] }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,9 +1,16 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "quack",
-  "version": "0.1.0",
   "identifier": "dev.clackstack.quack",
   "bundle": {
+    "active": true,
+    "license": "Apache-2.0",
+    "licenseFile": "../../LICENSE",
+    "homepage": "https://quack.clackstack.dev",
+    "category": "DeveloperTool",
+    "shortDescription": "Desktop coding agent for open-weight models",
+    "longDescription": "Desktop client for quack, a local-first coding agent for open-weight models.",
+    "copyright": "Copyright 2026 Paul Hovey",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -17,9 +24,9 @@
     }
   },
   "build": {
-    "beforeDevCommand": "pnpm --dir ui run dev",
+    "beforeDevCommand": "pnpm run dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "pnpm --dir ui run build",
+    "beforeBuildCommand": "pnpm run build",
     "frontendDist": "ui/build"
   },
   "app": {

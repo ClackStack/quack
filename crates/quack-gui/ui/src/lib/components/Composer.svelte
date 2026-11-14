@@ -903,7 +903,7 @@
 
 	.ac-empty {
 		padding: 8px 10px;
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink-3);
 	}
 
@@ -926,7 +926,7 @@
 
 	.ac-label {
 		font-family: var(--font-mono);
-		font-size: 12px;
+		font-size: 0.75rem;
 		font-weight: 600;
 		color: var(--ink);
 		overflow: hidden;
@@ -940,7 +940,7 @@
 	}
 
 	.ac-badge {
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		font-family: var(--font-mono);
 		color: var(--sky-ink);
 		align-self: center;
@@ -948,7 +948,7 @@
 
 	.ac-detail {
 		grid-column: 1 / -1;
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--ink-3);
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -970,13 +970,13 @@
 		border: 1px solid var(--rule);
 		background: var(--bg-panel);
 		font-family: var(--font-mono);
-		font-size: 11px;
+		font-size: 0.6875rem;
 		color: var(--ink-2);
 	}
 
 	.attach-chip button {
 		color: var(--ink-3);
-		font-size: 13px;
+		font-size: 0.8125rem;
 		line-height: 1;
 		padding: 0 2px;
 	}
@@ -986,7 +986,7 @@
 	}
 
 	.attach-err {
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--fail);
 	}
 
@@ -998,14 +998,14 @@
 	}
 
 	.mini-btn {
-		height: 24px;
+		min-height: 1.5rem;
 		padding: 0 8px;
 		border-radius: var(--r-md);
 		border: 1px solid var(--rule);
 		background: var(--bg-panel);
 		color: var(--ink-2);
 		font-family: var(--font-mono);
-		font-size: 11px;
+		font-size: 0.6875rem;
 		white-space: nowrap;
 	}
 
@@ -1026,7 +1026,7 @@
 		font-family: var(--font-serif);
 		font-size: var(--text-prose);
 		line-height: 1.5;
-		min-height: 24px;
+		min-height: 1.5rem;
 		max-height: 240px;
 		color: var(--ink);
 	}
@@ -1044,7 +1044,7 @@
 	.hint {
 		flex: 1;
 		color: var(--ink-3);
-		font-size: 12px;
+		font-size: 0.75rem;
 		display: flex;
 		align-items: center;
 		gap: var(--sp-sm);
@@ -1091,13 +1091,13 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 5px;
-		height: 26px;
+		min-height: 1.625rem;
 		padding: 0 10px;
 		border-radius: 999px;
 		border: 1px solid var(--rule);
 		background: var(--bg-raised);
 		color: var(--ink-2);
-		font-size: 12px;
+		font-size: 0.75rem;
 		font-weight: 500;
 		white-space: nowrap;
 		transition:
@@ -1147,7 +1147,7 @@
 	}
 
 	.caret {
-		font-size: 10px;
+		font-size: 0.625rem;
 		color: var(--ink-3);
 		margin-left: 1px;
 	}
@@ -1159,7 +1159,7 @@
 
 	.model-name {
 		font-family: var(--font-mono);
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		font-weight: 500;
 		color: var(--ink);
 		overflow: hidden;
@@ -1215,7 +1215,7 @@
 
 	.popup-head {
 		font-weight: 700;
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		letter-spacing: 0.06em;
 		text-transform: uppercase;
 		color: var(--ink-3);
@@ -1258,24 +1258,24 @@
 	}
 
 	.choice-label {
-		font-size: 13px;
+		font-size: 0.8125rem;
 		font-weight: 600;
 		color: var(--ink);
 	}
 
 	.check {
 		color: var(--sky-ink);
-		font-size: 12px;
+		font-size: 0.75rem;
 		font-weight: 700;
 	}
 
 	.choice-note {
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--ink-3);
 	}
 
 	.popup-foot {
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--ink-3);
 		padding: 6px 8px 4px;
 		border-top: 1px solid var(--rule-soft);

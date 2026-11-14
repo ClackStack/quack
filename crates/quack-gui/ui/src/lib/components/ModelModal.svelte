@@ -253,14 +253,14 @@
 	.modal-head h2 {
 		margin: 0;
 		font-family: var(--font-serif);
-		font-size: 19px;
+		font-size: 1.1875rem;
 		font-weight: 600;
 		color: var(--ink);
 	}
 
 	.sub {
 		margin: 3px 0 0;
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink-3);
 	}
 
@@ -270,11 +270,11 @@
 	}
 
 	.close-btn {
-		width: 28px;
-		height: 28px;
+		width: 1.75rem;
+		height: 1.75rem;
 		border-radius: var(--r-md);
 		color: var(--ink-3);
-		font-size: 18px;
+		font-size: 1.125rem;
 		line-height: 1;
 		display: grid;
 		place-items: center;
@@ -299,7 +299,7 @@
 		border-radius: var(--r-md);
 		background: var(--bg-raised);
 		color: var(--ink);
-		font-size: 13px;
+		font-size: 0.8125rem;
 	}
 
 	.search:focus {
@@ -344,7 +344,7 @@
 
 	.p-tag {
 		font-family: var(--font-mono);
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		padding: 1px 7px;
 		border-radius: 999px;
 		border: 1px solid var(--rule);
@@ -360,7 +360,7 @@
 	.inline-link {
 		margin-left: 8px;
 		color: var(--sky-ink);
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		text-decoration: underline;
 	}
 
@@ -371,7 +371,7 @@
 
 	.provider-head h3 {
 		margin: 0;
-		font-size: 11px;
+		font-size: 0.6875rem;
 		font-weight: 700;
 		letter-spacing: 0.12em;
 		text-transform: uppercase;
@@ -383,7 +383,7 @@
 	}
 
 	.provider-note {
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink-3);
 	}
 
@@ -428,7 +428,7 @@
 		flex: none;
 		padding: 0 10px;
 		border-left: 1px solid var(--rule-soft);
-		font-size: 11px;
+		font-size: 0.6875rem;
 		font-family: var(--font-mono);
 		color: var(--ink-3);
 	}
@@ -465,14 +465,14 @@
 
 	.model-id {
 		font-family: var(--font-mono);
-		font-size: 13px;
+		font-size: 0.8125rem;
 		font-weight: 500;
 		color: var(--ink);
 		overflow-wrap: anywhere;
 	}
 
 	.badge {
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		font-weight: 600;
 		letter-spacing: 0.06em;
 		text-transform: uppercase;
@@ -485,7 +485,7 @@
 	}
 
 	.note {
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink-3);
 	}
 

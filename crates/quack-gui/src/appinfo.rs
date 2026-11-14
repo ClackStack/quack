@@ -1,13 +1,14 @@
 //! The `AppInfo` snapshot (docs/plan/15-desktop-client.md#the-bridge): the static facts
 //! a webview needs about its engine's config, sent at tab start and after
 //! `StartupComplete` (which also follows `Op::ReloadConfig`). Mirrors the TUI's
-//! `AppInfo::from_config` without the terminal-only parts (hooks, grammar dirs);
+//! `AppInfo::from_config` without the terminal-only parts (grammar dirs);
 //! the rest of the same data reaches the GUI through `Op`s and `Event`s.
 
 use std::path::Path;
 
-use quack_config::Loaded;
+use quack_config::hooks::OnError;
 use quack_config::settings::SandboxMode;
+use quack_config::{HookFile, ItemState, LayerKind, Loaded, McpServerFile, ProjectStatus};
 use serde::Serialize;
 
 /// A serializable snapshot of `Loaded`, built once per tab and on reload.
@@ -44,8 +45,35 @@ pub struct AppInfo {
     pub bundles: Vec<BundleRow>,
     /// `[bundles] disabled` as configured, including names not installed.
     pub bundles_disabled: Vec<String>,
+    /// Configured hooks from `hooks.d/*.toml` across active layers.
+    pub hooks: Vec<HookRow>,
+    /// `[hooks] disabled` as configured, including names not installed.
+    pub hooks_disabled: Vec<String>,
+    /// Configured MCP servers from `mcp.d/*.toml` across active layers.
+    pub mcp: Vec<McpRow>,
+    /// `[mcp] disabled` as configured, including names not installed.
+    pub mcp_disabled: Vec<String>,
+    /// Project trust status for `.quack/`.
+    pub project_status: String,
+    /// Resolved configuration, memory, and session directories.
+    pub paths: PathsSnapshot,
     /// Recent submitted prompts for this workspace (`history.jsonl`), oldest first.
     pub history: Vec<String>,
+}
+
+/// Resolved directories used by this config and workspace (`quack config paths`, memory, sessions).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PathsSnapshot {
+    pub defaults: Option<String>,
+    pub system: String,
+    pub user_config: String,
+    pub user_data: String,
+    pub user_cache: String,
+    pub project: String,
+    pub memory_global: String,
+    pub memory_project: String,
+    pub sessions_root: String,
+    pub sessions_project: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -125,6 +153,52 @@ pub struct BundleRow {
     pub enabled: bool,
     /// What it holds, e.g. `2 skills, 1 MCP server`.
     pub contents: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct HookRow {
+    pub id: String,
+    pub layer: String,
+    pub file: String,
+    /// `enabled`, `disabled`, or `failed`.
+    pub state: String,
+    pub detail: String,
+    pub enabled: bool,
+    pub can_toggle: bool,
+    pub has_setup: bool,
+    pub description: String,
+    pub event: Option<String>,
+    pub command: Vec<String>,
+    pub matcher_tool: String,
+    pub matcher_pattern: String,
+    pub matcher_prompt: String,
+    pub timeout_secs: Option<u64>,
+    pub on_error: Option<String>,
+    pub full_context: bool,
+    pub connections_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct McpRow {
+    pub id: String,
+    pub layer: String,
+    pub file: String,
+    /// `enabled`, `disabled`, or `failed`.
+    pub state: String,
+    pub detail: String,
+    pub enabled: bool,
+    pub can_toggle: bool,
+    pub blocked_by_policy: bool,
+    pub transport: Option<String>,
+    pub target: String,
+    pub description: String,
+    pub sandbox: Option<bool>,
+    pub startup_timeout_secs: Option<u64>,
+    pub call_timeout_secs: Option<u64>,
+    pub max_output_tokens: Option<u32>,
+    pub auto_approve: Vec<String>,
+    pub env_keys: Vec<String>,
+    pub header_keys: Vec<String>,
 }
 
 impl AppInfo {
@@ -207,8 +281,44 @@ impl AppInfo {
                 })
                 .collect(),
             bundles_disabled: config.settings.bundles.disabled.clone(),
+            hooks: hooks_snapshot(config),
+            hooks_disabled: config.settings.hooks.disabled.clone(),
+            mcp: mcp_snapshot(config),
+            mcp_disabled: config.settings.mcp.disabled.clone(),
+            project_status: project_status_label(config.project).to_owned(),
+            paths: paths_snapshot(config),
             history: quack_core::load_history(&quack_core::history_path(config)),
         }
+    }
+}
+
+fn project_status_label(status: ProjectStatus) -> &'static str {
+    match status {
+        ProjectStatus::None => "none",
+        ProjectStatus::Trusted => "trusted",
+        ProjectStatus::SettingsOnly => "settings-only",
+        ProjectStatus::Untrusted => "untrusted",
+        ProjectStatus::Changed => "changed",
+        ProjectStatus::Ignored => "ignored",
+        ProjectStatus::DisabledByPolicy => "disabled-by-policy",
+    }
+}
+
+fn paths_snapshot(config: &Loaded) -> PathsSnapshot {
+    let d = &config.dirs;
+    let (memory_global, memory_project) = quack_core::memory_dirs(config);
+    let (sessions_root, sessions_project) = quack_core::sessions_dirs(config);
+    PathsSnapshot {
+        defaults: d.defaults.as_ref().map(|p| p.display().to_string()),
+        system: d.system.display().to_string(),
+        user_config: d.user_config.display().to_string(),
+        user_data: d.user_data.display().to_string(),
+        user_cache: d.user_cache.display().to_string(),
+        project: d.project.display().to_string(),
+        memory_global: memory_global.display().to_string(),
+        memory_project: memory_project.display().to_string(),
+        sessions_root: sessions_root.display().to_string(),
+        sessions_project: sessions_project.display().to_string(),
     }
 }
 
@@ -278,6 +388,200 @@ fn sandbox_snapshot(config: &Loaded) -> SandboxSnapshot {
         writable: sb.writable.clone(),
         locked: config.settings.policy.locks("sandbox.mode"),
     }
+}
+
+fn hooks_snapshot(config: &Loaded) -> Vec<HookRow> {
+    let disabled_locked = config.settings.policy.locks("hooks.disabled");
+    quack_config::load_hooks(config)
+        .into_iter()
+        .map(|item| {
+            let file_path = item.path.display().to_string();
+            let parsed = match &item.state {
+                ItemState::Loaded(f) => Some(f.clone()),
+                ItemState::Disabled(_) => quack_config::read_item_file::<HookFile>(&item.path),
+                ItemState::Failed(_) => None,
+            };
+            let (state, detail, enabled) = match &item.state {
+                ItemState::Loaded(f) if f.enabled => ("enabled", "on".to_owned(), true),
+                ItemState::Loaded(_) => ("disabled", "disabled in file".to_owned(), false),
+                ItemState::Disabled(why) => ("disabled", why.clone(), false),
+                ItemState::Failed(d) => ("failed", d.one_line(), false),
+            };
+            let listed_and_locked =
+                disabled_locked && config.settings.hooks.disabled.contains(&item.id);
+            let can_toggle = item.layer != LayerKind::System
+                && !matches!(item.state, ItemState::Failed(_))
+                && !listed_and_locked
+                && !(enabled && disabled_locked);
+            let (
+                has_setup,
+                description,
+                event,
+                command,
+                matcher_tool,
+                matcher_pattern,
+                matcher_prompt,
+                timeout_secs,
+                on_error,
+                full_context,
+                connections_count,
+            ) = match parsed {
+                Some(f) => (
+                    f.setup.is_some(),
+                    f.description,
+                    Some(f.event.label().to_owned()),
+                    f.command,
+                    f.matcher.tool,
+                    f.matcher.pattern,
+                    f.matcher.prompt,
+                    Some(f.timeout_secs),
+                    Some(on_error_label(f.on_error).to_owned()),
+                    f.full_context,
+                    f.connections.as_ref().map_or(0, Vec::len),
+                ),
+                None => (
+                    false,
+                    String::new(),
+                    None,
+                    Vec::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    None,
+                    None,
+                    false,
+                    0,
+                ),
+            };
+            HookRow {
+                id: item.id,
+                layer: item.layer.label().to_owned(),
+                file: file_path,
+                state: state.to_owned(),
+                detail,
+                enabled,
+                can_toggle,
+                has_setup,
+                description,
+                event,
+                command,
+                matcher_tool,
+                matcher_pattern,
+                matcher_prompt,
+                timeout_secs,
+                on_error,
+                full_context,
+                connections_count,
+            }
+        })
+        .collect()
+}
+
+fn on_error_label(mode: OnError) -> &'static str {
+    match mode {
+        OnError::Deny => "deny",
+        OnError::Allow => "allow",
+        OnError::Warn => "warn",
+    }
+}
+
+fn mcp_snapshot(config: &Loaded) -> Vec<McpRow> {
+    let disabled_locked = config.settings.policy.locks("mcp.disabled");
+    quack_config::load_mcp(config)
+        .into_iter()
+        .map(|item| {
+            let file_path = item.path.display().to_string();
+            let parsed = match &item.state {
+                ItemState::Loaded(f) => Some(f.clone()),
+                ItemState::Disabled(_) => quack_config::read_item_file::<McpServerFile>(&item.path),
+                ItemState::Failed(_) => None,
+            };
+            let (state, detail, enabled) = match &item.state {
+                ItemState::Loaded(_) => ("enabled", "enabled".to_owned(), true),
+                ItemState::Disabled(why) => ("disabled", why.clone(), false),
+                ItemState::Failed(d) => ("failed", d.one_line(), false),
+            };
+            let policy_url = parsed
+                .as_ref()
+                .and_then(|f| (!f.url.is_empty()).then_some(f.url.as_str()));
+            let blocked_by_policy = detail.contains("policy")
+                || (parsed.is_some() && !config.settings.policy.mcp.allows(&item.id, policy_url));
+            let listed_and_locked =
+                disabled_locked && config.settings.mcp.disabled.contains(&item.id);
+            let can_toggle = item.layer != LayerKind::System
+                && !matches!(item.state, ItemState::Failed(_))
+                && !blocked_by_policy
+                && !listed_and_locked
+                && !(enabled && disabled_locked);
+            let (
+                transport,
+                target,
+                description,
+                sandbox,
+                startup_timeout_secs,
+                call_timeout_secs,
+                max_output_tokens,
+                auto_approve,
+                env_keys,
+                header_keys,
+            ) = match parsed {
+                Some(f) => {
+                    let transport = f.transport().ok().map(str::to_owned);
+                    let target = if !f.url.is_empty() {
+                        f.url
+                    } else if f.args.is_empty() {
+                        f.command
+                    } else {
+                        format!("{} {}", f.command, f.args.join(" "))
+                    };
+                    (
+                        transport,
+                        target,
+                        f.description,
+                        f.sandbox,
+                        Some(f.startup_timeout_secs),
+                        Some(f.call_timeout_secs),
+                        Some(f.max_output_tokens),
+                        f.tools.auto_approve,
+                        f.env.into_keys().collect(),
+                        f.headers.into_keys().collect(),
+                    )
+                }
+                None => (
+                    None,
+                    String::new(),
+                    String::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
+            McpRow {
+                id: item.id,
+                layer: item.layer.label().to_owned(),
+                file: file_path,
+                state: state.to_owned(),
+                detail,
+                enabled,
+                can_toggle,
+                blocked_by_policy,
+                transport,
+                target,
+                description,
+                sandbox,
+                startup_timeout_secs,
+                call_timeout_secs,
+                max_output_tokens,
+                auto_approve,
+                env_keys,
+                header_keys,
+            }
+        })
+        .collect()
 }
 
 /// The branch in `.git/HEAD` of `dir` or a parent; worktrees and submodules point at

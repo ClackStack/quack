@@ -42,7 +42,7 @@
 	}
 	h1 {
 		font-family: var(--font-serif);
-		font-size: 24px;
+		font-size: 1.5rem;
 		font-weight: 600;
 		max-width: 36ch;
 		margin: 0 0 16px;

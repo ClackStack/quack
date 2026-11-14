@@ -130,7 +130,7 @@ components:
   rail:
     backgroundColor: "{colors.cloth}"
     textColor: "{colors.cloth-ink}"
-    width: "292px"
+    width: "336px"
     padding: "16px 14px 28px"
   composer-send:
     backgroundColor: "{colors.duck}"
@@ -223,7 +223,7 @@ The palette is a field guide's: cream paper, deep pond water, and a handful of i
 
 ## Layout
 
-The workspace is a full-height two-column grid: a fixed 292px pond rail (`--sidebar-w`) running the full viewport height, and the paper main column. The main column stacks its own header (52px, `--header-h`, with its 3px waterline immediately below), transcript, decision cards, and composer — with the per-session controls (`mode`, `permissions`, `model`, `thinking`, `context`) anchored cleanly right beneath the composer box so they stay beside the input without crowding the top header. Under 900px the rail collapses behind a "Projects" menu button and overlays from the left (max-width 86vw). The minimum supported viewport is 720×480.
+The workspace is a full-height two-column grid: a fixed 336px pond rail (`--sidebar-w`) running the full viewport height, and the paper main column. The main column stacks its own header (52px, `--header-h`, with its 3px waterline immediately below), transcript, decision cards, and composer — with the per-session controls (`mode`, `permissions`, `model`, `thinking`, `context`) anchored cleanly right beneath the composer box so they stay beside the input without crowding the top header. Under 900px the rail collapses behind a "Projects" menu button and overlays from the left (max-width 86vw). The minimum supported viewport is 720×480.
 
 The main column stacks: header, transcript, decision cards, composer. Transcript entries center-lighten rather than stretch: user rows and assistant prose cap at 76ch. The composer is a paper card at the foot; the plan-ready bar and action-error strip occupy full width when present.
 
@@ -307,5 +307,5 @@ Edges do the framing. The header base and composer head carry a 3px `double` rul
 - **Don't** add a third shadow, a glow, or a blur beyond the two named shadow tokens; depth is tonal steps and hairlines.
 - **Don't** put machine text (paths, commands, diffs, token counts) in anything but Spline Sans Mono, or prose in anything but Bitter.
 - **Don't** re-draw the duck: the brand mark is the bundled `icon.png` (`src/lib/assets/`), never an inline approximation.
-- **Don't** let the rail grow past its 292px column (`--sidebar-w`) or the workspace lose its 720×480 floor.
+- **Don't** let the rail grow past its 336px column (`--sidebar-w`) or the workspace lose its 720×480 floor.
 - **Don't** rebuild the circled numerals as absolutely-positioned SVG overlays or per-line DOM nodes — the counter implementation is the recorded decision.

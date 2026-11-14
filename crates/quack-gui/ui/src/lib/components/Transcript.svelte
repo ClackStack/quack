@@ -295,7 +295,7 @@ ask quack to do something in this folder</pre>
 	}
 
 	.cap {
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		font-weight: 700;
 		letter-spacing: 0.1em;
 		text-transform: uppercase;
@@ -324,7 +324,7 @@ ask quack to do something in this folder</pre>
 	}
 
 	.turn-btn {
-		font-size: 11px;
+		font-size: 0.6875rem;
 		color: var(--ink-3);
 		padding: 1px 7px;
 		border-radius: var(--r-md);
@@ -349,7 +349,7 @@ ask quack to do something in this folder</pre>
 	.rewind-note {
 		margin: 0;
 		font-family: var(--font-sans);
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink-2);
 	}
 
@@ -360,7 +360,7 @@ ask quack to do something in this folder</pre>
 	}
 
 	.rewind-actions .btn {
-		font-size: 12px;
+		font-size: 0.75rem;
 		padding: 4px 10px;
 	}
 
@@ -371,7 +371,7 @@ ask quack to do something in this folder</pre>
 		background: var(--fail-soft);
 		color: var(--fail);
 		font-family: var(--font-sans);
-		font-size: 12px;
+		font-size: 0.75rem;
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
@@ -399,7 +399,7 @@ ask quack to do something in this folder</pre>
 	}
 
 	.chip {
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		background: var(--bg-panel);
 		border: 1px solid var(--rule);
 		border-radius: var(--r-md);
@@ -420,7 +420,7 @@ ask quack to do something in this folder</pre>
 		display: flex;
 		align-items: center;
 		gap: 7px;
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		font-weight: 700;
 		letter-spacing: 0.1em;
 		text-transform: uppercase;
@@ -442,7 +442,7 @@ ask quack to do something in this folder</pre>
 
 	.reasoning {
 		color: var(--ink-3);
-		font-size: 13px;
+		font-size: 0.8125rem;
 		border-left: 1px solid var(--rule);
 		padding-left: 12px;
 	}
@@ -463,7 +463,7 @@ ask quack to do something in this folder</pre>
 	.compacted {
 		align-self: center;
 		color: var(--ink-3);
-		font-size: 12px;
+		font-size: 0.75rem;
 		font-family: var(--font-serif);
 		font-style: italic;
 		border: 1px dashed var(--rule);
@@ -478,7 +478,7 @@ ask quack to do something in this folder</pre>
 		border-radius: var(--r-lg);
 		padding: 4px 12px;
 		color: var(--ink-3);
-		font-size: 12px;
+		font-size: 0.75rem;
 	}
 
 	.pruned summary {
@@ -492,12 +492,12 @@ ask quack to do something in this folder</pre>
 		margin: 6px 0 2px;
 		padding-left: 18px;
 		font-family: var(--font-mono);
-		font-size: 11px;
+		font-size: 0.6875rem;
 		color: var(--ink-2);
 	}
 
 	.system {
-		font-size: 13px;
+		font-size: 0.8125rem;
 		padding: 8px 12px;
 		border-radius: var(--r-md);
 		border: 1px solid var(--rule);
@@ -521,12 +521,12 @@ ask quack to do something in this folder</pre>
 		align-items: center;
 		gap: 8px;
 		color: var(--ink-3);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 	}
 
 	.measure {
 		font-family: var(--font-mono);
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 	}
 
 	.cursor {

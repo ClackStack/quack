@@ -214,7 +214,7 @@
 
 	h1 {
 		font-family: var(--font-serif);
-		font-size: 27px;
+		font-size: 1.6875rem;
 		font-weight: 600;
 		line-height: 1.15;
 		letter-spacing: -0.01em;
@@ -227,7 +227,7 @@
 		margin: 0;
 		line-height: 1.55;
 		font-family: var(--font-serif);
-		font-size: 15.5px;
+		font-size: 0.96875rem;
 	}
 
 	.actions {
@@ -264,7 +264,7 @@
 	}
 
 	h2 {
-		font-size: 12px;
+		font-size: 0.75rem;
 		font-weight: 700;
 		letter-spacing: 0.12em;
 		text-transform: uppercase;
@@ -307,13 +307,13 @@
 
 	.path {
 		font-family: var(--font-mono);
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink-3);
 	}
 
 	.hint {
 		color: var(--ink-3);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		margin: 0;
 	}
 </style>

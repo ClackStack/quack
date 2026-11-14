@@ -4,13 +4,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use quack_config::hooks::HookEvent;
-use quack_config::{LayerKind, Loaded};
+use quack_config::{LayerKind, Loaded, NewMcpServer, Secret};
 use quack_lsp::LspManager;
 use quack_mcp::{McpManager, ServerAsk};
 use quack_protocol::PermissionMode;
 use quack_protocol::{
     ApprovalPolicy, CallId, EngineError, EngineErrorKind, Event, ExportFormat, InputItem,
-    InstructionFile, Op, SessionId, SessionInfo, SessionSummary, TurnId, WorkMode, WriteScope,
+    InstructionFile, McpSecretValue, Op, SessionId, SessionInfo, SessionSummary, TurnId, WorkMode,
+    WriteScope,
 };
 use quack_providers::{Message, Provider, StreamEvent};
 use quack_tools::Permissions;
@@ -549,7 +550,12 @@ impl Engine {
     fn on_started(&mut self, outcome: StartupOutcome) {
         self.problem = outcome.problem;
         let Some(setup) = outcome.setup else {
-            if self.resume != Resume::New {
+            let has_resume_target = match &self.resume {
+                Resume::New => false,
+                Resume::Latest => session::project_sessions(&self.config).latest().is_some(),
+                Resume::Id(_) => true,
+            };
+            if has_resume_target {
                 self.warn("cannot resume: no model is ready".into());
             }
             return;
@@ -558,12 +564,7 @@ impl Engine {
         self.session.profile = setup.profile.id.clone();
         let resume = std::mem::take(&mut self.resume);
         let resumed = resume != Resume::New;
-        let (history, plan) = self.open_saved(&resume, &setup).unwrap_or_else(|| {
-            if resume != Resume::New {
-                self.warn("starting a new session".into());
-            }
-            (Vec::new(), String::new())
-        });
+        let (history, plan) = self.open_saved(&resume, &setup).unwrap_or_default();
         self.configure_reasoning(&setup);
         if !plan.is_empty() {
             setup.tool_ctx.plan.restore(&plan);
@@ -2003,6 +2004,103 @@ impl Engine {
                     });
                 });
             }
+            Op::EnableMcp { id } => {
+                let config = self.config.clone();
+                let requested = id.clone();
+                let outcome = tokio::task::spawn_blocking(move || {
+                    config
+                        .reload()
+                        .map_err(|e| e.to_string())?
+                        .enable_mcp(&requested)
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+                match outcome {
+                    Ok(enabled) => {
+                        self.emit(Event::McpEnabled {
+                            id,
+                            path: enabled.path.display().to_string(),
+                        });
+                        self.queued.push_back(Queued::Reload(None));
+                        self.next_queued(done, reload);
+                    }
+                    Err(message) => self.emit(Event::Error {
+                        error: EngineError {
+                            kind: EngineErrorKind::Config,
+                            message,
+                        },
+                    }),
+                }
+            }
+            Op::SaveMcpServer {
+                id,
+                scope,
+                description,
+                command,
+                args,
+                cwd,
+                url,
+                sandbox,
+                env,
+                headers,
+            } => {
+                let layer = match scope {
+                    WriteScope::User => Some(LayerKind::User),
+                    WriteScope::Project => Some(LayerKind::Project),
+                    WriteScope::Session => {
+                        self.warn("MCP servers are saved to the user or project layer".into());
+                        None
+                    }
+                };
+                if let Some(layer) = layer {
+                    let config = self.config.clone();
+                    let requested = id.clone();
+                    let spec = NewMcpServer {
+                        id,
+                        description,
+                        command,
+                        args,
+                        cwd,
+                        url,
+                        sandbox,
+                        env: env
+                            .into_iter()
+                            .map(|(k, v)| (k, secret_from_mcp(v)))
+                            .collect(),
+                        headers: headers
+                            .into_iter()
+                            .map(|(k, v)| (k, secret_from_mcp(v)))
+                            .collect(),
+                    };
+                    let saved = tokio::task::spawn_blocking(move || {
+                        config
+                            .reload()
+                            .map_err(|e| e.to_string())?
+                            .save_mcp_server(layer, spec)
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r);
+                    match saved {
+                        Ok(path) => {
+                            self.emit(Event::McpServerSaved {
+                                id: requested,
+                                path: path.display().to_string(),
+                            });
+                            self.queued.push_back(Queued::Reload(None));
+                            self.next_queued(done, reload);
+                        }
+                        Err(message) => self.emit(Event::Error {
+                            error: EngineError {
+                                kind: EngineErrorKind::Config,
+                                message,
+                            },
+                        }),
+                    }
+                }
+            }
             Op::DetectServers => {
                 let config = self.config.clone();
                 let tx = self.tx.clone();
@@ -3022,6 +3120,8 @@ fn op_name(op: &Op) -> &'static str {
         Op::ListLsp => "list_lsp",
         Op::InitInstructions => "init_instructions",
         Op::RestartMcp { .. } => "restart_mcp",
+        Op::EnableMcp { .. } => "enable_mcp",
+        Op::SaveMcpServer { .. } => "save_mcp_server",
         Op::AddProvider { .. } => "add_provider",
         Op::ListServices => "list_services",
         Op::SignIn { .. } => "sign_in",
@@ -3077,4 +3177,12 @@ fn new_session_id() -> SessionId {
         .map(|d| d.as_nanos())
         .unwrap_or_default();
     SessionId(format!("{nanos:032x}"))
+}
+
+fn secret_from_mcp(value: McpSecretValue) -> Secret {
+    match value {
+        McpSecretValue::Plain { value } => Secret::Plain(value.0),
+        McpSecretValue::Env { env, format } => Secret::Env { env, format },
+        McpSecretValue::Keyring { keyring } => Secret::Keyring { keyring },
+    }
 }

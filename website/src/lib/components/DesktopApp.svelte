@@ -3,7 +3,15 @@
 	import PlateHeading from '#lib/components/PlateHeading.svelte';
 	import { Check, ChevronLeft, ChevronRight, Maximize2, Monitor, Moon, Sun, X } from '@lucide/svelte';
 
-	type ScreenId = 'approval' | 'jobs' | 'workspace' | 'models';
+	type ScreenId =
+		| 'approval'
+		| 'jobs'
+		| 'workspace'
+		| 'models'
+		| 'providers'
+		| 'egress'
+		| 'memory'
+		| 'settings';
 	type PreviewTheme = null | 'light' | 'dark';
 
 	type Screen = {
@@ -19,17 +27,17 @@
 	const screens: Screen[] = [
 		{
 			id: 'approval',
-			tab: 'Specimen approvals',
-			short: 'Numbered diff plate',
-			title: 'Approve file changes on a specimen plate',
+			tab: 'Edit approvals',
+			short: 'Numbered diff & rules',
+			title: 'Approve file edits with full context',
 			summary:
-				'Writes and patches pause for review before touching disk. Circled field marks number every added or removed line alongside the files already edited in this job.',
+				'Writes and patches pause for review before touching disk. Circled line markers highlight every added or removed line alongside persistent rules and rejection feedback.',
 			points: [
-				['One-keystroke decisions', 'Approve a single write, allow it for this session, or reject cleanly with esc.'],
-				['Session control strip', 'Switch Plan or Edit mode, permissions, and model right under the composer.'],
-				['Live file ledger', 'Changed paths stack in the pond rail with an Undo last action ready beside them.']
+				['Decision & rule actions', 'Approve a single write, allow it for this session, save a persistent rule, or explain why not.'],
+				['Attachments & planner strip', 'Attach @ File mentions or images and switch mode, permissions, main model, and planner model below the composer.'],
+				['Exports, undo & memory', 'Branch jobs, export Markdown or JSON transcripts, Undo last writes, and jump to Memory notes in the sidebar.']
 			],
-			alt: 'quack desktop app paused for approval on a specimen-plate diff of src/pond/ducks.ts, with numbered additions, Approve change, Allow for this session, Not this, and the session control strip below the composer'
+			alt: 'quack desktop app paused for approval on a diff preview of src/pond/ducks.ts, with numbered additions, Approve change, Allow for this session, Save rule, Not this — tell quack why, header boundary pills, and model/planner controls below the composer'
 		},
 		{
 			id: 'jobs',
@@ -37,13 +45,13 @@
 			short: 'Urgency queue across repos',
 			title: 'Triage parallel jobs across repositories',
 			summary:
-				'Keep turns running across multiple repositories at once and switch from Projects to the live Jobs queue when a session needs input or hits an error.',
+				'Keep turns running across multiple repositories at once and switch from Projects to the live Jobs queue whenever an approval or timeout needs attention.',
 			points: [
-				['Sorted by urgency', 'Waiting approvals and failures rise above running and ready conversations.'],
+				['Sorted by urgency', 'Waiting approvals and failures rise above running and ready conversations, with quick filter chips by state.'],
 				['Sub-agent & plan status', 'Track active explore sub-agents, tool counts, and plan steps directly on each card.'],
-				['Header waterline', 'A thin progress line under the workspace header traces streaming output while you read elsewhere.']
+				['Header waterline & pills', 'Inspect LSP diagnostics, Offline egress status, and a thin streaming progress line right under the header.']
 			],
-			alt: 'quack desktop app Jobs tab triaging four jobs across demo-pond, quack, and orderly, showing an outside-sandbox approval, a provider timeout error, and an active turn with an explore sub-agent and plan progress bar'
+			alt: 'quack desktop app Jobs tab triaging four jobs across quack, orderly, demo-pond, and field-notes, showing an outside-sandbox approval, a provider timeout error, and an active turn with an explore sub-agent and plan progress bar'
 		},
 		{
 			id: 'workspace',
@@ -51,27 +59,83 @@
 			short: 'Token meter & sparkline',
 			title: 'Watch context pressure and prompt cache hits',
 			summary:
-				'Settled turns collapse thinking traces into an expandable toggle and plot engine metrics in the pond rail as they happen.',
+				'Settled turns fold reasoning into collapsible thinking traces while the sidebar plots live cache reuse, throughput, and pruning thresholds.',
 			points: [
 				['Pruning threshold tick', 'The context bar marks where automatic pruning kicks in so you know when to compact.'],
-				['Per-call cache chart', 'Compare sent tokens, % served from cache, throughput, and time to first token.'],
-				['Collapsible thoughts & tools', 'Inspect field thoughts and written lines inline without burying the conversation.']
+				['Per-call cache chart', 'Compare sent tokens, % reused from cache, throughput (tok/s), and time to first token.'],
+				['Branch & transcript export', 'Branch a conversation or export Markdown or JSON transcripts directly from the active project card.']
 			],
-			alt: 'quack desktop app settled conversation showing collapsed field thoughts, written lines in src/pond/ducks.ts, 16% context meter with pruning tick, 80% cache hit usage sparkline at 43 tok/s, and Undo last'
+			alt: 'quack desktop app settled conversation showing collapsed thinking toggle, written lines in src/pond/ducks.ts, 16% context meter with pruning tick, 80% cache hit usage sparkline at 43 tok/s, and attachment buttons below the composer'
 		},
 		{
 			id: 'models',
-			tab: 'Model picker',
-			short: 'Local servers & providers',
-			title: 'Switch local or API models mid-project',
+			tab: 'Model & planner',
+			short: 'Main & plan-mode switch',
+			title: 'Switch execution and planner models separately',
 			summary:
-				'Keep multiple workspaces pinned in the pond rail and pick from discovered local servers or configured providers with full context sizes and reasoning levels.',
+				'Pin a dedicated Plan-mode architect model beside your main model across multiple workspaces, with live context limits and measured throughput shown inline.',
 			points: [
-				['Providers & limits', 'Groups every model by provider with context window size and supported thinking effort.'],
-				['Per-job model choice', 'Run a deep reasoning model in one repo while another job stays on a fast local server.'],
-				['Same TOML layers as CLI', 'Reads your existing provider files and local discovery with nothing hardcoded inside.']
+				['Planner split pill', 'Pair a reasoning model for planning with a fast local model for edits right from one modal.'],
+				['Local tags & throughput', 'Spot Local / Free endpoints, context window sizes, ~tok/s speed, and thinking effort levels.'],
+				['Same TOML layers as CLI', 'Reads your existing provider files and local server discovery with nothing hardcoded inside.']
 			],
-			alt: 'quack desktop app Choose a model dialog open over four pinned projects, listing dev-local/tiny with 33k ctx and dev-local/thinker with 131k ctx and thinking effort options'
+			alt: 'quack desktop app Choose a model dialog open over four pinned projects, showing active dev-local/tiny at ~43 tok/s alongside Plan mode architect dev-local/thinker'
+		},
+		{
+			id: 'providers',
+			tab: 'Provider setup',
+			short: 'Local servers & API keys',
+			title: 'Discover local servers or wire up providers',
+			summary:
+				'Scan this machine for running local servers without sending inference requests, store API keys in the OS credential store, or point at any OpenAI-compatible URL.',
+			points: [
+				['Local server discovery', 'Looks for running local endpoints on this machine without sending model requests.'],
+				['OS credential storage', 'Hosted keys are stored in the OS credential store, or a private key file when unavailable.'],
+				['Connect by URL', 'Add any lab or gateway endpoint by base URL directly from the setup panel.']
+			],
+			alt: 'quack desktop app Providers setup page showing available dev-local models, Find local servers button, Hosted provider API key form with OS credential store note, and Connect by URL fields'
+		},
+		{
+			id: 'egress',
+			tab: 'Network & sandbox',
+			short: 'Egress & isolation passport',
+			title: 'Inspect network egress and sandbox bounds live',
+			summary:
+				'Click the Offline or Bounded pill in the header to verify every configured host, toggle strict offline mode, and check the active OS command sandbox.',
+			points: [
+				['Strict offline mode', 'Restrict outbound traffic to loopback servers, configured providers, and explicit allow-list hosts.'],
+				['Default-off checks', 'Confirm at a glance that model catalog refresh, update checks, and OpenTelemetry export stay Off.'],
+				['Command sandbox scope', 'Shows active OS command isolation boundaries with a session pause toggle.']
+			],
+			alt: 'quack desktop app Network & Sandbox Boundary dialog showing Strict offline mode ON, dev-local localhost:11434 Local / Loopback destination, catalog/update/OpenTelemetry Off, and active Command Sandbox status'
+		},
+		{
+			id: 'memory',
+			tab: 'Memory notes',
+			short: 'Shared TUI & GUI Markdown',
+			title: 'Browse and edit shared Markdown memory notes',
+			summary:
+				'Review, filter, copy, or edit project and global Markdown memory notes stored in the same paths the terminal CLI reads.',
+			points: [
+				['Project & global scopes', 'Filter across All, Project, or Global notes alongside the live memory index budget meter.'],
+				['Rendered or raw Markdown', 'Switch between rendered Markdown and raw text, create new notes, or copy paths directly.'],
+				['Shared with the terminal', 'Reads and saves the exact same local Markdown note directories across TUI and GUI sessions.']
+			],
+			alt: 'quack desktop app Memory modal showing 1% index fill, project and global scope filters, rust-conventions note rendered as Markdown, and Edit/Copy path actions'
+		},
+		{
+			id: 'settings',
+			tab: 'Settings',
+			short: 'Layered TOML & extensions',
+			title: 'Configure layered TOML, hooks, and MCP servers',
+			summary:
+				'Browse paths, model defaults, agent tools, network, sandbox, Hooks & MCP servers, and raw TOML keys in one UI, saving cleanly to user or project config.',
+			points: [
+				['Explicit save layer', 'Choose whether changes write to user config.toml or workspace .quack/config.toml, with layer badges per key.'],
+				['Cross-section search', 'Filter settings, descriptions, hooks, and MCP servers together without hunting through TOML files.'],
+				['Hooks & MCP lifecycle', 'Inspect stdio/HTTP servers and lifecycle hooks, toggle defaults, and reload config live.']
+			],
+			alt: 'quack desktop app Settings page with Save to User config or Project (.quack) toggle, filter box, seven-section rail, Setup & Models controls with layer badges, Reload config, and Done'
 		}
 	];
 
@@ -135,18 +199,18 @@
 
 	const themeOptions: { value: PreviewTheme; shortLabel: string; restLabel: string; label: string }[] = [
 		{ value: null, shortLabel: 'Match', restLabel: ' site', label: 'Match site' },
-		{ value: 'light', shortLabel: 'Day', restLabel: ' survey', label: 'Day survey' },
-		{ value: 'dark', shortLabel: 'Night', restLabel: ' survey', label: 'Night survey' }
+		{ value: 'light', shortLabel: 'Light', restLabel: '', label: 'Light' },
+		{ value: 'dark', shortLabel: 'Dark', restLabel: '', label: 'Dark' }
 	];
 </script>
 
-{#snippet surveyImage(screen: Screen, eager: boolean, cls: string)}
+{#snippet screenImage(screen: Screen, eager: boolean, cls: string)}
 	{#if previewTheme === null}
 		<img
 			src="/assets/gui/{screen.id}-light.webp"
 			alt={screen.alt}
-			width="2560"
-			height="1720"
+			width="2640"
+			height="1880"
 			loading={eager ? 'eager' : 'lazy'}
 			decoding="async"
 			class="{cls} dark:hidden"
@@ -154,8 +218,8 @@
 		<img
 			src="/assets/gui/{screen.id}-dark.webp"
 			alt={screen.alt}
-			width="2560"
-			height="1720"
+			width="2640"
+			height="1880"
 			loading={eager ? 'eager' : 'lazy'}
 			decoding="async"
 			class="{cls} hidden dark:block"
@@ -164,8 +228,8 @@
 		<img
 			src="/assets/gui/{screen.id}-{previewTheme}.webp"
 			alt={screen.alt}
-			width="2560"
-			height="1720"
+			width="2640"
+			height="1880"
 			loading={eager ? 'eager' : 'lazy'}
 			decoding="async"
 			class={cls}
@@ -229,7 +293,7 @@
 				aria-label="Inspect full-size screenshot: {active.title}"
 				class="block w-full text-left rounded-xl border-2 border-ink overflow-hidden bg-term shadow-[0_18px_40px_-18px_rgba(29,42,58,0.55)] cursor-zoom-in transition-transform hover:-translate-y-0.5"
 			>
-				{@render surveyImage(active, true, 'block w-full h-auto aspect-[1280/860] object-cover')}
+				{@render screenImage(active, true, 'block w-full h-auto aspect-[1320/940] object-cover')}
 			</button>
 			<figcaption class="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-ink-2">
 				<span>Captured from the built-in scripted demo in <code class="text-ink">quack-gui</code>.</span>
@@ -288,8 +352,8 @@
 					? 'border-ink ring-1 ring-ink bg-sky-soft'
 					: 'border-rule bg-paper hover:border-ink/40 hover:bg-wash'}"
 			>
-				<div class="aspect-[1280/860] w-full overflow-hidden rounded-lg border border-rule bg-term">
-					{@render surveyImage(screen, false, 'block w-full h-full object-cover')}
+				<div class="aspect-[1320/940] w-full overflow-hidden rounded-lg border border-rule bg-term">
+					{@render screenImage(screen, false, 'block w-full h-full object-cover')}
 				</div>
 				<span class="mt-2.5 block font-display font-bold text-sm sm:text-base leading-snug text-ink">
 					{screen.tab}
@@ -302,10 +366,12 @@
 	</div>
 
 	<p class="mt-6 rounded-xl border border-rule bg-wash px-4 py-3 text-sm text-ink-2 leading-relaxed">
-		<strong class="font-semibold text-ink">Source preview:</strong> the release archives in
-		<a href="#install" class="text-sky-ink underline underline-offset-2 font-semibold">Install</a> currently
-		package the CLI. To run the desktop window today, build the UI bundle in
-		<code>crates/quack-gui/ui</code> and run <code>cargo build -p quack-gui --features desktop</code>.
+		<strong class="font-semibold text-ink">Separate desktop bundles:</strong> tagged GitHub
+		releases publish unsigned <code>quack-gui</code> packages (<code>.dmg</code>,
+		<code>-setup.exe</code>, <code>.deb</code>, <code>.rpm</code>, and <code>.AppImage</code>) separately from the CLI
+		archives in <a href="#install" class="text-sky-ink underline underline-offset-2 font-semibold">Install</a>.
+		To build from source, bundle the UI in <code>crates/quack-gui/ui</code> and run
+		<code>cargo build -p quack-gui --features desktop</code>.
 	</p>
 </Plate>
 
@@ -336,6 +402,7 @@
 				{#each themeOptions as opt (opt.label)}
 					<button
 						type="button"
+						aria-label={opt.label}
 						aria-pressed={previewTheme === opt.value}
 						onclick={() => (previewTheme = opt.value)}
 						class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold transition-colors {previewTheme === opt.value
@@ -349,7 +416,7 @@
 						{:else}
 							<Moon class="w-3 h-3" aria-hidden="true" />
 						{/if}
-						<span class="hidden sm:inline">{opt.label}</span>
+						<span>{opt.shortLabel}<span class="hidden sm:inline">{opt.restLabel}</span></span>
 					</button>
 				{/each}
 			</div>
@@ -386,7 +453,7 @@
 	</div>
 
 	<div class="flex justify-center">
-		{@render surveyImage(
+		{@render screenImage(
 			active,
 			true,
 			'block max-w-full max-h-[74vh] w-auto h-auto rounded-xl border border-rule bg-term'

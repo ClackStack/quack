@@ -3,10 +3,14 @@ import type {
 	CommandInfo,
 	ContextSegment,
 	DetectedServer,
+	HookConnectionDraft,
+	HookSetupInfo,
 	LspServerInfo,
+	McpSecretValue,
 	McpServerInfo,
 	MemoryNote,
 	Op,
+	ProfileInfo,
 	ServiceInfo,
 	ProviderModels,
 	Question,
@@ -18,7 +22,9 @@ import type {
 	WriteScope
 } from '#lib/protocol';
 import type { AppInfo, ClientEvent, ClientOp, Transport } from '#lib/transport/types';
+import type { HookRunEntry } from './extensions';
 import { recordModelSpeed } from './modelStats';
+import { formatTomlStringArray, type SettingsSectionId } from './settings';
 
 /**
  * One tab's view of one engine (docs/plan/15-desktop-client.md#the-ui): a reducer from
@@ -256,6 +262,13 @@ export class Session {
 	/** Set when "Branch & try another model" asked to open the model picker after fork lands. */
 	modelPickerAfterFork = $state(false);
 	settingSaving = $state(false);
+	settingsOpen = $state(false);
+	settingsTab = $state<SettingsSectionId>('paths');
+	settingFeedback = $state<{ key: string; value: string; path: string; note?: string } | null>(
+		null
+	);
+	settingError = $state<string | null>(null);
+	profiles = $state<{ active: string; forced: boolean; profiles: ProfileInfo[] } | null>(null);
 	egressOpen = $state(false);
 	workspaceFiles = $state<string[] | null>(null);
 	loadingFiles = $state(false);
@@ -266,6 +279,21 @@ export class Session {
 	memoryIndexFill = $state(0);
 	memorySaving = $state(false);
 	memoryError = $state<string | null>(null);
+	hookRuns = $state<HookRunEntry[]>([]);
+	hookPayloadChoice = $state<{ id: string; path: string } | null>(null);
+	hookSaving = $state(false);
+	hookFeedback = $state<string | null>(null);
+	hookError = $state<string | null>(null);
+	hookSetup = $state<HookSetupInfo | null>(null);
+	hookSetupLoading = $state(false);
+	hookSetupSaving = $state(false);
+	hookSetupChecking = $state(false);
+	hookSetupPendingRequest = $state<number | null>(null);
+	hookSetupStatus = $state<{ kind: 'ok' | 'fail' | 'notice'; text: string } | null>(null);
+	hookSetupError = $state<string | null>(null);
+	mcpSaving = $state(false);
+	mcpFeedback = $state<string | null>(null);
+	mcpError = $state<string | null>(null);
 	inputHistory = $state<string[]>([]);
 
 	get canSubmit() {
@@ -289,6 +317,10 @@ export class Session {
 	#progressSinceWarning = false;
 	#pendingForkOpenPicker = false;
 	#reloadAfterSettingSaved = false;
+	#nextHookSetupRequest = 1;
+	#activeHookInspectRequest: number | null = null;
+	#activeHookSaveRequest: number | null = null;
+	#activeHookCheckRequest: number | null = null;
 	#lastRewindAttempt: { back: number; conversation: boolean; files: boolean } | null = null;
 
 	constructor(transport: Transport, tab: number, info: AppInfo, cwd?: string) {
@@ -365,6 +397,7 @@ export class Session {
 				this.starting = false;
 				this.startupDetail = null;
 				this.trustSaving = false;
+				if (this.settingsOpen && this.settingsTab === 'extensions') void this.refreshMcp();
 				if (!this.currentModel) void this.openSetup();
 				break;
 			case 'config_reloaded':
@@ -594,10 +627,24 @@ export class Session {
 				break;
 			case 'setting_saved':
 				this.settingSaving = false;
+				this.settingError = null;
+				this.settingFeedback = {
+					key: ev.key,
+					value: ev.value,
+					path: ev.path,
+					...(ev.note ? { note: ev.note } : {})
+				};
 				if (this.#reloadAfterSettingSaved) {
 					this.#reloadAfterSettingSaved = false;
 					void this.#send({ op: 'reload_config' });
 				}
+				break;
+			case 'profiles':
+				this.profiles = {
+					active: ev.active,
+					forced: ev.forced,
+					profiles: ev.profiles
+				};
 				break;
 			case 'stats':
 				this.stats = ev.report;
@@ -700,6 +747,99 @@ export class Session {
 				this.memorySaving = false;
 				this.memoryError = null;
 				break;
+			case 'hook_ran':
+				this.hookRuns = [
+					{
+						id: ev.id,
+						on: ev.on,
+						outcome: ev.outcome,
+						ms: ev.ms,
+						...(ev.message ? { message: ev.message } : {}),
+						contextTokens: ev.context_tokens ?? 0,
+						at: Date.now()
+					},
+					...this.hookRuns
+				].slice(0, 25);
+				break;
+			case 'hook_payload_choice':
+				this.hookSaving = false;
+				this.hookPayloadChoice = { id: ev.id, path: ev.path };
+				break;
+			case 'hook_enabled':
+				this.hookSaving = false;
+				this.hookError = null;
+				this.hookPayloadChoice = null;
+				this.hookFeedback = ev.note
+					? `Enabled ${ev.id} (${ev.path}): ${ev.note}`
+					: `Enabled hook ${ev.id} (${ev.path}).`;
+				break;
+			case 'mcp_enabled':
+				this.mcpSaving = false;
+				this.mcpError = null;
+				this.mcpFeedback = `Enabled MCP server ${ev.id} (${ev.path}).`;
+				break;
+			case 'mcp_server_saved':
+				this.mcpSaving = false;
+				this.mcpError = null;
+				this.mcpFeedback = `Saved MCP server ${ev.id} (${ev.path}).`;
+				break;
+			case 'hook_setup':
+				if (this.#activeHookInspectRequest === ev.request) {
+					this.#activeHookInspectRequest = null;
+					this.hookSetupLoading = false;
+					this.hookSetupError = null;
+					this.hookSetupStatus = null;
+					this.hookSetup = ev.info;
+				}
+				break;
+			case 'hook_setup_saved':
+				if (this.#activeHookSaveRequest === ev.request) {
+					this.#activeHookSaveRequest = null;
+					this.hookSetupSaving = false;
+					this.hookSetupPendingRequest = null;
+					this.hookSetupError = null;
+					this.hookSetup = ev.info;
+					this.hookSetupStatus = {
+						kind: 'ok',
+						text: ev.note || `Saved connections for ${ev.info.id}.`
+					};
+				}
+				break;
+			case 'hook_setup_pending':
+				if (this.#activeHookSaveRequest === ev.request) {
+					this.hookSetupPendingRequest = ev.request;
+					this.hookSetupStatus = {
+						kind: 'notice',
+						text: 'Saved to file; finishing turn before reloading hook configuration…'
+					};
+				}
+				break;
+			case 'hook_setup_failed':
+				if (this.#activeHookInspectRequest === ev.request) {
+					this.#activeHookInspectRequest = null;
+					this.hookSetupLoading = false;
+					this.hookSetupError = ev.message;
+				} else if (this.#activeHookSaveRequest === ev.request) {
+					this.#activeHookSaveRequest = null;
+					this.hookSetupSaving = false;
+					this.hookSetupPendingRequest = null;
+					this.hookSetupError = ev.message;
+				} else if (this.#activeHookCheckRequest === ev.request) {
+					this.#activeHookCheckRequest = null;
+					this.hookSetupChecking = false;
+					this.hookSetupError = ev.message;
+				}
+				break;
+			case 'hook_check_result':
+				if (this.#activeHookCheckRequest === ev.request) {
+					this.#activeHookCheckRequest = null;
+					this.hookSetupChecking = false;
+					this.hookSetupStatus = {
+						kind: ev.status === 'ok' ? 'ok' : ev.status === 'cancelled' ? 'notice' : 'fail',
+						text: ev.message
+					};
+				}
+				break;
 			case 'notice':
 				this.#sealStreams();
 				this.items.push({ kind: 'system', id: nextId(), tone: 'notice', text: ev.message });
@@ -708,6 +848,12 @@ export class Session {
 				this.#sealStreams();
 				this.turnPending = false;
 				this.settingSaving = false;
+				this.hookSaving = false;
+				this.mcpSaving = false;
+				this.hookSetupLoading = false;
+				this.hookSetupSaving = false;
+				this.hookSetupChecking = false;
+				this.hookSetupPendingRequest = null;
 				this.rewindLoading = false;
 				this.forking = false;
 				if (this.memorySaving) {
@@ -722,10 +868,19 @@ export class Session {
 				this.setupWorking = false;
 				this.items.push({ kind: 'system', id: nextId(), tone: 'warning', text: ev.message });
 				break;
-			case 'error':
+			case 'error': {
+				const wasMcpSaving = this.mcpSaving;
+				const wasHookSaving = this.hookSaving;
 				this.#sealStreams();
 				this.turnPending = false;
+				if (this.settingSaving || ev.error.kind === 'config') {
+					this.settingError = ev.error.message;
+				}
+				if (wasMcpSaving) this.mcpError = ev.error.message;
+				if (wasHookSaving) this.hookError = ev.error.message;
 				this.settingSaving = false;
+				this.hookSaving = false;
+				this.mcpSaving = false;
 				this.rewindLoading = false;
 				this.forking = false;
 				this.memorySaving = false;
@@ -743,6 +898,7 @@ export class Session {
 				});
 				this.streaming = false;
 				break;
+			}
 			default:
 				// Facts the header does not show yet (skills, hooks, LSP, doctor, stats…)
 				// arrive here until their surfaces land (G2/G3).
@@ -768,6 +924,12 @@ export class Session {
 		this.rewindConflict = null;
 		this.forking = false;
 		this.settingSaving = false;
+		this.hookSaving = false;
+		this.mcpSaving = false;
+		this.hookSetupLoading = false;
+		this.hookSetupSaving = false;
+		this.hookSetupChecking = false;
+		this.hookSetupPendingRequest = null;
 		this.memorySaving = false;
 		this.#sealStreams();
 		this.approval = null;
@@ -1124,6 +1286,8 @@ export class Session {
 	) {
 		if (this.settingSaving || this.streaming || this.turnPending) return false;
 		this.settingSaving = true;
+		this.settingError = null;
+		this.settingFeedback = null;
 		this.#reloadAfterSettingSaved = reload;
 		const sent = await this.#send({ op: 'save_setting', key, value, scope });
 		if (!sent) {
@@ -1140,6 +1304,31 @@ export class Session {
 			scope,
 			true
 		);
+	}
+
+	async reloadConfig() {
+		if (this.closed || this.streaming || this.turnPending) return false;
+		this.settingError = null;
+		return this.#send({ op: 'reload_config' });
+	}
+
+	async listProfiles() {
+		if (this.closed) return false;
+		return this.#send({ op: 'list_profiles' });
+	}
+
+	async setProfile(id: string) {
+		if (this.closed || this.streaming || this.turnPending) return false;
+		return this.#send({ op: 'set_profile', id });
+	}
+
+	async pickDirectory(): Promise<string | null> {
+		return this.#transport.pickFolder();
+	}
+
+	clearSettingStatus() {
+		this.settingError = null;
+		this.settingFeedback = null;
 	}
 
 	async refreshMcp() {
@@ -1221,9 +1410,29 @@ export class Session {
 	}
 
 	async openSetup() {
+		this.settingsOpen = false;
 		this.setupOpen = true;
 		this.setupNotice = '';
 		await this.#send({ op: 'list_services' });
+	}
+
+	openSettings(tab?: SettingsSectionId) {
+		if (tab) this.settingsTab = tab;
+		this.setupOpen = false;
+		this.settingsOpen = true;
+		this.settingError = null;
+		if (!this.profiles) void this.listProfiles();
+		if (this.settingsTab === 'extensions') void this.refreshMcp();
+	}
+
+	selectSettingsTab(tab: SettingsSectionId) {
+		this.settingsTab = tab;
+		if (tab === 'extensions') void this.refreshMcp();
+	}
+
+	closeSettings() {
+		this.settingsOpen = false;
+		this.settingError = null;
 	}
 	async detectServers() {
 		if (this.detecting) return;
@@ -1311,5 +1520,187 @@ export class Session {
 		const sent = await this.#send({ op: 'delete_memory', scope, name });
 		if (!sent) this.memorySaving = false;
 		return sent;
+	}
+
+	async restartMcp(id: string) {
+		if (this.closed) return false;
+		this.mcpError = null;
+		const sent = await this.#send({ op: 'restart_mcp', id });
+		if (sent) this.mcpFeedback = `Restart requested for ${id}…`;
+		return sent;
+	}
+
+	async enableMcp(id: string) {
+		if (this.closed || this.mcpSaving || this.streaming || this.turnPending) return false;
+		this.mcpSaving = true;
+		this.mcpError = null;
+		this.mcpFeedback = null;
+		const sent = await this.#send({ op: 'enable_mcp', id });
+		if (!sent) this.mcpSaving = false;
+		return sent;
+	}
+
+	async disableMcp(id: string, scope: WriteScope) {
+		const current = this.info?.mcp_disabled ?? [];
+		const next = current.includes(id) ? current : [...current, id];
+		this.mcpError = null;
+		const ok = await this.saveSetting('mcp.disabled', formatTomlStringArray(next), scope, true);
+		if (ok) this.mcpFeedback = `Disabled MCP server ${id} in ${scope} config.`;
+		return ok;
+	}
+
+	async saveMcpServer(args: {
+		id: string;
+		scope: WriteScope;
+		description: string;
+		command: string;
+		args: string[];
+		cwd: string;
+		url: string;
+		sandbox?: boolean;
+		env: Record<string, McpSecretValue>;
+		headers: Record<string, McpSecretValue>;
+	}) {
+		if (this.closed || this.mcpSaving || this.streaming || this.turnPending) return false;
+		this.mcpSaving = true;
+		this.mcpError = null;
+		this.mcpFeedback = null;
+		const sent = await this.#send({
+			op: 'save_mcp_server',
+			id: args.id,
+			scope: args.scope,
+			description: args.description,
+			command: args.command,
+			args: args.args,
+			cwd: args.cwd,
+			url: args.url,
+			...(args.sandbox === undefined ? {} : { sandbox: args.sandbox }),
+			env: args.env,
+			headers: args.headers
+		});
+		if (!sent) this.mcpSaving = false;
+		return sent;
+	}
+
+	async enableHook(id: string, replacePayload?: boolean | null) {
+		if (this.closed || this.hookSaving || this.streaming || this.turnPending) return false;
+		this.hookSaving = true;
+		this.hookError = null;
+		this.hookFeedback = null;
+		const sent = await this.#send({
+			op: 'enable_hook',
+			id,
+			...(replacePayload === undefined ? {} : { replace_payload: replacePayload })
+		});
+		if (!sent) this.hookSaving = false;
+		return sent;
+	}
+
+	async disableHook(id: string, scope: WriteScope) {
+		const current = this.info?.hooks_disabled ?? [];
+		const next = current.includes(id) ? current : [...current, id];
+		this.hookError = null;
+		const ok = await this.saveSetting('hooks.disabled', formatTomlStringArray(next), scope, true);
+		if (ok) this.hookFeedback = `Disabled hook ${id} in ${scope} config.`;
+		return ok;
+	}
+
+	dismissHookPayloadChoice() {
+		this.hookPayloadChoice = null;
+	}
+
+	async inspectHookSetup(id: string) {
+		if (this.closed || this.hookSetupLoading) return false;
+		await this.cancelHookCheck();
+		const request = this.#nextHookSetupRequest++;
+		this.#activeHookInspectRequest = request;
+		this.hookSetupLoading = true;
+		this.hookSetupError = null;
+		this.hookSetupStatus = null;
+		const sent = await this.#send({ op: 'inspect_hook_setup', id, request });
+		if (!sent) {
+			this.#activeHookInspectRequest = null;
+			this.hookSetupLoading = false;
+		}
+		return sent;
+	}
+
+	async saveHookSetup(args: {
+		id: string;
+		revision: string;
+		connections: HookConnectionDraft[];
+		enable?: boolean | null;
+		replacePayload?: boolean | null;
+	}) {
+		if (this.closed || this.hookSetupSaving) return false;
+		const request = this.#nextHookSetupRequest++;
+		this.#activeHookSaveRequest = request;
+		this.hookSetupSaving = true;
+		this.hookSetupError = null;
+		this.hookSetupStatus = null;
+		this.hookSetupPendingRequest = null;
+		const sent = await this.#send({
+			op: 'save_hook_setup',
+			id: args.id,
+			request,
+			revision: args.revision,
+			connections: args.connections,
+			enable: args.enable ?? null,
+			replace_payload: args.replacePayload ?? null
+		});
+		if (!sent) {
+			this.#activeHookSaveRequest = null;
+			this.hookSetupSaving = false;
+		}
+		return sent;
+	}
+
+	async checkHookSetup(args: {
+		id: string;
+		revision: string;
+		connection: HookConnectionDraft;
+		url: string;
+	}) {
+		if (this.closed || this.hookSetupChecking) return false;
+		const request = this.#nextHookSetupRequest++;
+		this.#activeHookCheckRequest = request;
+		this.hookSetupChecking = true;
+		this.hookSetupError = null;
+		this.hookSetupStatus = { kind: 'notice', text: `Testing connection to ${args.url || args.id}…` };
+		const sent = await this.#send({
+			op: 'check_hook_setup',
+			id: args.id,
+			request,
+			revision: args.revision,
+			connection: args.connection,
+			url: args.url
+		});
+		if (!sent) {
+			this.#activeHookCheckRequest = null;
+			this.hookSetupChecking = false;
+		}
+		return sent;
+	}
+
+	async cancelHookCheck() {
+		const request = this.#activeHookCheckRequest;
+		if (request === null) return false;
+		this.#activeHookCheckRequest = null;
+		this.hookSetupChecking = false;
+		this.hookSetupStatus = { kind: 'notice', text: 'Connection check cancelled.' };
+		return this.#send({ op: 'cancel_hook_check', request });
+	}
+
+	closeHookSetup() {
+		void this.cancelHookCheck();
+		this.#activeHookInspectRequest = null;
+		this.#activeHookSaveRequest = null;
+		this.hookSetup = null;
+		this.hookSetupLoading = false;
+		this.hookSetupSaving = false;
+		this.hookSetupChecking = false;
+		this.hookSetupPendingRequest = null;
+		this.hookSetupStatus = null;
+		this.hookSetupError = null;
 	}
 }

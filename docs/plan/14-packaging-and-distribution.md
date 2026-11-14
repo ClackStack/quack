@@ -184,6 +184,12 @@ the binary and the defaults:
 - The publish job runs `cargo cyclonedx` (0.5.9, pinned) on `quack-cli` for all targets and attaches `quack.cdx.json` (CycloneDX 1.5; 430 components on 2026-10-25).
 - `docs/enterprise.md` is written: packages, the system policy with a checked example, a company defaults bundle, the air-gapped build (run with vendored sources, an empty `CARGO_HOME` and `--offline`), and checking egress.
 
+### Desktop GUI bundles (2026-11-14)
+
+- `.github/workflows/release.yml` adds a `build-gui` job backed by `scripts/package-gui.sh <target>` for the six non-musl desktop targets: `x86_64-unknown-linux-gnu` (`ubuntu-22.04`) and `aarch64-unknown-linux-gnu` (`ubuntu-24.04-arm`) producing `.deb` (`quack-gui_<v>_<arch>.deb`), `.rpm` (`quack-gui-<v>-1.<arch>.rpm`), and `.AppImage` (`quack-gui-<target>.AppImage`); `x86_64-apple-darwin` and `aarch64-apple-darwin` producing `.dmg`; `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` producing NSIS installers (`quack-gui-<target>-setup.exe`). Bundles ship unsigned and include `defaults/`.
+- `crates/quack-gui/tauri.linux.conf.json` sets `"productName": "quack-gui"` on Linux so `.deb` and `.rpm` packages install `/usr/bin/quack-gui` and `/usr/lib/quack-gui/defaults` under `quack-gui` without colliding with CLI `.deb`/`.rpm` (`Package: quack`, `/usr/bin/quack`).
+- The `publish` job also generates `quack-gui.cdx.json` via `cargo cyclonedx` on `crates/quack-gui/Cargo.toml --features desktop` and attaches all `quack-gui-*` assets and sums to `SHA256SUMS`.
+
 ### Still to do
 
 | Platform | Artifacts |

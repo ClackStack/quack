@@ -1,7 +1,11 @@
 <script lang="ts">
 	import type { Session } from '#lib/session.svelte';
 
-	let { session, onClose }: { session: Session; onClose: () => void } = $props();
+	let {
+		session,
+		onClose,
+		onOpenSettings
+	}: { session: Session; onClose: () => void; onOpenSettings?: () => void } = $props();
 
 	let dialogEl: HTMLElement | undefined = $state();
 	const egress = $derived(session.info?.egress);
@@ -188,9 +192,16 @@
 
 		<div class="modal-foot">
 			<span class="foot-note">Defaults are local TOML layers; no endpoints are hardcoded in the binary.</span>
-			<button class="btn" onclick={onClose}>
-				Close <span class="kbd">esc</span>
-			</button>
+			<div class="foot-actions">
+				{#if onOpenSettings}
+					<button type="button" class="btn" onclick={onOpenSettings}>
+						Edit in Settings
+					</button>
+				{/if}
+				<button class="btn" onclick={onClose}>
+					Close <span class="kbd">esc</span>
+				</button>
+			</div>
 		</div>
 	</div>
 </div>
@@ -232,18 +243,18 @@
 	.modal-head h2 {
 		margin: 0;
 		font-family: var(--font-serif);
-		font-size: 18px;
+		font-size: 1.125rem;
 		color: var(--ink);
 	}
 
 	.sub {
 		margin: 4px 0 0;
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		color: var(--ink-2);
 	}
 
 	.close-btn {
-		font-size: 20px;
+		font-size: 1.25rem;
 		line-height: 1;
 		padding: 2px 8px;
 		border-radius: var(--r-md);
@@ -283,14 +294,14 @@
 
 	.card-head h3 {
 		margin: 0;
-		font-size: 14px;
+		font-size: 0.875rem;
 		font-weight: 700;
 		color: var(--ink);
 	}
 
 	.desc {
 		margin: 3px 0 0;
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		color: var(--ink-2);
 		line-height: 1.45;
 	}
@@ -302,7 +313,7 @@
 	}
 
 	.label {
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		font-weight: 700;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
@@ -326,7 +337,7 @@
 		border-radius: var(--r-md);
 		background: var(--bg-raised);
 		border: 1px solid var(--rule-soft);
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		flex-wrap: wrap;
 	}
 
@@ -341,13 +352,13 @@
 
 	.dest-host {
 		font-family: var(--font-mono);
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--ink-2);
 		margin-right: auto;
 	}
 
 	.tag {
-		font-size: 10.5px;
+		font-size: 0.65625rem;
 		font-weight: 600;
 		padding: 1px 7px;
 		border-radius: 999px;
@@ -370,7 +381,7 @@
 	.mono-line {
 		margin: 0;
 		font-family: var(--font-mono);
-		font-size: 12px;
+		font-size: 0.75rem;
 		color: var(--ink);
 	}
 
@@ -387,7 +398,7 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 8px;
-		font-size: 12px;
+		font-size: 0.75rem;
 	}
 
 	.check-k {
@@ -396,7 +407,7 @@
 
 	.check-v {
 		font-family: var(--font-mono);
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--ok);
 	}
 
@@ -406,7 +417,7 @@
 
 	.empty {
 		margin: 0;
-		font-size: 12.5px;
+		font-size: 0.78125rem;
 		color: var(--ink-3);
 	}
 
@@ -421,7 +432,14 @@
 	}
 
 	.foot-note {
-		font-size: 11.5px;
+		font-size: 0.71875rem;
 		color: var(--ink-3);
+	}
+
+	.foot-actions {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex: none;
 	}
 </style>

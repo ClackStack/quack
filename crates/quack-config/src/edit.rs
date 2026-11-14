@@ -64,8 +64,8 @@ impl Loaded {
         key: &str,
         raw: &str,
     ) -> Result<(PathBuf, Option<String>), String> {
-        if key.starts_with("policy") {
-            return Err("policy can only be set in the system layer by an administrator".into());
+        if key.starts_with("policy") || key == "keys" || key.starts_with("keys.") {
+            return Err(format!("`{key}` cannot be set as a flat setting"));
         }
         if self.settings.policy.locks(key) {
             return Err(format!("`{key}` is locked by the system policy"));
@@ -73,8 +73,19 @@ impl Loaded {
         let file = self
             .layer_file(layer)
             .ok_or_else(|| format!("the {layer} layer has no directory"))?;
-        let value = parse_override(raw.trim());
-        set_in_file(&file, key, &value)?;
+        let in_project = self.active_project_trust(layer);
+        if raw.trim() == "null" {
+            if !is_known_setting_key(key) {
+                return Err(format!("unknown setting `{key}`"));
+            }
+            remove_in_file(&file, key)?;
+        } else {
+            let value = parse_override(raw.trim());
+            set_in_file(&file, key, &value)?;
+        }
+        if let Some(decision) = in_project {
+            self.trust_project(decision)?;
+        }
         let note = match self.origin_of(key) {
             Origin::File { layer: l, path } if *l > layer => Some(format!(
                 "still overridden by the {l} layer ({})",
@@ -89,6 +100,24 @@ impl Loaded {
 }
 
 impl Loaded {
+    pub(crate) fn active_project_trust(&self, layer: LayerKind) -> Option<TrustDecision> {
+        if layer != LayerKind::Project {
+            return None;
+        }
+        let decision = match self.project {
+            ProjectStatus::Trusted => TrustDecision::Trusted,
+            ProjectStatus::SettingsOnly => TrustDecision::SettingsOnly,
+            _ => return None,
+        };
+        trust::lookup(
+            &self.dirs.user_data,
+            &self.dirs.workspace_root,
+            &self.dirs.project,
+        )
+        .is_some_and(|f| f.current)
+        .then_some(decision)
+    }
+
     /// Add "always allow" rules to `[permissions] allow`: in the project's
     /// `.quack/config.toml` when `project` is asked for and that file is loaded (its trust
     /// is recorded again, so the edit doesn't make the project untrusted), else in the
@@ -97,21 +126,12 @@ impl Loaded {
         if self.settings.policy.locks("permissions.allow") {
             return Err("`permissions.allow` is locked by the system policy".into());
         }
-        let trusted = match self.project {
-            ProjectStatus::Trusted => Some(TrustDecision::Trusted),
-            ProjectStatus::SettingsOnly => Some(TrustDecision::SettingsOnly),
-            _ => None,
-        };
         // Only while the files still match the trust given to them.
-        let in_project = trusted.filter(|_| {
-            project
-                && trust::lookup(
-                    &self.dirs.user_data,
-                    &self.dirs.workspace_root,
-                    &self.dirs.project,
-                )
-                .is_some_and(|f| f.current)
-        });
+        let in_project = if project {
+            self.active_project_trust(LayerKind::Project)
+        } else {
+            None
+        };
         let layer = if in_project.is_some() {
             LayerKind::Project
         } else {
@@ -322,6 +342,44 @@ pub(crate) fn set_in_text(text: &str, key: &str, value: &Value) -> Result<String
     Ok(out)
 }
 
+fn is_known_setting_key(key: &str) -> bool {
+    if key == "context.window" {
+        return true;
+    }
+    let table = toml::Table::try_from(Settings::default()).unwrap_or_default();
+    merge::leaves(&table).into_iter().any(|(k, _)| k == key)
+}
+
+/// Remove one dotted key from a `config.toml`, keeping comments and other entries untouched.
+fn remove_in_file(file: &Path, key: &str) -> Result<(), String> {
+    let text = match std::fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("cannot read {}: {e}", file.display())),
+    };
+    let Some(updated) =
+        remove_in_text(&text, key).map_err(|e| format!("{}: {e}", file.display()))?
+    else {
+        return Ok(());
+    };
+    write_atomic(file, &updated)
+}
+
+pub(crate) fn remove_in_text(text: &str, key: &str) -> Result<Option<String>, String> {
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| format!("not valid TOML: {}", e.message()))?;
+    let Some((table, leaf)) = existing_table(&mut doc, key) else {
+        return Ok(None);
+    };
+    if table.remove(leaf).is_none() {
+        return Ok(None);
+    }
+    let out = doc.to_string();
+    toml::from_str::<Settings>(&out).map_err(|e| e.message().to_owned())?;
+    Ok(Some(out))
+}
+
 fn to_edit_value(value: &Value) -> Result<toml_edit::Value, String> {
     if value.is_table() {
         return Err("set the keys inside a table one at a time".into());
@@ -467,6 +525,53 @@ mod tests {
             docs.iter()
                 .any(|(k, d)| k == "ui.ascii" && d.contains("ASCII")),
             "{docs:?}"
+        );
+    }
+
+    #[test]
+    fn null_removes_setting_and_project_trust_refreshes() {
+        let out = remove_in_text(
+            "[context]\n# custom cap\nwindow = 16384\nbudget_ratio = 0.85\n",
+            "context.window",
+        )
+        .expect("remove")
+        .expect("changed");
+        assert!(!out.contains("window"), "{out}");
+        assert!(out.contains("budget_ratio = 0.85"), "{out}");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let proj = root.join("repo/.quack");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        std::fs::write(proj.join("config.toml"), "[context]\nwindow = 8192\n").expect("write");
+
+        let mut vars = std::collections::HashMap::new();
+        for (k, sub) in [
+            ("QUACK_SYSTEM_DIR", "system"),
+            ("QUACK_CONFIG_DIR", "user"),
+            ("QUACK_DATA_DIR", "data"),
+            ("QUACK_CACHE_DIR", "cache"),
+        ] {
+            vars.insert(k.to_owned(), std::ffi::OsString::from(root.join(sub)));
+        }
+        vars.insert("QUACK_DEFAULTS_DIR".into(), "none".into());
+        let opts = crate::load::LoadOptions::new(root.join("repo"));
+        let loaded = crate::load_with(&|k| vars.get(k).cloned(), &opts).expect("load");
+        loaded.trust_project(TrustDecision::Trusted).expect("trust");
+        let loaded = crate::load_with(&|k| vars.get(k).cloned(), &opts).expect("load");
+        assert_eq!(loaded.project, ProjectStatus::Trusted);
+        assert_eq!(loaded.settings.context.window, Some(8192));
+
+        loaded
+            .save_setting(LayerKind::Project, "context.window", "null")
+            .expect("unset");
+        let reloaded = crate::load_with(&|k| vars.get(k).cloned(), &opts).expect("reload");
+        assert_eq!(reloaded.project, ProjectStatus::Trusted);
+        assert_eq!(reloaded.settings.context.window, None);
+        assert!(
+            reloaded
+                .save_setting(LayerKind::User, "ui.bogus", "null")
+                .is_err()
         );
     }
 }

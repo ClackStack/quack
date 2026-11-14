@@ -43,6 +43,16 @@ async fn open(
     (registry, tab, rx)
 }
 
+fn warnings_in(events: &[Event]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Warning { message } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn appinfo_snapshot_carries_the_static_facts() {
     let server = MockServer::start().await;
@@ -65,6 +75,11 @@ async fn appinfo_snapshot_carries_the_static_facts() {
         info.permission_mode
     );
     assert!(info.settings.iter().any(|s| s.key == "model.default"));
+    assert!(info.settings.iter().any(|s| s.key == "memory.path"));
+    assert!(info.paths.memory_global.ends_with("memory"));
+    assert!(info.paths.sessions_root.ends_with("sessions"));
+    assert!(!info.paths.user_config.is_empty());
+    assert!(!info.project_status.is_empty());
     assert!(!info.egress.offline);
     assert!(!info.egress.telemetry_enabled);
     assert!(
@@ -307,7 +322,9 @@ async fn opens_without_a_ready_model_even_when_latest_was_requested() {
     .await
     .expect("open does not wait for model readiness")
     .expect("open");
-    collect_until(&mut rx, |ev| matches!(ev, Event::StartupComplete)).await;
+    let (events, _) = collect_until(&mut rx, |ev| matches!(ev, Event::StartupComplete)).await;
+    let warnings = warnings_in(&events);
+    assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
     registry.close(tab).await;
 }
 
@@ -578,5 +595,235 @@ async fn shares_input_history_and_memory_edits_with_tui() {
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].name, "bridge-note");
 
+    registry.close(tab).await;
+}
+
+#[tokio::test]
+async fn save_setting_for_memory_path_updates_resolved_paths_on_reload() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let custom_memory = tmp.path().join("custom-memory");
+    let expected_value = serde_json::Value::String(custom_memory.display().to_string()).to_string();
+    let (registry, tab, mut rx) = open(tmp.path(), &server).await;
+    collect_until(&mut rx, |e| matches!(e, Event::StartupComplete)).await;
+
+    registry
+        .send_op(
+            tab,
+            serde_json::json!({
+                "op": "save_setting",
+                "key": "memory.path",
+                "value": expected_value,
+                "scope": "user"
+            }),
+        )
+        .await
+        .expect("save memory.path");
+    collect_until(
+        &mut rx,
+        |e| matches!(e, Event::SettingSaved { key, .. } if key == "memory.path"),
+    )
+    .await;
+
+    registry
+        .send_op(tab, serde_json::json!({ "op": "reload_config" }))
+        .await
+        .expect("reload");
+    collect_until(&mut rx, |e| matches!(e, Event::ConfigReloaded)).await;
+    let message = until(&mut rx, |m| matches!(m.payload, Payload::Info { .. })).await;
+    let Payload::Info { info } = message.payload else {
+        unreachable!()
+    };
+    assert_eq!(
+        info.paths.memory_global,
+        custom_memory.display().to_string()
+    );
+    registry.close(tab).await;
+}
+
+#[tokio::test]
+async fn hooks_and_mcp_snapshot_and_save_enable_round_trip() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let user_hooks = tmp.path().join("user").join("hooks.d");
+    std::fs::create_dir_all(&user_hooks).expect("mkdir hooks.d");
+    std::fs::write(
+        user_hooks.join("pre-edit.toml"),
+        "enabled = false\ndescription = \"Verify edit prerequisites\"\nevent = \"pre_tool\"\ncommand = [\"true\"]\n",
+    )
+    .expect("write hook");
+
+    let (registry, tab, mut rx) = open(tmp.path(), &server).await;
+    let initial = until(&mut rx, |m| matches!(m.payload, Payload::Info { .. })).await;
+    let Payload::Info { info } = initial.payload else {
+        unreachable!()
+    };
+    let hook = info
+        .hooks
+        .iter()
+        .find(|h| h.id == "pre-edit")
+        .expect("pre-edit hook in snapshot");
+    assert!(!hook.enabled);
+    assert!(hook.can_toggle);
+    assert_eq!(hook.event.as_deref(), Some("pre_tool"));
+    assert_eq!(hook.description, "Verify edit prerequisites");
+
+    collect_until(&mut rx, |e| matches!(e, Event::StartupComplete)).await;
+
+    registry
+        .send_op(
+            tab,
+            serde_json::json!({
+                "op": "save_mcp_server",
+                "id": "local-tools",
+                "scope": "user",
+                "description": "Local loopback MCP",
+                "command": "",
+                "args": [],
+                "cwd": "",
+                "url": "http://127.0.0.1:1/mcp",
+                "env": {},
+                "headers": {
+                    "Authorization": { "kind": "env", "env": "LOCAL_MCP_TOKEN", "format": "Bearer {}" }
+                }
+            }),
+        )
+        .await
+        .expect("save_mcp_server");
+    collect_until(
+        &mut rx,
+        |e| matches!(e, Event::McpServerSaved { id, .. } if id == "local-tools"),
+    )
+    .await;
+    let msg = until(&mut rx, |m| matches!(m.payload, Payload::Info { .. })).await;
+    let Payload::Info { info } = msg.payload else {
+        unreachable!()
+    };
+    let mcp = info
+        .mcp
+        .iter()
+        .find(|s| s.id == "local-tools")
+        .expect("saved mcp server in snapshot");
+    assert!(mcp.enabled);
+    assert!(mcp.can_toggle);
+    assert_eq!(mcp.transport.as_deref(), Some("http"));
+    assert_eq!(mcp.target, "http://127.0.0.1:1/mcp");
+    assert_eq!(mcp.header_keys, vec!["Authorization"]);
+    collect_until(&mut rx, |e| matches!(e, Event::StartupComplete)).await;
+
+    registry
+        .send_op(
+            tab,
+            serde_json::json!({
+                "op": "save_setting",
+                "key": "mcp.disabled",
+                "value": "[\"local-tools\"]",
+                "scope": "user"
+            }),
+        )
+        .await
+        .expect("disable mcp");
+    collect_until(
+        &mut rx,
+        |e| matches!(e, Event::SettingSaved { key, .. } if key == "mcp.disabled"),
+    )
+    .await;
+    registry
+        .send_op(tab, serde_json::json!({ "op": "reload_config" }))
+        .await
+        .expect("reload");
+    let msg = until(&mut rx, |m| matches!(m.payload, Payload::Info { .. })).await;
+    let Payload::Info { info } = msg.payload else {
+        unreachable!()
+    };
+    assert_eq!(info.mcp_disabled, vec!["local-tools"]);
+    assert!(
+        !info
+            .mcp
+            .iter()
+            .find(|s| s.id == "local-tools")
+            .expect("mcp")
+            .enabled
+    );
+    collect_until(&mut rx, |e| matches!(e, Event::StartupComplete)).await;
+
+    registry
+        .send_op(
+            tab,
+            serde_json::json!({ "op": "enable_mcp", "id": "local-tools" }),
+        )
+        .await
+        .expect("enable_mcp");
+    collect_until(
+        &mut rx,
+        |e| matches!(e, Event::McpEnabled { id, .. } if id == "local-tools"),
+    )
+    .await;
+    let msg = until(&mut rx, |m| matches!(m.payload, Payload::Info { .. })).await;
+    let Payload::Info { info } = msg.payload else {
+        unreachable!()
+    };
+    assert!(info.mcp_disabled.is_empty());
+    assert!(
+        info.mcp
+            .iter()
+            .find(|s| s.id == "local-tools")
+            .expect("mcp")
+            .enabled
+    );
+    collect_until(&mut rx, |e| matches!(e, Event::StartupComplete)).await;
+
+    registry
+        .send_op(
+            tab,
+            serde_json::json!({ "op": "enable_hook", "id": "pre-edit" }),
+        )
+        .await
+        .expect("enable_hook");
+    collect_until(
+        &mut rx,
+        |e| matches!(e, Event::HookEnabled { id, .. } if id == "pre-edit"),
+    )
+    .await;
+    let msg = until(&mut rx, |m| matches!(m.payload, Payload::Info { .. })).await;
+    let Payload::Info { info } = msg.payload else {
+        unreachable!()
+    };
+    assert!(
+        info.hooks
+            .iter()
+            .find(|h| h.id == "pre-edit")
+            .expect("hook")
+            .enabled
+    );
+
+    registry.close(tab).await;
+}
+
+#[tokio::test]
+async fn opening_new_project_with_latest_emits_no_warning() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(r#"{"data":[]}"#))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = common::workspace(tmp.path(), &server.uri());
+    let registry = Registry::with_parts(fixed_loader(loaded), tmp.path().join("gui-data"));
+    let (sink, mut rx) = collecting_sink();
+    let tab = registry
+        .open(ws_of(tmp.path()), Resume::Latest, sink)
+        .await
+        .expect("open");
+    let (events, _) = collect_until(&mut rx, |e| matches!(e, Event::StartupComplete)).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::SessionConfigured { .. })),
+        "expected SessionConfigured before StartupComplete: {events:?}"
+    );
+    let warnings = warnings_in(&events);
+    assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
     registry.close(tab).await;
 }

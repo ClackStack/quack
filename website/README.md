@@ -11,7 +11,7 @@ It is laid out as plates in a field guide, with the TUI's own ASCII duck (`_(o)>
 1. **quack**: "Any model. Any provider. No leaks.", the install command (with a Plucked switch for the install without hosted-service providers, and the archive for the visitor's detected platform), and the duck with four field marks that link into the grinder.
 2. **Grinder**: the same models through a generic harness and through quack; pick a failure to see what each does.
 3. **In the wild**: three example sessions drawn the way the TUI draws them, including Plan + Allow proposing tests for review. Work mode and approvals appear separately in the status bar.
-4. **Desktop app**: four interactive screenshots of `quack-gui` (specimen-plate diff approval, multi-project Jobs queue, context and cache telemetry, and model picker) with Day/Night survey switching and full-size zoom.
+4. **Desktop app**: eight interactive screenshots of `quack-gui` (diff-preview edit approvals, multi-project Jobs queue, context and cache telemetry, model & planner picker, provider setup, network & sandbox boundary, shared Memory notes, and layered Settings) with Light/Dark theme switching and full-size zoom.
 5. **Field marks**: the Plan/Edit × Ask/Allow matrix, then every other README feature, one line each, grouped. Mode descriptions follow [`docs/modes.md`](../docs/modes.md); keep the matrix, terminal example and configuration reference in step.
 6. **Measured**: quack's own dated eval runs from `docs/plan/roadmap.md`, newest first, and the FrontierHarness Eval chart (quack has not been run on it).
 7. **For teams**: what administrators need: nothing built in, host policy, locked settings, enforced hooks, `quack-plucked`.
