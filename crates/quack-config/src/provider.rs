@@ -194,6 +194,8 @@ pub struct Tls {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Http {
+    /// Covers the TCP connect, any proxy handshake and TLS, shared across the host's
+    /// addresses, so a slow VPN needs some room.
     pub timeout_connect_secs: u64,
     /// Long prefill on big contexts can be slow.
     pub timeout_idle_secs: u64,
@@ -209,7 +211,7 @@ pub struct Http {
 impl Default for Http {
     fn default() -> Self {
         Self {
-            timeout_connect_secs: 10,
+            timeout_connect_secs: 30,
             timeout_idle_secs: 300,
             timeout_first_byte_secs: 0,
             max_retries: 3,

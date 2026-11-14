@@ -63,7 +63,7 @@ query strings and fragments are omitted from API requests and added context.
 Descriptions are limited to 1,200 characters, with explicit cut markers. Diffs
 are loaded in full. A diff above 9,000 bytes produces a warning in the hook's
 user-visible message showing its size. This hook sets `full_context = true` to
-preserve stdout and context in full through the engine. Above 8,000 estimated
+preserve stdout and context in full through the engine. Above 32,000 estimated
 context tokens the engine also emits a warning. API errors appear beside the
 affected review or diff, so another review can still load. Server-side diff
 limits still apply, including GitLab's raw-diff limits. These snapshots describe

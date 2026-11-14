@@ -160,7 +160,12 @@ fn main() -> ExitCode {
                     path,
                 });
             match quack_tui::run(engine, config, trace).await {
-                Ok(()) => exit::OK,
+                Ok(resume_id) => {
+                    if let Some(id) = resume_id {
+                        println!("resume with: quack -s {id}");
+                    }
+                    exit::OK
+                }
                 Err(e) => {
                     eprintln!("error: terminal: {e}");
                     exit::AGENT_ERROR

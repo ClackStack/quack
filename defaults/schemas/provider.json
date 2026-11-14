@@ -100,7 +100,8 @@
           "type": "string"
         },
         "timeout_connect_secs": {
-          "default": 10,
+          "default": 30,
+          "description": "Covers the TCP connect, any proxy handshake and TLS, shared across the host's\naddresses, so a slow VPN needs some room.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -603,7 +604,7 @@
       "default": {
         "max_retries": 3,
         "proxy": "",
-        "timeout_connect_secs": 10,
+        "timeout_connect_secs": 30,
         "timeout_first_byte_secs": 0,
         "timeout_idle_secs": 300
       }

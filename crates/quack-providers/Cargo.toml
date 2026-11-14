@@ -30,7 +30,7 @@ tracing.workspace = true
 ring = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "net", "io-util"] }
 wiremock.workspace = true
 tempfile.workspace = true
 ring = { workspace = true }

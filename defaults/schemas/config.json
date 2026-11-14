@@ -306,6 +306,11 @@
           "$ref": "#/$defs/ListOrAppend",
           "default": []
         },
+        "http1_only": {
+          "default": false,
+          "description": "Speak HTTP/1.1 only, one connection per request, instead of sharing one HTTP/2\nconnection. Try it when a VPN or proxy leaves connections stale.",
+          "type": "boolean"
+        },
         "offline": {
           "default": false,
           "description": "Block all egress except provider base URLs and `egress_allow`.",
@@ -313,7 +318,7 @@
         },
         "proxy": {
           "default": "",
-          "description": "Empty: `HTTPS_PROXY` / system.",
+          "description": "Empty: `HTTPS_PROXY` / system. Hosts in `NO_PROXY` always go direct.",
           "type": "string"
         }
       },
@@ -713,6 +718,7 @@
       "default": {
         "ca_bundle": "",
         "egress_allow": [],
+        "http1_only": false,
         "offline": false,
         "proxy": ""
       }

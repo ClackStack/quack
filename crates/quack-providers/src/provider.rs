@@ -51,7 +51,11 @@ pub struct Provider {
     /// Shared so a clone for streaming copies one word, not the whole file.
     pub file: Arc<ProviderFile>,
     api: Api,
-    client: reqwest::Client,
+    /// What the client is built from, to build a fresh one when a connection goes stale.
+    spec: Arc<ClientSpec>,
+    /// Shared by every clone, so a client replaced after a stall ([`Provider::renew_client`])
+    /// serves them all.
+    client: Arc<RwLock<Pooled>>,
     base_url: String,
     /// Shared by every clone, so a new key ([`Provider::take_key`]) reaches them all.
     /// The map under the lock is itself shared, so a request copies one `Arc`.
@@ -139,7 +143,8 @@ impl Provider {
             insert_header(&mut headers, "anthropic-version", anthropic::VERSION, false)?;
         }
 
-        let client = build_client(&file, network, env)?;
+        let spec = ClientSpec::resolve(&file, network, env)?;
+        let client = spec.build()?;
         #[cfg(feature = "auth-chatgpt")]
         let mut login = None;
         if let Some(a) = &file.auth {
@@ -190,7 +195,11 @@ impl Provider {
             dialect: openai_chat::Dialect::of(&base_url),
             base_url,
             file: Arc::new(file),
-            client,
+            spec: Arc::new(spec),
+            client: Arc::new(RwLock::new(Pooled {
+                generation: 0,
+                client,
+            })),
             headers: Arc::new(RwLock::new(Arc::new(headers))),
             extra,
             #[cfg(feature = "proto-openai-responses")]
@@ -265,6 +274,41 @@ impl Provider {
         }
     }
 
+    /// The current client, with its generation for [`Provider::renew_client`].
+    fn client(&self) -> (u64, reqwest::Client) {
+        let pooled = match self.client.read() {
+            Ok(p) => p,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        (pooled.generation, pooled.client.clone())
+    }
+
+    /// After a timeout or network error, replace the client, and with it every pooled
+    /// connection. Dropping a request leaves its HTTP/2 connection in the pool, so without
+    /// this a retry would go down the same dead connection; this is a browser's refresh.
+    /// Several requests failing on one client replace it once.
+    fn renew_client(&self, stale: u64, e: &ProviderError) {
+        if !matches!(e.kind, ErrorKind::Timeout | ErrorKind::Network) {
+            return;
+        }
+        let fresh = match self.spec.build() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(provider = %self.id, error = %e, "could not renew the HTTP client");
+                return;
+            }
+        };
+        let mut pooled = match self.client.write() {
+            Ok(p) => p,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if pooled.generation == stale {
+            tracing::debug!(provider = %self.id, "new HTTP client after a stalled request");
+            pooled.generation += 1;
+            pooled.client = fresh;
+        }
+    }
+
     /// The headers for one request, with a current token for a signed-in provider.
     async fn request_headers(&self) -> Result<RequestHeaders, ProviderError> {
         #[cfg(feature = "auth-chatgpt")]
@@ -331,8 +375,9 @@ impl Provider {
         Duration::from_secs(secs.max(1))
     }
 
+    /// A models listing: the connect timeout plus time for the server to answer.
     fn discovery_timeout(&self) -> Duration {
-        Duration::from_secs(self.file.http.timeout_connect_secs.max(1) * 3)
+        Duration::from_secs(self.file.http.timeout_connect_secs.max(1) + 20)
     }
 
     async fn get_json(&self, path: &str) -> Result<serde_json::Value, ProviderError> {
@@ -340,14 +385,16 @@ impl Provider {
     }
 
     async fn get_json_at(&self, url: String) -> Result<serde_json::Value, ProviderError> {
+        let (generation, client) = self.client();
         let resp = self
             .request_headers()
             .await?
-            .apply(self.client.get(url))
+            .apply(client.get(url))
             .timeout(self.discovery_timeout())
             .send()
             .await
-            .map_err(|e| ProviderError::from_reqwest(&e))?;
+            .map_err(|e| ProviderError::from_reqwest(&e))
+            .inspect_err(|e| self.renew_client(generation, e))?;
         let resp = check_status(resp).await?;
         resp.json()
             .await
@@ -405,7 +452,7 @@ impl Provider {
             .request_headers()
             .await
             .ok()?
-            .apply(self.client.post(self.url(ollama::SHOW_PATH)))
+            .apply(self.client().1.post(self.url(ollama::SHOW_PATH)))
             .timeout(self.discovery_timeout())
             .json(&serde_json::json!({ "model": model }))
             .send()
@@ -485,7 +532,7 @@ impl Provider {
         // A plain header set never changes mid-turn, so every retry reuses the first clone;
         // a signed-in provider refreshes its token per attempt.
         let mut shared: Option<RequestHeaders> = None;
-        let resp = loop {
+        let (generation, resp) = loop {
             let headers = match &mut shared {
                 Some(h) => h.clone(),
                 None => {
@@ -502,9 +549,11 @@ impl Provider {
                     h
                 }
             };
+            // Taken per attempt: a retry after a stall gets the fresh client.
+            let (generation, client) = self.client();
             let send = headers
                 .apply(
-                    self.client
+                    client
                         .post(self.url(&path))
                         .header(reqwest::header::ACCEPT, accept)
                         .json(&body),
@@ -519,8 +568,11 @@ impl Provider {
                     format!("no response in {}s", first_byte.as_secs()),
                 )),
             };
+            if let Err(e) = &result {
+                self.renew_client(generation, e);
+            }
             match result {
-                Ok(r) => break r,
+                Ok(r) => break (generation, r),
                 Err(e) if e.retryable() && attempt < self.file.http.max_retries => {
                     let wait = backoff(attempt, &e);
                     tracing::warn!(provider = %self.id, attempt, ?wait, error = %e, "retrying");
@@ -564,7 +616,10 @@ impl Provider {
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx.send(Err(ProviderError::from_reqwest(&e))).await;
+                    // Not retried, but the next request shouldn't use this connection.
+                    let e = ProviderError::from_reqwest(&e);
+                    self.renew_client(generation, &e);
+                    let _ = tx.send(Err(e)).await;
                     return;
                 }
             };
@@ -784,7 +839,9 @@ fn install_ring() {
 pub fn http_client(network: &NetworkSettings, env: Env<'_>) -> Result<reqwest::Client, String> {
     let file: ProviderFile =
         serde_json::from_value(serde_json::json!({ "base_url": "" })).map_err(|e| e.to_string())?;
-    build_client(&file, network, env).map_err(|e| e.message)
+    ClientSpec::resolve(&file, network, env)
+        .and_then(|spec| spec.build())
+        .map_err(|e| e.message)
 }
 
 /// Like [`http_client`], leaving redirects to the caller, who can check each destination.
@@ -794,112 +851,235 @@ pub(crate) fn unredirected_client(
 ) -> Result<reqwest::Client, String> {
     let file: ProviderFile =
         serde_json::from_value(serde_json::json!({ "base_url": "" })).map_err(|e| e.to_string())?;
-    client_builder(&file, network, env)
+    ClientSpec::resolve(&file, network, env)
         .map_err(|e| e.message)?
+        .builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("HTTP client: {e}"))
 }
 
+#[cfg(test)]
 fn build_client(
     file: &ProviderFile,
     network: &NetworkSettings,
     env: Env<'_>,
 ) -> Result<reqwest::Client, ProviderError> {
-    client_builder(file, network, env)?
-        .build()
-        .map_err(|e| ProviderError::new(ErrorKind::Config, format!("HTTP client: {e}")))
+    ClientSpec::resolve(file, network, env)?.build()
 }
 
-fn client_builder(
-    file: &ProviderFile,
-    network: &NetworkSettings,
-    env: Env<'_>,
-) -> Result<reqwest::ClientBuilder, ProviderError> {
-    install_ring();
-    let config = |msg: String| ProviderError::new(ErrorKind::Config, msg);
-    let read = |label: &str, path: &str| {
-        std::fs::read(expand_home(path, env)).map_err(|e| config(format!("{label} `{path}`: {e}")))
-    };
-    let http = &file.http;
-    let mut b = reqwest::Client::builder()
-        .user_agent(concat!("quack/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(http.timeout_connect_secs.max(1)))
-        .read_timeout(Duration::from_secs(http.timeout_idle_secs.max(1)));
+/// How often an HTTP/2 connection with nothing arriving is PINGed, and how long the answer
+/// may take. A connection that died quietly (a VPN that reconnected, a local proxy that
+/// keeps its socket open after the path behind it went) is then closed and leaves the
+/// pool, instead of taking every request sent down it. TCP keepalive can't see this when
+/// the socket's other end is a local proxy or VPN client that is still alive.
+const H2_PING_INTERVAL: Duration = Duration::from_secs(20);
+const H2_PING_TIMEOUT: Duration = Duration::from_secs(10);
 
-    let env_str = |key: &str| {
-        env(key)
-            .or_else(|| std::env::var_os(key))
-            .and_then(|v| v.into_string().ok())
-            .filter(|s| !s.is_empty())
-    };
+/// The client in use and how many times it has been replaced.
+#[derive(Debug)]
+struct Pooled {
+    generation: u64,
+    client: reqwest::Client,
+}
 
-    let proxy = Some(http.proxy.as_str())
-        .filter(|p| !p.is_empty())
-        .map(str::to_owned)
-        .or_else(|| Some(network.proxy.clone()).filter(|p| !p.is_empty()))
-        .or_else(|| {
-            [
-                "HTTPS_PROXY",
-                "https_proxy",
-                "HTTP_PROXY",
-                "http_proxy",
-                "ALL_PROXY",
-                "all_proxy",
-            ]
+/// Everything a client is built from, read once from the provider file, the settings and
+/// the environment (proxy, CA and key files), so a fresh client can be built mid-turn.
+#[derive(Debug, Clone)]
+struct ClientSpec {
+    connect: Duration,
+    idle: Duration,
+    proxy: Option<reqwest::Proxy>,
+    roots: Vec<reqwest::Certificate>,
+    identity: Option<reqwest::Identity>,
+    insecure: bool,
+    http1_only: bool,
+    network: NetworkSettings,
+    /// HTTP/2 without TLS, so tests can reach a plain mock server over HTTP/2.
+    #[cfg(test)]
+    h2c: bool,
+}
+
+impl ClientSpec {
+    fn resolve(
+        file: &ProviderFile,
+        network: &NetworkSettings,
+        env: Env<'_>,
+    ) -> Result<Self, ProviderError> {
+        let config = |msg: String| ProviderError::new(ErrorKind::Config, msg);
+        let read = |label: &str, path: &str| {
+            std::fs::read(expand_home(path, env))
+                .map_err(|e| config(format!("{label} `{path}`: {e}")))
+        };
+        let http = &file.http;
+        let env_str = |key: &str| {
+            env(key)
+                .or_else(|| std::env::var_os(key))
+                .and_then(|v| v.into_string().ok())
+                .filter(|s| !s.is_empty())
+        };
+
+        let proxy = Some(http.proxy.as_str())
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .or_else(|| Some(network.proxy.clone()).filter(|p| !p.is_empty()))
+            .or_else(|| {
+                [
+                    "HTTPS_PROXY",
+                    "https_proxy",
+                    "HTTP_PROXY",
+                    "http_proxy",
+                    "ALL_PROXY",
+                    "all_proxy",
+                ]
+                .into_iter()
+                .find_map(env_str)
+            });
+        // A proxy set here replaces reqwest's own lookup, which would have read NO_PROXY:
+        // read it ourselves, or hosts meant to go direct (a VPN's internal ones) go through
+        // the proxy.
+        let no_proxy = ["NO_PROXY", "no_proxy"]
             .into_iter()
             .find_map(env_str)
-        });
-    if let Some(ref p) = proxy {
-        b = b.proxy(reqwest::Proxy::all(p).map_err(|e| config(format!("proxy `{p}`: {e}")))?);
+            .and_then(|s| reqwest::NoProxy::from_string(&s));
+        let proxy = match proxy {
+            Some(p) => Some(
+                reqwest::Proxy::all(&p)
+                    .map_err(|e| config(format!("proxy `{p}`: {e}")))?
+                    .no_proxy(no_proxy),
+            ),
+            None => None,
+        };
+
+        let mut roots = Vec::new();
+        let mut ca_files = Vec::new();
+        if !network.ca_bundle.is_empty() {
+            ca_files.push(network.ca_bundle.clone());
+        }
+        if let Some(ca) = file.tls.ca_file.as_deref().filter(|s| !s.is_empty()) {
+            ca_files.push(ca.to_owned());
+        }
+        if ca_files.is_empty() {
+            ca_files.extend(
+                ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"]
+                    .into_iter()
+                    .find_map(env_str),
+            );
+        }
+        for ca in &ca_files {
+            let pem = read("CA file", ca)?;
+            roots.extend(
+                reqwest::Certificate::from_pem_bundle(&pem)
+                    .map_err(|e| config(format!("CA file `{ca}`: {e}")))?,
+            );
+        }
+        let identity = match (&file.tls.client_cert, &file.tls.client_key) {
+            (Some(cert), Some(key)) => {
+                let mut pem = read("client_cert", cert)?;
+                pem.push(b'\n');
+                pem.extend(read("client_key", key)?);
+                Some(
+                    reqwest::Identity::from_pem(&pem)
+                        .map_err(|e| config(format!("client certificate: {e}")))?,
+                )
+            }
+            (None, None) => None,
+            _ => {
+                return Err(config(
+                    "tls.client_cert and tls.client_key must be set together".into(),
+                ));
+            }
+        };
+        if file.tls.insecure_skip_verify {
+            tracing::warn!(provider = ?file.id, "TLS certificate verification is disabled");
+        }
+        Ok(Self {
+            connect: Duration::from_secs(http.timeout_connect_secs.max(1)),
+            idle: Duration::from_secs(http.timeout_idle_secs.max(1)),
+            proxy,
+            roots,
+            identity,
+            insecure: file.tls.insecure_skip_verify,
+            http1_only: network.http1_only,
+            network: network.clone(),
+            #[cfg(test)]
+            h2c: false,
+        })
     }
 
-    let mut roots = Vec::new();
-    let mut ca_files = Vec::new();
-    if !network.ca_bundle.is_empty() {
-        ca_files.push(network.ca_bundle.clone());
-    }
-    if let Some(ca) = file.tls.ca_file.as_deref().filter(|s| !s.is_empty()) {
-        ca_files.push(ca.to_owned());
-    }
-    if ca_files.is_empty() {
-        ca_files.extend(
-            ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"]
-                .into_iter()
-                .find_map(env_str),
-        );
-    }
-    for ca in &ca_files {
-        let pem = read("CA file", ca)?;
-        roots.extend(
-            reqwest::Certificate::from_pem_bundle(&pem)
-                .map_err(|e| config(format!("CA file `{ca}`: {e}")))?,
-        );
-    }
-    if !roots.is_empty() {
-        b = b.tls_certs_merge(roots);
-    }
-    match (&file.tls.client_cert, &file.tls.client_key) {
-        (Some(cert), Some(key)) => {
-            let mut pem = read("client_cert", cert)?;
-            pem.push(b'\n');
-            pem.extend(read("client_key", key)?);
-            let id = reqwest::Identity::from_pem(&pem)
-                .map_err(|e| config(format!("client certificate: {e}")))?;
-            b = b.identity(id);
+    fn builder(&self) -> reqwest::ClientBuilder {
+        install_ring();
+        let mut b = reqwest::Client::builder()
+            .user_agent(concat!("quack/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(self.connect)
+            .read_timeout(self.idle)
+            .http2_keep_alive_interval(H2_PING_INTERVAL)
+            .http2_keep_alive_timeout(H2_PING_TIMEOUT)
+            .http2_keep_alive_while_idle(true);
+        if self.http1_only {
+            b = b.http1_only();
         }
-        (None, None) => {}
-        _ => {
-            return Err(config(
-                "tls.client_cert and tls.client_key must be set together".into(),
-            ));
+        #[cfg(test)]
+        if self.h2c {
+            b = b.http2_prior_knowledge();
         }
+        if let Some(p) = &self.proxy {
+            b = b.proxy(p.clone());
+        }
+        if !self.roots.is_empty() {
+            b = b.tls_certs_merge(self.roots.clone());
+        }
+        if let Some(id) = &self.identity {
+            b = b.identity(id.clone());
+        }
+        if self.insecure {
+            b = b.tls_danger_accept_invalid_certs(true);
+        }
+        let gate = self.network.clone();
+        b.redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            gate_redirect(attempt, &gate)
+        }))
     }
-    if file.tls.insecure_skip_verify {
-        tracing::warn!(provider = ?file.id, "TLS certificate verification is disabled");
-        b = b.tls_danger_accept_invalid_certs(true);
+
+    fn build(&self) -> Result<reqwest::Client, ProviderError> {
+        self.builder()
+            .build()
+            .map_err(|e| ProviderError::new(ErrorKind::Config, format!("HTTP client: {e}")))
     }
-    Ok(b)
+}
+
+/// Every client this crate builds follows redirects only within the host the chain
+/// started from; any other destination must pass the egress gate, so a redirect can
+/// never lead somewhere the gate would refuse. A custom policy guards its own hop
+/// count; reqwest still refuses loops and strips credentials on cross-origin hops.
+fn gate_redirect(
+    attempt: reqwest::redirect::Attempt<'_>,
+    network: &NetworkSettings,
+) -> reqwest::redirect::Action {
+    const MAX_HOPS: usize = 10;
+    if attempt.previous().len() > MAX_HOPS {
+        return attempt.error("too many redirects");
+    }
+    let target = attempt.url();
+    let scheme = target.scheme().to_owned();
+    let host = target.host_str().unwrap_or_default().to_owned();
+    let started_on = attempt
+        .previous()
+        .first()
+        .and_then(reqwest::Url::host_str)
+        .unwrap_or_default()
+        .to_owned();
+    let url = target.as_str().to_owned();
+    if !matches!(scheme.as_str(), "http" | "https") {
+        return attempt.error(format!("refused a redirect to the `{scheme}` scheme"));
+    }
+    if host == started_on {
+        return attempt.follow();
+    }
+    match network.check_egress(&url) {
+        Ok(()) => attempt.follow(),
+        Err(why) => attempt.error(why),
+    }
 }
 
 #[cfg(test)]
@@ -970,5 +1150,161 @@ mod tests {
         session.take_key(&build("new"));
         let models = turn.list_models().await.expect("the new key is sent");
         assert_eq!(models[0].id, "tiny");
+    }
+
+    const SSE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+    async fn sse_server() -> wiremock::MockServer {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(SSE),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn reply(p: &Provider) -> Result<String, ProviderError> {
+        let req = ChatRequest {
+            model: "m".into(),
+            messages: vec![Message::User {
+                content: "hi".into(),
+                images: Vec::new(),
+            }],
+            ..ChatRequest::default()
+        };
+        let mut rx = p.stream(req, ReasoningFormat::Auto, CancellationToken::new());
+        let mut b = crate::ResponseBuilder::default();
+        while let Some(ev) = rx.recv().await {
+            b.push(&ev?);
+        }
+        match b.into_message() {
+            Message::Assistant { content, .. } => Ok(content),
+            other => panic!("not an assistant message: {other:?}"),
+        }
+    }
+
+    /// A TCP relay to `upstream` whose first connection can go dead while both of its
+    /// sockets stay open, as behind a VPN client or local proxy whose path has gone.
+    /// Returns the relay's address, the switch, and the count of connections accepted.
+    async fn relay(
+        upstream: std::net::SocketAddr,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        async fn pipe(
+            mut from: tokio::net::tcp::OwnedReadHalf,
+            mut to: tokio::net::tcp::OwnedWriteHalf,
+            dead: Option<Arc<AtomicBool>>,
+        ) {
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                let n = match from.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                if dead.as_ref().is_some_and(|d| d.load(Ordering::SeqCst)) {
+                    continue;
+                }
+                if to.write_all(&buf[..n]).await.is_err() {
+                    return;
+                }
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind relay");
+        let addr = listener.local_addr().expect("relay address");
+        let dead = Arc::new(AtomicBool::new(false));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let (switch, count) = (dead.clone(), accepted.clone());
+        tokio::spawn(async move {
+            while let Ok((inbound, _)) = listener.accept().await {
+                let first = count.fetch_add(1, Ordering::SeqCst) == 0;
+                let Ok(outbound) = tokio::net::TcpStream::connect(upstream).await else {
+                    return;
+                };
+                let gate = first.then(|| switch.clone());
+                let (ri, wi) = inbound.into_split();
+                let (ro, wo) = outbound.into_split();
+                tokio::spawn(pipe(ri, wo, gate.clone()));
+                tokio::spawn(pipe(ro, wi, gate));
+            }
+        });
+        (addr, dead, accepted)
+    }
+
+    /// Over HTTP/2 every request shares one connection. When it goes dead without closing,
+    /// the retry after the first-byte timeout must not go down it again.
+    #[tokio::test]
+    async fn a_retry_leaves_a_dead_http2_connection_behind() {
+        use std::sync::atomic::Ordering;
+        let server = sse_server().await;
+        let (addr, dead, accepted) = relay(*server.address()).await;
+        let file: ProviderFile = toml::from_str(&format!(
+            "base_url = \"http://{addr}/v1\"\nmodels = [\"m\"]\n\
+             [http]\ntimeout_idle_secs = 30\ntimeout_first_byte_secs = 1\nmax_retries = 1\n"
+        ))
+        .expect("provider toml");
+        let mut p =
+            Provider::new("mock", file, &NetworkSettings::default(), &|_| None).expect("provider");
+        let mut spec = (*p.spec).clone();
+        spec.h2c = true;
+        p.client = Arc::new(RwLock::new(Pooled {
+            generation: 0,
+            client: spec.build().expect("h2c client"),
+        }));
+        p.spec = Arc::new(spec);
+
+        assert_eq!(reply(&p).await.expect("first reply"), "Hello");
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        dead.store(true, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        assert_eq!(reply(&p).await.expect("the retry answers"), "Hello");
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            2,
+            "the retry opened a new connection"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// A proxy from the environment skips the hosts in `NO_PROXY`.
+    #[tokio::test]
+    async fn no_proxy_hosts_go_direct() {
+        let server = sse_server().await;
+        let file: ProviderFile = toml::from_str(&format!(
+            "base_url = \"{}/v1\"\nmodels = [\"m\"]\n[http]\nmax_retries = 0\n",
+            server.uri()
+        ))
+        .expect("provider toml");
+        // Nothing listens on port 1, so a request through the proxy fails at once. An empty
+        // value hides the variable from the real environment.
+        let build = |no_proxy: &str| {
+            let vars: HashMap<&str, OsString> = [
+                ("HTTPS_PROXY", "http://127.0.0.1:1"),
+                ("NO_PROXY", no_proxy),
+                ("no_proxy", ""),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k, OsString::from(v)))
+            .collect();
+            Provider::new("mock", file.clone(), &NetworkSettings::default(), &|k| {
+                vars.get(k).cloned()
+            })
+            .expect("provider")
+        };
+        assert!(reply(&build("")).await.is_err(), "the proxy is used");
+        let direct = build("localhost,127.0.0.1");
+        assert_eq!(reply(&direct).await.expect("goes direct"), "Hello");
     }
 }

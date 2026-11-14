@@ -114,8 +114,9 @@ retention_days = 0                # 0 = keep forever
 [network]
 offline = false                   # true: block all egress except provider base_urls → 11-security
 egress_allow = []                 # extra hosts allowed when offline
-proxy = ""                        # default: HTTPS_PROXY / system
+proxy = ""                        # default: HTTPS_PROXY / system; NO_PROXY hosts go direct
 ca_bundle = ""                    # extra PEM roots in addition to OS store
+http1_only = false                # true: no shared HTTP/2 connection (stale VPNs/proxies) → 02-providers
 
 [catalog]                         # model prices and windows → 02-providers
 refresh = false                   # true: refresh in the background, at most daily
