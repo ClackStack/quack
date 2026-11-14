@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Session } from '#lib/session.svelte';
+	import { partitionExpertProviders, splitInlineCode } from '#lib/setup';
 
 	let { session }: { session: Session } = $props();
 	let serviceId = $state('');
@@ -15,6 +16,21 @@
 			? session.signInError.message
 			: null
 	);
+	const expert = $derived(partitionExpertProviders(session.providers, session.services));
+	const hasExpert = $derived(
+		expert.envProviders.length > 0 || expert.otherUnavailable.length > 0
+	);
+	const expertSummary = $derived.by(() => {
+		const parts: string[] = [];
+		if (expert.envProviders.length > 0) {
+			const n = expert.envProviders.length;
+			parts.push(`${n} environment ${n === 1 ? 'variable' : 'variables'}`);
+		}
+		if (expert.otherUnavailable.length > 0) {
+			parts.push(`${expert.otherUnavailable.length} other unavailable`);
+		}
+		return parts.join(' · ');
+	});
 
 	async function saveKey(event: SubmitEvent) {
 		event.preventDefault();
@@ -190,9 +206,99 @@
 			>
 		</form>
 	</section>
-	{#each session.providers.filter((p) => !p.available) as provider (provider.id)}
-		<p class="status"><strong>{provider.id}</strong>: {provider.note}</p>
-	{/each}
+
+	{#if hasExpert}
+		<section class="expert" aria-labelledby="expert-heading">
+			<details class="accordion">
+				<summary>
+					<span class="accordion-head">
+						<span id="expert-heading" class="accordion-title"
+							>Expert Setup: Environment Variables</span
+						>
+						{#if expertSummary}
+							<span class="accordion-sub">{expertSummary}</span>
+						{/if}
+					</span>
+					<span class="accordion-chevron" aria-hidden="true">
+						<svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+							<path
+								d="M6 3.5 10.5 8 6 12.5"
+								stroke="currentColor"
+								stroke-width="1.6"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							/>
+						</svg>
+					</span>
+				</summary>
+				<div class="accordion-body">
+					{#if expert.envProviders.length > 0}
+						<p class="expert-intro">
+							Export these variables in your shell before launching quack instead of saving API
+							keys above.
+						</p>
+						<ul class="expert-list">
+							{#each expert.envProviders as item (item.id)}
+								<li class="expert-row">
+									<div class="expert-main">
+										<span class="expert-provider">
+											{#if item.name}
+												<span class="provider-name">{item.name}</span>
+												<span class="provider-id">{item.id}</span>
+											{:else}
+												<span class="provider-id solo">{item.id}</span>
+											{/if}
+										</span>
+										<span class="expert-meta">
+											<code class="env-var">{item.envVar}</code>
+											{#if item.available}
+												<span class="state-badge ready">Set</span>
+											{:else if item.extraNote}
+												<span class="state-badge warn">Unavailable</span>
+											{:else}
+												<span class="state-badge">Not set</span>
+											{/if}
+										</span>
+									</div>
+									{#if item.extraNote}
+										<p class="expert-note">
+											{#each splitInlineCode(item.extraNote) as seg, i (i)}{#if seg.code}<code>{seg.text}</code>{:else}{seg.text}{/if}{/each}
+										</p>
+									{/if}
+								</li>
+							{/each}
+						</ul>
+					{/if}
+
+					{#if expert.otherUnavailable.length > 0}
+						<div class="other-group">
+							<h3 class="subhead">Other unavailable providers</h3>
+							<ul class="expert-list">
+								{#each expert.otherUnavailable as item (item.id)}
+									<li class="expert-row">
+										<div class="expert-main">
+											<span class="expert-provider">
+												{#if item.name}
+													<span class="provider-name">{item.name}</span>
+													<span class="provider-id">{item.id}</span>
+												{:else}
+													<span class="provider-id solo">{item.id}</span>
+												{/if}
+											</span>
+											<span class="state-badge">Unavailable</span>
+										</div>
+										<p class="expert-note">
+											{#each splitInlineCode(item.note) as seg, i (i)}{#if seg.code}<code>{seg.text}</code>{:else}{seg.text}{/if}{/each}
+										</p>
+									</li>
+								{/each}
+							</ul>
+						</div>
+					{/if}
+				</div>
+			</details>
+		</section>
+	{/if}
 </section>
 
 <style>
@@ -206,6 +312,9 @@
 		max-width: 720px;
 		padding: var(--sp-lg) 0;
 		border-bottom: 1px solid var(--rule);
+	}
+	.setup > section:last-child {
+		border-bottom: none;
 	}
 	.heading {
 		display: flex;
@@ -286,5 +395,193 @@
 	}
 	.status {
 		font-size: 12px;
+	}
+	.accordion {
+		border: 1px solid var(--rule);
+		border-radius: var(--r-lg);
+		background: var(--bg-panel);
+	}
+	.accordion summary {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--sp-md);
+		padding: 12px 14px;
+		cursor: pointer;
+		list-style: none;
+		user-select: none;
+		border-radius: calc(var(--r-lg) - 1px);
+		transition: background-color 120ms ease-out;
+	}
+	.accordion summary::-webkit-details-marker {
+		display: none;
+	}
+	.accordion summary:hover {
+		background: var(--bg-soft);
+	}
+	.accordion[open] summary {
+		border-bottom-left-radius: 0;
+		border-bottom-right-radius: 0;
+		border-bottom: 1px solid var(--rule-soft);
+	}
+	.accordion-head {
+		display: grid;
+		gap: 2px;
+		min-width: 0;
+	}
+	.accordion-title {
+		font-family: var(--font-serif);
+		font-size: 15.5px;
+		font-weight: 600;
+		color: var(--ink);
+	}
+	.accordion-sub {
+		font-size: 12px;
+		color: var(--ink-3);
+	}
+	.accordion-chevron {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 20px;
+		height: 20px;
+		color: var(--ink-3);
+		flex: none;
+		transition:
+			transform 150ms ease-out,
+			color 120ms ease-out;
+	}
+	.accordion-chevron svg {
+		width: 14px;
+		height: 14px;
+	}
+	.accordion summary:hover .accordion-chevron {
+		color: var(--ink);
+	}
+	.accordion[open] .accordion-chevron {
+		transform: rotate(90deg);
+	}
+	.accordion-body {
+		padding: 14px;
+		display: grid;
+		gap: var(--sp-md);
+	}
+	.expert-intro {
+		margin: 0;
+		font-size: 12.5px;
+		color: var(--ink-2);
+	}
+	.other-group {
+		display: grid;
+		gap: 8px;
+	}
+	.subhead {
+		margin: 0;
+		font-family: var(--font-ui);
+		font-size: 11px;
+		font-weight: 600;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--ink-3);
+	}
+	.expert-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		border: 1px solid var(--rule-soft);
+		border-radius: var(--r-md);
+		background: var(--bg-raised);
+	}
+	.expert-row {
+		padding: 9px 12px;
+		display: grid;
+		gap: 4px;
+	}
+	.expert-row + .expert-row {
+		border-top: 1px solid var(--rule-soft);
+	}
+	.expert-main {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		flex-wrap: wrap;
+		gap: 6px 12px;
+	}
+	.expert-provider {
+		display: inline-flex;
+		align-items: baseline;
+		flex-wrap: wrap;
+		gap: 2px 8px;
+		min-width: 0;
+	}
+	.provider-name {
+		font-family: var(--font-serif);
+		font-size: 14px;
+		font-weight: 600;
+		color: var(--ink);
+	}
+	.provider-id {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		color: var(--ink-3);
+		overflow-wrap: anywhere;
+	}
+	.provider-id.solo {
+		font-size: 13px;
+		font-weight: 500;
+		color: var(--ink);
+	}
+	.expert-meta {
+		display: inline-flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+	.env-var {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		color: var(--ink);
+		background: var(--bg-soft);
+		border: 1px solid var(--rule-soft);
+		border-radius: var(--r-sm);
+		padding: 2px 7px;
+		overflow-wrap: anywhere;
+	}
+	.state-badge {
+		font-size: 10.5px;
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		padding: 2px 7px;
+		border-radius: 999px;
+		color: var(--ink-3);
+		background: var(--bg-panel);
+		border: 1px solid var(--rule-soft);
+		white-space: nowrap;
+	}
+	.state-badge.ready {
+		color: var(--ok);
+		background: var(--ok-soft);
+		border-color: color-mix(in srgb, var(--ok) 35%, var(--rule-soft));
+	}
+	.state-badge.warn {
+		color: var(--fail);
+		background: var(--fail-soft);
+		border-color: color-mix(in srgb, var(--fail) 35%, var(--rule-soft));
+	}
+	.expert-note {
+		margin: 0;
+		font-size: 12px;
+		line-height: 1.45;
+		color: var(--ink-2);
+		overflow-wrap: anywhere;
+	}
+	.expert-note code {
+		font-size: 11.5px;
+		color: var(--ink);
+		background: var(--bg-soft);
+		border: 1px solid var(--rule-soft);
+		border-radius: var(--r-sm);
+		padding: 1px 5px;
 	}
 </style>

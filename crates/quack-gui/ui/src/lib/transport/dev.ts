@@ -55,16 +55,39 @@ export function devTransport(): Transport {
 	};
 	const send = (tab: number, event: Event) => fan({ tab, event });
 	let nextTab = 0;
-	let workMode: import('#lib/protocol').WorkMode = 'edit';
-	let approvals: import('#lib/protocol').ApprovalPolicy = 'ask';
-	let effort: string | null = null;
-	let resolveApproval: (() => void) | null = null;
+	type TabState = {
+		cwd: string;
+		branch: string;
+		workMode: import('#lib/protocol').WorkMode;
+		approvals: import('#lib/protocol').ApprovalPolicy;
+		effort: string | null;
+		resolveApproval: (() => void) | null;
+	};
+	const tabs = new Map<number, TabState>();
+	const demoFolders = [
+		'/home/you/Development/demo-pond',
+		'/home/you/Development/quack',
+		'/home/you/Development/orderly',
+		'/home/you/Development/field-notes'
+	];
+	let nextPick = 0;
+
 	// `?demo=turn` plays the demo turn on open; `&auto=1` also answers its approval,
 	// so a headless capture can reach the settled state without a keyboard.
+	// `?demo=jobs` seeds multiple parallel jobs across states (input, error, working, ready).
 	const params =
 		typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
-	const autoDemo = params?.get('demo') === 'turn';
+	const demoMode = params?.get('demo');
+	const autoDemo = demoMode === 'turn';
+	const jobsDemo = demoMode === 'jobs';
 	const autoApprove = params?.get('auto') === '1';
+
+	function branchFor(cwd: string): string {
+		if (cwd.endsWith('/quack')) return 'fix/eval-timeouts';
+		if (cwd.endsWith('/orderly')) return 'feat/batch-export';
+		if (cwd.endsWith('/field-notes')) return 'chore/deps';
+		return 'main';
+	}
 
 	const catalog = () => ({
 		providers: [
@@ -124,11 +147,13 @@ export function devTransport(): Transport {
 
 		// The demo pauses here until the UI answers the approval (an Op, via sendOp).
 		await new Promise<void>((resolve) => {
-			resolveApproval = resolve;
+			const state = tabs.get(tab);
+			if (state) state.resolveApproval = resolve;
 			if (autoApprove)
 				setTimeout(() => {
-					resolveApproval?.();
-					resolveApproval = null;
+					const current = tabs.get(tab);
+					current?.resolveApproval?.();
+					if (current) current.resolveApproval = null;
 				}, 2200);
 		});
 		await sleep(200);
@@ -181,26 +206,215 @@ export function devTransport(): Transport {
 		});
 	}
 
+	function seedJobsDemo(tab: number, cwd: string) {
+		if (cwd.endsWith('/quack')) {
+			send(tab, { event: 'session_title', title: 'Clean stale eval cache' });
+			send(tab, { event: 'turn_started', turn: 2 });
+			send(tab, {
+				event: 'assistant_delta',
+				text: 'I found 4.2 GB of stale eval caches in target/tmp-cache. Removing them next.'
+			});
+			send(tab, {
+				event: 'tool_call_begin',
+				call: {
+					call_id: `dev-job-${tab}-1`,
+					name: 'shell',
+					summary: 'rm -rf target/tmp-cache'
+				}
+			});
+			send(tab, {
+				event: 'approval_request',
+				call_id: `dev-job-${tab}-1`,
+				request: {
+					kind: 'shell',
+					command: 'rm -rf /var/tmp/quack-eval-cache && cargo check -p quack-exec',
+					cwd,
+					outside_sandbox: true
+				},
+				always: []
+			});
+			send(tab, {
+				event: 'context_update',
+				used: 11200,
+				budget: 26214,
+				window: 32768,
+				cache_hit_tokens: 6100,
+				threshold: 24576
+			});
+			return;
+		}
+		if (cwd.endsWith('/orderly')) {
+			send(tab, { event: 'session_title', title: 'Refactor CSV streaming' });
+			send(tab, { event: 'turn_started', turn: 3 });
+			send(tab, {
+				event: 'tool_call_begin',
+				call: { call_id: `dev-job-${tab}-1`, name: 'edit', summary: 'edit src/export.rs' }
+			});
+			send(tab, {
+				event: 'tool_call_end',
+				call_id: `dev-job-${tab}-1`,
+				result: {
+					ok: true,
+					summary: 'edited src/export.rs',
+					detail: '--- src/export.rs\n+++ src/export.rs\n@@ -12,1 +12,4 @@\n-    write_all()\n+    flush_rows()\n+    stream_chunks()\n'
+				}
+			});
+			send(tab, {
+				event: 'error',
+				error: { kind: 'provider', message: 'Upstream provider timed out after 30s (HTTP 504).' }
+			});
+			send(tab, {
+				event: 'turn_aborted',
+				turn: 3,
+				reason: 'Upstream provider timed out after 30s (HTTP 504).'
+			});
+			send(tab, {
+				event: 'context_update',
+				used: 18900,
+				budget: 26214,
+				window: 32768,
+				cache_hit_tokens: 9400,
+				threshold: 24576
+			});
+			return;
+		}
+		if (cwd.endsWith('/field-notes')) {
+			send(tab, { event: 'session_title', title: 'Update changelog & deps' });
+			send(tab, { event: 'turn_started', turn: 1 });
+			send(tab, {
+				event: 'assistant_delta',
+				text: 'Updated Cargo.lock and documented the 0.14 migration steps in CHANGELOG.md.'
+			});
+			send(tab, {
+				event: 'tool_call_begin',
+				call: { call_id: `dev-job-${tab}-1`, name: 'edit', summary: 'edit CHANGELOG.md' }
+			});
+			send(tab, {
+				event: 'tool_call_end',
+				call_id: `dev-job-${tab}-1`,
+				result: {
+					ok: true,
+					summary: 'edited CHANGELOG.md',
+					detail: '--- CHANGELOG.md\n+++ CHANGELOG.md\n@@ -1,0 +1,3 @@\n+## 0.14\n+- Added multi-job rail\n'
+				}
+			});
+			send(tab, {
+				event: 'turn_complete',
+				turn: 1,
+				usage: { prompt_tokens: 3400, completion_tokens: 180, cached_prompt_tokens: 2100 }
+			});
+			send(tab, {
+				event: 'stats',
+				report: {
+					model: 'dev-local/tiny',
+					turns: 4,
+					requests: 7,
+					unreported: 0,
+					prompt_tokens: 21000,
+					completion_tokens: 1200,
+					cached_tokens: 14000,
+					cache_reported: 7,
+					cost: 0.08,
+					unpriced: 0,
+					ttft_ms: [210, 480],
+					tokens_per_sec: 48.2,
+					open_ms: 92000,
+					model_ms: 21000,
+					tools_ms: 6000,
+					approval_ms: 0,
+					tools: [{ name: 'edit', calls: 3, failed: 0, ms: 90 }],
+					compactions: 0,
+					pruned: 0,
+					resumed: false,
+					history: []
+				}
+			});
+			send(tab, {
+				event: 'context_update',
+				used: 7200,
+				budget: 26214,
+				window: 32768,
+				cache_hit_tokens: 4500,
+				threshold: 24576
+			});
+			return;
+		}
+		// demo-pond: actively running job with sub-agent and plan progress
+		send(tab, { event: 'session_title', title: 'Add pond duck counter' });
+		send(tab, { event: 'turn_started', turn: 1 });
+		send(tab, {
+			event: 'assistant_delta',
+			text: 'Running the census suite while explore checks other pond writers…'
+		});
+		send(tab, {
+			event: 'plan',
+			checklist: '[x] inspect pond module\n[~] update duck counter\n[ ] verify census tests'
+		});
+		send(tab, {
+			event: 'tool_call_begin',
+			call: { call_id: `dev-job-${tab}-1`, name: 'shell', summary: 'cargo test -p quack-core' }
+		});
+		send(tab, {
+			event: 'agent_started',
+			id: `scout-${tab}`,
+			agent: 'explore',
+			description: 'check pond edge for writers',
+			call_id: `dev-job-${tab}-1`,
+			model: 'dev-local/tiny'
+		});
+		for (let i = 0; i < 4; i++) {
+			send(tab, {
+				event: 'agent',
+				id: `scout-${tab}`,
+				inner: { event: 'tool_call_begin', call: { call_id: `sub-${i}`, name: 'read', summary: 'read file' } }
+			});
+		}
+		send(tab, {
+			event: 'context_update',
+			used: 10900,
+			budget: 26214,
+			window: 32768,
+			cache_hit_tokens: 6800,
+			threshold: 24576
+		});
+	}
+
 	return {
 		kind: 'dev',
 
 		async pickFolder(): Promise<string | null> {
 			await sleep(150);
-			return '/home/you/Development/demo-pond';
+			const openCwds = new Set([...tabs.values()].map((t) => t.cwd));
+			const unused = demoFolders.find((dir) => !openCwds.has(dir));
+			if (unused) return unused;
+			const pick = demoFolders[nextPick % demoFolders.length];
+			nextPick++;
+			return pick;
 		},
 
-		async openFolder(cwd: string, resume: ResumeRequest): Promise<OpenedTab> {
+		async openFolder(cwd: string, _resume: ResumeRequest): Promise<OpenedTab> {
 			const tab = nextTab++;
-			fan({ tab, info: { ...INFO, cwd } });
+			const branch = branchFor(cwd);
+			const tabState: TabState = {
+				cwd,
+				branch,
+				workMode: 'edit',
+				approvals: 'ask',
+				effort: null,
+				resolveApproval: null
+			};
+			tabs.set(tab, tabState);
+			const info = { ...INFO, cwd, branch };
+			fan({ tab, info });
 			fan({
 				tab,
 				event: {
 					event: 'session_configured',
-					session: { ...SESSION, id: `${SESSION.id}-${tab}` }
+					session: { ...SESSION, cwd, id: `${SESSION.id}-${tab}` }
 				}
 			});
 			send(tab, { event: 'model_catalog', ...catalog() });
-			send(tab, { event: 'mode_changed', work_mode: workMode, approvals });
+			send(tab, { event: 'mode_changed', work_mode: tabState.workMode, approvals: tabState.approvals });
 			send(tab, {
 				event: 'skills',
 				skills: [
@@ -221,22 +435,31 @@ export function devTransport(): Transport {
 			send(tab, { event: 'session_list', sessions: savedSessions() });
 			send(tab, { event: 'startup_complete' });
 			if (autoDemo) setTimeout(() => void runDemoTurn(tab), 500);
-			return { tab, info: { ...INFO, cwd } };
+			else if (jobsDemo) setTimeout(() => seedJobsDemo(tab, cwd), 120);
+			return { tab, info };
 		},
 
 		async sendOp(tab: number, op: Op): Promise<void> {
+			const state = tabs.get(tab);
 			switch (op.op) {
 				case 'user_turn':
 					void runDemoTurn(tab);
 					break;
-			case 'approval_response':
-				resolveApproval?.();
-				resolveApproval = null;
-				break;
+				case 'interrupt':
+					send(tab, { event: 'turn_aborted', turn: 1, reason: 'Stopped by user' });
+					break;
+				case 'approval_response':
+					state?.resolveApproval?.();
+					if (state) state.resolveApproval = null;
+					break;
 				case 'set_work_mode':
-					workMode = op.mode;
-					send(tab, { event: 'mode_changed', work_mode: workMode, approvals });
-					if (workMode === 'plan') {
+					if (state) state.workMode = op.mode;
+					send(tab, {
+						event: 'mode_changed',
+						work_mode: state?.workMode ?? op.mode,
+						approvals: state?.approvals ?? 'ask'
+					});
+					if (op.mode === 'plan') {
 						send(tab, {
 							event: 'plan',
 							checklist: '[x] read the pond\n[ ] count the ducks\n[ ] export the census'
@@ -244,34 +467,44 @@ export function devTransport(): Transport {
 					}
 					break;
 				case 'set_approval_policy':
-					approvals = op.policy;
-					send(tab, { event: 'mode_changed', work_mode: workMode, approvals });
+					if (state) state.approvals = op.policy;
+					send(tab, {
+						event: 'mode_changed',
+						work_mode: state?.workMode ?? 'edit',
+						approvals: state?.approvals ?? op.policy
+					});
 					break;
 				case 'set_reasoning_effort':
-					effort = op.effort ?? null;
+					if (state) state.effort = op.effort ?? null;
 					send(tab, {
 						event: 'session_configured',
 						session: {
 							...SESSION,
-						model: 'dev-local/thinker',
-						reasoning_effort: effort,
-						reasoning_efforts: ['low', 'medium', 'high']
-					}
-				});
+							cwd: state?.cwd ?? INFO.cwd,
+							model: 'dev-local/thinker',
+							reasoning_effort: state?.effort ?? null,
+							reasoning_efforts: ['low', 'medium', 'high']
+						}
+					});
 					break;
 				case 'set_model': {
 					const model = `${op.provider}/${op.model}`;
 					if (model === 'dev-local/thinker')
 						send(tab, {
 							event: 'session_configured',
-						session: {
-							...SESSION,
-							model,
-							reasoning_effort: effort,
-							reasoning_efforts: ['low', 'medium', 'high']
-						}
+							session: {
+								...SESSION,
+								cwd: state?.cwd ?? INFO.cwd,
+								model,
+								reasoning_effort: state?.effort ?? null,
+								reasoning_efforts: ['low', 'medium', 'high']
+							}
 						});
-					else send(tab, { event: 'session_configured', session: { ...SESSION, model } });
+					else
+						send(tab, {
+							event: 'session_configured',
+							session: { ...SESSION, cwd: state?.cwd ?? INFO.cwd, model }
+						});
 					send(tab, {
 						event: 'model_catalog',
 						...catalog(),
@@ -393,6 +626,7 @@ export function devTransport(): Transport {
 		},
 
 		async closeTab(tab: number): Promise<void> {
+			tabs.delete(tab);
 			fan({ tab, closed: { reason: null } });
 		},
 

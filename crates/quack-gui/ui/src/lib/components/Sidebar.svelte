@@ -1,51 +1,68 @@
 <script lang="ts">
 	import iconUrl from '#lib/assets/icon.png';
+	import JobsOverview from '#lib/components/JobsOverview.svelte';
+	import {
+		compactCount as fmtTokens,
+		describeJob,
+		parsePlanSteps,
+		projectName,
+		shortenPath as shorten,
+		summarizeJobs,
+		type JobActionTarget
+	} from '#lib/jobs';
 	import type { Session } from '#lib/session.svelte';
 	import { samePath, type SidebarProject } from '#lib/workspaces.svelte';
 
 	let {
 		session,
+		sessions,
 		projects,
 		opening = false,
 		openingCwd = null,
+		railTab = $bindable<'projects' | 'jobs'>('projects'),
 		onSelectProject,
 		onCloseProject,
+		onSelectJob,
+		onInterruptJob,
+		onDismissIssue,
+		onReopenJob,
+		onCloseJob,
 		onNewTab
 	}: {
 		session: Session;
+		sessions: Session[];
 		projects: SidebarProject[];
 		opening?: boolean;
 		openingCwd?: string | null;
+		railTab?: 'projects' | 'jobs';
 		onSelectProject: (cwd: string) => void;
 		onCloseProject: (cwd: string) => void;
+		onSelectJob: (tab: number, target?: JobActionTarget) => void;
+		onInterruptJob: (tab: number) => void;
+		onDismissIssue: (tab: number) => void;
+		onReopenJob: (tab: number) => void;
+		onCloseJob: (tab: number) => void;
 		onNewTab: () => void;
 	} = $props();
 
 	let contextOpen = $state(false);
+	let projectsTabBtn: HTMLButtonElement | undefined = $state();
+	let jobsTabBtn: HTMLButtonElement | undefined = $state();
 
-	const planItems = $derived.by(() => {
-		const text = session.plan.trim();
-		if (!text) return [];
-		return text.split('\n').map((line) => {
-			const match = /^\[([x~ ])\]\s*(.*)$/.exec(line.trim());
-			return {
-				state: (match?.[1] ?? ' ') as 'x' | '~' | ' ',
-				text: match?.[2] ?? line
-			};
-		});
-	});
+	const planItems = $derived(parsePlanSteps(session.plan));
 	const doneCount = $derived(planItems.filter((p) => p.state === 'x').length);
 
 	const busy = $derived(session.streaming || session.turnPending);
-	const jobStatus = $derived.by(() => {
-		if (session.closed) return 'closed';
-		if (session.starting) return 'starting…';
-		if (session.switching) return 'switching…';
-		if (session.approval || session.questions) return 'waiting on you';
-		if (busy) return 'working…';
-		if (session.trust) return 'needs your trust';
-		if (!session.currentModel) return 'choose a model';
-		return 'ready';
+	const activeSummary = $derived(describeJob(session));
+	const jobStatus = $derived(activeSummary.compactStatus);
+	const jobsCounts = $derived(summarizeJobs(sessions));
+
+	const jobsTabAria = $derived.by(() => {
+		const parts = [`Jobs, ${jobsCounts.total} active`];
+		if (jobsCounts.input > 0) parts.push(`${jobsCounts.input} waiting on you`);
+		if (jobsCounts.error > 0) parts.push(`${jobsCounts.error} issue${jobsCounts.error === 1 ? '' : 's'}`);
+		if (jobsCounts.working > 0) parts.push(`${jobsCounts.working} working`);
+		return parts.join(', ');
 	});
 
 	const disabled = $derived(
@@ -70,8 +87,6 @@
 		return { used, threshold, near, usedTokens: c.used, base };
 	});
 
-	const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
-
 	// ---- usage ----
 	const stats = $derived(session.stats);
 	const spark = $derived.by(() => {
@@ -91,22 +106,86 @@
 	// ---- files ----
 	const files = $derived(session.editedFiles);
 
-	function projectName(cwd: string | undefined): string {
-		if (!cwd) return 'Workspace';
-		const parts = cwd.split(/[\\/]/).filter(Boolean);
-		return parts[parts.length - 1] || cwd;
-	}
-	function shorten(path: string): string {
-		return path.replace(/^\/home\/[^/]+/, '~');
+	function onTabKeyDown(e: KeyboardEvent) {
+		if (e.key === 'ArrowRight' || e.key === 'End') {
+			e.preventDefault();
+			railTab = 'jobs';
+			jobsTabBtn?.focus();
+		} else if (e.key === 'ArrowLeft' || e.key === 'Home') {
+			e.preventDefault();
+			railTab = 'projects';
+			projectsTabBtn?.focus();
+		}
 	}
 </script>
 
-<aside class="rail cloth" aria-label="Projects">
-	<div class="brand" title={`_(•)> quack ${session.info?.version ?? ''}`}>
-		<img class="brand-duck" src={iconUrl} alt="" />
-		<span class="brand-name">quack</span>
+<aside class="rail cloth" aria-label="Projects and jobs">
+	<div class="rail-top">
+		<div class="brand" title={`_(•)> quack ${session.info?.version ?? ''}`}>
+			<img class="brand-duck" src={iconUrl} alt="" />
+			<span class="brand-name">quack</span>
+		</div>
+
+		<div class="rail-tabs" role="tablist" aria-label="Sidebar view">
+			<button
+				bind:this={projectsTabBtn}
+				type="button"
+				role="tab"
+				id="rail-tab-projects"
+				class="rail-tab"
+				aria-selected={railTab === 'projects'}
+				aria-controls="rail-panel-projects"
+				tabindex={railTab === 'projects' ? 0 : -1}
+				class:active={railTab === 'projects'}
+				onclick={() => (railTab = 'projects')}
+				onkeydown={onTabKeyDown}
+			>
+				<span>Projects</span>
+				{#if projects.length > 0}
+					<span class="tab-badge">{projects.length}</span>
+				{/if}
+			</button>
+			<button
+				bind:this={jobsTabBtn}
+				type="button"
+				role="tab"
+				id="rail-tab-jobs"
+				class="rail-tab"
+				aria-label={jobsTabAria}
+				aria-selected={railTab === 'jobs'}
+				aria-controls="rail-panel-jobs"
+				tabindex={railTab === 'jobs' ? 0 : -1}
+				class:active={railTab === 'jobs'}
+				onclick={() => (railTab = 'jobs')}
+				onkeydown={onTabKeyDown}
+			>
+				{#if jobsCounts.attention > 0 || jobsCounts.working > 0}
+					<span
+						class="tab-dot"
+						class:error={jobsCounts.error > 0 && jobsCounts.input === 0}
+						class:working={jobsCounts.attention === 0 && jobsCounts.working > 0}
+						aria-hidden="true"
+					></span>
+				{/if}
+				<span>Jobs</span>
+				<span
+					class="tab-badge"
+					class:input={jobsCounts.input > 0}
+					class:error={jobsCounts.error > 0 && jobsCounts.input === 0}
+				>
+					{jobsCounts.attention > 0 ? jobsCounts.attention : jobsCounts.total}
+				</span>
+			</button>
+		</div>
 	</div>
 
+	{#if railTab === 'projects'}
+		<div
+			id="rail-panel-projects"
+			role="tabpanel"
+			aria-labelledby="rail-tab-projects"
+			class="rail-panel"
+		>
 	<section>
 		<h2>Projects</h2>
 		<button class="open" disabled={opening} onclick={onNewTab}>
@@ -144,7 +223,7 @@
 									</span>
 									<span class="p-note">
 										{shorten(item.cwd)}
-										{tab?.streaming ? ' · working' : ''}
+										{activeSummary.category === 'working' ? ' · working' : ''}
 									</span>
 								</button>
 								<button
@@ -167,11 +246,21 @@
 									</span>
 								</div>
 								<p class="s-note jobs-hint">each job is one conversation in this project</p>
-								<div class="job live" class:idle={!busy && !session.approval && !session.questions}>
+								<div
+									class="job live"
+									class:idle={activeSummary.category === 'ready'}
+									class:issue={activeSummary.category === 'error'}
+								>
 									<div class="j-title">{session.title || 'New job'}</div>
 									<div class="j-note">
-										{#if busy || session.approval || session.questions}<span class="dot" aria-hidden="true"></span
-											>{/if}
+										{#if activeSummary.category !== 'ready'}
+											<span
+												class="dot"
+												class:still={activeSummary.category === 'error'}
+												class:fail={activeSummary.category === 'error'}
+												aria-hidden="true"
+											></span>
+										{/if}
 										{jobStatus}
 									</div>
 								</div>
@@ -195,6 +284,7 @@
 							</div>
 						</div>
 					{:else}
+						{@const tabSummary = tab ? describeJob(tab) : null}
 						<div class="p-row idle">
 							<button
 								class="project"
@@ -214,10 +304,17 @@
 											/></svg
 										>
 										<span class="p-name">{projectName(item.cwd)}</span>
+										{#if tabSummary && tabSummary.category !== 'ready'}
+											<span
+												class="p-stat-dot {tabSummary.category}"
+												title={tabSummary.statusLabel}
+												aria-hidden="true"
+											></span>
+										{/if}
 									</span>
 									<span class="p-note">
 										{shorten(item.cwd)}
-										{#if isOpening} · opening…{:else if tab?.streaming} · working{/if}
+										{#if isOpening} · opening…{:else if tabSummary && tabSummary.category !== 'ready'} · {tabSummary.compactStatus}{/if}
 									</span>
 								</span>
 								<span class="p-go" aria-hidden="true">›</span>
@@ -407,6 +504,27 @@
 			</ul>
 		</section>
 	{/if}
+		</div>
+	{:else}
+		<div
+			id="rail-panel-jobs"
+			role="tabpanel"
+			aria-labelledby="rail-tab-jobs"
+			class="rail-panel"
+		>
+			<JobsOverview
+				{sessions}
+				activeTab={session.tab}
+				{opening}
+				{onSelectJob}
+				{onInterruptJob}
+				{onDismissIssue}
+				{onReopenJob}
+				{onCloseJob}
+				onNewProject={onNewTab}
+			/>
+		</div>
+	{/if}
 </aside>
 
 <style>
@@ -442,6 +560,93 @@
 		font-size: 19px;
 		letter-spacing: -0.01em;
 		color: #f2f6f8;
+	}
+
+	.rail-top {
+		display: grid;
+		gap: 12px;
+	}
+
+	.rail-tabs {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 4px;
+		padding: 3px;
+		border-radius: 10px;
+		background: var(--cloth-deep);
+		border: 1px solid rgba(219, 228, 233, 0.16);
+	}
+
+	.rail-tab {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		padding: 6px 8px;
+		border-radius: 7px;
+		border: 1px solid transparent;
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--cloth-dim);
+		transition:
+			background-color 120ms ease-out,
+			border-color 120ms ease-out,
+			color 120ms ease-out;
+	}
+
+	.rail-tab:hover {
+		color: var(--cloth-ink);
+	}
+
+	.rail-tab.active {
+		background: var(--cloth-card);
+		border-color: rgba(127, 179, 201, 0.45);
+		color: var(--cloth-ink);
+	}
+
+	.tab-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		flex: none;
+		background: var(--duck);
+	}
+
+	.tab-dot.error {
+		background: var(--cloth-fail);
+	}
+
+	.tab-dot.working {
+		animation: pulse 1.1s ease-out infinite alternate;
+	}
+
+	.tab-badge {
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		font-weight: 500;
+		line-height: 1;
+		padding: 2px 6px;
+		border-radius: 999px;
+		background: rgba(240, 248, 252, 0.09);
+		color: var(--cloth-dim);
+	}
+
+	.tab-badge.input {
+		background: var(--duck);
+		color: #2b240f;
+		font-weight: 700;
+	}
+
+	.tab-badge.error {
+		background: var(--cloth-fail);
+		color: #26110e;
+		font-weight: 700;
+	}
+
+	.rail-panel {
+		display: grid;
+		gap: 22px;
+		align-content: start;
 	}
 
 	section {
@@ -805,8 +1010,44 @@
 		animation: pulse 1.1s ease-out infinite alternate;
 	}
 
+	.dot.fail {
+		background: var(--cloth-fail);
+	}
+
 	.dot.still {
 		animation: none;
+	}
+
+	.job.issue {
+		border-color: rgba(235, 131, 118, 0.58);
+	}
+
+	.p-stat-dot {
+		margin-left: auto;
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		flex: none;
+		background: var(--duck);
+	}
+
+	.p-stat-dot.error {
+		background: var(--cloth-fail);
+	}
+
+	.p-stat-dot.working {
+		animation: pulse 1.1s ease-out infinite alternate;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.tab-dot.working,
+		.p-stat-dot.working,
+		.dot {
+			animation: none;
+		}
+		.rail-tab {
+			transition: none;
+		}
 	}
 
 	@keyframes pulse {

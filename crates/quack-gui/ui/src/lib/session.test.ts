@@ -432,4 +432,41 @@ describe('field notes: skills, stats and specimens', () => {
 		});
 		expect(session.stats?.turns).toBe(1);
 	});
+
+	it('tracks startup progress, transient retry warnings, persistent errors, and close reasons', () => {
+		const { session } = fixture();
+		session.onEvent({
+			event: 'startup_progress',
+			subsystem: 'mcp',
+			state: { state: 'running', detail: 'connecting filesystem' }
+		});
+		expect(session.startupDetail).toBe('connecting filesystem');
+		session.onEvent({ event: 'startup_complete' });
+		expect(session.startupDetail).toBeNull();
+
+		// Retry warning followed by progress clears automatically when turn finishes.
+		session.onEvent({ event: 'turn_started', turn: 1 });
+		session.onEvent({ event: 'warning', message: 'Transient 503, retrying…' });
+		expect(session.issue).toEqual({ kind: 'warning', message: 'Transient 503, retrying…' });
+		session.onEvent({ event: 'assistant_delta', text: 'Recovered!' });
+		session.onEvent({
+			event: 'turn_complete',
+			turn: 1,
+			usage: { prompt_tokens: 50, completion_tokens: 10 }
+		});
+		expect(session.issue).toBeNull();
+
+		// Error stays more severe than subsequent turn_aborted and clears via dismissIssue().
+		session.onEvent({ event: 'turn_started', turn: 2 });
+		session.onEvent({ event: 'error', error: { kind: 'provider', message: 'Quota exceeded' } });
+		session.onEvent({ event: 'turn_aborted', turn: 2, reason: 'Quota exceeded' });
+		expect(session.issue).toEqual({ kind: 'error', message: 'Quota exceeded' });
+		session.dismissIssue();
+		expect(session.issue).toBeNull();
+		expect(session.actionError).toBeNull();
+
+		session.onClosed('Process terminated with exit code 1');
+		expect(session.closed).toBe(true);
+		expect(session.closedReason).toBe('Process terminated with exit code 1');
+	});
 });

@@ -274,4 +274,29 @@ describe('workspace lifecycle', () => {
 			'/home/paul/Development/other'
 		]);
 	});
+
+	it('focuses tabs directly with selectTab and reopens stopped jobs without dropping all sessions', async () => {
+		const { transport, workspaces, receive } = fixture();
+		vi.mocked(transport.openFolder)
+			.mockResolvedValueOnce({ tab: 1, info: makeInfo('/workspace/a') })
+			.mockResolvedValueOnce({ tab: 2, info: makeInfo('/workspace/a') });
+
+		await workspaces.open('/workspace/a', { resume: 'latest' });
+		receive({ tab: 1, closed: { reason: 'Connection reset' } });
+		expect(workspaces.sessions[0].closed).toBe(true);
+		expect(workspaces.sessions[0].closedReason).toBe('Connection reset');
+
+		let sawEmptyDuringReopen = false;
+		const reopenPromise = workspaces.reopenTab(1);
+		if (workspaces.sessions.length === 0) sawEmptyDuringReopen = true;
+		await reopenPromise;
+
+		expect(sawEmptyDuringReopen).toBe(false);
+		expect(transport.closeTab).toHaveBeenCalledWith(1);
+		expect(transport.openFolder).toHaveBeenLastCalledWith('/workspace/a', { resume: 'latest' });
+		expect(workspaces.sessions).toHaveLength(1);
+		expect(workspaces.sessions[0].tab).toBe(2);
+		expect(workspaces.selectTab(2)).toBe(true);
+		expect(workspaces.selectTab(999)).toBe(false);
+	});
 });

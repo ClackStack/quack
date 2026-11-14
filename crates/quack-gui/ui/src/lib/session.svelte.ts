@@ -78,6 +78,7 @@ export interface EditedFile {
 
 export type WorkMode = 'plan' | 'edit';
 export type ApprovalPolicy = 'read-only' | 'ask' | 'auto-edit' | 'allow' | 'yolo';
+export type JobIssue = { kind: 'error' | 'warning' | 'aborted'; message: string };
 
 /** What the agent may do; independent of the approval policy. */
 export const WORK_MODES: { id: WorkMode; label: string; about: string }[] = [
@@ -213,11 +214,14 @@ export class Session {
 	sessions = $state<SessionSummary[]>([]);
 	resumed = $state(false);
 	starting = $state(true);
+	startupDetail = $state<string | null>(null);
 	closed = $state(false);
+	closedReason = $state<string | null>(null);
 	sessionId = $state<string | null>(null);
 	switching = $state(false);
 	sending = $state(false);
 	actionError = $state<string | null>(null);
+	issue = $state<JobIssue | null>(null);
 	trust = $state<{ path: string; summary: string; changed: boolean } | null>(null);
 	trustSaving = $state(false);
 	setupOpen = $state(false);
@@ -248,6 +252,7 @@ export class Session {
 	}
 
 	#transport: Transport;
+	#progressSinceWarning = false;
 
 	constructor(transport: Transport, tab: number, info: AppInfo, cwd?: string) {
 		this.#transport = transport;
@@ -284,14 +289,30 @@ export class Session {
 				}
 				this.#pickThinkingFor = null;
 				break;
+			case 'startup_progress':
+				if (ev.state.state === 'running') {
+					this.startupDetail = ev.state.detail || ev.subsystem;
+				} else if (ev.state.state === 'failed') {
+					this.startupDetail = `${ev.subsystem} failed`;
+					this.issue = { kind: 'error', message: `${ev.subsystem}: ${ev.state.error}` };
+				} else if (ev.state.state === 'needs_attention' && this.issue?.kind !== 'error') {
+					this.issue = {
+						kind: 'warning',
+						message: ev.state.detail || `${ev.subsystem} needs attention`
+					};
+				}
+				break;
 			case 'startup_complete':
 				this.starting = false;
+				this.startupDetail = null;
 				this.trustSaving = false;
 				if (!this.currentModel) void this.openSetup();
 				break;
 			case 'config_reloaded':
 				this.trust = null;
 				this.starting = true;
+				this.startupDetail = null;
+				this.issue = null;
 				break;
 			case 'project_trust':
 				this.trust = { path: ev.path, summary: ev.summary, changed: ev.changed };
@@ -307,6 +328,7 @@ export class Session {
 				this.title = ev.title ?? '';
 				break;
 			case 'assistant_delta':
+				this.#progressSinceWarning = true;
 				this.#appendStream('assistant', ev.text);
 				break;
 			case 'assistant_rewrite': {
@@ -318,6 +340,7 @@ export class Session {
 				this.#appendStream('reasoning', ev.text);
 				break;
 			case 'tool_call_begin':
+				this.#progressSinceWarning = true;
 				this.#sealStreams();
 				this.items.push({
 					kind: 'tool',
@@ -357,6 +380,9 @@ export class Session {
 			case 'turn_started':
 				this.turnPending = false;
 				this.streaming = true;
+				this.issue = null;
+				this.actionError = null;
+				this.#progressSinceWarning = false;
 				break;
 			case 'turn_complete':
 				this.turnPending = false;
@@ -364,6 +390,7 @@ export class Session {
 				this.#sealStreams();
 				this.approval = null;
 				this.questions = null;
+				if (this.issue?.kind === 'warning' && this.#progressSinceWarning) this.issue = null;
 				this.lastUsage = {
 					prompt: ev.usage.prompt_tokens,
 					completion: ev.usage.completion_tokens,
@@ -379,6 +406,7 @@ export class Session {
 				this.#sealStreams();
 				this.approval = null;
 				this.questions = null;
+				if (this.issue?.kind !== 'error') this.issue = { kind: 'aborted', message: ev.reason };
 				this.items.push({
 					kind: 'system',
 					id: nextId(),
@@ -475,6 +503,7 @@ export class Session {
 				this.sessions = ev.sessions;
 				break;
 			case 'agent_started':
+				this.#progressSinceWarning = true;
 				this.agents.push({
 					id: ev.id,
 					agent: ev.agent,
@@ -487,6 +516,7 @@ export class Session {
 				});
 				break;
 			case 'agent': {
+				this.#progressSinceWarning = true;
 				const run = this.agents.findLast((a) => a.id === ev.id);
 				if (run) {
 					if (ev.inner.event === 'assistant_delta') run.text += ev.inner.text;
@@ -523,7 +553,9 @@ export class Session {
 			case 'warning':
 				this.#sealStreams();
 				this.turnPending = false;
+				this.#progressSinceWarning = false;
 				if (this.switching || this.setupWorking) this.actionError = ev.message;
+				if (this.issue?.kind !== 'error') this.issue = { kind: 'warning', message: ev.message };
 				this.switching = false;
 				this.setupWorking = false;
 				this.items.push({ kind: 'system', id: nextId(), tone: 'warning', text: ev.message });
@@ -532,6 +564,7 @@ export class Session {
 				this.#sealStreams();
 				this.turnPending = false;
 				this.actionError = ev.error.message;
+				this.issue = { kind: 'error', message: ev.error.message };
 				this.switching = false;
 				this.setupWorking = false;
 				this.trustSaving = false;
@@ -552,18 +585,26 @@ export class Session {
 
 	onClosed(reason: string | null) {
 		this.closed = true;
+		this.closedReason = reason;
 		this.turnPending = false;
 		this.switching = false;
 		this.setupWorking = false;
 		this.trustSaving = false;
 		this.detecting = false;
 		this.starting = false;
+		this.startupDetail = null;
 		this.streaming = false;
 		this.signingIn = null;
 		this.#sealStreams();
 		this.approval = null;
 		this.questions = null;
 		if (reason) this.items.push({ kind: 'system', id: nextId(), tone: 'error', text: reason });
+	}
+
+	dismissIssue() {
+		this.actionError = null;
+		this.issue = null;
+		this.signInError = null;
 	}
 
 	#resetConversation() {
@@ -579,6 +620,10 @@ export class Session {
 		this.approval = null;
 		this.questions = null;
 		this.resumed = false;
+		this.issue = null;
+		this.actionError = null;
+		this.signInError = null;
+		this.#progressSinceWarning = false;
 	}
 
 	#pushReplay(item: ReplayItem) {

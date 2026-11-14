@@ -5,8 +5,14 @@
 	let {
 		session,
 		sidebarOpen = false,
+		attentionCount = 0,
 		onToggleSidebar = () => {}
-	}: { session: Session; sidebarOpen?: boolean; onToggleSidebar?: () => void } = $props();
+	}: {
+		session: Session;
+		sidebarOpen?: boolean;
+		attentionCount?: number;
+		onToggleSidebar?: () => void;
+	} = $props();
 
 	const disabled = $derived(
 		session.closed ||
@@ -54,6 +60,11 @@
 			/></svg
 		>
 		<span class="menu-label">Projects</span>
+		{#if attentionCount > 0}
+			<span class="menu-badge" title={`${attentionCount} job${attentionCount === 1 ? '' : 's'} needing attention`}>
+				{attentionCount}
+			</span>
+		{/if}
 	</button>
 
 	<div class="identity">
@@ -107,6 +118,17 @@
 	.menu-btn svg {
 		width: 15px;
 		height: 15px;
+	}
+
+	.menu-badge {
+		font-family: var(--font-mono);
+		font-size: 10px;
+		font-weight: 700;
+		line-height: 1;
+		padding: 2px 6px;
+		border-radius: 999px;
+		background: var(--duck);
+		color: #2b240f;
 	}
 
 	@media (max-width: 900px) {

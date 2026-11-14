@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { summarizeJobs, type JobActionTarget } from '#lib/jobs';
 	import type { Session } from '#lib/session.svelte';
 	import type { SidebarProject } from '#lib/workspaces.svelte';
 	import { theme } from '#lib/theme.svelte';
@@ -15,28 +16,39 @@
 
 	let {
 		session,
+		sessions,
 		projects,
 		opening = false,
 		openingCwd = null,
 		openError = null,
+		railTab = $bindable<'projects' | 'jobs'>('projects'),
 		onDismissOpenError,
 		onSelectProject,
 		onCloseProject,
+		onSelectJob,
+		onReopenJob,
+		onCloseJob,
 		onNewTab
 	}: {
 		session: Session;
+		sessions: Session[];
 		projects: SidebarProject[];
 		opening?: boolean;
 		openingCwd?: string | null;
 		openError?: string | null;
+		railTab?: 'projects' | 'jobs';
 		onDismissOpenError?: () => void;
 		onSelectProject: (cwd: string) => void;
 		onCloseProject: (cwd: string) => void;
+		onSelectJob: (tab: number, target?: JobActionTarget) => void;
+		onReopenJob: (tab: number) => void;
+		onCloseJob: (tab: number) => void;
 		onNewTab: () => void;
 	} = $props();
 
 	let sidebarOpen = $state(false);
 	let activeModal = $state<'model' | 'context' | null>(null);
+	const attentionCount = $derived(summarizeJobs(sessions).attention);
 
 	const planReady = $derived(
 		session.workMode === 'plan' && session.plan.trim().length > 0 && !session.streaming
@@ -65,26 +77,41 @@
 	<div id="workspace-sidebar" class="sidebar" class:open={sidebarOpen}>
 		<Sidebar
 			{session}
+			{sessions}
 			{projects}
 			{opening}
 			{openingCwd}
+			bind:railTab
 			onSelectProject={(cwd) => {
 				sidebarOpen = false;
 				onSelectProject(cwd);
 			}}
 			{onCloseProject}
+			onSelectJob={(tab, target) => {
+				sidebarOpen = false;
+				onSelectJob(tab, target);
+			}}
+			onInterruptJob={(tab) => void sessions.find((s) => s.tab === tab)?.interrupt()}
+			onDismissIssue={(tab) => sessions.find((s) => s.tab === tab)?.dismissIssue()}
+			{onReopenJob}
+			{onCloseJob}
 			{onNewTab}
 		/>
 	</div>
 	<div class="pane">
-		<Header {session} {sidebarOpen} onToggleSidebar={() => (sidebarOpen = !sidebarOpen)} />
+		<Header
+			{session}
+			{sidebarOpen}
+			{attentionCount}
+			onToggleSidebar={() => (sidebarOpen = !sidebarOpen)}
+		/>
 		<main>
 			{#if session.actionError || openError}
 				<div class="action-error" role="alert">
 					<span>{session.actionError ?? openError}</span><button
 						class="btn"
 						onclick={() => {
-							session.actionError = null;
+							session.dismissIssue();
 							onDismissOpenError?.();
 						}}>Dismiss</button
 					>

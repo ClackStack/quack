@@ -349,6 +349,36 @@ export class Workspaces {
 		}
 	}
 
+	/** Focus a live (or closed) workspace tab by its engine tab id. */
+	selectTab(tab: number) {
+		const idx = this.sessions.findIndex((s) => s.tab === tab);
+		if (idx < 0) return false;
+		this.activeIndex = idx;
+		this.error = null;
+		return true;
+	}
+
+	/** Restart a stopped workspace tab without briefly dropping to the welcome screen. */
+	async reopenTab(tab: number) {
+		const stale = this.sessions.find((s) => s.tab === tab);
+		if (!stale || this.opening) return;
+		const cwd = stale.cwd;
+		try {
+			await this.#transport.closeTab(stale.tab);
+		} catch (error) {
+			this.error = errorMessage(error);
+			return;
+		}
+		await this.open(cwd, { resume: 'latest' });
+		const staleIndex = this.sessions.indexOf(stale);
+		const hasReplacement = this.sessions.some((s) => s !== stale && samePath(s.cwd, cwd));
+		if (staleIndex >= 0 && hasReplacement) {
+			this.sessions.splice(staleIndex, 1);
+			if (this.activeIndex > staleIndex) this.activeIndex--;
+			else if (this.activeIndex >= this.sessions.length) this.activeIndex = this.sessions.length - 1;
+		}
+	}
+
 	/** Focus an already-open sidebar project, or start/resume a remembered dormant one. */
 	async selectProject(cwd: string) {
 		const idx = this.sessions.findIndex((s) => samePath(s.cwd, cwd));
