@@ -22,8 +22,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::session::{self, SharedLog};
 
-/// Default context limit, or the warning threshold for full-context hooks.
+/// Context from a hook is capped at about this many tokens, unless `full_context` is set.
 const MAX_CONTEXT_TOKENS: u32 = 8_000;
+/// `full_context` hooks keep everything; the engine warns above this many estimated tokens.
+const WARN_CONTEXT_TOKENS: u32 = 32_000;
 
 /// The session's hooks, read from `hooks.d` at startup and on `/reload`.
 #[derive(Debug, Default)]
@@ -253,11 +255,11 @@ impl Hooks {
                 Ok(Some(reply)) => {
                     if hook.file.full_context
                         && let Some(text) = reply.context.as_ref().filter(|_| event.takes_context())
-                        && tokens::estimate(text) > MAX_CONTEXT_TOKENS
+                        && tokens::estimate(text) > WARN_CONTEXT_TOKENS
                     {
                         (sink.emit)(Event::Warning {
                             message: format!(
-                                "Hook `{}` added about {} tokens, exceeding {MAX_CONTEXT_TOKENS}; \
+                                "Hook `{}` added about {} tokens, exceeding {WARN_CONTEXT_TOKENS}; \
                                  full context was retained.",
                                 hook.id,
                                 tokens::estimate(text),

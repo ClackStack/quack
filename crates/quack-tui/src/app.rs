@@ -666,6 +666,12 @@ pub struct App {
     browser: Option<String>,
     /// The session title, for the terminal window and the sidebar.
     pub(crate) session_title: Option<String>,
+    /// Current engine session id, for the resume hint on exit.
+    session_id: Option<String>,
+    /// True once the current session exists on disk (resumed or at least one turn started).
+    session_saved: bool,
+    /// A `/new` session switch is in flight; clear `session_saved` when `SessionConfigured` lands.
+    starting_new: bool,
     /// Installed skills, runnable as `/<name>`.
     skills: Vec<quack_protocol::SkillInfo>,
     /// Custom slash commands, minus any that a built-in command's name hides.
@@ -788,6 +794,9 @@ impl App {
             clipboard: None,
             browser: None,
             session_title: None,
+            session_id: None,
+            session_saved: false,
+            starting_new: false,
             skills: Vec::new(),
             custom: Vec::new(),
             mcp_prompts: Vec::new(),
@@ -820,6 +829,15 @@ impl App {
 
     pub fn should_quit(&self) -> bool {
         self.quit
+    }
+
+    /// Short id of the current session if it has been saved on disk, for a resume hint on exit.
+    pub fn resume_id(&self) -> Option<String> {
+        self.session_saved
+            .then_some(self.session_id.as_deref())
+            .flatten()
+            .filter(|id| !id.is_empty())
+            .map(|id| id.chars().take(12).collect())
     }
 
     pub fn take_dirty(&mut self) -> bool {
@@ -987,6 +1005,27 @@ impl App {
             .into_iter()
             .map(|i| &COMMANDS[i])
             .collect();
+        if !query.is_empty() {
+            let mut insert_at = hits
+                .iter()
+                .rposition(|c| c.name.starts_with(query))
+                .map_or(0, |i| i + 1);
+            for cmd in COMMANDS {
+                if !cmd.aliases.iter().any(|a| a.starts_with(query)) {
+                    continue;
+                }
+                if let Some(pos) = hits.iter().position(|h| h.name == cmd.name) {
+                    if pos >= insert_at {
+                        hits.remove(pos);
+                        hits.insert(insert_at, cmd);
+                        insert_at += 1;
+                    }
+                } else {
+                    hits.insert(insert_at, cmd);
+                    insert_at += 1;
+                }
+            }
+        }
         if let Some(alias) = COMMANDS.iter().find(|c| c.aliases.contains(&query)) {
             hits.retain(|c| c.name != alias.name);
             hits.insert(0, alias);
@@ -1165,6 +1204,10 @@ impl App {
                 self.note(format!("queued, waiting for {waiting_for}"));
             }
             Event::SessionConfigured { session } => {
+                self.session_id = Some(session.id.0);
+                if std::mem::take(&mut self.starting_new) {
+                    self.session_saved = false;
+                }
                 self.info.model = session.model;
                 self.info.profile = session.profile;
                 self.reasoning_effort = session.reasoning_effort;
@@ -1473,7 +1516,10 @@ impl App {
                     self.growth.clear();
                 }
                 self.startup_dismissed = true;
+                self.starting_new = false;
+                self.session_saved = true;
                 let short: String = session.id.0.chars().take(12).collect();
+                self.session_id = Some(session.id.0);
                 self.note(format!("resumed session {short} ({} entries)", items.len()));
                 for item in items {
                     self.transcript.push(match item {
@@ -1500,6 +1546,7 @@ impl App {
                 }
             }
             Event::TurnStarted { .. } => {
+                self.session_saved = true;
                 self.queued = false;
                 self.turn_running = true;
                 self.turn_started = Some(Instant::now());
@@ -2882,6 +2929,8 @@ impl App {
                 self.agents.clear();
                 self.context = None;
                 self.growth.clear();
+                self.starting_new = true;
+                self.session_saved = false;
                 self.ops.push(Op::NewSession);
                 self.note("new session; the previous one is saved (/resume)".into());
             }
@@ -4312,6 +4361,56 @@ mod tests {
     }
 
     #[test]
+    fn compact_aliases_summarize_and_summary() {
+        for alias in ["/summarize", "/summary"] {
+            let mut app = App::new(info());
+            type_str(&mut app, alias);
+            assert_eq!(
+                app.popup_matches().first().map(|c| c.name.as_str()),
+                Some("compact")
+            );
+            press(&mut app, KeyCode::Enter);
+            assert_eq!(app.take_ops(), vec![Op::Compact { focus: None }]);
+
+            let mut app = App::new(info());
+            type_str(&mut app, &format!("{alias} keep the test plan"));
+            press(&mut app, KeyCode::Enter);
+            assert_eq!(
+                app.take_ops(),
+                vec![Op::Compact {
+                    focus: Some("keep the test plan".into()),
+                }]
+            );
+        }
+
+        // Typing a prefix of the alias surfaces `/compact` in the popup.
+        let mut app = App::new(info());
+        type_str(&mut app, "/summ");
+        assert_eq!(
+            app.popup_matches().first().map(|c| c.name.as_str()),
+            Some("compact")
+        );
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.input.text(), "/compact ");
+
+        // Custom commands cannot reuse the aliases.
+        let mut app = App::new(info());
+        app.on_engine(Event::Commands {
+            commands: vec![quack_protocol::CommandInfo {
+                name: "summarize".into(),
+                description: "custom".into(),
+                args: String::new(),
+                source: "user".into(),
+                path: "/cfg/commands/summarize.md".into(),
+            }],
+        });
+        assert!(app.custom.is_empty());
+        assert!(app.transcript.iter().any(
+            |e| matches!(e, Entry::Warning(w) if w.contains("/summarize in /cfg/commands/summarize.md"))
+        ));
+    }
+
+    #[test]
     fn config_set_saves_to_user_layer_and_applies_ui_live() {
         let mut app = App::new(info());
         type_str(&mut app, "/config set ui.ascii true");
@@ -4603,5 +4702,53 @@ mod tests {
                 Op::ReloadConfig,
             ]
         );
+    }
+
+    #[test]
+    fn resume_id_only_reported_for_saved_sessions() {
+        let session = |id: &str| quack_protocol::SessionInfo {
+            id: SessionId(id.into()),
+            cwd: "/tmp".into(),
+            model: Some("mock/m".into()),
+            profile: "generic".into(),
+            reasoning_effort: None,
+            reasoning_efforts: vec![],
+        };
+
+        let mut app = App::new(info());
+        app.on_engine(Event::SessionConfigured {
+            session: session("0123456789abcdef0123456789abcdef"),
+        });
+        // No turn yet -> not saved on disk.
+        assert_eq!(app.resume_id(), None);
+
+        // First turn starts -> saved.
+        app.on_engine(Event::TurnStarted { turn: TurnId(1) });
+        app.on_engine(Event::TurnComplete {
+            turn: TurnId(1),
+            usage: quack_protocol::Usage::default(),
+        });
+        assert_eq!(app.resume_id().as_deref(), Some("0123456789ab"));
+
+        // `/fork` replaces the session id while staying saved.
+        app.on_engine(Event::SessionConfigured {
+            session: session("fedcba9876543210fedcba9876543210"),
+        });
+        assert_eq!(app.resume_id().as_deref(), Some("fedcba987654"));
+
+        // `/new` clears saved state until a turn starts in the new session.
+        type_str(&mut app, "/new ");
+        press(&mut app, KeyCode::Enter);
+        app.on_engine(Event::SessionConfigured {
+            session: session("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        });
+        assert_eq!(app.resume_id(), None);
+
+        // Resuming a saved session marks it saved immediately.
+        app.on_engine(Event::SessionResumed {
+            session: session("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            items: vec![],
+        });
+        assert_eq!(app.resume_id().as_deref(), Some("bbbbbbbbbbbb"));
     }
 }

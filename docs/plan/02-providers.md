@@ -168,7 +168,7 @@ client_key  = "~/.certs/me.key"
 # insecure_skip_verify = false         # exists, warns loudly, blockable by policy
 
 [http]
-timeout_connect_secs = 10
+timeout_connect_secs = 30              # TCP + proxy + TLS, split across the host's addresses
 timeout_idle_secs = 300                # long prefill on big contexts can be slow
 timeout_first_byte_secs = 0            # wait for headers, then retry (doubling each time); 0 = idle
 max_retries = 3                        # 429/5xx/connection reset, exponential backoff + jitter
@@ -322,6 +322,14 @@ Stalls (2026-10-25). A hosted service can accept a request and never answer; Fir
 
 - **No headers:** `[http] timeout_first_byte_secs` bounds the wait for response headers, and the provider retries (up to `max_retries`), doubling the wait each time up to `timeout_idle_secs`, because servers send headers after prefill. Unset means `timeout_idle_secs`; `fireworks.toml` sets 30.
 - **Reply stops partway:** once bytes flow the provider never retries, so a `Timeout` or `Network` error mid-stream reaches the engine, which sends the same step again (at most twice, with a warning each time). The partial reply never entered the history, so the request is byte-identical and the cache stays warm.
+
+Stale connections (2026-11-13). Over a VPN, requests timed out in quack while opencode, on the same network, kept working. opencode runs on Bun, whose `fetch` speaks HTTP/1.1: each request has its own socket, and an aborted request takes its socket with it. reqwest negotiates HTTP/2, so every request from a process shares one connection. When that connection dies without closing (the VPN reconnects, or a local proxy or VPN client keeps the socket open after the path behind it has gone), TCP keepalive sees nothing wrong, and dropping a timed-out request only resets its stream, so every retry went down the same dead connection. Three changes, in `provider.rs`:
+
+- **HTTP/2 PINGs** (`H2_PING_INTERVAL` 20s, `H2_PING_TIMEOUT` 10s, while idle too) close a dead connection, so it leaves the pool.
+- **A fresh client after a `Timeout` or `Network` error.** reqwest can't empty its pool, so `Provider::renew_client` builds a new client from the `ClientSpec` (proxy, roots, identity, resolved once in `Provider::new`) and every clone uses it from then on. This is a browser's refresh. A generation number makes several requests failing at once replace the client only once.
+- **`[network] http1_only`** behaves like opencode, for networks where HTTP/2 still misbehaves.
+
+Two more were found at the same time. An `HTTPS_PROXY` from the environment ignored `NO_PROXY`: quack hands reqwest the proxy itself, which turns off reqwest's own lookup and with it `NO_PROXY`, so the VPN's internal hosts went through the proxy. `ClientSpec::resolve` now reads `NO_PROXY` itself. And `timeout_connect_secs` went from 10 to 30: it covers TCP, the proxy's `CONNECT` and TLS, and hyper-util splits it across the host's addresses, so a lossy VPN ran out of it after a couple of resent SYNs. `timeout_first_byte_secs` stays at the idle timeout, so a slow local prefill isn't cut off; PINGs now find a dead HTTP/2 connection long before then. `provider::tests` puts a TCP relay in front of the mock server that can make its first connection go dead with both sockets open, and checks that the retry opens a second one.
 
 ## Vision (2026-10-24)
 

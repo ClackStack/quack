@@ -165,7 +165,7 @@ All configuration UIs share one modal widget, so they look and behave the same:
 | `/bundles` | | Installed bundles with their contents; turn each on or off ([08](08-instructions-skills-commands.md#bundles)) |
 | `/title <text>` | | Rename the session |
 | `/export [md\|json]` | | Write transcript to a file |
-| `/compact [focus]` | | Compact now, with optional focus instructions |
+| `/compact [focus]` | `/summarize`, `/summary` | Compact now, with optional focus instructions |
 | `/context` | | Context breakdown modal: segments, tokens, prunable items, cache state; actions: prune now, drop an item |
 | `/config` | `/settings` | **Settings editor**: tabs mirror `config.toml` tables (Model, UI, Context, Tools, Permissions, Memory, Sessions, Network). Each row shows the effective value, its source layer and a description from the JSON Schema. Edit inline with type-aware widgets (toggle, enum picker, number, string, list) |
 | `/permissions [ask\|allow]` | | Ask/Allow approval picker, keeping Plan/Edit, plus allow/ask/deny rule lists per layer; add/remove rules; shows the compiled-in deny floor (read-only). Yolo stays under `/yolo`; an active legacy policy is named in the tab title |

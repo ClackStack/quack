@@ -36,7 +36,7 @@ pub(crate) struct Global {
     #[arg(long = "continue", global = true, conflicts_with = "resume")]
     pub continue_: bool,
     /// Resume a saved session by id (or unique prefix); `quack sessions` lists them.
-    #[arg(long, global = true, value_name = "ID")]
+    #[arg(short = 's', long, global = true, value_name = "ID")]
     pub resume: Option<String>,
     /// Ask before unapproved actions, or allow them within the selected work mode and sandbox.
     #[arg(
@@ -325,5 +325,11 @@ mod mode_tests {
         for legacy in ["auto-edit", "read-only", "full-auto", "yolo", "plan"] {
             assert!(!approvals.contains(legacy), "{approvals}");
         }
+    }
+
+    #[test]
+    fn short_s_parses_as_resume() {
+        let cli = Cli::try_parse_from(["quack", "-s", "0123456789ab"]).expect("-s flag");
+        assert_eq!(cli.global.resume.as_deref(), Some("0123456789ab"));
     }
 }

@@ -368,8 +368,9 @@ alias for Allow; existing flags and saved sessions still load without increasing
 |---|---|---|
 | `offline` | `false` | When true, restricts network access to local interfaces or `egress_allow` hosts |
 | `egress_allow` | `[]` | Allowed remote host globs when `offline = true` |
-| `proxy` | `""` | HTTP/HTTPS proxy URL |
+| `proxy` | `""` | HTTP/HTTPS proxy URL (empty: `HTTPS_PROXY` or the system's). Hosts in `NO_PROXY` always go direct |
 | `ca_bundle` | `""` | Path to custom PEM certificate bundle |
+| `http1_only` | `false` | Use HTTP/1.1 only, one connection per request, instead of one shared HTTP/2 connection. Try it if requests stall behind a VPN or proxy |
 
 **`[catalog]`**
 | Key | Default | Description |
@@ -453,8 +454,9 @@ alias for Allow; existing flags and saved sessions still load without increasing
 | `enabled` | `true` | Toggle provider availability |
 | `auth_header`, `auth_scheme` | `Authorization`, `Bearer` | HTTP authorization header configuration |
 | `headers` | `{}` | Custom HTTP headers sent with requests |
-| `http.timeout_connect_secs` | `10` | Connection timeout |
+| `http.timeout_connect_secs` | `30` | Connection timeout, covering TCP, any proxy and TLS |
 | `http.timeout_idle_secs` | `300` | Stream idle timeout |
+| `http.timeout_first_byte_secs` | `0` (the idle timeout) | Wait for response headers before retrying; doubles on each retry |
 | `http.max_retries` | `3` | Maximum automatic retries on transient errors |
 | `discovery.enabled` | `false` | Query server `/models` endpoint dynamically at startup |
 | `catalog` | provider ID | ID in the model catalog, for prices and windows nothing else reports. Servers on this machine aren't looked up unless named; `""` turns it off |
@@ -538,7 +540,7 @@ and confirms the hook is active. Turning a hook off lists its id in `[hooks] dis
 | `match.tool`, `match.pattern` | `""` | Tool name glob and argument pattern matchers |
 | `match.prompt` | `""` | Regular expression for `user_prompt` events |
 | `timeout_secs` | `10` | Maximum hook execution duration |
-| `full_context` | `false` | Preserve full stdout and added context, warning above 8,000 estimated tokens |
+| `full_context` | `false` | Preserve full stdout and added context, warning above 32,000 estimated tokens (other hooks truncate at 8,000) |
 | `setup` | none | Versioned, declarative TUI fields and service presets; optional for custom hooks |
 | `connections` | none | Connection settings and credential references, passed to the script on stdin with credentials in its environment; an explicit empty list disables all connections |
 | `on_error` | `"warn"` | Failure behavior: `warn`, `allow` (silent continue), or `deny` |

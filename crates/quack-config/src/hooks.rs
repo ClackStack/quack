@@ -55,7 +55,7 @@ pub struct HookFile {
     pub cwd: String,
     #[serde(default = "timeout")]
     pub timeout_secs: u64,
-    /// Preserve stdout and added context in full. Warn above 8,000 estimated tokens.
+    /// Preserve stdout and added context in full. Warn above 32,000 estimated tokens.
     #[serde(default)]
     pub full_context: bool,
     /// What a failure (a crash, a timeout, unreadable output) means.

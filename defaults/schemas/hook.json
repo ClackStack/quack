@@ -378,7 +378,7 @@
     },
     "full_context": {
       "default": false,
-      "description": "Preserve stdout and added context in full. Warn above 8,000 estimated tokens.",
+      "description": "Preserve stdout and added context in full. Warn above 32,000 estimated tokens.",
       "type": "boolean"
     },
     "id": {

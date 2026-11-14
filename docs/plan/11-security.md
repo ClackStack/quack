@@ -141,11 +141,11 @@ When a command fails because of the sandbox (EPERM/EACCES patterns, network erro
 
 ### Harness's own traffic
 
-The **egress gate** is `NetworkSettings::check_egress`, used for remote MCP servers, and `Settings::check_fetch`, which adds the system policy's hosts, for quack's own requests (`quack_providers::fetch`: the model catalog and the version check). `fetch` checks every redirect too, sends no identifier or credentials, and caps the body. Provider requests don't pass the gate: a provider's `base_url` is a configured destination, and `[policy.providers] hosts` limits those.
+The **egress gate** is `NetworkSettings::check_egress`, used for remote MCP servers, and `Settings::check_fetch`, which adds the system policy's hosts, for quack's own requests (`quack_providers::fetch`: the model catalog and the version check). `fetch` checks every redirect too, sends no identifier or credentials, and caps the body. Provider requests don't pass the gate for their first hop: a provider's `base_url` is a configured destination, and `[policy.providers] hosts` limits those. Redirects are gated everywhere, though: every HTTP client the harness builds (`client_builder`, covering provider streaming, remote MCP and sign-ins) follows a redirect only within the host the chain started from, and any cross-host hop must pass `check_egress` - so a redirect can never turn a allowed URL into a trampoline, in offline mode or out of it.
 
-- `network.offline = false`: allowed destinations are configured provider base URLs, MCP http URLs, `web_fetch` (if enabled), and the `catalog.url` and `updates.url` hosts when the user runs `quack catalog refresh` or `quack update`, or has turned on `catalog.refresh` or `updates.check`. Both settings are off by default, so nothing else is ever contacted implicitly.
-- `network.offline = true`: only provider base URLs + `egress_allow` hosts. `web_fetch` is unregistered. The catalog and version checks are refused, by command or in the background, unless their host is in `egress_allow`. Tokenizer and grammar fetch commands refuse to run. MCP http servers outside the allowlist are disabled with a clear reason.
-- A CI test asserts that a full startup + turn with a mock provider makes **zero** connections other than to the mock (see [13](13-testing-and-evals.md)), and `offline_stops_the_opt_in_checks` that the checks reach their hosts only when on and not offline.
+- `network.offline = false`: allowed destinations are configured provider base URLs, MCP http URLs, `web_fetch` (if enabled), and the `catalog.url` and `updates.url` hosts when the user runs `quack catalog refresh` or `quack update`, or has turned on `catalog.refresh` or `updates.check`. Both settings are off by default, and pinning tests (`the_bundle_ships_with_the_opt_in_checks_off`, `no_remote_mcp_server_ships_enabled`) keep the shipped bundle that way: nothing is ever contacted implicitly.
+- `network.offline = true`: only provider base URLs + `egress_allow` hosts. `web_fetch` is unregistered. The catalog and version checks are refused, by command or in the background, unless their host is in `egress_allow`. Tokenizer and grammar fetch commands refuse to run. MCP http servers outside the allowlist are disabled with a clear reason, and a redirect from an allowed server to another host is refused at the policy layer (`a_redirect_cannot_step_around_the_offline_gate` in `quack-mcp`, `a_provider_redirect_cannot_step_around_offline_mode` in `quack-core`).
+- CI tests assert that a full startup + turns with a mock provider - plain turns, a tool call, a sub-agent - make **zero** connections other than to the mock (`no_egress_beyond_the_configured_provider`), that a fresh install (bundle, no provider, no keys) reaches only servers on this machine (`a_fresh_install_stays_on_this_machine`), and that the checks reach their hosts only when on and not offline (`offline_stops_the_opt_in_checks`). `scripts/no-egress.sh` proves the same at the OS level, tracing `connect` and UDP sends (DNS leaves via `sendto`, not `connect`) inside a loopback-only namespace.
 - A download can only change numbers. The model catalog holds prices and context windows, and never a `base_url` or key name, so a compromised feed can't redirect traffic or keys. Provider presets stay reviewed files in `defaults/providers.d/`.
 - `web_fetch`, when enabled, blocks private, link-local and metadata IP ranges (SSRF protection, as maki does), unless `allow_private = true`. Enterprises with internal docs may want that.
 
@@ -155,7 +155,8 @@ Commands run by `shell`, and stdio MCP servers, can open their own connections. 
 
 ### Corporate networks
 
-- `HTTPS_PROXY`/`NO_PROXY` are honoured, along with `[network] proxy`.
+- `HTTPS_PROXY`/`NO_PROXY` are honoured, along with `[network] proxy`. `NO_PROXY` applies to a configured proxy too (fixed 2026-11-13: an environment proxy had been ignoring it).
+- `[network] http1_only` avoids one shared HTTP/2 connection, for VPNs and proxies that leave connections stale ([02](02-providers.md)).
 - OS trust store via `rustls-platform-verifier`, so corporate root CAs in the Windows/macOS/Linux stores work. Extra `ca_bundle` is supported.
 - mTLS client certificates per provider ([02](02-providers.md)).
 
@@ -241,7 +242,7 @@ activation. The engine confirms success after loading the hook from the updated 
 - **Order.** The hooks for one event run in id order, one after another; a later
   `pre_tool` hook sees the arguments an earlier one changed, and a denial stops the rest.
   A hook's context is capped at about 8,000 tokens by default. `full_context = true`
-  preserves full stdout and context and emits a warning above that token threshold.
+  preserves full stdout and context and emits a warning above 32,000 estimated tokens.
 - **Reporting.** `Event::HookRan` (id, event, outcome, time, message, context tokens); the
   TUI shows a line when a hook added context, decided or said something. Each run is a
   `hook` record in the session log. `/doctor` has a hooks row: each file loads and its

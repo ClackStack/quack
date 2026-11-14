@@ -61,12 +61,13 @@ impl StartupTrace {
     }
 }
 
-/// Run the TUI until the user quits. Restores the terminal on exit and on panic.
+/// Run the TUI until the user quits. Restores the terminal on exit and on panic, returning
+/// the short id of the current session if it was saved so the caller can print a resume hint.
 pub async fn run(
     mut engine: EngineHandle,
     config: Arc<Loaded>,
     trace: Option<StartupTrace>,
-) -> io::Result<()> {
+) -> io::Result<Option<String>> {
     let mut app = App::new(AppInfo::from_config(&config));
     let mut terminal = ratatui::init();
     let _ = crossterm::execute!(io::stdout(), EnableBracketedPaste, PushTitle);
@@ -79,7 +80,7 @@ pub async fn run(
     );
     ratatui::restore();
     engine.shutdown().await;
-    result
+    result.map(|()| app.resume_id())
 }
 
 async fn event_loop(

@@ -127,7 +127,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     ),
     c(
         "compact",
-        &[],
+        &["summarize", "summary"],
         "[focus]",
         "Summarize earlier conversation now, keeping the current turn",
         None,

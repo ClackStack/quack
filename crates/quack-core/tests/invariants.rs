@@ -45,16 +45,24 @@ fn defaults_bundle() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
 }
 
-/// An isolated configuration with a user-layer `mock` provider, an optional defaults
-/// bundle and extra `config.toml` text.
-fn configure(root: &Path, base_url: &str, defaults: Option<&Path>, config: &str) -> Loaded {
+/// An isolated configuration with an optional user-layer `mock` provider, an optional
+/// defaults bundle and extra `config.toml` text. `None` provider is the shape of a fresh
+/// install: the bundle alone, nothing of the user's own.
+fn load_config(
+    root: &Path,
+    provider: Option<&str>,
+    defaults: Option<&Path>,
+    config: &str,
+) -> Loaded {
     let user = root.join("user");
     std::fs::create_dir_all(user.join("providers.d")).expect("mkdir");
-    std::fs::write(
-        user.join("providers.d").join("mock.toml"),
-        format!("base_url = \"{base_url}/v1\"\nmodels = [\"tiny\"]\n"),
-    )
-    .expect("provider");
+    if let Some(base_url) = provider {
+        std::fs::write(
+            user.join("providers.d").join("mock.toml"),
+            format!("base_url = \"{base_url}/v1\"\nmodels = [\"tiny\"]\n"),
+        )
+        .expect("provider");
+    }
     std::fs::write(user.join("config.toml"), config).expect("config");
     let mut vars: HashMap<String, OsString> = HashMap::new();
     vars.insert("QUACK_CONFIG_DIR".into(), user.into_os_string());
@@ -72,6 +80,11 @@ fn configure(root: &Path, base_url: &str, defaults: Option<&Path>, config: &str)
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("mkdir");
     load_with(&move |k| vars.get(k).cloned(), &LoadOptions::new(ws)).expect("load")
+}
+
+/// An isolated configuration with a user-layer `mock` provider.
+fn configure(root: &Path, base_url: &str, defaults: Option<&Path>, config: &str) -> Loaded {
+    load_config(root, Some(base_url), defaults, config)
 }
 
 async fn next(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> Event {
@@ -125,6 +138,33 @@ async fn turn(engine: &mut EngineHandle, text: &str) {
             Event::TurnComplete { .. } => return,
             Event::TurnAborted { reason, .. } => panic!("aborted: {reason}"),
             Event::Error { error } => panic!("engine error: {}", error.message),
+            _ => {}
+        }
+    }
+}
+
+/// Run one turn that is expected to fail: collect the engine's error messages instead of
+/// panicking on them, until the turn ends one way or the other.
+async fn turn_errors(engine: &mut EngineHandle, text: &str) -> Vec<String> {
+    engine
+        .submit(Op::UserTurn {
+            items: vec![InputItem::text(text)],
+            overrides: TurnOverrides::default(),
+        })
+        .await;
+    let mut errors = Vec::new();
+    loop {
+        match next(&mut engine.events).await {
+            Event::ApprovalRequest { call_id, .. } => {
+                engine
+                    .submit(Op::ApprovalResponse {
+                        call_id,
+                        decision: ApprovalDecision::AllowOnce,
+                    })
+                    .await;
+            }
+            Event::TurnComplete { .. } | Event::TurnAborted { .. } => return errors,
+            Event::Error { error } => errors.push(error.message),
             _ => {}
         }
     }
@@ -386,16 +426,64 @@ async fn forward(
     client.shutdown().await
 }
 
-/// Startup plus three turns with the defaults bundle installed reaches nothing but the
-/// configured provider, with `offline` on and off. All provider traffic goes through a
-/// recording proxy, so any other destination would show up.
+fn reply_text(t: &str) -> ResponseTemplate {
+    sse(&[&format!(
+        r#"{{"choices":[{{"delta":{{"content":"{t}"}},"finish_reason":"stop"}}]}}"#
+    )])
+}
+
+fn reply_call(name: &str, args: &str) -> ResponseTemplate {
+    sse(&[&format!(
+        r#"{{"choices":[{{"delta":{{"tool_calls":[{{"index":0,"id":"c1","function":{{"name":"{name}","arguments":"{args}"}}}}]}},"finish_reason":"tool_calls"}}]}}"#
+    )])
+}
+
+/// A provider that walks a fixed script: three plain replies, then a `read` tool call and
+/// the continuation after its result, then a `task` sub-agent call (whose nested turn makes
+/// a request of its own in the middle) and the final answer. Each mock answers once
+/// (`up_to_n_times`), so wiremock's first-match rule walks the script in order; the
+/// continuation mocks also require a tool result in the history, proving the tool round
+/// trips really happened.
+async fn scripted_server() -> MockServer {
+    let server = MockServer::start().await;
+    let script: Vec<(bool, ResponseTemplate)> = vec![
+        (false, reply_text("One.")),
+        (false, reply_text("Two.")),
+        (false, reply_text("Three.")),
+        (false, reply_call("read", r#"{\"path\":\"note.txt\"}"#)),
+        (true, reply_text("Read it.")),
+        (
+            false,
+            reply_call("task", r#"{\"agent\":\"explore\",\"prompt\":\"look\"}"#),
+        ),
+        (false, reply_text("Found.")),
+        (true, reply_text("Done.")),
+    ];
+    for (after_tool, reply) in script {
+        let mut matcher = Mock::given(method("POST")).and(path("/v1/chat/completions"));
+        if after_tool {
+            matcher = matcher.and(body_string_contains("\"role\":\"tool\""));
+        }
+        matcher
+            .respond_with(reply)
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+    }
+    server
+}
+
+/// Startup plus plain turns, a tool-call turn and a sub-agent turn, with the defaults
+/// bundle installed, reaches nothing but the configured provider, with `offline` on and
+/// off. All provider traffic goes through a recording proxy, so any other destination
+/// would show up.
 #[tokio::test]
 async fn no_egress_beyond_the_configured_provider() {
-    let server = answering_server().await;
-    let mock = *server.address();
+    let tmp = tempfile::tempdir().expect("tempdir");
     for offline in [false, true] {
+        let server = scripted_server().await;
+        let mock = *server.address();
         let proxy = RecordingProxy::start(mock).await;
-        let tmp = tempfile::tempdir().expect("tempdir");
         let loaded = configure(
             tmp.path(),
             &server.uri(),
@@ -405,6 +493,7 @@ async fn no_egress_beyond_the_configured_provider() {
                 proxy.url
             ),
         );
+        std::fs::write(tmp.path().join("ws").join("note.txt"), "a note\n").expect("note");
         let mut engine = Engine::spawn(Arc::new(loaded));
         let s = startup(&mut engine).await;
         assert!(
@@ -414,11 +503,21 @@ async fn no_egress_beyond_the_configured_provider() {
             ),
             "{s:?}"
         );
-        for text in ["one", "two", "three"] {
+        for text in ["one", "two", "three", "read the note", "delegate a look"] {
             turn(&mut engine, text).await;
         }
+        let requests = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.url.path() == "/v1/chat/completions")
+            .count();
         engine.shutdown().await;
-
+        // Three plain turns (3 requests), the read round trip (2) and the sub-agent (its
+        // own request plus the parent's continuation, 3): the whole script ran. (Startup's
+        // one `GET /v1/models`, which fills model metadata, is not a turn request.)
+        assert_eq!(requests, 8, "the scripted exchange did not run in full");
         let allowed = format!("POST {mock}");
         let destinations = proxy.destinations();
         assert!(
@@ -430,6 +529,81 @@ async fn no_egress_beyond_the_configured_provider() {
             "offline = {offline}: unexpected destinations {destinations:?}"
         );
     }
+}
+
+/// A provider whose endpoint answers with a redirect to another host cannot step around
+/// offline mode: every redirect hop is checked against the same gate as the first
+/// request, so the turn fails without anything being sent towards the redirect target.
+#[tokio::test]
+async fn a_provider_redirect_cannot_step_around_offline_mode() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", "http://elsewhere.example/v1/chat/completions"),
+        )
+        .mount(&server)
+        .await;
+    let mock = *server.address();
+    let proxy = RecordingProxy::start(mock).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = configure(
+        tmp.path(),
+        &server.uri(),
+        Some(&defaults_bundle()),
+        &format!("[network]\noffline = true\nproxy = \"{}\"\n", proxy.url),
+    );
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    startup(&mut engine).await;
+    let errors = turn_errors(&mut engine, "hello").await;
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("network.offline") && e.contains("elsewhere.example")),
+        "the gate's refusal should surface, got {errors:?}"
+    );
+    engine.shutdown().await;
+    let destinations = proxy.destinations();
+    assert!(
+        destinations.iter().all(|d| d.ends_with(&mock.to_string())),
+        "the redirect target was contacted: {destinations:?}"
+    );
+}
+
+/// A fresh install: the defaults bundle, no provider of the user's own, no keys. Startup
+/// may probe the bundle's local servers (it needs a default model, and only servers on
+/// this machine answer without a key), and the turn a user then starts reaches for the
+/// same ones - but nothing a fresh install does ever leaves the machine.
+#[tokio::test]
+async fn a_fresh_install_stays_on_this_machine() {
+    let black_hole: SocketAddr = "127.0.0.1:9".parse().expect("addr");
+    let proxy = RecordingProxy::start(black_hole).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = load_config(
+        tmp.path(),
+        None,
+        Some(&defaults_bundle()),
+        &format!("[network]\nproxy = \"{}\"\n", proxy.url),
+    );
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    startup(&mut engine).await;
+    let startup_destinations = proxy.destinations();
+    assert!(
+        startup_destinations.iter().all(|d| d.contains("127.0.0.1")),
+        "startup reached off this machine: {startup_destinations:?}"
+    );
+    let errors = turn_errors(&mut engine, "hello").await;
+    assert!(
+        !errors.is_empty(),
+        "the turn should fail without a reachable provider"
+    );
+    engine.shutdown().await;
+    let destinations = proxy.destinations();
+    assert!(
+        destinations.iter().all(|d| d.contains("127.0.0.1")),
+        "a fresh install reached off this machine: {destinations:?}"
+    );
 }
 
 /// The opt-in checks reach the configured host when turned on, and `offline` stops them
@@ -580,5 +754,52 @@ async fn resume_reproduces_the_request_exactly() {
     assert!(
         bodies[0].to_string().contains("[~] answer questions"),
         "the plan reminder rides on the request: {messages:#?}"
+    );
+}
+
+/// The bundle ships with both opt-in background checks off: a fresh install refreshes no
+/// model catalog and looks for no updates until the user turns them on.
+#[test]
+fn the_bundle_ships_with_the_opt_in_checks_off() {
+    let text = std::fs::read_to_string(defaults_bundle().join("config.toml")).expect("read");
+    let settings: quack_config::Settings = toml::from_str(&text).expect("parse");
+    assert!(
+        !settings.catalog.refresh,
+        "a fresh install would fetch {} in the background",
+        settings.catalog.url
+    );
+    assert!(
+        !settings.updates.check,
+        "a fresh install would ask {} for updates in the background",
+        settings.updates.url
+    );
+}
+
+/// No remote (`http`/`https`) MCP server in the bundle ships enabled: the user opts in by
+/// copying the file and turning it on, so a fresh install connects to no MCP endpoint.
+#[test]
+fn no_remote_mcp_server_ships_enabled() {
+    let dir = defaults_bundle().join("mcp.d");
+    let mut remote = 0;
+    for entry in std::fs::read_dir(&dir).expect("mcp.d").flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|x| x != "toml") {
+            continue;
+        }
+        let file: quack_config::McpServerFile =
+            toml::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        if file.url.starts_with("http") {
+            remote += 1;
+            assert!(
+                !file.enabled,
+                "{}: a remote MCP server ships enabled ({})",
+                path.display(),
+                file.url
+            );
+        }
+    }
+    assert!(
+        remote > 0,
+        "the bundle's remote MCP offers are gone; revisit this test"
     );
 }

@@ -360,10 +360,13 @@ pub struct NetworkSettings {
     #[serde(deserialize_with = "list::de")]
     #[schemars(with = "ListOrAppend")]
     pub egress_allow: Vec<String>,
-    /// Empty: `HTTPS_PROXY` / system.
+    /// Empty: `HTTPS_PROXY` / system. Hosts in `NO_PROXY` always go direct.
     pub proxy: String,
     /// Extra PEM roots, in addition to the OS store.
     pub ca_bundle: String,
+    /// Speak HTTP/1.1 only, one connection per request, instead of sharing one HTTP/2
+    /// connection. Try it when a VPN or proxy leaves connections stale.
+    pub http1_only: bool,
 }
 
 impl NetworkSettings {
