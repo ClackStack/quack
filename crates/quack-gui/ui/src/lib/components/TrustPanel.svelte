@@ -41,7 +41,9 @@
 		padding: var(--sp-xl);
 	}
 	h1 {
-		font-size: 22px;
+		font-family: var(--font-serif);
+		font-size: 24px;
+		font-weight: 600;
 		max-width: 36ch;
 		margin: 0 0 16px;
 	}

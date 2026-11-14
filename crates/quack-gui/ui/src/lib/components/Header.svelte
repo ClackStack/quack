@@ -1,32 +1,21 @@
 <script lang="ts">
-	import {
-		APPROVALS,
-		WORK_MODES,
-		type ApprovalPolicy,
-		type Session,
-		type WorkMode
-	} from '#lib/session.svelte';
-	import iconUrl from '#lib/assets/icon.png';
+	import type { Session } from '#lib/session.svelte';
 	import ThemeToggle from '#lib/components/ThemeToggle.svelte';
 
-	let { session }: { session: Session } = $props();
+	let {
+		session,
+		sidebarOpen = false,
+		onToggleSidebar = () => {}
+	}: { session: Session; sidebarOpen?: boolean; onToggleSidebar?: () => void } = $props();
 
-	let showModels = $state(false);
-	let showWorkMode = $state(false);
-	let showApprovals = $state(false);
-	let showContext = $state(false);
-
-	const modelLabel = $derived(session.currentModel ?? 'no model');
-	const workModeLabel = $derived(
-		WORK_MODES.find((m) => m.id === session.workMode)?.label ?? session.workMode
-	);
-	const approvalsLabel = $derived(
-		APPROVALS.find((a) => a.id === session.approvals)?.label ?? session.approvals
-	);
-	const thinkingLabel = $derived(session.reasoningEffort ?? 'default');
-	// Legacy policies stay visible only while active (docs/plan/15-desktop-client.md).
-	const approvalChoices = $derived(
-		APPROVALS.filter((a) => !a.legacy || session.approvals === a.id)
+	const disabled = $derived(
+		session.closed ||
+			session.starting ||
+			!!session.trust ||
+			session.switching ||
+			session.setupWorking ||
+			session.streaming ||
+			session.turnPending
 	);
 
 	const fill = $derived.by(() => {
@@ -41,260 +30,46 @@
 			(session.context?.used ?? 0) >= session.context.threshold * 0.9
 	);
 
-	function closeMenus(event: MouseEvent) {
-		if ((event.target as HTMLElement).closest('.menu-anchor')) return;
-		showModels = false;
-		showWorkMode = false;
-		showApprovals = false;
-		showContext = false;
-		session.thinkingOpen = false;
+	function projectName(cwd: string | undefined): string {
+		if (!cwd) return 'Workspace';
+		const parts = cwd.split('/').filter(Boolean);
+		return parts[parts.length - 1] || cwd;
 	}
-
-	function closeMenusExcept(thinking: boolean) {
-		showModels = false;
-		showWorkMode = false;
-		showApprovals = false;
-		showContext = false;
-		if (!thinking) session.thinkingOpen = false;
-	}
-
-	const disabled = $derived(
-		session.closed ||
-			session.starting ||
-			!!session.trust ||
-			session.switching ||
-			session.setupWorking ||
-			session.streaming ||
-			session.turnPending
-	);
-
-	const providers = $derived(session.providers.filter((p) => p.models.length > 0));
 </script>
 
-<svelte:window onclick={closeMenus} />
-
 <header>
-	<div class="wordmark" title={`_(•)> quack ${session.info?.version ?? ''}`}>
-		<img src={iconUrl} class="app-icon" alt="" width="22" height="22" />
-		<span>quack</span>
-	</div>
-
-	<div class="menu-anchor">
-		<button
-			class="pill model-picker"
-			class:pill-live={session.streaming}
-			onclick={() => {
-				showModels = !showModels;
-				closeMenusExcept(false);
-			}}
-			aria-expanded={showModels}
+	<button
+		class="menu-btn"
+		aria-expanded={sidebarOpen}
+		aria-controls="workspace-sidebar"
+		onclick={onToggleSidebar}
+	>
+		<svg viewBox="0 0 24 24" aria-hidden="true"
+			><path
+				d="M4.5 7h15M4.5 12h15M4.5 17h15"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.8"
+				stroke-linecap="round"
+			/></svg
 		>
-			{modelLabel}{#if session.reasoningEfforts.length > 0}<span class="note"> · {thinkingLabel}</span>{/if}
-			{#if session.streaming}<span class="live-dot" aria-label="streaming"></span>{/if}
-		</button>
-		{#if session.reasoningEfforts.length > 0}
-			<button
-				class="pill chip"
-				class:chip-open={session.thinkingOpen}
-				onclick={() => {
-					session.thinkingOpen = !session.thinkingOpen;
-				closeMenusExcept(true);
-			}}
-				aria-expanded={session.thinkingOpen}
-				title="Thinking level for {modelLabel}"
-			>
-				thinking: {thinkingLabel}
-			</button>
+		<span class="menu-label">Projects</span>
+	</button>
+
+	<div class="identity">
+		<span class="job-name">{session.title || 'New job'}</span>
+		{#if session.info?.cwd}
+			<span class="sep" aria-hidden="true">·</span>
+			<span class="folder" title={session.info.cwd}>{projectName(session.info.cwd)}</span>
 		{/if}
-		{#if showModels}
-			<div class="menu" role="menu">
-				{#each providers as provider (provider.id)}
-					<div class="provider" class:unavailable={!provider.available}>
-						<div class="provider-name">
-							{provider.id}
-							{#if !provider.available}<span class="note">{provider.note}</span>{/if}
-						</div>
-						{#each provider.models as model (model.id)}
-							<button
-								class="model"
-								role="menuitem"
-								disabled={!provider.available || disabled}
-								onclick={() => {
-									void session.setModel(`${provider.id}/${model.id}`);
-									showModels = false;
-								}}
-							>
-								<span class="model-id">{provider.id}/{model.id}</span>
-								<span class="note">{[
-									model.price,
-									model.reasoning_efforts?.length
-										? `thinking: ${model.reasoning_efforts.join(' · ')}`
-										: null
-									].filter(Boolean).join(' · ') || 'Select model'}</span>
-							</button>
-						{/each}
-					</div>
-				{/each}
-				<button
-					class="model"
-					role="menuitem"
-					{disabled}
-					onclick={() => {
-						showModels = false;
-						void session.openSetup();
-					}}>Connect a provider…</button
-				>
-				{#if providers.length === 0}
-					<div class="empty">No providers ready.</div>
-				{/if}
-			</div>
-		{/if}
-		{#if session.thinkingOpen}
-			<div class="menu" role="menu" aria-label="Thinking level">
-				<div class="menu-heading">Thinking · {modelLabel}</div>
-				<button
-					class="model"
-					role="menuitemradio"
-					aria-checked={session.reasoningEffort === null}
-					onclick={() => void session.setReasoningEffort(null)}
-				>
-					<span class="model-id">Default</span>
-					<span class="note">The level configured for this model</span>
-				</button>
-				{#each session.reasoningEfforts as level (level)}
-					<button
-						class="model"
-						role="menuitemradio"
-						aria-checked={session.reasoningEffort === level}
-						onclick={() => void session.setReasoningEffort(level)}
-					>
-						<span class="model-id">{level}</span>
-					</button>
-				{/each}
-				<div class="menu-foot">
-					Lower levels favor speed and cost; higher ones allow more time for hard tasks.
-					Applies between turns and is saved with the session.
-				</div>
-			</div>
+		{#if session.info?.branch}
+			<span class="branch" title={`Git branch: ${session.info.branch}`}>{session.info.branch}</span>
 		{/if}
 	</div>
 
-	<div class="menu-anchor">
-		<button
-			class="pill"
-			class:pill-live={session.workMode === 'plan'}
-			onclick={() => {
-				showWorkMode = !showWorkMode;
-				closeMenusExcept(false);
-			}}
-			aria-expanded={showWorkMode}
-		>
-			{workModeLabel}
-		</button>
-		{#if showWorkMode}
-			<div class="menu" role="menu" aria-label="Work mode">
-				{#each WORK_MODES as mode (mode.id)}
-					<button
-						class="model"
-						role="menuitemradio"
-						aria-checked={session.workMode === mode.id}
-						onclick={() => {
-							void session.setWorkMode(mode.id as WorkMode);
-							showWorkMode = false;
-						}}
-					>
-						<span class="model-id">{mode.label}</span>
-						<span class="note">{mode.about}</span>
-					</button>
-				{/each}
-				<div class="menu-foot">What the agent may do; Plan proposes changes for review.</div>
-			</div>
-		{/if}
-	</div>
-
-	<div class="menu-anchor">
-		<button
-			class="pill"
-			class:pill-live={session.approvals === 'yolo'}
-			onclick={() => {
-				showApprovals = !showApprovals;
-				closeMenusExcept(false);
-			}}
-			aria-expanded={showApprovals}
-		>
-			{approvalsLabel}{session.sandboxOff ? ' · sandbox off' : ''}
-		</button>
-		{#if showApprovals}
-			<div class="menu" role="menu" aria-label="Approvals">
-				{#each approvalChoices as approval (approval.id)}
-					<button
-						class="model"
-						role="menuitemradio"
-						aria-checked={session.approvals === approval.id}
-						onclick={() => {
-							void session.setApprovals(approval.id as ApprovalPolicy);
-							showApprovals = false;
-						}}
-					>
-						<span class="model-id">{approval.label}</span>
-						<span class="note">{approval.about}</span>
-					</button>
-				{/each}
-				<div class="menu-foot">
-					Approvals apply within the work mode; deny rules and the sandbox still hold.
-				</div>
-			</div>
-		{/if}
-	</div>
-
-	<button class="btn" {disabled} onclick={() => session.openSetup()}>Providers</button>
 	<div class="grow"></div>
 
-	<div class="menu-anchor">
-		<button
-			class="pill"
-			class:nearing
-			onclick={() => {
-				void session.refreshContext();
-				showContext = !showContext;
-				closeMenusExcept(false);
-			}}
-			aria-expanded={showContext}
-		>
-			context {session.context ? `${Math.round(fill * 100)}%` : '—'}
-		</button>
-		{#if showContext}
-			<div class="menu right">
-				{#if session.contextReport}
-					{#each session.contextReport.segments as segment (segment.name)}
-						<div class="segment">
-							<span class="model-id">{segment.name}</span>
-							<span class="note">{segment.tokens} tok · {segment.detail}</span>
-						</div>
-					{/each}
-					{#if session.contextReport.note}
-						<div class="empty">{session.contextReport.note}</div>
-					{/if}
-					<button
-						class="model"
-						role="menuitem"
-						onclick={() => {
-							void session.compact();
-							showContext = false;
-						}}
-					>
-						<span class="model-id">Compact now</span>
-						<span class="note">summarize older history</span>
-					</button>
-				{:else}
-					<div class="empty">
-						{session.context ? `${session.context.used} tokens in use` : 'no context report yet'}
-					</div>
-				{/if}
-			</div>
-		{/if}
-	</div>
-
+	<button class="btn providers-btn" {disabled} onclick={() => session.openSetup()}>Providers</button>
 	<ThemeToggle />
 </header>
 
@@ -311,159 +86,93 @@
 		align-items: center;
 		gap: var(--sp-sm);
 		padding: 0 var(--sp-md);
-		border-bottom: 1px solid var(--rule);
+		border-bottom: 3px double var(--rule);
 		background: var(--bg-panel);
 	}
 
-	.model-picker {
-		max-width: min(38vw, 360px);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		display: block;
+	.menu-btn {
+		display: none;
+		align-items: center;
+		gap: 7px;
+		height: 30px;
+		padding: 0 10px;
+		border: 1px solid var(--rule);
+		border-radius: var(--r-lg);
+		color: var(--ink-2);
+		font-size: 12.5px;
+		font-weight: 500;
+		flex: none;
 	}
 
-	.chip {
-		font-size: 12px;
-		padding: 2px 8px;
+	.menu-btn svg {
+		width: 15px;
+		height: 15px;
 	}
 
-	.chip-open {
-		border-color: var(--sky-ink);
+	@media (max-width: 900px) {
+		.menu-btn {
+			display: inline-flex;
+		}
 	}
 
-	.wordmark {
-		font-family: var(--font-mono);
-		font-weight: 700;
-		font-size: 15px;
-		letter-spacing: -0.02em;
-		display: inline-flex;
+	.identity {
+		display: flex;
 		align-items: center;
 		gap: 8px;
-		margin-right: var(--sp-sm);
-		user-select: none;
+		min-width: 0;
+		overflow: hidden;
 	}
 
-	.wordmark .app-icon {
-		width: 22px;
-		height: 22px;
-		object-fit: contain;
-		display: block;
-		border-radius: var(--r-sm);
+	.job-name {
+		font-family: var(--font-serif);
+		font-size: 14.5px;
+		font-weight: 600;
+		color: var(--ink);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.sep {
+		color: var(--ink-3);
+		flex: none;
+	}
+
+	.folder {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		color: var(--ink-3);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.branch {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--sky-ink);
+		background: var(--sky-soft);
+		border: 1px solid color-mix(in srgb, var(--sky) 35%, var(--rule));
+		border-radius: 999px;
+		padding: 1px 8px;
+		flex: none;
+	}
+
+	@media (max-width: 600px) {
+		.sep,
+		.folder,
+		.branch {
+			display: none;
+		}
 	}
 
 	.grow {
 		flex: 1;
 	}
 
-	.live-dot {
-		width: 7px;
-		height: 7px;
-		border-radius: 999px;
-		background: var(--beak);
-		animation: pulse 1.1s ease-out infinite alternate;
-	}
-
-	@keyframes pulse {
-		from {
-			opacity: 1;
-		}
-		to {
-			opacity: 0.35;
-		}
-	}
-
-	.menu-anchor {
-		position: relative;
-	}
-
-	.menu {
-		position: absolute;
-		top: calc(100% + 6px);
-		left: 0;
-		min-width: 280px;
-		max-height: 380px;
-		overflow: auto;
-		background: var(--bg-raised);
-		border: 1px solid var(--rule);
-		border-radius: var(--r-lg);
-		box-shadow: var(--shadow-pop);
-		padding: 6px;
-		z-index: 30;
-	}
-
-	.menu.right {
-		left: auto;
-		right: 0;
-	}
-
-	.menu-heading {
-		font-weight: 700;
-		font-size: 12px;
-		color: var(--ink-2);
-		padding: 6px 8px 2px;
-	}
-
-	.menu-foot {
-		font-size: 12px;
-		color: var(--ink-3);
-		padding: 6px 8px;
-		border-top: 1px solid var(--rule-soft);
-		margin-top: 4px;
-	}
-
-	.provider {
-		padding: 4px 6px;
-	}
-
-	.provider + .provider {
-		border-top: 1px solid var(--rule-soft);
-	}
-
-	.provider-name {
-		font-weight: 700;
-		font-size: 12px;
-		color: var(--ink-2);
-		padding: 4px 8px 2px;
-	}
-
-	.provider.unavailable .provider-name {
-		color: var(--ink-3);
-	}
-
-	.model {
-		width: 100%;
-		display: flex;
-		flex-direction: column;
-		align-items: stretch;
-		gap: 1px;
-		text-align: left;
-		padding: 7px 8px;
-		border-radius: var(--r-md);
-	}
-
-	.model:hover:not(:disabled) {
-		background: var(--bg-soft);
-	}
-
-	.model-id {
-		font-family: var(--font-mono);
-		font-size: 13px;
-	}
-
-	.note {
-		font-size: 12px;
-		color: var(--ink-3);
-	}
-
-	.empty {
-		padding: 10px;
-		color: var(--ink-3);
-	}
-
-	.pill.nearing {
-		border-color: var(--duck-line);
-		background: var(--duck-soft);
-		color: var(--duck-ink);
+	.providers-btn {
+		padding: 4px 11px;
+		font-size: 12.5px;
 	}
 
 	.waterline {

@@ -19,9 +19,15 @@ export class ThemeStore {
 
 	initBrowser() {
 		try {
-			const saved = localStorage.getItem(THEME_STORAGE_KEY);
-			if (saved === 'dark' || saved === 'light' || saved === 'system') {
-				this.preference = saved;
+			const asked = new URLSearchParams(window.location.search).get('theme');
+			if (asked === 'dark' || asked === 'light') {
+				// A themed link previews one theme without touching the saved choice.
+				this.preference = asked;
+			} else {
+				const saved = localStorage.getItem(THEME_STORAGE_KEY);
+				if (saved === 'dark' || saved === 'light' || saved === 'system') {
+					this.preference = saved;
+				}
 			}
 		} catch {
 			// ignore storage access errors

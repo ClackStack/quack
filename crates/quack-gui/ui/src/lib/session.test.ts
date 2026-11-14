@@ -347,3 +347,89 @@ describe('subscription sign-in', () => {
 		expect(session.signingIn).toBeNull();
 	});
 });
+
+describe('field notes: skills, stats and specimens', () => {
+	it('keeps the skills the engine reports', () => {
+		const { session } = fixture();
+		session.onEvent({
+			event: 'skills',
+			skills: [{ name: 'pond-census', description: 'Count residents.', source: 'demo', dir: '/d' }]
+		});
+		expect(session.skills).toHaveLength(1);
+		expect(session.skills[0].name).toBe('pond-census');
+	});
+
+	it('collects edited files from edit and write calls, keeping the opening subject', () => {
+		const { session } = fixture();
+		session.onEvent({
+			event: 'tool_call_begin',
+			call: { call_id: 'a', name: 'edit', summary: 'edit src/one.ts' }
+		});
+		session.onEvent({
+			event: 'tool_call_end',
+			call_id: 'a',
+			result: {
+				ok: true,
+				summary: 'edited 1 place',
+				detail: '--- a/src/one.ts\n+++ b/src/one.ts\n@@\n-old\n+new\n+newer'
+			}
+		});
+		session.onEvent({
+			event: 'tool_call_begin',
+			call: { call_id: 'b', name: 'edit', summary: 'edit 2 files' }
+		});
+		session.onEvent({
+			event: 'tool_call_end',
+			call_id: 'b',
+			result: {
+				ok: true,
+				summary: 'edit 2 files',
+				detail: '--- a/src/two.ts\n+++ b/src/two.ts\n@@\n+a\n--- a/src/three.rs\n+++ b/src/three.rs\n@@\n-b'
+			}
+		});
+		const files = session.editedFiles;
+		expect(files.map((f) => f.path)).toEqual(['src/one.ts', 'src/two.ts', 'src/three.rs']);
+		expect(files[0]).toMatchObject({ adds: 2, dels: 1, ops: 1 });
+		expect(files[1]).toMatchObject({ adds: 1, dels: 0 });
+		expect(files[2]).toMatchObject({ adds: 0, dels: 1 });
+	});
+
+	it('re-reads the usage and context after a turn completes', () => {
+		const { session, send } = fixture();
+		session.onEvent({ event: 'turn_started', turn: 1 });
+		session.onEvent({
+			event: 'turn_complete',
+			turn: 1,
+			usage: { prompt_tokens: 100, completion_tokens: 20 }
+		});
+		expect(send).toHaveBeenCalledWith(3, { op: 'get_stats' });
+		expect(send).toHaveBeenCalledWith(3, { op: 'get_context' });
+	});
+
+	it('holds the stats report the engine answers with', () => {
+		const { session } = fixture();
+		session.onEvent({
+			event: 'stats',
+			report: {
+				model: 'mock/org/model',
+				turns: 1,
+				requests: 2,
+				unreported: 0,
+				prompt_tokens: 400,
+				completion_tokens: 50,
+				cached_tokens: 300,
+				cache_reported: 2,
+				unpriced: 2,
+				open_ms: 1000,
+				model_ms: 500,
+				tools_ms: 100,
+				approval_ms: 0,
+				tools: [],
+				compactions: 0,
+				pruned: 0,
+				resumed: false
+			}
+		});
+		expect(session.stats?.turns).toBe(1);
+	});
+});

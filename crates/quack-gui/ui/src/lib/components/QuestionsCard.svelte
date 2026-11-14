@@ -94,7 +94,8 @@
 
 	.q p {
 		margin: 0;
-		font-size: 14px;
+		font-family: var(--font-serif);
+		font-size: 14.5px;
 	}
 
 	.options {

@@ -1,62 +1,115 @@
 /*
  * quack-gui design tokens (crates/quack-gui/ui).
  *
- * The field-guide palette from website/DESIGN.md and the TUI's theme.rs, drawn as a
- * working tool: paper grounds, hairline rules, the TUI's inks (duck yellow, beak
- * orange, sky) doing real jobs, leaf/pink reserved for pass/fail. Dark mode turns the
- * paper to dusk; the inks stay. Mono carries the machine voice; prose carries the
- * transcript.
+ * The field guide, evolved: the project is a pond quack surveys. Cream paper
+ * grounds the work; deep pond water binds the rail, so the duck works on its
+ * own element; double rules and hairlines frame every edge the way a guide
+ * book frames its plates. Bitter carries prose and names, Archivo carries
+ * chrome, Spline Sans Mono carries the machine voice. Chroma does one job at
+ * a time: duck yellow marks the live thing, pond blue holds the water it all
+ * sits on, vermilion what is struck out of it. Dark mode is the night survey:
+ * the same pond after dark, paper gone dark, inks kept in rank.
  */
 
+@font-face {
+	font-family: 'Bitter';
+	src: url('/fonts/bitter-var.ttf') format('truetype-variations');
+	font-weight: 100 900;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Bitter';
+	src: url('/fonts/bitter-italic-var.ttf') format('truetype-variations');
+	font-weight: 100 900;
+	font-style: italic;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Archivo';
+	src: url('/fonts/archivo-var.ttf') format('truetype-variations');
+	font-weight: 100 900;
+	font-stretch: 62% 125%;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Spline Sans Mono';
+	src: url('/fonts/spline-mono-var.ttf') format('truetype-variations');
+	font-weight: 300 700;
+	font-style: normal;
+	font-display: swap;
+}
+
 :root {
-	--bg: #ffffff;
-	--bg-soft: #f1fafd;
-	--bg-panel: #ffffff;
-	--bg-raised: #ffffff;
-	--ink: #1d2a3a;
-	--ink-2: #46596d;
-	--ink-3: #64788c;
-	--rule: #d5dee6;
-	--rule-soft: #e5ecf2;
+	--bg: #f7f3e8;
+	--bg-soft: #f0ead9;
+	--bg-panel: #fbf7ec;
+	--bg-raised: #fffdf4;
+	--ink: #2f2a20;
+	--ink-2: #57503f;
+	--ink-3: #6b6353;
+	--rule: #b3a98e;
+	--rule-soft: #d9d0ba;
 
-	--duck: #ffd60a;
-	--duck-line: #e8cf55;
-	--duck-soft: #fff4b8;
-	--duck-ink: #7a6100;
-	--sky: #5ec8e5;
-	--sky-soft: #d6f2fa;
-	--sky-ink: #086a86;
-	--beak: #ff9f43;
-	--beak-ink: #b25300;
-	--beak-soft: #fff1e3;
+	/* The pond water binding the rail. */
+	--cloth: #264457;
+	--cloth-deep: #182e3d;
+	--cloth-card: #1d3646;
+	--cloth-job: #162a38;
+	--cloth-ink: #ebf1f5;
+	--cloth-dim: #c8d7e0;
+	--cloth-mut: #a7becb;
+	--cloth-ok: #a9d186;
+	--cloth-fail: #f09c75;
 
-	--ok: #22743a;
-	--ok-soft: #e5f5e9;
-	--fail: #b0244c;
-	--fail-soft: #fff2f5;
-	--warn: #a06e00;
+	/* Chroma with jobs. */
+	--duck: #e8b21a;
+	--duck-line: #b98a06;
+	--duck-soft: #f6ecd0;
+	--duck-ink: #6b5410;
+	--sky: #5e8ba3;
+	--sky-soft: #e7eef1;
+	--sky-ink: #35586b;
+	--beak: #d07c24;
+	--beak-ink: #8a4a08;
+	--beak-soft: #f7ecdd;
 
-	--selection: rgba(94, 200, 229, 0.28);
-	--user-row: #f6f8fa;
+	--ok: #4a7031;
+	--ok-soft: #eaf0dd;
+	--fail: #b6401f;
+	--fail-soft: #f7e8e0;
+	--warn: #8a6a00;
 
-	--term: #16191f;
-	--term-text: #d8dee9;
-	--term-dim: #8a94a6;
+	--ver: #b6401f;
+	--grn: #4a7031;
 
-	--focus: #086a86;
+	/* Specimen plates: the dark frame and the inner ring. */
+	--plate-line: #3c3526;
+	--plate-ring: #e2d8bd;
 
-	--font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
-	--font-mono: ui-monospace, 'JetBrains Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
+	--selection: rgba(53, 88, 107, 0.24);
+	--user-row: #f0ead9;
+
+	--term: #1b2431;
+	--term-text: #d8d3c0;
+	--term-dim: #8f8a76;
+
+	--focus: #35586b;
+
+	--font-ui: 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--font-serif: 'Bitter', Georgia, 'Times New Roman', serif;
+	--font-mono: 'Spline Sans Mono', ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
 
 	--text-ui: 13.5px;
 	--text-prose: 15px;
 	--text-mono: 13px;
-	--leading-prose: 1.65;
+	--leading-prose: 1.6;
 	--leading-ui: 1.45;
 
 	--r-sm: 4px;
 	--r-md: 6px;
-	--r-lg: 8px;
+	--r-lg: 9px;
 	--r-xl: 12px;
 
 	--sp-xs: 4px;
@@ -65,90 +118,128 @@
 	--sp-lg: 24px;
 	--sp-xl: 32px;
 
-	--header-h: 48px;
-	--sidebar-w: 264px;
+	--header-h: 52px;
+	--sidebar-w: 292px;
 
-	--shadow-pop: 0 6px 24px rgba(29, 42, 58, 0.14), 0 1px 3px rgba(29, 42, 58, 0.1);
-	--shadow-card: 0 1px 2px rgba(29, 42, 58, 0.08);
+	--shadow-pop: 0 16px 34px -14px rgba(23, 42, 55, 0.45), 0 3px 9px rgba(23, 42, 55, 0.14);
+	--shadow-card: 0 1px 2px rgba(23, 42, 55, 0.1);
+	--scrim: rgba(18, 32, 42, 0.42);
 }
 
 :root[data-theme='dark'] {
-	--bg: #1d2a3a;
-	--bg-soft: #16212e;
-	--bg-panel: #223146;
-	--bg-raised: #283951;
-	--ink: #dde7f0;
-	--ink-2: #b7c6d5;
-	--ink-3: #8fa2b5;
-	--rule: #3a4c61;
-	--rule-soft: #2e3f53;
+	--bg: #151b23;
+	--bg-soft: #10151d;
+	--bg-panel: #1a212b;
+	--bg-raised: #222b36;
+	--ink: #e8e3d0;
+	--ink-2: #b8b29c;
+	--ink-3: #948f7a;
+	--rule: #3d4959;
+	--rule-soft: #2b3542;
 
-	--duck-soft: #3a3313;
-	--duck-ink: #ffd60a;
-	--sky-soft: #14384a;
-	--sky-ink: #7ad4ec;
-	--beak-soft: #3f2c14;
-	--beak-ink: #ffb25e;
+	--cloth: #0d1722;
+	--cloth-deep: #070e16;
+	--cloth-card: #132130;
+	--cloth-job: #0e1926;
+	--cloth-ink: #e2ebf0;
+	--cloth-dim: #b8cad4;
+	--cloth-mut: #91a8b5;
+	--cloth-ok: #a3c47e;
+	--cloth-fail: #e08356;
 
-	--ok: #8fd694;
-	--ok-soft: #1d3327;
-	--fail: #ff8fab;
-	--fail-soft: #3c1d28;
-	--warn: #e3b341;
+	--duck: #e8b21a;
+	--duck-line: #8a6a10;
+	--duck-soft: #2e2812;
+	--duck-ink: #edc65a;
+	--sky: #7fb3c9;
+	--sky-soft: #1d2f38;
+	--sky-ink: #9cc4d6;
+	--beak: #d99a52;
+	--beak-ink: #e3b283;
+	--beak-soft: #33270f;
 
-	--selection: rgba(94, 200, 229, 0.32);
-	--user-row: #243347;
+	--ok: #a3c47e;
+	--ok-soft: #25301a;
+	--fail: #e08356;
+	--fail-soft: #3a2118;
+	--warn: #d3ab3e;
 
-	--term: #10151c;
-	--term-text: #d8dee9;
-	--term-dim: #8a94a6;
+	--ver: #e08356;
+	--grn: #a3c47e;
 
-	--focus: #7ad4ec;
+	--plate-line: #4a5a6c;
+	--plate-ring: #2d3a49;
 
-	--shadow-pop: 0 6px 24px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
-	--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
+	--selection: rgba(127, 179, 201, 0.3);
+	--user-row: #1c242e;
+
+	--term: #10161f;
+	--term-text: #d8d3c0;
+	--term-dim: #8f8a76;
+
+	--focus: #9cc4d6;
+
+	--shadow-pop: 0 16px 34px -14px rgba(0, 0, 0, 0.6), 0 3px 9px rgba(0, 0, 0, 0.4);
+	--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
+	--scrim: rgba(4, 9, 14, 0.62);
 }
 
 @media (prefers-color-scheme: dark) {
 	:root:not([data-theme='light']) {
-		--bg: #1d2a3a;
-		--bg-soft: #16212e;
-		--bg-panel: #223146;
-		--bg-raised: #283951;
-		--ink: #dde7f0;
-		--ink-2: #b7c6d5;
-		--ink-3: #8fa2b5;
-		--rule: #3a4c61;
-		--rule-soft: #2e3f53;
+		--bg: #151b23;
+		--bg-soft: #10151d;
+		--bg-panel: #1a212b;
+		--bg-raised: #222b36;
+		--ink: #e8e3d0;
+		--ink-2: #b8b29c;
+		--ink-3: #948f7a;
+		--rule: #3d4959;
+		--rule-soft: #2b3542;
 
-		--duck-soft: #3a3313;
-		--duck-ink: #ffd60a;
-		--sky-soft: #14384a;
-		--sky-ink: #7ad4ec;
-		--beak-soft: #3f2c14;
-		--beak-ink: #ffb25e;
+		--cloth: #0d1722;
+		--cloth-deep: #070e16;
+		--cloth-card: #132130;
+		--cloth-job: #0e1926;
+		--cloth-ink: #e2ebf0;
+		--cloth-dim: #b8cad4;
+		--cloth-mut: #91a8b5;
+		--cloth-ok: #a3c47e;
+		--cloth-fail: #e08356;
 
-		--ok: #8fd694;
-		--ok-soft: #1d3327;
-		--fail: #ff8fab;
-		--fail-soft: #3c1d28;
-		--warn: #e3b341;
+		--duck-line: #8a6a10;
+		--duck-soft: #2e2812;
+		--duck-ink: #edc65a;
+		--sky: #7fb3c9;
+		--sky-soft: #1d2f38;
+		--sky-ink: #9cc4d6;
+		--beak: #d99a52;
+		--beak-ink: #e3b283;
+		--beak-soft: #33270f;
 
-		--selection: rgba(94, 200, 229, 0.32);
-		--user-row: #243347;
+		--ok: #a3c47e;
+		--ok-soft: #25301a;
+		--fail: #e08356;
+		--fail-soft: #3a2118;
+		--warn: #d3ab3e;
 
-		--term: #10151c;
-		--term-text: #d8dee9;
-		--term-dim: #8a94a6;
+		--ver: #e08356;
+		--grn: #a3c47e;
 
-		--focus: #7ad4ec;
+		--plate-line: #4a5a6c;
+		--plate-ring: #2d3a49;
 
-		--shadow-pop: 0 6px 24px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
-		--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
-	}
+		--selection: rgba(127, 179, 201, 0.3);
+		--user-row: #1c242e;
 
-	:root:not([data-theme='light']) .btn-primary {
-		color: #10151c;
+		--term: #10161f;
+		--term-text: #d8d3c0;
+		--term-dim: #8f8a76;
+
+		--focus: #9cc4d6;
+
+		--shadow-pop: 0 16px 34px -14px rgba(0, 0, 0, 0.6), 0 3px 9px rgba(0, 0, 0, 0.4);
+		--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
+		--scrim: rgba(4, 9, 14, 0.62);
 	}
 }
 
@@ -235,7 +326,8 @@ kbd {
 	background: transparent;
 }
 
-/* Shared control styles (global because the components are many and small). */
+/* Shared control styles (global because the components are many and small).
+ * The primary action is the guide's one bright mark: duck yellow, dark ink. */
 .btn {
 	display: inline-flex;
 	align-items: center;
@@ -245,8 +337,11 @@ kbd {
 	border: 1px solid var(--rule);
 	background: var(--bg-raised);
 	color: var(--ink);
-	font-weight: 500;
-	transition: background-color 120ms ease-out, border-color 120ms ease-out;
+	font-weight: 600;
+	transition:
+		background-color 120ms ease-out,
+		border-color 120ms ease-out,
+		color 120ms ease-out;
 }
 
 .btn:hover:not(:disabled) {
@@ -255,19 +350,16 @@ kbd {
 }
 
 .btn-primary {
-	background: var(--sky-ink);
-	border-color: var(--sky-ink);
-	color: #ffffff;
-}
-
-:root[data-theme='dark'] .btn-primary {
-	color: #10151c;
+	background: var(--duck);
+	border-color: var(--duck-line);
+	color: #2b240f;
+	box-shadow: var(--shadow-card);
 }
 
 .btn-primary:hover:not(:disabled) {
-	background: var(--sky);
-	border-color: var(--sky);
-	color: #10151c;
+	background: #f0c23a;
+	border-color: var(--duck-line);
+	color: #2b240f;
 }
 
 .btn-danger {
@@ -282,13 +374,15 @@ kbd {
 .pill {
 	display: inline-flex;
 	align-items: center;
-	gap: 6px;
-	padding: 3px 10px;
+	gap: 7px;
+	height: 28px;
+	padding: 0 12px;
 	border-radius: 999px;
 	border: 1px solid var(--rule);
+	background: var(--bg-panel);
 	color: var(--ink-2);
-	font-size: 12.5px;
-	font-weight: 600;
+	font-size: 12px;
+	font-weight: 500;
 	white-space: nowrap;
 }
 
@@ -307,4 +401,28 @@ kbd {
 	border-radius: var(--r-sm);
 	padding: 1px 5px;
 	background: var(--bg-soft);
+}
+
+/* Field marks: the circled numerals that number a plate's evidence. */
+.mark {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 17px;
+	height: 17px;
+	border-radius: 50%;
+	border: 1.5px solid currentColor;
+	font-family: var(--font-ui);
+	font-size: 10.5px;
+	font-weight: 700;
+	line-height: 1;
+	flex: none;
+}
+
+/* The pond surface of the rail, as two passing ripples. */
+.cloth {
+	background-color: var(--cloth);
+	background-image:
+		repeating-linear-gradient(0deg, rgba(240, 248, 252, 0.03) 0 1px, transparent 1px 4px),
+		repeating-linear-gradient(90deg, rgba(6, 16, 24, 0.08) 0 1px, transparent 1px 4px);
 }

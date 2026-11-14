@@ -34,6 +34,20 @@ const INFO: AppInfo = {
 
 const SESSION = { id: 'dev-session-0000', cwd: INFO.cwd, model: INFO.model, profile: 'generic' };
 
+function savedSessions() {
+	return [
+		{
+			id: `${SESSION.id}-older`,
+			title: 'Untangle the migration test',
+			model: 'dev-local/tiny',
+			turns: 6,
+			age: '3h ago',
+			started: '2026-11-08',
+			current: false
+		}
+	];
+}
+
 export function devTransport(): Transport {
 	const listeners = new Set<(message: TabMessage) => void>();
 	const fan = (message: TabMessage) => {
@@ -45,6 +59,12 @@ export function devTransport(): Transport {
 	let approvals: import('#lib/protocol').ApprovalPolicy = 'ask';
 	let effort: string | null = null;
 	let resolveApproval: (() => void) | null = null;
+	// `?demo=turn` plays the demo turn on open; `&auto=1` also answers its approval,
+	// so a headless capture can reach the settled state without a keyboard.
+	const params =
+		typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+	const autoDemo = params?.get('demo') === 'turn';
+	const autoApprove = params?.get('auto') === '1';
 
 	const catalog = () => ({
 		providers: [
@@ -105,6 +125,31 @@ export function devTransport(): Transport {
 		// The demo pauses here until the UI answers the approval (an Op, via sendOp).
 		await new Promise<void>((resolve) => {
 			resolveApproval = resolve;
+			if (autoApprove)
+				setTimeout(() => {
+					resolveApproval?.();
+					resolveApproval = null;
+				}, 2200);
+		});
+		await sleep(200);
+		send(tab, {
+			event: 'agent_started',
+			id: 'scout-1',
+			agent: 'explore',
+			description: 'check the pond edge for other writers',
+			call_id: 'dev-call-1',
+			model: 'dev-local/tiny'
+		});
+		send(tab, {
+			event: 'agent',
+			id: 'scout-1',
+			inner: { event: 'assistant_delta', text: 'No other module writes ducks.ts; the census is safe to add. ' }
+		});
+		send(tab, {
+			event: 'agent_finished',
+			id: 'scout-1',
+			ok: true,
+			summary: '3 steps · 1.2k tokens'
 		});
 		send(tab, {
 			event: 'tool_call_end',
@@ -114,6 +159,10 @@ export function devTransport(): Transport {
 				summary: 'wrote 2 lines',
 				detail: 'const ducks = 5;\nexport default ducks;\n'
 			}
+		});
+		send(tab, {
+			event: 'plan',
+			checklist: '[x] read the pond module\n[x] add the duck counter\n[~] check the census test'
 		});
 		await sleep(200);
 		push(['Done — ', '`src/pond/ducks.ts`', ' now exports the pond census.'], 'assistant');
@@ -153,20 +202,25 @@ export function devTransport(): Transport {
 			send(tab, { event: 'model_catalog', ...catalog() });
 			send(tab, { event: 'mode_changed', work_mode: workMode, approvals });
 			send(tab, {
-				event: 'session_list',
-				sessions: [
+				event: 'skills',
+				skills: [
 					{
-						id: `${SESSION.id}-older`,
-						title: 'Untangle the migration test',
-						model: 'dev-local/tiny',
-						turns: 6,
-						age: '3h ago',
-						started: '2026-11-08',
-						current: false
+						name: 'pond-census',
+						description: 'Count and report the pond\u2019s residents (demo).',
+						source: 'demo',
+						dir: '~/Development/demo-pond/.agents/skills/pond-census'
+					},
+					{
+						name: 'migration-notes',
+						description: 'Summarize schema changes for the flock (demo).',
+						source: 'demo',
+						dir: '~/Development/demo-pond/.agents/skills/migration-notes'
 					}
 				]
 			});
+			send(tab, { event: 'session_list', sessions: savedSessions() });
 			send(tab, { event: 'startup_complete' });
+			if (autoDemo) setTimeout(() => void runDemoTurn(tab), 500);
 			return { tab, info: { ...INFO, cwd } };
 		},
 
@@ -175,10 +229,10 @@ export function devTransport(): Transport {
 				case 'user_turn':
 					void runDemoTurn(tab);
 					break;
-				case 'approval_response':
-					resolveApproval?.();
-					resolveApproval = null;
-					break;
+			case 'approval_response':
+				resolveApproval?.();
+				resolveApproval = null;
+				break;
 				case 'set_work_mode':
 					workMode = op.mode;
 					send(tab, { event: 'mode_changed', work_mode: workMode, approvals });
@@ -272,7 +326,48 @@ export function devTransport(): Transport {
 					send(tab, { event: 'warning', message: 'The browser demo has no saved sessions.' });
 					break;
 				case 'list_sessions':
-					send(tab, { event: 'session_list', sessions: [] });
+					send(tab, { event: 'session_list', sessions: savedSessions() });
+					break;
+				case 'get_stats':
+					send(tab, {
+					event: 'stats',
+					report: {
+						model: 'dev-local/tiny',
+						turns: 3,
+						requests: 9,
+						unreported: 0,
+						prompt_tokens: 41200,
+						completion_tokens: 1490,
+						cached_tokens: 33100,
+						cache_reported: 9,
+						unpriced: 9,
+						ttft_ms: [240, 610],
+						tokens_per_sec: 42.7,
+						open_ms: 187000,
+						model_ms: 52000,
+						tools_ms: 21000,
+						approval_ms: 9000,
+						tools: [
+							{ name: 'read', calls: 14, failed: 0, ms: 210 },
+							{ name: 'write', calls: 1, failed: 0, ms: 40 },
+							{ name: 'task', calls: 1, failed: 0, ms: 8400 }
+						],
+						compactions: 0,
+						pruned: 1,
+						resumed: false,
+						history: [
+							{ prompt: 640, cached: 0, completion: 60 },
+							{ prompt: 3900, cached: 2900, completion: 210 },
+							{ prompt: 4400, cached: 3600, completion: 180 },
+							{ prompt: 4600, cached: 4100, completion: 240 },
+							{ prompt: 5100, cached: 4700, completion: 160 },
+							{ prompt: 5300, cached: 4900, completion: 300 },
+							{ prompt: 5600, cached: 5200, completion: 140 },
+							{ prompt: 5900, cached: 5500, completion: 120 },
+							{ prompt: 6360, cached: 6000, completion: 80 }
+						]
+					}
+				});
 					break;
 				case 'get_context':
 					send(tab, {

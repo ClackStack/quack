@@ -44,6 +44,7 @@ ask quack to do something in this folder</pre>
 		{#each session.items as item (item.id)}
 			{#if item.kind === 'user'}
 				<div class="user-row">
+					<div class="cap">You</div>
 					<p>{item.text}</p>
 					{#if item.files.length > 0}
 						<div class="chips">
@@ -58,17 +59,29 @@ ask quack to do something in this folder</pre>
 				</div>
 			{:else if item.kind === 'assistant'}
 				<article class="assistant">
+					<div class="who">
+						<svg viewBox="0 0 24 24" aria-hidden="true"
+							><circle cx="8.7" cy="6" r="2.7" fill="none" stroke="currentColor" stroke-width="1.7"/>
+							<path d="M6.3 4.9 3.4 6l2.9 1.1" fill="none" stroke="currentColor" stroke-width="1.7"
+								stroke-linecap="round" stroke-linejoin="round"/>
+							<path d="M3.4 14.4c0-3 2.4-5.4 5.4-5.4h2.3c3.5 0 6.3 2.3 6.3 5.1 0 2.4-2.1 4.3-5.3 4.3H7.1c-2 0-3.7-1.7-3.7-4z" fill="none"
+								stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+							<path d="M12 15.2a3.2 3.2 0 0 0-3.2-3.2" fill="none" stroke="currentColor" stroke-width="1.7"/>
+							<path d="M19.6 18.8h1.9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg
+						>
+						quack
+					</div>
 					<AssistantMessage text={item.text} streaming={item.streaming} />
 				</article>
 			{:else if item.kind === 'reasoning'}
 				<details class="reasoning">
-					<summary>thinking</summary>
+					<summary>field thoughts</summary>
 					<p>{item.text}</p>
 				</details>
 			{:else if item.kind === 'tool'}
 				<ToolCard item={item} />
 			{:else if item.kind === 'compacted'}
-				<div class="compacted">older history summarized</div>
+				<div class="compacted">older notes summarized for the trail ahead</div>
 			{:else}
 				<div class="system {item.tone}" role={item.tone === 'error' ? 'alert' : 'status'}>
 					{item.text}
@@ -89,7 +102,7 @@ ask quack to do something in this folder</pre>
 	.transcript {
 		flex: 1;
 		overflow-y: auto;
-		padding: var(--sp-md) var(--sp-lg) var(--sp-lg);
+		padding: var(--sp-lg) var(--sp-lg) var(--sp-md);
 		display: flex;
 		flex-direction: column;
 		gap: var(--sp-md);
@@ -108,7 +121,7 @@ ask quack to do something in this folder</pre>
 	.empty pre {
 		display: inline-block;
 		text-align: left;
-		color: var(--beak-ink);
+		color: var(--sky-ink);
 		line-height: 1.25;
 		margin: 0;
 	}
@@ -118,15 +131,27 @@ ask quack to do something in this folder</pre>
 		color: var(--ink-3);
 	}
 
+	/* Your notes: the vermilion edge of a field entry. */
 	.user-row {
 		background: var(--user-row);
 		border: 1px solid var(--rule-soft);
+		border-left: 1px solid var(--ver);
 		border-radius: var(--r-lg);
 		padding: 10px 14px;
+		max-width: 76ch;
+	}
+
+	.cap {
+		font-size: 10.5px;
+		font-weight: 700;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--ver);
 	}
 
 	.user-row p {
-		margin: 0;
+		margin: 4px 0 0;
+		font-family: var(--font-serif);
 		font-size: var(--text-prose);
 		line-height: var(--leading-prose);
 		white-space: pre-wrap;
@@ -142,7 +167,7 @@ ask quack to do something in this folder</pre>
 
 	.chip {
 		font-size: 11.5px;
-		background: var(--bg-soft);
+		background: var(--bg-panel);
 		border: 1px solid var(--rule);
 		border-radius: var(--r-md);
 		padding: 2px 8px;
@@ -153,16 +178,39 @@ ask quack to do something in this folder</pre>
 		font-family: var(--font-mono);
 	}
 
+	/* quack's notes: the blue-ink entries, serif like the guide's prose. */
 	.assistant {
+		max-width: 76ch;
+	}
+
+	.who {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		font-size: 10.5px;
+		font-weight: 700;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--sky-ink);
+		margin-bottom: 2px;
+	}
+
+	.who svg {
+		width: 16px;
+		height: 16px;
+		flex: none;
+	}
+
+	.assistant :global(.prose) {
+		font-family: var(--font-serif);
 		font-size: var(--text-prose);
 		line-height: var(--leading-prose);
-		max-width: 76ch;
 	}
 
 	.reasoning {
 		color: var(--ink-3);
 		font-size: 13px;
-		border-left: 2px solid var(--rule);
+		border-left: 1px solid var(--rule);
 		padding-left: 12px;
 	}
 
@@ -170,6 +218,8 @@ ask quack to do something in this folder</pre>
 		cursor: pointer;
 		color: var(--ink-2);
 		user-select: none;
+		font-style: italic;
+		font-family: var(--font-serif);
 	}
 
 	.reasoning p {
@@ -181,6 +231,8 @@ ask quack to do something in this folder</pre>
 		align-self: center;
 		color: var(--ink-3);
 		font-size: 12px;
+		font-family: var(--font-serif);
+		font-style: italic;
 		border: 1px dashed var(--rule);
 		border-radius: 999px;
 		padding: 3px 12px;
@@ -209,21 +261,22 @@ ask quack to do something in this folder</pre>
 	.status {
 		display: flex;
 		align-items: center;
-		gap: var(--sp-sm);
-		color: var(--ink-2);
+		gap: 8px;
+		color: var(--ink-3);
 		font-size: 12.5px;
 	}
 
 	.measure {
 		font-family: var(--font-mono);
-		color: var(--ink-3);
+		font-size: 11.5px;
 	}
 
 	.cursor {
-		width: 8px;
-		height: 15px;
-		background: var(--duck);
 		display: inline-block;
+		width: 8px;
+		height: 1em;
+		vertical-align: text-bottom;
+		background: var(--duck);
 		animation: blink 900ms steps(1) infinite;
 	}
 

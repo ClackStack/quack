@@ -215,11 +215,15 @@
 		gap: var(--sp-md);
 	}
 	h1 {
-		font-size: 22px;
+		font-family: var(--font-serif);
+		font-size: 24px;
+		font-weight: 600;
 		margin: 0 0 8px;
 	}
 	h2 {
-		font-size: 16px;
+		font-family: var(--font-serif);
+		font-size: 17px;
+		font-weight: 600;
 		margin: 0 0 8px;
 	}
 	h3 {

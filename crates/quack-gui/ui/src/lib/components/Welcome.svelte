@@ -1,5 +1,6 @@
 <script lang="ts">
-	import type { Transport, ResumeRequest } from '#lib/transport';
+	import type { RecentFolder, Transport, ResumeRequest } from '#lib/transport';
+	import { collapseHomeDisplay, dedupeRecentFolders } from '#lib/workspaces.svelte';
 	import logoUrl from '#lib/assets/logo.png';
 	import ThemeToggle from '#lib/components/ThemeToggle.svelte';
 
@@ -7,19 +8,22 @@
 		transport,
 		opening,
 		openError,
+		homePrefix = '',
 		onOpen
 	}: {
 		transport: Transport;
 		opening: boolean;
 		openError: string | null;
+		homePrefix?: string;
 		onOpen: (cwd: string, resume: ResumeRequest) => void;
 	} = $props();
 
-	let recents = $state<{ path: string; opened: number }[]>([]);
+	let rawRecents = $state<RecentFolder[]>([]);
+	let recents = $derived(dedupeRecentFolders(rawRecents, homePrefix).slice(0, 8));
 	let manualPath = $state('');
 
 	$effect(() => {
-		void transport.recentFolders(8).then((folders) => (recents = folders));
+		void transport.recentFolders(16).then((folders) => (rawRecents = folders ?? []));
 	});
 
 	async function pick() {
@@ -28,12 +32,11 @@
 	}
 
 	function short(path: string): string {
-		const home = path.match(/^\/home\/[^/]+(\/.*)?$/);
-		return home?.[1] !== undefined ? `~${home[1]}` : path;
+		return collapseHomeDisplay(path, homePrefix);
 	}
 
 	function name(path: string): string {
-		const parts = path.split('/');
+		const parts = path.split(/[\\/]/).filter(Boolean);
 		return parts[parts.length - 1] || path;
 	}
 </script>
@@ -210,10 +213,11 @@
 	}
 
 	h1 {
-		font-size: 26px;
+		font-family: var(--font-serif);
+		font-size: 27px;
+		font-weight: 600;
 		line-height: 1.15;
-		letter-spacing: -0.02em;
-		font-weight: 800;
+		letter-spacing: -0.01em;
 		margin: 0;
 	}
 
@@ -222,6 +226,8 @@
 		max-width: 46ch;
 		margin: 0;
 		line-height: 1.55;
+		font-family: var(--font-serif);
+		font-size: 15.5px;
 	}
 
 	.actions {
@@ -258,9 +264,11 @@
 	}
 
 	h2 {
-		font-size: 13px;
+		font-size: 12px;
 		font-weight: 700;
-		color: var(--ink-2);
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		color: var(--ink-3);
 		margin: 0;
 	}
 

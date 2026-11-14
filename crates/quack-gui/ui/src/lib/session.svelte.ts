@@ -8,7 +8,9 @@ import type {
 	ProviderModels,
 	Question,
 	ReplayItem,
-	SessionSummary
+	SessionSummary,
+	SkillInfo,
+	StatsReport
 } from '#lib/protocol';
 import type { AppInfo, Transport } from '#lib/transport/types';
 
@@ -33,6 +35,8 @@ export type Item =
 			output: string;
 			detail: string | null;
 			open: boolean;
+			/** Files the call's opening summary named; the end summary may reword it. */
+			subjects: string[];
 	  }
 	| { kind: 'system'; id: number; tone: 'notice' | 'warning' | 'error'; text: string }
 	| { kind: 'compacted'; id: number };
@@ -59,6 +63,17 @@ export interface ContextState {
 export interface SpeedState {
 	ttftMs: number;
 	tokensPerSec: number | null;
+}
+
+/** One file the session has written into, for the specimen case. */
+export interface EditedFile {
+	path: string;
+	adds: number;
+	dels: number;
+	/** Write and edit calls that touched it. */
+	ops: number;
+	/** The latest diff, for the expanded view. */
+	diff: string | null;
 }
 
 export type WorkMode = 'plan' | 'edit';
@@ -108,8 +123,60 @@ export const APPROVALS: {
 let itemSeq = 0;
 const nextId = () => ++itemSeq;
 
+/** File paths named by a unified diff's `+++`/`---` headers. */
+/** A unified diff split into per-file sections, each with its own change counts.
+ * Header pairs are read together so `--- a/x` + `+++ /dev/null` and the reverse
+ * still name the file that changed. */
+function diffSections(
+	detail: string
+): { path: string; adds: number; dels: number }[] {
+	const sections: { path: string; adds: number; dels: number }[] = [];
+	let current: { path: string; adds: number; dels: number } | null = null;
+	const lines = detail.split('\n');
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		const plus = /^\+\+\+ (?:b\/)?(.+)$/.exec(line);
+		if (plus) {
+			if (plus[1] !== '/dev/null') {
+				current = { path: plus[1], adds: 0, dels: 0 };
+				sections.push(current);
+			} else current = null;
+			continue;
+		}
+		const minus = /^--- (?:a\/)?(.+)$/.exec(line);
+		if (minus) {
+			const next = /^\+\+\+ (?:b\/)?(.+)$/.exec(lines[i + 1] ?? '');
+			const path =
+				next && next[1] !== '/dev/null'
+					? next[1]
+					: minus[1] !== '/dev/null'
+						? minus[1]
+						: null;
+			if (path) {
+				current = { path, adds: 0, dels: 0 };
+				sections.push(current);
+			} else current = null;
+			if (next) i++;
+			continue;
+		}
+		if (current) {
+			if (line.startsWith('+')) current.adds += 1;
+			else if (line.startsWith('-')) current.dels += 1;
+		}
+	}
+	return sections;
+}
+
+/** The files an `edit src/x.rs` / `write docs.md` opening summary names. */
+function summarySubjects(summary: string): string[] {
+	const named = /^(?:edit|write|patch) (.+)$/.exec(summary.trim());
+	return named && !named[1].endsWith(' files') ? [named[1]] : [];
+}
+
 export class Session {
 	tab = $state(0);
+	/** Real filesystem folder used to open/reopen this tab (never `~`-collapsed). */
+	cwd = $state('');
 	info = $state<AppInfo | null>(null);
 	title = $state('');
 	draft = $state('');
@@ -159,6 +226,10 @@ export class Session {
 	services = $state<ServiceInfo[]>([]);
 	detectedServers = $state<DetectedServer[] | null>(null);
 	detecting = $state(false);
+	/** Skills the engine loaded for this project; arrives at startup. */
+	skills = $state<SkillInfo[]>([]);
+	/** The engine's `/stats` report, fetched after each turn. */
+	stats = $state<StatsReport | null>(null);
 
 	get canSubmit() {
 		return (
@@ -178,10 +249,11 @@ export class Session {
 
 	#transport: Transport;
 
-	constructor(transport: Transport, tab: number, info: AppInfo) {
+	constructor(transport: Transport, tab: number, info: AppInfo, cwd?: string) {
 		this.#transport = transport;
 		this.tab = tab;
 		this.info = info;
+		this.cwd = cwd || info.cwd;
 		this.currentModel = info.model;
 		this.approvals = info.permission_mode as ApprovalPolicy;
 		this.workMode = info.work_mode === 'plan' ? 'plan' : 'edit';
@@ -256,7 +328,8 @@ export class Session {
 					ok: null,
 					output: '',
 					detail: null,
-					open: false
+					open: false,
+					subjects: summarySubjects(ev.call.summary)
 				});
 				break;
 			case 'tool_call_output_delta': {
@@ -296,6 +369,9 @@ export class Session {
 					completion: ev.usage.completion_tokens,
 					cached: ev.usage.cached_prompt_tokens ?? null
 				};
+				// Usage and context re-read after every turn.
+				void this.#send({ op: 'get_stats' });
+				void this.refreshContext();
 				break;
 			case 'turn_aborted':
 				this.turnPending = false;
@@ -385,6 +461,12 @@ export class Session {
 			case 'servers_detected':
 				this.detectedServers = ev.servers;
 				this.detecting = false;
+				break;
+			case 'skills':
+				this.skills = ev.skills;
+				break;
+			case 'stats':
+				this.stats = ev.report;
 				break;
 			case 'provider_added':
 				this.setupNotice = ev.note ?? 'Provider saved. Choose a model to continue.';
@@ -493,6 +575,7 @@ export class Session {
 		this.contextReport = null;
 		this.speed = null;
 		this.lastUsage = null;
+		this.stats = null;
 		this.approval = null;
 		this.questions = null;
 		this.resumed = false;
@@ -515,7 +598,8 @@ export class Session {
 				ok: item.ok,
 				output: item.result,
 				detail: item.detail ?? null,
-				open: false
+				open: false,
+				subjects: summarySubjects(item.summary)
 			});
 		} else {
 			this.items.push({ kind: 'compacted', id: nextId() });
@@ -687,6 +771,9 @@ export class Session {
 	async refreshContext() {
 		return this.#send({ op: 'get_context' });
 	}
+	async refreshStats() {
+		return this.#send({ op: 'get_stats' });
+	}
 	async compact(focus?: string) {
 		return this.#send({ op: 'compact', ...(focus ? { focus } : {}) });
 	}
@@ -725,6 +812,43 @@ export class Session {
 	}
 	async undo() {
 		return this.#send({ op: 'undo', checkpoint: null, force: false });
+	}
+
+	/** Files this session has written into, newest evidence last. Derived from the
+	 * transcript's edit and write calls, so it needs no engine round trip. */
+	get editedFiles(): EditedFile[] {
+		const map = new Map<string, EditedFile>();
+		for (const item of this.items) {
+			if (item.kind !== 'tool') continue;
+			const detail = item.detail ?? '';
+			// A real diff attributes each hunk to its own file; anything else falls
+			// back to the file the opening summary named, with no counts claimed.
+			const byPath = new Map<string, { path: string; adds: number; dels: number }>();
+			for (const section of diffSections(detail)) {
+				const seen = byPath.get(section.path);
+				if (seen) {
+					seen.adds += section.adds;
+					seen.dels += section.dels;
+				} else byPath.set(section.path, section);
+			}
+			const hits =
+				byPath.size > 0
+					? [...byPath.values()]
+					: [...item.subjects, ...summarySubjects(item.summary)].map((path) => ({
+							path,
+							adds: 0,
+							dels: 0
+						}));
+			for (const hit of hits) {
+				const entry = map.get(hit.path) ?? { path: hit.path, adds: 0, dels: 0, ops: 0, diff: null };
+				entry.adds += hit.adds;
+				entry.dels += hit.dels;
+				entry.ops += 1;
+				if (detail) entry.diff = detail;
+				map.set(hit.path, entry);
+			}
+		}
+		return [...map.values()];
 	}
 
 	async trustProject(decision: 'trusted' | 'settings-only' | 'ignored') {

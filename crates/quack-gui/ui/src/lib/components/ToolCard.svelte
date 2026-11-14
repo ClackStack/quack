@@ -162,6 +162,12 @@
 		white-space: pre;
 	}
 
+	/* Diffs are plates: paper, ink, and the guide's change colours. */
+	.diff {
+		background: var(--bg-panel);
+		color: var(--ink);
+	}
+
 	.out {
 		background: var(--term);
 		color: var(--term-text);
@@ -172,16 +178,16 @@
 	}
 
 	.line.add {
-		background: color-mix(in srgb, var(--ok) 16%, transparent);
-		color: var(--ok);
+		background: color-mix(in srgb, var(--grn) 12%, transparent);
+		color: color-mix(in srgb, var(--grn) 75%, var(--ink));
 	}
 
 	.line.del {
-		background: color-mix(in srgb, var(--fail) 14%, transparent);
-		color: var(--fail);
+		background: color-mix(in srgb, var(--ver) 10%, transparent);
+		color: color-mix(in srgb, var(--ver) 80%, var(--ink));
 	}
 
 	.line.meta {
-		color: var(--term-dim);
+		color: var(--ink-3);
 	}
 </style>

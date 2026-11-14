@@ -230,6 +230,7 @@ fn default_bundle_candidates(user_data: &Path) -> Vec<PathBuf> {
 /// The nearest ancestor of `cwd` containing `.git` (directory or worktree file), else `cwd`.
 pub fn find_workspace_root(cwd: &Path) -> PathBuf {
     cwd.ancestors()
+        .filter(|dir| !dir.as_os_str().is_empty())
         .find(|dir| dir.join(".git").exists())
         .unwrap_or(cwd)
         .to_path_buf()
@@ -301,6 +302,12 @@ mod tests {
         assert_eq!(find_workspace_root(&nested), tmp.path());
         let dirs = Dirs::discover_with(&env_of(&[]), &nested);
         assert_eq!(dirs.project, tmp.path().join(".quack"));
+    }
+
+    #[test]
+    fn workspace_root_ignores_empty_ancestor_on_relative_missing_path() {
+        let missing = Path::new("~/not-a-real-folder");
+        assert_eq!(find_workspace_root(missing), missing);
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]

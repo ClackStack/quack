@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Session } from '#lib/session.svelte';
+	import type { SidebarProject } from '#lib/workspaces.svelte';
 	import { theme } from '#lib/theme.svelte';
 	import Header from './Header.svelte';
 	import SetupPanel from './SetupPanel.svelte';
@@ -9,28 +10,49 @@
 	import ApprovalCard from './ApprovalCard.svelte';
 	import QuestionsCard from './QuestionsCard.svelte';
 	import Composer from './Composer.svelte';
+	import ModelModal from './ModelModal.svelte';
+	import ContextModal from './ContextModal.svelte';
 
 	let {
 		session,
-		sessions,
-		activeIndex,
-		onSelectTab,
-		onCloseTab,
+		projects,
+		opening = false,
+		openingCwd = null,
+		openError = null,
+		onDismissOpenError,
+		onSelectProject,
+		onCloseProject,
 		onNewTab
 	}: {
 		session: Session;
-		sessions: Session[];
-		activeIndex: number;
-		onSelectTab: (index: number) => void;
-		onCloseTab: (index: number) => void;
+		projects: SidebarProject[];
+		opening?: boolean;
+		openingCwd?: string | null;
+		openError?: string | null;
+		onDismissOpenError?: () => void;
+		onSelectProject: (cwd: string) => void;
+		onCloseProject: (cwd: string) => void;
 		onNewTab: () => void;
 	} = $props();
 
 	let sidebarOpen = $state(false);
+	let activeModal = $state<'model' | 'context' | null>(null);
 
 	const planReady = $derived(
 		session.workMode === 'plan' && session.plan.trim().length > 0 && !session.streaming
 	);
+	// While a decision is on the table, the rest of the room steps back: the log,
+	// the rail and the composer dim so the specimen plate holds the only full-strength ink.
+	const awaiting = $derived(!!session.approval || !!session.questions);
+
+	$effect(() => {
+		if (awaiting || session.trust || session.setupOpen) activeModal = null;
+	});
+
+	$effect(() => {
+		void session.tab;
+		activeModal = null;
+	});
 
 	$effect(() => {
 		if (session.info?.ui.theme) {
@@ -39,37 +61,32 @@
 	});
 </script>
 
-<div class="workspace">
-	<Header {session} />
-	<div class="tabs" aria-label="Workspaces">
-		{#each sessions as tab, i (tab.tab)}
-			<button
-				class="tab"
-				aria-current={i === activeIndex ? 'page' : undefined}
-				onclick={() => onSelectTab(i)}>{tab.info?.cwd ?? 'Workspace'}</button
-			>
-			<button
-				class="tab ghost"
-				aria-label={`Close ${tab.info?.cwd ?? 'workspace'}`}
-				onclick={() => onCloseTab(i)}>×</button
-			>
-		{/each}
-		<button class="tab ghost" aria-label="Open folder" onclick={onNewTab}>+</button>
-		<button
-			class="tab sidebar-toggle"
-			aria-expanded={sidebarOpen}
-			aria-controls="workspace-sidebar"
-			onclick={() => (sidebarOpen = !sidebarOpen)}>Sessions</button
-		>
+<div class="workspace" class:awaiting>
+	<div id="workspace-sidebar" class="sidebar" class:open={sidebarOpen}>
+		<Sidebar
+			{session}
+			{projects}
+			{opening}
+			{openingCwd}
+			onSelectProject={(cwd) => {
+				sidebarOpen = false;
+				onSelectProject(cwd);
+			}}
+			{onCloseProject}
+			{onNewTab}
+		/>
 	</div>
-
-	<div class="body">
+	<div class="pane">
+		<Header {session} {sidebarOpen} onToggleSidebar={() => (sidebarOpen = !sidebarOpen)} />
 		<main>
-			{#if session.actionError}
+			{#if session.actionError || openError}
 				<div class="action-error" role="alert">
-					<span>{session.actionError}</span><button
+					<span>{session.actionError ?? openError}</span><button
 						class="btn"
-						onclick={() => (session.actionError = null)}>Dismiss</button
+						onclick={() => {
+							session.actionError = null;
+							onDismissOpenError?.();
+						}}>Dismiss</button
 					>
 				</div>
 			{/if}
@@ -90,34 +107,50 @@
 						<button class="btn" onclick={() => session.setWorkMode('edit')}>Back to Edit</button>
 					</div>
 				{/if}
-				{#if session.approval}
-					<ApprovalCard
-						approval={session.approval}
-						busy={session.sending}
-						onAnswer={(d) => void session.answerApproval(d)}
-					/>
+				{#if session.approval || session.questions}
+					<div class="decision-slot">
+						{#if session.approval}
+							<ApprovalCard
+								approval={session.approval}
+								busy={session.sending}
+								onAnswer={(d) => void session.answerApproval(d)}
+							/>
+						{/if}
+						{#if session.questions}
+							{#key session.questions.callId}
+								<QuestionsCard
+									questions={session.questions.questions}
+									busy={session.sending}
+									onAnswer={(a) => void session.answerQuestions(a)}
+								/>
+							{/key}
+						{/if}
+					</div>
 				{/if}
-				{#if session.questions}
-					{#key session.questions.callId}
-						<QuestionsCard
-							questions={session.questions.questions}
-							busy={session.sending}
-							onAnswer={(a) => void session.answerQuestions(a)}
-						/>
-					{/key}
-				{/if}
-				<Composer {session} />
+				<Composer
+					{session}
+					modalOpen={activeModal !== null}
+					onOpenModels={() => (activeModal = 'model')}
+					onOpenContext={() => (activeModal = 'context')}
+				/>
 			{/if}
-		</main>
-		<div id="workspace-sidebar" class="sidebar" class:open={sidebarOpen}><Sidebar {session} /></div>
+			</main>
+		</div>
 	</div>
-</div>
+
+{#if activeModal === 'model'}
+	<ModelModal {session} onClose={() => (activeModal = null)} />
+{:else if activeModal === 'context'}
+	<ContextModal {session} onClose={() => (activeModal = null)} />
+{/if}
 
 <style>
 	.workspace {
 		height: 100vh;
 		display: grid;
-		grid-template-rows: auto auto auto minmax(0, 1fr);
+		/* The rail runs the full height of the window; the header and the
+		   waterline belong to the chat pane alone. */
+		grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
 		overflow: hidden;
 	}
 
@@ -134,43 +167,16 @@
 		flex: 1;
 	}
 
-	.tabs {
-		overflow-x: auto;
-		display: flex;
-		align-items: center;
-		gap: var(--sp-xs);
-		padding: 4px 12px;
-		border-bottom: 1px solid var(--rule);
-		background: var(--bg-soft);
-	}
-
-	.tab {
-		font-family: var(--font-mono);
-		font-size: 12px;
-		padding: 3px 10px;
-		border-radius: var(--r-md);
-		background: var(--bg-panel);
-		border: 1px solid var(--rule);
-	}
-
-	.tab.ghost {
-		background: none;
-		border-style: dashed;
-		color: var(--ink-2);
-	}
-
 	.sidebar {
 		min-height: 0;
 		display: grid;
 	}
-	.sidebar-toggle {
-		display: none;
-	}
 
-	.body {
-		display: grid;
-		grid-template-columns: 1fr var(--sidebar-w);
+	.pane {
+		min-width: 0;
 		min-height: 0;
+		display: grid;
+		grid-template-rows: auto auto minmax(0, 1fr);
 	}
 
 	main {
@@ -178,6 +184,33 @@
 		flex-direction: column;
 		min-height: 0;
 		min-width: 0;
+	}
+
+	.decision-slot {
+		flex: 0 1 auto;
+		min-height: 0;
+		padding-top: 4px;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+	}
+
+	/* Decision focus: everything but the plate on the table steps back. */
+	.awaiting :global(.transcript),
+	.awaiting :global(.composer),
+	.awaiting :global(.rail),
+	.awaiting :global(header),
+	.plan-bar {
+		transition:
+			opacity 220ms ease-out,
+			filter 220ms ease-out;
+	}
+
+	.awaiting :global(.transcript),
+	.awaiting :global(.composer),
+	.awaiting :global(.rail),
+	.awaiting :global(header) {
+		opacity: 0.55;
+		filter: saturate(0.6);
 	}
 
 	.plan-bar {
@@ -189,10 +222,15 @@
 		background: var(--duck-soft);
 	}
 
+	.awaiting .plan-bar {
+		opacity: 0.55;
+		filter: saturate(0.6);
+	}
+
 	.plan-bar p {
 		margin: 0;
-		font-family: var(--font-mono);
-		font-size: 12px;
+		font-family: var(--font-serif);
+		font-size: 13px;
 		white-space: pre-wrap;
 		color: var(--duck-ink);
 		display: -webkit-box;
@@ -207,13 +245,9 @@
 	}
 
 	@media (max-width: 900px) {
-		.body {
+		.workspace {
 			position: relative;
 			grid-template-columns: minmax(0, 1fr);
-		}
-		.sidebar-toggle {
-			display: block;
-			margin-left: auto;
 		}
 		.sidebar {
 			display: none;
@@ -221,8 +255,9 @@
 		.sidebar.open {
 			display: grid;
 			position: absolute;
-			inset: 0 0 0 auto;
+			inset: 0 auto 0 0;
 			width: var(--sidebar-w);
+			max-width: 86vw;
 			z-index: 20;
 		}
 	}

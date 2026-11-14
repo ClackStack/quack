@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::appinfo::AppInfo;
 use crate::coalesce::DeltaCoalescer;
-use crate::recent::RecentFolders;
+use crate::recent::{RecentFolders, expand_tilde_with, workspace_key};
 
 /// How long opening a tab may take: config, the model, and replaying a saved log.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -264,6 +264,13 @@ impl Registry {
         sink: Arc<dyn Sink>,
     ) -> Result<TabId, OpenError> {
         self.check_client(client).map_err(OpenError::Engine)?;
+        let cwd = expand_tilde_with(cwd, &|k| std::env::var_os(k));
+        if cwd.as_os_str().is_empty() || !cwd.is_dir() {
+            return Err(OpenError::Config(format!(
+                "folder does not exist: {} · choose an existing folder",
+                cwd.display()
+            )));
+        }
         let opts = LoadOptions::new(cwd.clone());
         let load = self.load.clone();
         let loaded = tokio::task::spawn_blocking(move || load(opts))
@@ -271,6 +278,13 @@ impl Registry {
             .map_err(|e| OpenError::Config(e.to_string()))?
             .map_err(OpenError::Config)?;
         let workspace = workspace_key(&loaded.dirs.workspace_root);
+        let recent_root = if !loaded.dirs.workspace_root.as_os_str().is_empty()
+            && loaded.dirs.workspace_root.is_dir()
+        {
+            loaded.dirs.workspace_root.clone()
+        } else {
+            cwd.clone()
+        };
         // A closing tab keeps its reservation until shutdown has finished. Reopen
         // waits here without blocking operations on unrelated tabs.
         let (id, tab, started) = loop {
@@ -313,7 +327,10 @@ impl Registry {
             return Err(OpenError::Engine(error));
         }
         self.check_client(client).map_err(OpenError::Engine)?;
-        self.recent.lock().expect("recent folders lock").touch(cwd);
+        self.recent
+            .lock()
+            .expect("recent folders lock")
+            .touch(recent_root);
         Ok(id)
     }
 
@@ -566,17 +583,6 @@ async fn run_tab(
     sink.send(TabMessage::closed(tab, reason));
 }
 
-/// Resolve symlinks before comparing workspace ownership; compare case-insensitively
-/// on the platforms where workspace paths are normally case-insensitive.
-fn workspace_key(path: &Path) -> PathBuf {
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if cfg!(any(windows, target_os = "macos")) {
-        PathBuf::from(path.to_string_lossy().to_lowercase())
-    } else {
-        path
-    }
-}
-
 /// Keep native resource resolution local to this client, with no process-wide
 /// environment mutation and the same override/reload behavior as other clients.
 fn load_from_resources(
@@ -633,5 +639,45 @@ mod tests {
             loaded.reload().expect("reload resources").settings.ui.theme,
             "dark"
         );
+    }
+
+    #[test]
+    fn expand_tilde_resolves_home_relative_paths() {
+        let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let fake_home = if cfg!(windows) {
+            "C:\\Users\\duck"
+        } else {
+            "/home/duck"
+        };
+        let env = |key: &str| (key == home_var).then(|| std::ffi::OsString::from(fake_home));
+        assert_eq!(
+            expand_tilde_with(PathBuf::from("~/pond/notes"), &env),
+            PathBuf::from(fake_home).join("pond/notes")
+        );
+        assert_eq!(
+            expand_tilde_with(PathBuf::from("~"), &env),
+            PathBuf::from(fake_home)
+        );
+        assert_eq!(
+            expand_tilde_with(PathBuf::from("~other/pond"), &env),
+            PathBuf::from("~other/pond")
+        );
+    }
+
+    #[tokio::test]
+    async fn open_rejects_empty_or_missing_directories() {
+        let registry = Registry::new();
+        let sink: Arc<dyn Sink> = Arc::new(|_| {});
+        let err = registry
+            .open(PathBuf::new(), Resume::New, sink.clone())
+            .await
+            .expect_err("empty cwd must fail");
+        assert!(matches!(err, OpenError::Config(_)), "{err:?}");
+        let missing = std::env::temp_dir().join("quack-gui-does-not-exist-99999");
+        let err = registry
+            .open(missing, Resume::New, sink)
+            .await
+            .expect_err("missing dir must fail");
+        assert!(matches!(err, OpenError::Config(_)), "{err:?}");
     }
 }
