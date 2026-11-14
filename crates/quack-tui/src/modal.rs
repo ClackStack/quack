@@ -2694,96 +2694,100 @@ pub(crate) fn custom_commands(commands: &[quack_protocol::CommandInfo], theme: &
     )
 }
 
-/// The `/mcp` modal: each server with its state, tools and recent stderr. `None` while
-/// asking the engine.
-pub(crate) fn mcp(servers: Option<&[quack_protocol::McpServerInfo]>, theme: &Theme) -> Modal {
+/// The `/mcp` modal: live servers, disabled/bundled examples, and quick-add actions.
+/// `servers` is `None` while asking the engine.
+pub(crate) fn mcp(
+    servers: Option<&[quack_protocol::McpServerInfo]>,
+    catalog: &[quack_config::McpSummary],
+    theme: &Theme,
+) -> Modal {
     let items = match servers {
         None => vec![placeholder("checking servers…", "", theme)],
-        Some([]) => vec![placeholder(
-            "no MCP servers",
-            "Add a TOML file to mcp.d in your config folder (`quack config paths` \
-             shows where), for example\n\ncommand = \"npx\"\nargs = [\"-y\", \"@modelcontextprotocol/server-everything\"]\n\n\
-             or, for a remote server, url = \"https://…/mcp\". The defaults bundle has examples.",
-            theme,
-        )],
-        Some(list) => list
-            .iter()
-            .map(|s| {
-                let style = match s.state {
-                    quack_protocol::McpServerState::Ready => theme.ok,
-                    quack_protocol::McpServerState::Failed => theme.error,
-                    _ => theme.warn,
-                };
-                let mut detail = vec![Line::styled(s.id.clone(), style), Line::raw("")];
-                if !s.description.is_empty() {
-                    detail.push(Line::raw(s.description.clone()));
-                    detail.push(Line::raw(""));
-                }
-                detail.push(field(theme, "state", s.state.label().to_owned()));
-                if !s.error.is_empty() {
-                    detail.push(Line::styled(s.error.clone(), theme.error));
-                }
-                detail.push(field(theme, s.transport.as_str(), s.target.clone()));
-                if s.state == quack_protocol::McpServerState::Ready {
-                    detail.push(field(
-                        theme,
-                        "tools",
-                        format!(
-                            "{} · ~{} tokens{}",
-                            s.tools.len(),
-                            s.tool_tokens,
-                            if s.deferred {
-                                " · found with tool_search (too large to send every time)"
-                            } else {
-                                ""
-                            }
-                        ),
-                    ));
-                    detail.push(Line::raw(""));
-                    detail.extend(s.tools.iter().map(|t| Line::raw(format!("  {t}"))));
-                    if !s.prompts.is_empty() {
+        Some(list) => {
+            let mut out: Vec<ModalItem> = list
+                .iter()
+                .map(|s| {
+                    let style = match s.state {
+                        quack_protocol::McpServerState::Ready => theme.ok,
+                        quack_protocol::McpServerState::Failed => theme.error,
+                        _ => theme.warn,
+                    };
+                    let mut detail = vec![Line::styled(s.id.clone(), style), Line::raw("")];
+                    if !s.description.is_empty() {
+                        detail.push(Line::raw(s.description.clone()));
                         detail.push(Line::raw(""));
-                        detail.push(field(theme, "prompts", s.prompts.len().to_string()));
+                    }
+                    detail.push(field(theme, "state", s.state.label().to_owned()));
+                    if !s.error.is_empty() {
+                        detail.push(Line::styled(s.error.clone(), theme.error));
+                    }
+                    detail.push(field(theme, s.transport.as_str(), s.target.clone()));
+                    if s.state == quack_protocol::McpServerState::Ready {
+                        detail.push(field(
+                            theme,
+                            "tools",
+                            format!(
+                                "{} · ~{} tokens{}",
+                                s.tools.len(),
+                                s.tool_tokens,
+                                if s.deferred {
+                                    " · found with tool_search (too large to send every time)"
+                                } else {
+                                    ""
+                                }
+                            ),
+                        ));
+                        detail.push(Line::raw(""));
+                        detail.extend(s.tools.iter().map(|t| Line::raw(format!("  {t}"))));
+                        if !s.prompts.is_empty() {
+                            detail.push(Line::raw(""));
+                            detail.push(field(theme, "prompts", s.prompts.len().to_string()));
+                            detail.extend(
+                                s.prompts
+                                    .iter()
+                                    .map(|p| Line::raw(format!("  /{}:{p}", s.id))),
+                            );
+                        }
+                        if !s.resources.is_empty() {
+                            detail.push(Line::raw(""));
+                            detail.push(field(theme, "resources", s.resources.len().to_string()));
+                            detail.extend(s.resources.iter().map(|r| Line::raw(format!("  {r}"))));
+                        }
+                    }
+                    if !s.log.is_empty() {
+                        detail.push(Line::raw(""));
+                        detail.push(Line::styled("recent output", theme.dim));
+                        let skip = s.log.len().saturating_sub(12);
                         detail.extend(
-                            s.prompts
+                            s.log
                                 .iter()
-                                .map(|p| Line::raw(format!("  /{}:{p}", s.id))),
+                                .skip(skip)
+                                .map(|l| Line::styled(format!("  {l}"), theme.dim)),
                         );
                     }
-                    if !s.resources.is_empty() {
-                        detail.push(Line::raw(""));
-                        detail.push(field(theme, "resources", s.resources.len().to_string()));
-                        detail.extend(s.resources.iter().map(|r| Line::raw(format!("  {r}"))));
-                    }
-                }
-                if !s.log.is_empty() {
                     detail.push(Line::raw(""));
-                    detail.push(Line::styled("recent output", theme.dim));
-                    let skip = s.log.len().saturating_sub(12);
-                    detail.extend(
-                        s.log
-                            .iter()
-                            .skip(skip)
-                            .map(|l| Line::styled(format!("  {l}"), theme.dim)),
-                    );
-                }
-                detail.push(Line::raw(""));
-                detail.push(Line::styled("^s restart this server", theme.dim));
-                ModalItem {
-                    label: s.id.clone(),
-                    hint: if s.state == quack_protocol::McpServerState::Ready {
-                        format!("{} tools", s.tools.len())
-                    } else {
-                        s.state.label().to_owned()
-                    },
-                    detail,
-                    action: None,
-                    run: false,
-                    alt: Some(format!("/mcp restart {}", s.id)),
-                    charts: Vec::new(),
-                }
-            })
-            .collect(),
+                    detail.push(Line::styled(
+                        "⏎ disable this server · ^s restart",
+                        theme.dim,
+                    ));
+                    ModalItem {
+                        label: s.id.clone(),
+                        hint: if s.state == quack_protocol::McpServerState::Ready {
+                            format!("{} tools", s.tools.len())
+                        } else {
+                            s.state.label().to_owned()
+                        },
+                        detail,
+                        action: Some(format!("/mcp disable {}", s.id)),
+                        run: true,
+                        alt: Some(format!("/mcp restart {}", s.id)),
+                        charts: Vec::new(),
+                    }
+                })
+                .collect();
+            out.extend(mcp_catalog_and_add_items(list, catalog, theme));
+            out
+        }
     };
     Modal::new(
         "MCP",
@@ -2793,6 +2797,111 @@ pub(crate) fn mcp(servers: Option<&[quack_protocol::McpServerInfo]>, theme: &The
         }],
     )
     .with_alt("restart")
+}
+
+fn mcp_catalog_and_add_items(
+    active: &[quack_protocol::McpServerInfo],
+    catalog: &[quack_config::McpSummary],
+    theme: &Theme,
+) -> Vec<ModalItem> {
+    let mut items = Vec::new();
+    for entry in catalog {
+        if active.iter().any(|s| s.id == entry.id) {
+            continue;
+        }
+        let hint = if entry.parse_error.is_some() {
+            "error".to_owned()
+        } else if entry.layer == quack_config::LayerKind::Defaults {
+            "example · off".to_owned()
+        } else {
+            "off".to_owned()
+        };
+        let mut detail = Vec::new();
+        if !entry.description.is_empty() {
+            detail.push(Line::raw(entry.description.clone()));
+            detail.push(Line::raw(""));
+        }
+        if !entry.transport.is_empty() {
+            detail.push(field(theme, "transport", entry.transport.clone()));
+        }
+        if !entry.target.is_empty() {
+            detail.push(field(theme, "target", entry.target.clone()));
+        }
+        detail.push(field(
+            theme,
+            "source",
+            format!("{} ({})", entry.layer.label(), entry.path.display()),
+        ));
+        if !entry.env_vars.is_empty() {
+            detail.push(field(theme, "env vars", entry.env_vars.join(", ")));
+        }
+        if let Some(reason) = &entry.disabled_reason {
+            detail.push(field(theme, "state", reason.clone()));
+        }
+        if let Some(err) = &entry.parse_error {
+            detail.push(Line::raw(""));
+            detail.push(Line::styled(format!("parse error: {err}"), theme.error));
+        } else {
+            detail.push(Line::raw(""));
+            detail.push(Line::styled(
+                if entry.layer == quack_config::LayerKind::Defaults {
+                    "⏎ copy example to user config, enable, and connect now"
+                } else {
+                    "⏎ enable and connect now"
+                },
+                theme.dim,
+            ));
+        }
+        items.push(ModalItem {
+            label: entry.id.clone(),
+            hint,
+            detail,
+            action: entry
+                .parse_error
+                .is_none()
+                .then(|| format!("/mcp enable {}", entry.id)),
+            run: entry.parse_error.is_none(),
+            alt: None,
+            charts: Vec::new(),
+        });
+    }
+
+    items.push(ModalItem {
+        label: "+ Add remote MCP server (HTTP)".into(),
+        hint: "url".into(),
+        detail: vec![
+            Line::styled("Connect a streamable HTTP MCP endpoint by URL", theme.accent),
+            Line::raw(""),
+            Line::styled(
+                "Prompts for the URL (e.g. https://mcp.context7.com/mcp), server id, and optional Bearer auth env var or token.",
+                theme.dim,
+            ),
+        ],
+        action: Some("/mcp add http".into()),
+        run: true,
+        alt: None,
+        charts: Vec::new(),
+    });
+    items.push(ModalItem {
+        label: "+ Add local MCP server (stdio)".into(),
+        hint: "command".into(),
+        detail: vec![
+            Line::styled(
+                "Add a local MCP server process run over stdio",
+                theme.accent,
+            ),
+            Line::raw(""),
+            Line::styled(
+                "Prompts for the command line (e.g. npx -y @playwright/mcp@latest) and server id.",
+                theme.dim,
+            ),
+        ],
+        action: Some("/mcp add stdio".into()),
+        run: true,
+        alt: None,
+        charts: Vec::new(),
+    });
+    items
 }
 
 /// The `/lsp` modal: each language server with its state and diagnostics. `None` while

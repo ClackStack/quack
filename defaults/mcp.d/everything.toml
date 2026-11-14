@@ -3,6 +3,7 @@
 # MCP works at all. Needs Node.js (npx downloads the server on first use).
 # To use it, copy this file to mcp.d in your config folder and delete `enabled = false`.
 enabled = false
+description = "Reference MCP server exercising tools, resources, and prompts for testing"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-everything", "stdio"]
 startup_timeout_secs = 60

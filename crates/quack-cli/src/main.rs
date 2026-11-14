@@ -7,6 +7,7 @@ mod cli;
 mod commands;
 mod errors;
 mod logging;
+mod mcp;
 mod setup;
 mod update;
 
@@ -86,6 +87,7 @@ fn main() -> ExitCode {
             ConfigCmd::Schema { dir } => commands::config_schema(&loaded, dir),
             ConfigCmd::Paths => commands::config_paths(&loaded),
         }),
+        Cmd::Mcp { cmd } => code(mcp::run(&loaded, cmd)),
         Cmd::Doctor => block_on(async move {
             let checks = quack_core::doctor::run(Arc::new(loaded)).await;
             commands::doctor(&checks)

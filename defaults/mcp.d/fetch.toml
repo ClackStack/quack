@@ -1,0 +1,11 @@
+#:schema ../schemas/mcp.json
+# Fetch MCP: retrieve web pages and convert them to Markdown.
+# Requires `uv` (`uvx`). To enable: run `quack mcp enable fetch` or `/mcp`.
+enabled = false
+description = "Fetch web pages and convert them to Markdown"
+command = "uvx"
+args = ["mcp-server-fetch"]
+startup_timeout_secs = 60
+
+[tools]
+auto_approve = ["fetch"]

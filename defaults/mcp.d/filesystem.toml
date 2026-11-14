@@ -2,6 +2,7 @@
 # Files under the listed folders. quack already has file tools for the workspace;
 # this is for folders outside it. Needs Node.js.
 enabled = false
+description = "Read-mostly filesystem access scoped to a directory (default ~/notes)"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "~/notes"]
 startup_timeout_secs = 60

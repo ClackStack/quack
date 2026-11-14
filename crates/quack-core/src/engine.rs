@@ -1944,6 +1944,46 @@ impl Engine {
                     });
                 });
             }
+            Op::EnableMcp { id } => {
+                let target = id.clone();
+                self.apply_mcp_change(id, done, reload, move |cfg| {
+                    crate::mcp::enable_mcp_in_config(cfg, &target, &|v| {
+                        std::env::var_os(v).is_some()
+                    })
+                })
+                .await;
+            }
+            Op::DisableMcp { id } => {
+                let target = id.clone();
+                self.apply_mcp_change(id, done, reload, move |cfg| {
+                    crate::mcp::disable_mcp_in_config(cfg, &target)
+                })
+                .await;
+            }
+            Op::AddMcp {
+                id,
+                url,
+                command,
+                args,
+                bearer_env,
+                bearer_token,
+            } => {
+                let target = id.clone();
+                self.apply_mcp_change(id, done, reload, move |cfg| {
+                    crate::mcp::add_mcp_in_config(
+                        cfg,
+                        crate::mcp::AddMcpInput {
+                            id: target,
+                            url,
+                            command,
+                            args,
+                            bearer_env,
+                            bearer_token: bearer_token.map(|s| s.0),
+                        },
+                    )
+                })
+                .await;
+            }
             Op::DetectServers => {
                 let config = self.config.clone();
                 let tx = self.tx.clone();
@@ -2287,6 +2327,36 @@ impl Engine {
                 })
                 .await;
         });
+    }
+
+    async fn apply_mcp_change(
+        &mut self,
+        id: String,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+        op: impl FnOnce(&Loaded) -> Result<String, String> + Send + 'static,
+    ) {
+        let config = self.config.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let reloaded = config.reload().map_err(|e| e.to_string())?;
+            op(&reloaded)
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+        match outcome {
+            Ok(message) => {
+                self.emit(Event::McpChanged { id, message });
+                self.queued.push_back(Queued::Reload(None));
+                self.next_queued(done, reload);
+            }
+            Err(message) => self.emit(Event::Error {
+                error: EngineError {
+                    kind: EngineErrorKind::Config,
+                    message,
+                },
+            }),
+        }
     }
 
     /// Read the config files again off the async threads.
@@ -2945,6 +3015,9 @@ fn op_name(op: &Op) -> &'static str {
         Op::ListLsp => "list_lsp",
         Op::InitInstructions => "init_instructions",
         Op::RestartMcp { .. } => "restart_mcp",
+        Op::EnableMcp { .. } => "enable_mcp",
+        Op::DisableMcp { .. } => "disable_mcp",
+        Op::AddMcp { .. } => "add_mcp",
         Op::AddProvider { .. } => "add_provider",
         Op::ListServices => "list_services",
         Op::SignIn { .. } => "sign_in",
