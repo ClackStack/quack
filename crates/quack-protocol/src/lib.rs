@@ -140,7 +140,7 @@ pub enum Op {
     DisableMcp {
         id: String,
     },
-    /// Write a user-layer `mcp.d/<id>.toml` server and reload MCP connections.
+    /// Write a `mcp.d/<id>.toml` server in the user or project layer and reload MCP connections.
     AddMcp {
         id: String,
         #[serde(default)]
@@ -155,6 +155,9 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "ts", ts(optional))]
         bearer_token: Option<SecretText>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        scope: Option<WriteScope>,
     },
     /// Create or update `<scope>/mcp.d/<id>.toml`, unlist it from `[mcp] disabled`, and
     /// reload config.
@@ -743,7 +746,7 @@ pub enum ExportFormat {
     Json,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum WriteScope {
@@ -1591,6 +1594,31 @@ mod tests {
                 previous_name: Some("old-name".into()),
             }),
             r#"{"op":"save_memory","scope":"global","name":"rust-conventions","description":"Workspace style notes","kind":"reference","body":"Body","previous_scope":"project","previous_name":"old-name"}"#
+        );
+
+        assert_eq!(
+            wire_json(&Op::AddMcp {
+                id: "docs".into(),
+                url: "https://example.com/mcp".into(),
+                command: String::new(),
+                args: vec![],
+                bearer_env: None,
+                bearer_token: None,
+                scope: None,
+            }),
+            r#"{"op":"add_mcp","id":"docs","url":"https://example.com/mcp","command":"","args":[]}"#
+        );
+        assert_eq!(
+            wire_json(&Op::AddMcp {
+                id: "docs".into(),
+                url: String::new(),
+                command: "npx".into(),
+                args: vec!["server".into()],
+                bearer_env: None,
+                bearer_token: None,
+                scope: Some(WriteScope::Project),
+            }),
+            r#"{"op":"add_mcp","id":"docs","url":"","command":"npx","args":["server"],"scope":"project"}"#
         );
     }
 }

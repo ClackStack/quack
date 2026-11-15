@@ -6,7 +6,7 @@ use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use quack_config::settings::{ShowReasoning, StartupPanel, UiSettings};
-use quack_config::{LayerStatus, Loaded, SettingRow};
+use quack_config::{LayerStatus, Loaded, ProjectStatus, SettingRow};
 use quack_protocol::{
     Answer, ApprovalDecision, ApprovalRequest, CallId, Event, ExportFormat, HookOutcome, InputItem,
     KeySource, LoadState, ModelId, Op, PermissionMode, ProviderId, Question, ReplayItem,
@@ -48,6 +48,10 @@ pub struct AppInfo {
     pub no_color: bool,
     /// Effective settings for `/config`.
     pub settings: Vec<SettingRow>,
+    /// Canonical-display path to `.quack/config.toml` for matching saved-setting origins.
+    pub project_config: String,
+    /// Trust state of this workspace's `.quack/`.
+    pub project_status: ProjectStatus,
     /// `(layer, status and file)` rows for `/config`.
     pub layers: Vec<(String, String)>,
     /// `(list, rule)` from `[permissions]`, e.g. `("allow", "shell:git status*")`.
@@ -92,6 +96,13 @@ impl AppInfo {
             ui: config.settings.ui.clone(),
             no_color: std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
             settings: config.setting_rows(),
+            project_config: config
+                .dirs
+                .project
+                .join("config.toml")
+                .display()
+                .to_string(),
+            project_status: config.project,
             grammar_dirs: config
                 .item_layers()
                 .into_iter()
@@ -411,7 +422,7 @@ pub(crate) enum ReviewChoice {
     KeepPlanning,
 }
 
-/// A one-line question `/setup` asks: a server's URL or an API key.
+/// A one-line question `/setup` or `/mcp add` asks.
 pub(crate) struct Prompt {
     pub title: String,
     pub label: String,
@@ -421,6 +432,8 @@ pub(crate) struct Prompt {
     pub text: String,
     /// Why the last answer was not taken.
     pub error: Option<String>,
+    /// Active write scope when adding an MCP server (`^l` toggles).
+    pub scope: Option<WriteScope>,
     then: PromptThen,
 }
 
@@ -489,6 +502,7 @@ impl Prompt {
             secret: false,
             text: String::new(),
             error: None,
+            scope: None,
             then: PromptThen::ServerUrl,
         }
     }
@@ -512,6 +526,7 @@ impl Prompt {
             secret: true,
             text: String::new(),
             error: None,
+            scope: None,
             then: PromptThen::ServerKey { url },
         }
     }
@@ -548,6 +563,7 @@ impl Prompt {
             secret: true,
             text: String::new(),
             error: None,
+            scope: None,
             then: PromptThen::NewKey { id: id.to_owned() },
         }
     }
@@ -571,11 +587,12 @@ impl Prompt {
             secret: true,
             text: String::new(),
             error: None,
+            scope: None,
             then: PromptThen::ServiceKey { id: id.to_owned() },
         }
     }
 
-    fn mcp_transport() -> Self {
+    fn mcp_transport(scope: WriteScope) -> Self {
         Self {
             title: "Add an MCP server".into(),
             label: "Transport (1 = remote HTTP, 2 = local command)".into(),
@@ -587,11 +604,12 @@ impl Prompt {
             secret: false,
             text: String::new(),
             error: None,
+            scope: Some(scope),
             then: PromptThen::McpTransport,
         }
     }
 
-    fn mcp_http_url() -> Self {
+    fn mcp_http_url(scope: WriteScope) -> Self {
         Self {
             title: "Add remote MCP server · 1 of 3".into(),
             label: "Endpoint URL".into(),
@@ -601,11 +619,12 @@ impl Prompt {
             secret: false,
             text: String::new(),
             error: None,
+            scope: Some(scope),
             then: PromptThen::McpHttpUrl,
         }
     }
 
-    fn mcp_http_id(url: String) -> Self {
+    fn mcp_http_id(url: String, scope: WriteScope) -> Self {
         let suggested = quack_config::derive_mcp_id_from_url(&url);
         let hint = match &suggested {
             Some(s) => format!(
@@ -620,11 +639,12 @@ impl Prompt {
             secret: false,
             text: suggested.unwrap_or_default(),
             error: None,
+            scope: Some(scope),
             then: PromptThen::McpHttpId { url },
         }
     }
 
-    fn mcp_http_auth(id: String, url: String) -> Self {
+    fn mcp_http_auth(id: String, url: String, scope: WriteScope) -> Self {
         Self {
             title: "Add remote MCP server · 3 of 3".into(),
             label: "Bearer token or env:VAR (optional)".into(),
@@ -636,11 +656,12 @@ impl Prompt {
             secret: true,
             text: String::new(),
             error: None,
+            scope: Some(scope),
             then: PromptThen::McpHttpAuth { id, url },
         }
     }
 
-    fn mcp_stdio_cmd() -> Self {
+    fn mcp_stdio_cmd(scope: WriteScope) -> Self {
         Self {
             title: "Add local MCP server · 1 of 2".into(),
             label: "Command and args".into(),
@@ -648,11 +669,12 @@ impl Prompt {
             secret: false,
             text: String::new(),
             error: None,
+            scope: Some(scope),
             then: PromptThen::McpStdioCmd,
         }
     }
 
-    fn mcp_stdio_id(command: String, args: Vec<String>) -> Self {
+    fn mcp_stdio_id(command: String, args: Vec<String>, scope: WriteScope) -> Self {
         let suggested = quack_config::derive_mcp_id_from_command(&command, &args);
         let hint = match &suggested {
             Some(s) => format!(
@@ -667,6 +689,7 @@ impl Prompt {
             secret: false,
             text: suggested.unwrap_or_default(),
             error: None,
+            scope: Some(scope),
             then: PromptThen::McpStdioId { command, args },
         }
     }
@@ -679,6 +702,8 @@ pub(crate) struct Approval {
     pub request: ApprovalRequest,
     /// The rules `A` (always allow) saves; empty when it isn't offered.
     pub always: Vec<String>,
+    /// Where `A` saves the rule (`.quack/` when trusted/settings-only, or user config).
+    pub always_scope: WriteScope,
 }
 
 /// A turn paused at `agent.max_steps`, waiting for the user's go-ahead.
@@ -817,6 +842,13 @@ pub struct App {
     key_sources: BTreeMap<String, KeySource>,
     /// The model catalog as last listed, to know a chosen model's thinking levels.
     catalog: Vec<quack_protocol::ProviderModels>,
+    catalog_loaded: bool,
+    /// Last profile list returned by the engine, so `^l` can rebuild `/profiles` in place.
+    profiles_cache: Option<(String, bool, Vec<quack_protocol::ProfileInfo>)>,
+    /// Last MCP server list returned by the engine, so `^l` can rebuild `/mcp` in place.
+    mcp_servers_cache: Option<Vec<quack_protocol::McpServerInfo>>,
+    /// Active target layer when saving settings/MCP in the TUI (`^l` / `/scope` toggles).
+    pub(crate) write_scope: WriteScope,
     /// A `/models <provider>/<model>` selection whose thinking-level picker is still owed
     /// once the engine confirms the switch.
     pick_thinking: Option<String>,
@@ -931,6 +963,10 @@ impl App {
             signing_in: None,
             key_sources: BTreeMap::new(),
             catalog: Vec::new(),
+            catalog_loaded: false,
+            profiles_cache: None,
+            mcp_servers_cache: None,
+            write_scope: WriteScope::User,
             pick_thinking: None,
             setup_offered: false,
             trust: None,
@@ -1293,15 +1329,28 @@ impl App {
                 self.startup_dismissed = false;
                 self.trust = None;
                 self.note("config reloaded".into());
+                if self.modal.as_ref().is_some_and(|m| m.title == "Config") {
+                    self.modal = Some(
+                        modal::config(
+                            &self.info.settings,
+                            &self.info.layers,
+                            self.write_scope,
+                            self.info.project_status,
+                            &self.theme,
+                        )
+                        .keep_place(self.modal.as_ref()),
+                    );
+                }
                 if self.modal.as_ref().is_some_and(|m| m.title == "Hooks") {
                     self.modal = Some(
-                        modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme)
+                        modal::hooks(&self.info.hooks, &self.hook_runs, self.write_scope, &self.theme)
                             .keep_place(self.modal.as_ref()),
                     );
                 }
                 if self.modal.as_ref().is_some_and(|m| m.title == "MCP") {
+                    self.mcp_servers_cache = None;
                     self.modal = Some(
-                        modal::mcp(None, &self.info.mcp_items, &self.theme)
+                        modal::mcp(None, &self.info.mcp_items, self.write_scope, &self.theme)
                             .keep_place(self.modal.as_ref()),
                     );
                     self.ops.push(Op::ListMcp);
@@ -1361,6 +1410,7 @@ impl App {
                     &self.theme,
                 ));
                 self.catalog = providers;
+                self.catalog_loaded = true;
             }
             Event::ModelCatalog { providers, current } => {
                 // Only refresh a /models modal that is still open.
@@ -1370,12 +1420,14 @@ impl App {
                             Some(&providers),
                             current.as_deref(),
                             self.info.ui.ascii,
+                            self.write_scope,
                             &self.theme,
                         )
                         .keep_place(self.modal.as_ref()),
                     );
                 }
                 self.catalog = providers;
+                self.catalog_loaded = true;
             }
             Event::Instructions { files } => {
                 if self.modal.as_ref().is_some_and(|m| m.title == "Instructions") {
@@ -1388,11 +1440,16 @@ impl App {
                 profiles,
             } => {
                 if self.modal.as_ref().is_some_and(|m| m.title == "Profiles") {
-                    self.modal = Some(modal::profiles(
-                        Some((&active, forced, &profiles)),
-                        &self.theme,
-                    ));
+                    self.modal = Some(
+                        modal::profiles(
+                            Some((&active, forced, &profiles)),
+                            self.write_scope,
+                            &self.theme,
+                        )
+                        .keep_place(self.modal.as_ref()),
+                    );
                 }
+                self.profiles_cache = Some((active, forced, profiles));
             }
             Event::Skills { skills } => {
                 self.skills = skills;
@@ -1460,10 +1517,16 @@ impl App {
             Event::McpServers { servers } => {
                 if self.modal.as_ref().is_some_and(|m| m.title == "MCP") {
                     self.modal = Some(
-                        modal::mcp(Some(&servers), &self.info.mcp_items, &self.theme)
-                            .keep_place(self.modal.as_ref()),
+                        modal::mcp(
+                            Some(&servers),
+                            &self.info.mcp_items,
+                            self.write_scope,
+                            &self.theme,
+                        )
+                        .keep_place(self.modal.as_ref()),
                     );
                 }
+                self.mcp_servers_cache = Some(servers);
             }
             Event::McpChanged { message, .. } => {
                 self.note(message);
@@ -1537,6 +1600,7 @@ impl App {
                     None,
                     self.info.model.as_deref(),
                     self.info.ui.ascii,
+                    self.write_scope,
                     &self.theme,
                 ));
             }
@@ -1618,7 +1682,12 @@ impl App {
                     form.result("Could not save", message);
                 } else if self.hook_inspect == Some(request) {
                     self.hook_inspect = None;
-                    self.modal = Some(modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme));
+                    self.modal = Some(modal::hooks(
+                        &self.info.hooks,
+                        &self.hook_runs,
+                        self.write_scope,
+                        &self.theme,
+                    ));
                     self.note(message);
                 }
             }
@@ -1749,10 +1818,19 @@ impl App {
                 request,
                 always,
             } => {
+                let project_ready = matches!(
+                    self.info.project_status,
+                    ProjectStatus::Trusted | ProjectStatus::SettingsOnly
+                );
                 self.approval = Some(Approval {
                     call_id,
                     request,
                     always,
+                    always_scope: if project_ready {
+                        WriteScope::Project
+                    } else {
+                        WriteScope::User
+                    },
                 });
             }
             Event::Plan { checklist } => self.plan = parse_plan(&checklist),
@@ -1913,8 +1991,13 @@ impl App {
                 });
                 if self.modal.as_ref().is_some_and(|m| m.title == "Hooks") {
                     self.modal = Some(
-                        modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme)
-                            .keep_place(self.modal.as_ref()),
+                        modal::hooks(
+                            &self.info.hooks,
+                            &self.hook_runs,
+                            self.write_scope,
+                            &self.theme,
+                        )
+                        .keep_place(self.modal.as_ref()),
                     );
                 }
                 // Quiet unless the hook changed something; failures arrive as warnings.
@@ -2140,7 +2223,12 @@ impl App {
         match form.key(key) {
             HookAction::None => {}
             HookAction::Close => {
-                self.modal = Some(modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme));
+                self.modal = Some(modal::hooks(
+                    &self.info.hooks,
+                    &self.hook_runs,
+                    self.write_scope,
+                    &self.theme,
+                ));
                 return;
             }
             HookAction::Reload => {
@@ -2277,6 +2365,15 @@ impl App {
             ModalOutcome::Run(text) => {
                 self.modal = None;
                 self.execute(&text);
+            }
+            ModalOutcome::ToggleScope => {
+                self.write_scope = match self.write_scope {
+                    WriteScope::Project => WriteScope::User,
+                    WriteScope::User | WriteScope::Session => WriteScope::Project,
+                };
+                if let Some(old) = self.modal.take() {
+                    self.refresh_scoped_modal(&old);
+                }
             }
         }
     }
@@ -2436,12 +2533,29 @@ impl App {
     }
 
     fn on_approval_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if key.code == KeyCode::Char('l')
+            && ctrl
+            && matches!(
+                self.info.project_status,
+                ProjectStatus::Trusted | ProjectStatus::SettingsOnly
+            )
+            && let Some(a) = self.approval.as_mut().filter(|a| !a.always.is_empty())
+        {
+            a.always_scope = match a.always_scope {
+                WriteScope::Project => WriteScope::User,
+                WriteScope::User | WriteScope::Session => WriteScope::Project,
+            };
+            return;
+        }
         let decision = match key.code {
             KeyCode::Char('y' | 'Y') | KeyCode::Enter => ApprovalDecision::AllowOnce,
             KeyCode::Char('A') if self.approval.as_ref().is_some_and(|a| !a.always.is_empty()) => {
-                ApprovalDecision::AlwaysAllow {
-                    scope: WriteScope::Project,
-                }
+                let scope = self
+                    .approval
+                    .as_ref()
+                    .map_or(WriteScope::User, |a| a.always_scope);
+                ApprovalDecision::AlwaysAllow { scope }
             }
             KeyCode::Char('a' | 'A') => ApprovalDecision::AllowSession,
             KeyCode::Char('n' | 'N') | KeyCode::Esc => ApprovalDecision::Deny,
@@ -2484,7 +2598,12 @@ impl App {
                 if back_setup {
                     self.open_setup();
                 } else if back_mcp {
-                    self.modal = Some(modal::mcp(None, &self.info.mcp_items, &self.theme));
+                    self.modal = Some(modal::mcp(
+                        self.mcp_servers_cache.as_deref(),
+                        &self.info.mcp_items,
+                        self.write_scope,
+                        &self.theme,
+                    ));
                     self.ops.push(Op::ListMcp);
                 }
             }
@@ -2493,6 +2612,14 @@ impl App {
                 p.text.pop();
             }
             KeyCode::Char('u') if ctrl => p.text.clear(),
+            KeyCode::Char('l') if ctrl => {
+                if let Some(s) = &mut p.scope {
+                    *s = match *s {
+                        WriteScope::Project => WriteScope::User,
+                        WriteScope::User | WriteScope::Session => WriteScope::Project,
+                    };
+                }
+            }
             KeyCode::Char(c) if !ctrl => {
                 p.text.push(c);
                 p.error = None;
@@ -2510,6 +2637,12 @@ impl App {
         let retry = |mut p: Prompt, error: &str| {
             p.error = Some(error.to_owned());
             Some(p)
+        };
+        let mcp_scope = p.scope.unwrap_or(self.write_scope);
+        let scope_label = if mcp_scope == WriteScope::Project {
+            "project .quack/"
+        } else {
+            "user config"
         };
         self.prompt = match &p.then {
             PromptThen::ServerUrl if text.is_empty() => {
@@ -2555,8 +2688,8 @@ impl App {
                 None
             }
             PromptThen::McpTransport => match text.to_ascii_lowercase().as_str() {
-                "1" | "http" | "remote" | "url" => Some(Prompt::mcp_http_url()),
-                "2" | "stdio" | "local" | "cmd" => Some(Prompt::mcp_stdio_cmd()),
+                "1" | "http" | "remote" | "url" => Some(Prompt::mcp_http_url(mcp_scope)),
+                "2" | "stdio" | "local" | "cmd" => Some(Prompt::mcp_stdio_cmd(mcp_scope)),
                 _ => retry(p, "enter `1` (remote HTTP) or `2` (local command)"),
             },
             PromptThen::McpHttpUrl if text.is_empty() => {
@@ -2567,7 +2700,7 @@ impl App {
             {
                 retry(p, "the URL must start with http:// or https://")
             }
-            PromptThen::McpHttpUrl => Some(Prompt::mcp_http_id(text)),
+            PromptThen::McpHttpUrl => Some(Prompt::mcp_http_id(text, mcp_scope)),
             PromptThen::McpHttpId { url } => {
                 let id = if text.is_empty() {
                     quack_config::derive_mcp_id_from_url(url).unwrap_or_default()
@@ -2575,7 +2708,7 @@ impl App {
                     text
                 };
                 match quack_config::check_mcp_id(&id) {
-                    Ok(()) => Some(Prompt::mcp_http_auth(id, url.clone())),
+                    Ok(()) => Some(Prompt::mcp_http_auth(id, url.clone(), mcp_scope)),
                     Err(e) => retry(p, &e),
                 }
             }
@@ -2588,7 +2721,7 @@ impl App {
                     if var.is_empty() {
                         retry(p, "enter an environment variable name after `env:`")
                     } else {
-                        self.note(format!("adding MCP server `{id}`…"));
+                        self.note(format!("adding MCP server `{id}` ({scope_label})…"));
                         self.ops.push(Op::AddMcp {
                             id: id.clone(),
                             url: url.clone(),
@@ -2596,11 +2729,12 @@ impl App {
                             args: Vec::new(),
                             bearer_env: Some(var),
                             bearer_token: None,
+                            scope: Some(mcp_scope),
                         });
                         None
                     }
                 } else {
-                    self.note(format!("adding MCP server `{id}`…"));
+                    self.note(format!("adding MCP server `{id}` ({scope_label})…"));
                     self.ops.push(Op::AddMcp {
                         id: id.clone(),
                         url: url.clone(),
@@ -2608,6 +2742,7 @@ impl App {
                         args: Vec::new(),
                         bearer_env: None,
                         bearer_token: (!text.is_empty()).then_some(SecretText(text)),
+                        scope: Some(mcp_scope),
                     });
                     None
                 }
@@ -2621,7 +2756,7 @@ impl App {
                     let mut iter = parts.into_iter();
                     let command = iter.next().unwrap_or_default();
                     let args = iter.collect();
-                    Some(Prompt::mcp_stdio_id(command, args))
+                    Some(Prompt::mcp_stdio_id(command, args, mcp_scope))
                 }
                 Ok(_) => retry(p, "enter a command line"),
                 Err(e) => retry(p, &e),
@@ -2634,7 +2769,7 @@ impl App {
                 };
                 match quack_config::check_mcp_id(&id) {
                     Ok(()) => {
-                        self.note(format!("adding MCP server `{id}`…"));
+                        self.note(format!("adding MCP server `{id}` ({scope_label})…"));
                         self.ops.push(Op::AddMcp {
                             id,
                             url: String::new(),
@@ -2642,6 +2777,7 @@ impl App {
                             args: args.clone(),
                             bearer_env: None,
                             bearer_token: None,
+                            scope: Some(mcp_scope),
                         });
                         None
                     }
@@ -3087,9 +3223,21 @@ impl App {
     fn run_command(&mut self, cmd: &Command, args: &str) {
         self.popup_selected = 0;
         match cmd.name {
-            "models" if args.starts_with("default ") => {
-                let reference = args["default ".len()..].trim();
-                self.save_setting("model.default", &toml_string(reference));
+            "models"
+                if take_scope_flag(args, self.write_scope)
+                    .1
+                    .starts_with("default ") =>
+            {
+                let (scope, rest) = take_scope_flag(args, self.write_scope);
+                let after = rest["default ".len()..].trim();
+                let (scope, reference) = split_scope_flag(after, scope);
+                if reference.is_empty() {
+                    self.note(
+                        "usage: /models default [--project|--user] <provider>/<model>".into(),
+                    );
+                } else {
+                    self.save_setting("model.default", &toml_string(reference), scope);
+                }
             }
             "models" if !args.is_empty() => match args.split_once('/') {
                 Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
@@ -3117,9 +3265,19 @@ impl App {
                 self.modal = Some(modal::instructions(None, &self.theme));
                 self.ops.push(Op::ListInstructions);
             }
-            "profiles" if args.starts_with("default ") => {
-                let id = args["default ".len()..].trim();
-                self.save_setting("model.profile", &toml_string(id));
+            "profiles"
+                if take_scope_flag(args, self.write_scope)
+                    .1
+                    .starts_with("default ") =>
+            {
+                let (scope, rest) = take_scope_flag(args, self.write_scope);
+                let after = rest["default ".len()..].trim();
+                let (scope, id) = split_scope_flag(after, scope);
+                if id.is_empty() {
+                    self.note("usage: /profiles default [--project|--user] <id>".into());
+                } else {
+                    self.save_setting("model.profile", &toml_string(id), scope);
+                }
             }
             "profiles" if !args.is_empty() => {
                 self.note(format!("switching to the {args} profile…"));
@@ -3128,7 +3286,7 @@ impl App {
                 });
             }
             "profiles" => {
-                self.modal = Some(modal::profiles(None, &self.theme));
+                self.modal = Some(modal::profiles(None, self.write_scope, &self.theme));
                 self.ops.push(Op::ListProfiles);
             }
             "models" => {
@@ -3136,6 +3294,7 @@ impl App {
                     None,
                     self.info.model.as_deref(),
                     self.info.ui.ascii,
+                    self.write_scope,
                     &self.theme,
                 ));
                 self.ops.push(Op::ListModels);
@@ -3204,22 +3363,52 @@ impl App {
                 });
                 self.note(format!("session renamed to “{args}”"));
             }
-            "config" if args.is_empty() => {
-                self.modal = Some(modal::config(
-                    &self.info.settings,
-                    &self.info.layers,
-                    &self.theme,
-                ));
-            }
             "config" => {
-                let rest = args.strip_prefix("set").map(str::trim_start);
-                match rest.and_then(|r| r.split_once(char::is_whitespace)) {
-                    Some((key, value)) if !value.trim().is_empty() => {
-                        self.save_setting(key, value.trim());
+                let (scope, rest) = take_scope_flag(args, self.write_scope);
+                if rest.is_empty() {
+                    self.write_scope = scope;
+                    self.modal = Some(modal::config(
+                        &self.info.settings,
+                        &self.info.layers,
+                        self.write_scope,
+                        self.info.project_status,
+                        &self.theme,
+                    ));
+                } else {
+                    let after_set = rest.strip_prefix("set").map(str::trim_start);
+                    let parsed = after_set.and_then(|r| {
+                        let (scope, r) = take_scope_flag(r, scope);
+                        r.split_once(char::is_whitespace)
+                            .map(|(k, v)| (scope, k, v))
+                    });
+                    match parsed {
+                        Some((scope, key, value)) if !value.trim().is_empty() => {
+                            self.save_setting(key, value.trim(), scope);
+                        }
+                        _ => {
+                            self.note("usage: /config set [--project|--user] <key> <value>".into())
+                        }
                     }
-                    _ => self.note("usage: /config set <key> <value>".into()),
                 }
             }
+            "scope" => match args.trim() {
+                "" => {
+                    self.write_scope = match self.write_scope {
+                        WriteScope::Project => WriteScope::User,
+                        WriteScope::User | WriteScope::Session => WriteScope::Project,
+                    };
+                    self.note(self.scope_note());
+                }
+                "user" | "global" => {
+                    self.write_scope = WriteScope::User;
+                    self.note(self.scope_note());
+                }
+                "project" | ".quack" => {
+                    self.write_scope = WriteScope::Project;
+                    self.note(self.scope_note());
+                }
+                _ => self.note("usage: /scope [user|project]".into()),
+            },
             "memory" if args.is_empty() => {
                 self.modal = Some(modal::memory(None, 0, &self.theme));
                 self.ops.push(Op::ListMemory);
@@ -3251,39 +3440,49 @@ impl App {
                 ));
                 self.ops.push(Op::ListModels);
             }
-            "mcp" if args.is_empty() => {
-                self.modal = Some(modal::mcp(None, &self.info.mcp_items, &self.theme));
-                self.ops.push(Op::ListMcp);
-            }
-            "mcp" if args == "add" => {
-                self.prompt = Some(Prompt::mcp_transport());
-            }
-            "mcp" if args == "add http" || args == "add remote" => {
-                self.prompt = Some(Prompt::mcp_http_url());
-            }
-            "mcp" if args == "add stdio" || args == "add local" => {
-                self.prompt = Some(Prompt::mcp_stdio_cmd());
-            }
-            "mcp" if args.starts_with("enable ") => {
-                let id = args["enable ".len()..].trim().to_owned();
-                self.note(format!("enabling MCP server {id}…"));
-                self.ops.push(Op::EnableMcp { id });
-            }
-            "mcp" if args.starts_with("disable ") => {
-                let id = args["disable ".len()..].trim().to_owned();
-                self.note(format!("disabling MCP server {id}…"));
-                self.ops.push(Op::DisableMcp { id });
-            }
-            "mcp" if args.starts_with("restart ") => {
-                let id = args["restart ".len()..].trim().to_owned();
-                self.note(format!("restarting MCP server {id}…"));
-                self.ops.push(Op::RestartMcp { id });
-            }
             "mcp" => {
-                self.note(
-                    "usage: /mcp [add [http|stdio] | enable <id> | disable <id> | restart <id>]"
-                        .into(),
-                );
+                let (scope, mcp_args) = take_scope_flag(args, self.write_scope);
+                if mcp_args.is_empty() {
+                    self.write_scope = scope;
+                    self.modal = Some(modal::mcp(
+                        None,
+                        &self.info.mcp_items,
+                        self.write_scope,
+                        &self.theme,
+                    ));
+                    self.ops.push(Op::ListMcp);
+                } else if let Some(sub) = mcp_args
+                    .strip_prefix("add")
+                    .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+                {
+                    let (scope, kind) = split_scope_flag(sub, scope);
+                    match kind {
+                        "" => self.prompt = Some(Prompt::mcp_transport(scope)),
+                        "http" | "remote" => self.prompt = Some(Prompt::mcp_http_url(scope)),
+                        "stdio" | "local" => self.prompt = Some(Prompt::mcp_stdio_cmd(scope)),
+                        _ => self.note(
+                            "usage: /mcp [add [--project|--user] [http|stdio] | enable <id> | disable <id> | restart <id>]"
+                                .into(),
+                        ),
+                    }
+                } else if let Some(id) = mcp_args.strip_prefix("enable ") {
+                    let id = id.trim().to_owned();
+                    self.note(format!("enabling MCP server {id}…"));
+                    self.ops.push(Op::EnableMcp { id });
+                } else if let Some(id) = mcp_args.strip_prefix("disable ") {
+                    let id = id.trim().to_owned();
+                    self.note(format!("disabling MCP server {id}…"));
+                    self.ops.push(Op::DisableMcp { id });
+                } else if let Some(id) = mcp_args.strip_prefix("restart ") {
+                    let id = id.trim().to_owned();
+                    self.note(format!("restarting MCP server {id}…"));
+                    self.ops.push(Op::RestartMcp { id });
+                } else {
+                    self.note(
+                        "usage: /mcp [add [--project|--user] [http|stdio] | enable <id> | disable <id> | restart <id>]"
+                            .into(),
+                    );
+                }
             }
             "lsp" => {
                 self.modal = Some(modal::lsp(None, &self.theme));
@@ -3334,6 +3533,7 @@ impl App {
                         None,
                         self.info.model.as_deref(),
                         self.info.ui.ascii,
+                        self.write_scope,
                         &self.theme,
                     )
                     .with_filter(&format!("{id}/")),
@@ -3351,37 +3551,51 @@ impl App {
                 force: args == "--force",
             }),
             "skills" => self.modal = Some(modal::skills(&self.skills, &self.theme)),
-            "bundles" if args.is_empty() => {
-                self.modal = Some(modal::bundles(&self.info.bundles, &self.theme));
-            }
-            "bundles" => match args.strip_prefix("toggle ").map(str::trim) {
-                Some(id) if self.info.bundles.iter().any(|b| b.id == id) => {
-                    let mut disabled = self.info.bundles_disabled.clone();
-                    let off = !disabled.iter().any(|d| d == id);
-                    if off {
-                        disabled.push(id.to_owned());
-                    } else {
-                        disabled.retain(|d| d != id);
-                    }
-                    let list = disabled
-                        .iter()
-                        .map(|d| toml_string(d))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    self.modal = None;
-                    self.ops.push(Op::SaveSetting {
-                        key: "bundles.disabled".into(),
-                        value: format!("[{list}]"),
-                        scope: WriteScope::User,
-                    });
-                    self.ops.push(Op::ReloadConfig);
-                    self.note(format!(
-                        "bundle `{id}` turned {}; reloading",
-                        if off { "off" } else { "on" }
+            "bundles" => {
+                let (scope, rest) = take_scope_flag(args, self.write_scope);
+                if rest.is_empty() {
+                    self.write_scope = scope;
+                    self.modal = Some(modal::bundles(
+                        &self.info.bundles,
+                        self.write_scope,
+                        &self.theme,
                     ));
+                } else {
+                    match rest
+                        .strip_prefix("toggle ")
+                        .map(|r| split_scope_flag(r, scope))
+                    {
+                        Some((scope, id)) if self.info.bundles.iter().any(|b| b.id == id) => {
+                            let mut disabled = self.info.bundles_disabled.clone();
+                            let off = !disabled.iter().any(|d| d == id);
+                            if off {
+                                disabled.push(id.to_owned());
+                            } else {
+                                disabled.retain(|d| d != id);
+                            }
+                            let list = disabled
+                                .iter()
+                                .map(|d| toml_string(d))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            self.modal = None;
+                            self.ops.push(Op::SaveSetting {
+                                key: "bundles.disabled".into(),
+                                value: format!("[{list}]"),
+                                scope,
+                            });
+                            self.ops.push(Op::ReloadConfig);
+                            self.note(format!(
+                                "bundle `{id}` turned {}; reloading",
+                                if off { "off" } else { "on" }
+                            ));
+                        }
+                        _ => self.note(
+                            "usage: /bundles, or /bundles toggle [--project|--user] <name>".into(),
+                        ),
+                    }
                 }
-                _ => self.note("usage: /bundles, or /bundles toggle <name>".into()),
-            },
+            }
             "tasks" => self.modal = Some(modal::tasks(&self.agents, &self.theme)),
             "todo" => {
                 self.plan_expanded = !self.plan_expanded;
@@ -3515,8 +3729,15 @@ impl App {
                 }
                 _ => self.note("usage: /trust [trusted|settings-only|ignored]".into()),
             },
-            "hooks" if args.is_empty() => {
-                self.modal = Some(modal::hooks(&self.info.hooks, &self.hook_runs, &self.theme));
+            "hooks" if take_scope_flag(args, self.write_scope).1.is_empty() => {
+                let (scope, _) = take_scope_flag(args, self.write_scope);
+                self.write_scope = scope;
+                self.modal = Some(modal::hooks(
+                    &self.info.hooks,
+                    &self.hook_runs,
+                    self.write_scope,
+                    &self.theme,
+                ));
             }
             "hooks" if args.starts_with("configure ") || args.starts_with("test ") => {
                 if let Some((action, id)) = args.split_once(' ') {
@@ -3534,8 +3755,11 @@ impl App {
                     });
                 }
             }
-            "hooks" => match args.strip_prefix("toggle ").map(str::trim) {
-                Some(id)
+            "hooks" => match args
+                .strip_prefix("toggle ")
+                .map(|r| split_scope_flag(r, self.write_scope))
+            {
+                Some((scope, id))
                     if self
                         .info
                         .hooks
@@ -3564,7 +3788,7 @@ impl App {
                         self.ops.push(Op::SaveSetting {
                             key: "hooks.disabled".into(),
                             value: format!("[{list}]"),
-                            scope: WriteScope::User,
+                            scope,
                         });
                         self.ops.push(Op::ReloadConfig);
                         self.note(format!("hook `{id}` turned off; reloading"));
@@ -3575,16 +3799,21 @@ impl App {
                         });
                     }
                 }
-                _ => self.note("usage: /hooks, or /hooks toggle <name>".into()),
+                _ => self.note("usage: /hooks, or /hooks toggle [--project|--user] <name>".into()),
             },
-            "theme" if args.is_empty() => {
-                self.modal = Some(modal::theme(&self.info.ui.theme, &self.theme));
-            }
-            "theme" => match args {
-                "dark" | "light" | "auto" => {
-                    self.save_setting("ui.theme", &toml_string(args));
+            "theme" => match split_scope_flag(args, self.write_scope) {
+                (scope, "") => {
+                    self.write_scope = scope;
+                    self.modal = Some(modal::theme(
+                        &self.info.ui.theme,
+                        self.write_scope,
+                        &self.theme,
+                    ));
                 }
-                _ => self.note("usage: /theme [dark|light|auto]".into()),
+                (scope, mode @ ("dark" | "light" | "auto")) => {
+                    self.save_setting("ui.theme", &toml_string(mode), scope);
+                }
+                _ => self.note("usage: /theme [--project|--user] [dark|light|auto]".into()),
             },
             "keys" => self.modal = Some(modal::help(&self.theme).with_tab(1)),
             "help" => self.modal = Some(modal::help(&self.theme)),
@@ -3659,12 +3888,82 @@ impl App {
         self.transcript.push(Entry::System(text));
     }
 
-    fn save_setting(&mut self, key: &str, value: &str) {
+    fn save_setting(&mut self, key: &str, value: &str, scope: WriteScope) {
         self.ops.push(Op::SaveSetting {
             key: key.to_owned(),
             value: value.to_owned(),
-            scope: WriteScope::User,
+            scope,
         });
+    }
+
+    fn scope_note(&self) -> String {
+        match self.write_scope {
+            WriteScope::Project => {
+                let status = match self.info.project_status {
+                    ProjectStatus::DisabledByPolicy => " · disabled by policy",
+                    ProjectStatus::Untrusted | ProjectStatus::Changed | ProjectStatus::Ignored => {
+                        " · untrusted (run `/trust` to load)"
+                    }
+                    ProjectStatus::None | ProjectStatus::Trusted | ProjectStatus::SettingsOnly => {
+                        ""
+                    }
+                };
+                format!("write scope: project (.quack/){status}")
+            }
+            WriteScope::User | WriteScope::Session => "write scope: user config".into(),
+        }
+    }
+
+    fn refresh_scoped_modal(&mut self, old: &Modal) {
+        let next = match old.title.as_str() {
+            "Config" => Some(modal::config(
+                &self.info.settings,
+                &self.info.layers,
+                self.write_scope,
+                self.info.project_status,
+                &self.theme,
+            )),
+            "Models" => Some(modal::models(
+                self.catalog_loaded.then_some(self.catalog.as_slice()),
+                self.info.model.as_deref(),
+                self.info.ui.ascii,
+                self.write_scope,
+                &self.theme,
+            )),
+            "Profiles" => Some(modal::profiles(
+                self.profiles_cache
+                    .as_ref()
+                    .map(|(active, forced, list)| (active.as_str(), *forced, list.as_slice())),
+                self.write_scope,
+                &self.theme,
+            )),
+            "Bundles" => Some(modal::bundles(
+                &self.info.bundles,
+                self.write_scope,
+                &self.theme,
+            )),
+            "Theme" => Some(modal::theme(
+                &self.info.ui.theme,
+                self.write_scope,
+                &self.theme,
+            )),
+            "Hooks" => Some(modal::hooks(
+                &self.info.hooks,
+                &self.hook_runs,
+                self.write_scope,
+                &self.theme,
+            )),
+            "MCP" => Some(modal::mcp(
+                self.mcp_servers_cache.as_deref(),
+                &self.info.mcp_items,
+                self.write_scope,
+                &self.theme,
+            )),
+            _ => None,
+        };
+        if let Some(m) = next {
+            self.modal = Some(m.keep_place(Some(old)));
+        }
     }
 
     fn on_setting_saved(&mut self, key: &str, value: &str, path: &str, note: Option<String>) {
@@ -3695,9 +3994,22 @@ impl App {
             }
             _ => false,
         };
+        let layer = if !self.info.project_config.is_empty() && path == self.info.project_config {
+            if self.info.project_status == ProjectStatus::None && value.trim() != "null" {
+                self.info.project_status = ProjectStatus::SettingsOnly;
+            }
+            "project"
+        } else {
+            "user"
+        };
         if let Some(row) = self.info.settings.iter_mut().find(|r| r.key == key) {
-            row.value = value.to_owned();
-            row.origin = format!("user: {path}");
+            if value.trim() == "null" {
+                row.value = "unset (/reload)".into();
+                row.origin = format!("removed from {layer}: {path}");
+            } else {
+                row.value = value.to_owned();
+                row.origin = format!("{layer}: {path}");
+            }
         }
         let when = if live {
             ""
@@ -3710,6 +4022,40 @@ impl App {
             text.push_str(&n);
         }
         self.note(text);
+    }
+}
+
+fn take_scope_flag(args: &str, default: WriteScope) -> (WriteScope, &str) {
+    let s = args.trim();
+    if let Some(rest) = s
+        .strip_prefix("--project")
+        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+    {
+        (WriteScope::Project, rest.trim())
+    } else if let Some(rest) = s
+        .strip_prefix("--user")
+        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+    {
+        (WriteScope::User, rest.trim())
+    } else {
+        (default, s)
+    }
+}
+
+fn split_scope_flag(args: &str, default: WriteScope) -> (WriteScope, &str) {
+    let (scope, s) = take_scope_flag(args, default);
+    if let Some(head) = s
+        .strip_suffix("--project")
+        .filter(|h| h.is_empty() || h.ends_with(char::is_whitespace))
+    {
+        (WriteScope::Project, head.trim())
+    } else if let Some(head) = s
+        .strip_suffix("--user")
+        .filter(|h| h.is_empty() || h.ends_with(char::is_whitespace))
+    {
+        (WriteScope::User, head.trim())
+    } else {
+        (scope, s)
     }
 }
 
@@ -3847,6 +4193,8 @@ mod tests {
             ui: UiSettings::default(),
             no_color: false,
             settings: Vec::new(),
+            project_config: String::new(),
+            project_status: ProjectStatus::None,
             layers: Vec::new(),
             rules: Vec::new(),
             grammar_dirs: Vec::new(),
@@ -5072,6 +5420,7 @@ mod tests {
                 args: Vec::new(),
                 bearer_env: Some("ROOST_TOKEN".into()),
                 bearer_token: None,
+                scope: Some(WriteScope::User),
             }]
         );
 
@@ -5090,6 +5439,181 @@ mod tests {
                 args: vec!["-y".into(), "@playwright/mcp@latest".into()],
                 bearer_env: None,
                 bearer_token: None,
+                scope: Some(WriteScope::User),
+            }]
+        );
+    }
+
+    #[test]
+    fn scope_toggle_and_project_writes_work_across_modals_prompts_and_approvals() {
+        use quack_config::SettingRow;
+        use quack_protocol::{ApprovalRequest, ModelInfo, ProfileInfo, ProviderModels};
+
+        let mut i = info();
+        i.project_config = "/repo/.quack/config.toml".into();
+        i.project_status = ProjectStatus::Trusted;
+        i.settings = vec![SettingRow {
+            key: "ui.ascii".into(),
+            value: "false".into(),
+            origin: "default".into(),
+            description: "Use ASCII glyphs".into(),
+            is_bool: true,
+            locked: false,
+        }];
+        let mut app = App::new(i);
+        let ctrl_l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+
+        // /config modal: Ctrl-L flips scope to project (.quack) and Enter saves `--project`.
+        type_str(&mut app, "/config");
+        press(&mut app, KeyCode::Enter);
+        app.on_terminal(TermEvent::Key(ctrl_l));
+        assert_eq!(app.write_scope, WriteScope::Project);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SaveSetting {
+                key: "ui.ascii".into(),
+                value: "true".into(),
+                scope: WriteScope::Project,
+            }]
+        );
+        // Saved project setting updates row.origin to `project: ...` instead of `user: ...`.
+        app.on_engine(Event::SettingSaved {
+            key: "ui.ascii".into(),
+            value: "true".into(),
+            path: "/repo/.quack/config.toml".into(),
+            note: None,
+        });
+        assert_eq!(
+            app.info.settings[0].origin,
+            "project: /repo/.quack/config.toml"
+        );
+
+        // `/scope user` switches back; `/models` modal Ctrl-L + Ctrl-S uses Project again.
+        type_str(&mut app, "/scope user");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.write_scope, WriteScope::User);
+
+        type_str(&mut app, "/models");
+        press(&mut app, KeyCode::Enter);
+        app.take_ops();
+        app.on_engine(Event::ModelCatalog {
+            providers: vec![ProviderModels {
+                bundled: false,
+                key: None,
+                id: "charm".into(),
+                available: true,
+                note: String::new(),
+                models: vec![ModelInfo {
+                    id: "true".into(),
+                    alias: None,
+                    context_window: None,
+                    price: None,
+                    reasoning_efforts: Vec::new(),
+                }],
+            }],
+            current: None,
+        });
+        app.on_terminal(TermEvent::Key(ctrl_l));
+        app.on_terminal(TermEvent::Key(ctrl_s));
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SaveSetting {
+                key: "model.default".into(),
+                value: "\"charm/true\"".into(),
+                scope: WriteScope::Project,
+            }]
+        );
+
+        // `/profiles` modal Ctrl-L toggles back to User and Ctrl-S saves to User.
+        type_str(&mut app, "/profiles");
+        press(&mut app, KeyCode::Enter);
+        app.take_ops();
+        app.on_engine(Event::Profiles {
+            active: "generic".into(),
+            forced: false,
+            profiles: vec![ProfileInfo {
+                id: "qwen-code".into(),
+                source: "defaults".into(),
+                edit_format: "edit".into(),
+                description: "Qwen".into(),
+                tools: vec!["read".into()],
+                system: "hi".into(),
+                matches: false,
+            }],
+        });
+        app.on_terminal(TermEvent::Key(ctrl_l));
+        assert_eq!(app.write_scope, WriteScope::User);
+        app.on_terminal(TermEvent::Key(ctrl_s));
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SaveSetting {
+                key: "model.profile".into(),
+                value: "\"qwen-code\"".into(),
+                scope: WriteScope::User,
+            }]
+        );
+
+        // `/theme --project light` saves directly to Project scope.
+        type_str(&mut app, "/theme --project light");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SaveSetting {
+                key: "ui.theme".into(),
+                value: "\"light\"".into(),
+                scope: WriteScope::Project,
+            }]
+        );
+
+        // `/mcp add stdio` inherits User then Ctrl-L inside the prompt flips it to Project.
+        type_str(&mut app, "/mcp add stdio");
+        press(&mut app, KeyCode::Enter);
+        app.on_terminal(TermEvent::Key(ctrl_l));
+        type_str(&mut app, "npx -y @playwright/mcp@latest");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::AddMcp {
+                id: "playwright".into(),
+                url: String::new(),
+                command: "npx".into(),
+                args: vec!["-y".into(), "@playwright/mcp@latest".into()],
+                bearer_env: None,
+                bearer_token: None,
+                scope: Some(WriteScope::Project),
+            }]
+        );
+
+        // Approval in a trusted project defaults to Project and Ctrl-L flips to User.
+        app.on_engine(Event::ApprovalRequest {
+            call_id: CallId("c1".into()),
+            request: ApprovalRequest::Shell {
+                command: "cargo test".into(),
+                cwd: ".".into(),
+                outside_sandbox: false,
+            },
+            always: vec!["shell:cargo test".into()],
+        });
+        assert_eq!(
+            app.approval.as_ref().map(|a| a.always_scope),
+            Some(WriteScope::Project)
+        );
+        app.on_terminal(TermEvent::Key(ctrl_l));
+        assert_eq!(
+            app.approval.as_ref().map(|a| a.always_scope),
+            Some(WriteScope::User)
+        );
+        press(&mut app, KeyCode::Char('A'));
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::ApprovalResponse {
+                call_id: CallId("c1".into()),
+                decision: ApprovalDecision::AlwaysAllow {
+                    scope: WriteScope::User,
+                },
             }]
         );
     }

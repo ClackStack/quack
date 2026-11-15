@@ -12,10 +12,11 @@
 			plucked.
 		</PlateHeading>
 
-		<div class="grid grid-cols-1 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] gap-12 items-center">
+		<InstallBox />
+
+		<div class="mt-8 grid grid-cols-1 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] gap-12 items-center">
 			<div class="max-w-2xl">
-				<InstallBox />
-				<ul class="mt-8 space-y-3 text-ink-2 leading-relaxed">
+				<ul class="space-y-3 text-ink-2 leading-relaxed">
 					<li><strong class="text-ink">Two apps, one core:</strong> installing the TUI does not install the GUI, and installing the GUI does not install the <code class="text-ink">quack</code> CLI command. Because they share one core, config, sessions, memory notes, and prompt history, the default installer sets up both in harmony — or add the other anytime.</li>
 					<li><strong class="text-ink">TUI &amp; Plucked (<code class="text-ink">quack</code> / <code class="text-ink">quack-plucked</code>):</strong> the terminal agent with profiles, sub-agents, MCP, ACP, and language servers. Plucked drops the hosted-service providers and leaves only local servers and your own config.</li>
 					<li><strong class="text-ink">GUI &amp; Plucked (<code class="text-ink">quack-gui</code> / <code class="text-ink">quack-gui-plucked</code>):</strong> the native desktop app for macOS, Windows, and glibc Linux, shipped in both standard and plucked bundles alongside the TUI.</li>

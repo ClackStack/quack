@@ -10,8 +10,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use quack_protocol::LoadState;
 
+use quack_config::ProjectStatus;
 use quack_config::settings::ShowReasoning;
-use quack_protocol::ApprovalRequest;
+use quack_protocol::{ApprovalRequest, WriteScope};
 
 use crate::app::{App, Entry, PlanState, PopupItem, ToolEntry};
 use crate::fuzzy;
@@ -163,18 +164,23 @@ fn draw_prompt(f: &mut Frame<'_>, app: &App) {
         width,
         height,
     };
+    let mut prompt_hints = vec![("⏎", p.enter_does())];
+    if let Some(scope) = p.scope {
+        prompt_hints.push((
+            "^l",
+            match scope {
+                WriteScope::Project => "scope: .quack",
+                WriteScope::User | WriteScope::Session => "scope: user",
+            },
+        ));
+    }
+    prompt_hints.extend([("^u", "clear"), ("esc", "back")]);
     let block = Block::bordered()
         .border_set(app.glyphs.border)
         .border_style(t.accent)
         .padding(ratatui::widgets::Padding::horizontal(1))
         .title(Span::styled(format!(" {} ", p.title), t.pill(t.accent)))
-        .title_bottom(
-            key_hints(
-                t,
-                &[("⏎", p.enter_does()), ("^u", "clear"), ("esc", "back")],
-            )
-            .right_aligned(),
-        );
+        .title_bottom(key_hints(t, &prompt_hints).right_aligned());
     let inner = block.inner(area);
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(block), area);
@@ -1358,8 +1364,23 @@ fn draw_approval(f: &mut Frame<'_>, app: &App, above: Rect) {
     lines.extend(body.into_iter().take(shown));
     lines.push(Line::raw(""));
     if always {
+        let target = match approval.always_scope {
+            WriteScope::Project => ".quack",
+            WriteScope::User | WriteScope::Session => "user",
+        };
+        let toggle = if matches!(
+            app.info.project_status,
+            ProjectStatus::Trusted | ProjectStatus::SettingsOnly
+        ) {
+            " · ^l scope"
+        } else {
+            ""
+        };
         lines.push(Line::styled(
-            format!("always allow saves {}", approval.always.join(", ")),
+            format!(
+                "always allow ({target}) saves {}{toggle}",
+                approval.always.join(", ")
+            ),
             t.dim,
         ));
     }
@@ -2200,6 +2221,7 @@ mod tests {
             Some(&catalog),
             Some("charm/glm-5.3"),
             false,
+            WriteScope::User,
             &app.theme,
         ));
         key(&mut app, KeyCode::Down, KeyModifiers::NONE);
@@ -2595,7 +2617,13 @@ mod tests {
                 true,
             ),
         ];
-        app.modal = Some(crate::modal::config(&rows, &[], &app.theme));
+        app.modal = Some(crate::modal::config(
+            &rows,
+            &[],
+            WriteScope::User,
+            ProjectStatus::None,
+            &app.theme,
+        ));
         insta::assert_snapshot!(render(&app, 100, 30));
     }
 
@@ -2624,7 +2652,16 @@ mod tests {
             ),
             ("env".into(), "loaded".into()),
         ];
-        app.modal = Some(crate::modal::config(&[], &files, &app.theme).with_tab(1));
+        app.modal = Some(
+            crate::modal::config(
+                &[],
+                &files,
+                WriteScope::User,
+                ProjectStatus::None,
+                &app.theme,
+            )
+            .with_tab(1),
+        );
         insta::assert_snapshot!("config_layers_100x30", render(&app, 100, 30));
         insta::assert_snapshot!("config_layers_60x20", render(&app, 60, 20));
         let key = |code| TerminalEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
@@ -2695,6 +2732,7 @@ mod tests {
                 outside_sandbox: false,
             },
             always: vec!["shell:cargo test".into()],
+            always_scope: WriteScope::User,
         });
         app.context = Some((12_345, 104_000));
         insta::assert_snapshot!(render(&app, 80, 24));
@@ -3669,5 +3707,54 @@ mod tests {
         key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(app.prompt.is_none());
         assert_eq!(app.modal.as_ref().map(|m| m.title.as_str()), Some("Setup"));
+    }
+
+    #[test]
+    fn project_scope_renders_in_config_modal_and_approval_bar() {
+        use crate::app::Approval;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use quack_config::SettingRow;
+        use quack_protocol::{ApprovalRequest, CallId};
+
+        let mut info = test_info();
+        info.project_status = ProjectStatus::Trusted;
+        info.settings = vec![SettingRow {
+            key: "model.default".into(),
+            value: "\"mock/tiny\"".into(),
+            origin: "user: ~/.config/quack/config.toml".into(),
+            description: "Default model.".into(),
+            is_bool: false,
+            locked: false,
+        }];
+        let mut app = App::new(info);
+        started(&mut app);
+
+        app.input.set("/config");
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut app, KeyCode::Char('l'), KeyModifiers::CONTROL);
+        let config_render = render(&app, 100, 30);
+        assert!(config_render.contains("scope: .quack"), "{config_render}");
+        assert!(
+            config_render.contains(".quack/config.toml"),
+            "{config_render}"
+        );
+
+        key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        app.approval = Some(Approval {
+            call_id: CallId("9".into()),
+            request: ApprovalRequest::Shell {
+                command: "cargo test".into(),
+                cwd: ".".into(),
+                outside_sandbox: false,
+            },
+            always: vec!["shell:cargo test".into()],
+            always_scope: WriteScope::Project,
+        });
+        let approval_render = render(&app, 80, 24);
+        assert!(
+            approval_render.contains("always allow (.quack) saves shell:cargo test"),
+            "{approval_render}"
+        );
+        assert!(approval_render.contains("^l scope"), "{approval_render}");
     }
 }

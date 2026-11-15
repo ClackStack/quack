@@ -1279,7 +1279,7 @@ impl Engine {
         });
     }
 
-    fn save_setting(&self, key: &str, value: &str, scope: &WriteScope) {
+    async fn save_setting(&mut self, key: &str, value: &str, scope: &WriteScope) {
         let layer = match scope {
             WriteScope::User => LayerKind::User,
             WriteScope::Project => LayerKind::Project,
@@ -1287,13 +1287,28 @@ impl Engine {
                 return self.warn("settings are saved to the user or project layer".into());
             }
         };
-        match self.config.save_setting(layer, key, value) {
-            Ok((path, note)) => self.emit(Event::SettingSaved {
-                key: key.to_owned(),
-                value: value.to_owned(),
-                path: path.display().to_string(),
-                note,
-            }),
+        let config = Arc::clone(&self.config);
+        let key_owned = key.to_owned();
+        let value_owned = value.to_owned();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let fresh = config.reload().map_err(|e| e.to_string())?;
+            let (path, note) = fresh.save_setting(layer, &key_owned, &value_owned)?;
+            let updated = fresh.reload().map_err(|e| e.to_string())?;
+            Ok::<_, String>((updated, path, note))
+        })
+        .await
+        .map_err(|e| format!("failed to save setting: {e}"))
+        .and_then(|r| r);
+        match outcome {
+            Ok((updated, path, note)) => {
+                self.config = Arc::new(updated);
+                self.emit(Event::SettingSaved {
+                    key: key.to_owned(),
+                    value: value.to_owned(),
+                    path: path.display().to_string(),
+                    note,
+                });
+            }
             Err(message) => self.emit(Event::Error {
                 error: EngineError {
                     kind: EngineErrorKind::Config,
@@ -2042,22 +2057,33 @@ impl Engine {
                 args,
                 bearer_env,
                 bearer_token,
+                scope,
             } => {
-                let target = id.clone();
-                self.apply_mcp_change(id, done, reload, move |cfg| {
-                    crate::mcp::add_mcp_in_config(
-                        cfg,
-                        crate::mcp::AddMcpInput {
-                            id: target,
-                            url,
-                            command,
-                            args,
-                            bearer_env,
-                            bearer_token: bearer_token.map(|s| s.0),
-                        },
-                    )
-                })
-                .await;
+                let project = match scope {
+                    None | Some(WriteScope::User) => Some(false),
+                    Some(WriteScope::Project) => Some(true),
+                    Some(WriteScope::Session) => None,
+                };
+                if let Some(project) = project {
+                    let target = id.clone();
+                    self.apply_mcp_change(id, done, reload, move |cfg| {
+                        crate::mcp::add_mcp_in_config(
+                            cfg,
+                            crate::mcp::AddMcpInput {
+                                id: target,
+                                url,
+                                command,
+                                args,
+                                bearer_env,
+                                bearer_token: bearer_token.map(|s| s.0),
+                                project,
+                            },
+                        )
+                    })
+                    .await;
+                } else {
+                    self.warn("MCP servers are saved to the user or project layer".into());
+                }
             }
             Op::SaveMcpServer {
                 id,
@@ -2272,7 +2298,7 @@ impl Engine {
                 self.title_tasks = JoinSet::new();
                 self.save_title(title.trim().to_owned());
             }
-            Op::SaveSetting { key, value, scope } => self.save_setting(&key, &value, &scope),
+            Op::SaveSetting { key, value, scope } => self.save_setting(&key, &value, &scope).await,
             Op::ReloadConfig => {
                 self.queued.push_back(Queued::Reload(None));
                 self.next_queued(done, reload);

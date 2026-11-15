@@ -13,6 +13,9 @@ use ratatui::widgets::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use quack_config::ProjectStatus;
+use quack_protocol::WriteScope;
+
 use crate::charts::{BarRow, Visual};
 use crate::commands::{COMMANDS, KEYS};
 use crate::fuzzy;
@@ -54,11 +57,15 @@ pub(crate) struct Modal {
     selected: usize,
     /// Tab whose item actions copy text while keeping the modal open.
     copy_tab: Option<usize>,
+    /// True when `^l` toggles between user and project (`.quack/`) write scope.
+    scoped: bool,
     footer: Vec<(&'static str, &'static str)>,
 }
 
 /// The secondary action key, shown in the footer when a modal has one.
 const ALT_KEY: &str = "^s";
+/// The scope-toggle key, shown in the footer of modals that save settings/MCP.
+const SCOPE_KEY: &str = "^l";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ModalOutcome {
@@ -69,6 +76,8 @@ pub(crate) enum ModalOutcome {
     Insert(String),
     /// Close and run this command.
     Run(String),
+    /// Toggle between user and project (`.quack/`) write scope and rebuild.
+    ToggleScope,
 }
 
 impl Modal {
@@ -81,6 +90,7 @@ impl Modal {
             filtered: Vec::new(),
             selected: 0,
             copy_tab: None,
+            scoped: false,
             footer: vec![
                 ("↑↓", "move"),
                 ("tab", "switch tab"),
@@ -95,6 +105,22 @@ impl Modal {
     /// Name the secondary action (Ctrl-S) in the footer.
     pub fn with_alt(mut self, what: &'static str) -> Self {
         self.footer.insert(self.footer.len() - 1, (ALT_KEY, what));
+        self
+    }
+
+    /// Enable the Ctrl-L user/project (`.quack/`) scope toggle and show it in the footer.
+    pub fn with_scope(mut self, scope: WriteScope) -> Self {
+        self.scoped = true;
+        let label = match scope {
+            WriteScope::Project => "scope: .quack",
+            WriteScope::User | WriteScope::Session => "scope: user",
+        };
+        let pos = self
+            .footer
+            .iter()
+            .position(|(k, _)| *k == ALT_KEY || *k == "⏎")
+            .unwrap_or_else(|| self.footer.len().saturating_sub(1));
+        self.footer.insert(pos, (SCOPE_KEY, label));
         self
     }
 
@@ -162,6 +188,7 @@ impl Modal {
                     return ModalOutcome::Run(cmd);
                 }
             }
+            KeyCode::Char('l') if ctrl && self.scoped => return ModalOutcome::ToggleScope,
             KeyCode::PageUp => self.selected = self.selected.saturating_sub(10),
             KeyCode::PageDown => {
                 self.selected = (self.selected + 10).min(self.filtered.len().saturating_sub(1));
@@ -568,8 +595,11 @@ pub(crate) fn models(
     catalog: Option<&[quack_protocol::ProviderModels]>,
     current: Option<&str>,
     ascii: bool,
+    scope: WriteScope,
     theme: &Theme,
 ) -> Modal {
+    let target = scope_file(scope);
+    let flag = scope_flag(scope);
     let field = |k: &str, v: String| {
         Line::from(vec![
             Span::styled(format!("{k:<10}"), theme.dim),
@@ -678,7 +708,7 @@ pub(crate) fn models(
                         ));
                     }
                     detail.push(Line::styled(
-                        "^s save as the default model (user config.toml)",
+                        format!("^s save as the default model ({target})"),
                         theme.dim,
                     ));
                     items.push(ModalItem {
@@ -691,7 +721,7 @@ pub(crate) fn models(
                         detail,
                         action: Some(format!("/models {reference}")),
                         run: true,
-                        alt: Some(format!("/models default {reference}")),
+                        alt: Some(format!("/models default{flag} {reference}")),
                         charts,
                     });
                 }
@@ -714,6 +744,31 @@ pub(crate) fn models(
         }],
     )
     .with_alt("save as default")
+    .with_scope(scope)
+}
+
+fn scope_file(scope: WriteScope) -> &'static str {
+    match scope {
+        WriteScope::Project => ".quack/config.toml",
+        WriteScope::User | WriteScope::Session => "user config.toml",
+    }
+}
+
+fn scope_flag(scope: WriteScope) -> &'static str {
+    match scope {
+        WriteScope::Project => " --project",
+        WriteScope::User | WriteScope::Session => "",
+    }
+}
+
+fn project_status_note(status: ProjectStatus) -> Option<&'static str> {
+    match status {
+        ProjectStatus::DisabledByPolicy => Some("project config is disabled by the system policy"),
+        ProjectStatus::Untrusted | ProjectStatus::Changed | ProjectStatus::Ignored => {
+            Some("note: .quack/ is not trusted yet — run `/trust` to load project settings")
+        }
+        ProjectStatus::None | ProjectStatus::Trusted | ProjectStatus::SettingsOnly => None,
+    }
 }
 
 fn field(theme: &Theme, k: &str, v: String) -> Line<'static> {
@@ -888,8 +943,15 @@ pub(crate) fn sessions(
 pub(crate) fn config(
     rows: &[quack_config::SettingRow],
     files: &[(String, String)],
+    scope: WriteScope,
+    project_status: ProjectStatus,
     theme: &Theme,
 ) -> Modal {
+    let target = scope_file(scope);
+    let flag = scope_flag(scope);
+    let status_note = (scope == WriteScope::Project)
+        .then(|| project_status_note(project_status))
+        .flatten();
     let settings = rows
         .iter()
         .map(|r| {
@@ -907,17 +969,25 @@ pub(crate) fn config(
             } else if r.is_bool {
                 let flipped = if r.value == "true" { "false" } else { "true" };
                 detail.push(Line::styled(
-                    format!("⏎ set to {flipped} in the user config.toml"),
+                    format!("⏎ set to {flipped} in {target}"),
                     theme.dim,
                 ));
-                (Some(format!("/config set {} {flipped}", r.key)), true)
+                (Some(format!("/config set{flag} {} {flipped}", r.key)), true)
             } else {
                 detail.push(Line::styled(
-                    "⏎ edit the value, then press ⏎ to save it to the user config.toml",
+                    format!("⏎ edit the value, then press ⏎ to save it to {target}"),
                     theme.dim,
                 ));
-                (Some(format!("/config set {} {}", r.key, r.value)), false)
+                (
+                    Some(format!("/config set{flag} {} {}", r.key, r.value)),
+                    false,
+                )
             };
+            if !r.locked
+                && let Some(msg) = status_note
+            {
+                detail.push(Line::styled(msg, theme.warn));
+            }
             let mut hint: String = r.value.chars().take(24).collect();
             if r.value.chars().count() > 24 {
                 hint.push('…');
@@ -982,7 +1052,7 @@ pub(crate) fn config(
         ],
     );
     modal.copy_tab = Some(1);
-    modal
+    modal.with_scope(scope)
 }
 
 /// Detail lines with charts set between them.
@@ -2185,7 +2255,9 @@ pub(crate) fn providers(
 }
 
 /// The `/skills` modal: installed skills; ⏎ puts `/<name> ` in the input.
-pub(crate) fn bundles(bundles: &[quack_config::Bundle], theme: &Theme) -> Modal {
+pub(crate) fn bundles(bundles: &[quack_config::Bundle], scope: WriteScope, theme: &Theme) -> Modal {
+    let target = scope_file(scope);
+    let flag = scope_flag(scope);
     let items = if bundles.is_empty() {
         vec![placeholder(
             "no bundles",
@@ -2223,7 +2295,7 @@ pub(crate) fn bundles(bundles: &[quack_config::Bundle], theme: &Theme) -> Modal 
                 detail.push(Line::raw(""));
                 detail.push(Line::styled(
                     format!(
-                        "⏎ turn it {} (saved to [bundles] disabled in your config.toml)",
+                        "⏎ turn it {} (saved to [bundles] disabled in {target})",
                         if b.enabled { "off" } else { "on" }
                     ),
                     theme.dim,
@@ -2232,7 +2304,7 @@ pub(crate) fn bundles(bundles: &[quack_config::Bundle], theme: &Theme) -> Modal 
                     label: name,
                     hint: format!("{state} · {}", b.layer),
                     detail,
-                    action: Some(format!("/bundles toggle {}", b.id)),
+                    action: Some(format!("/bundles toggle{flag} {}", b.id)),
                     run: true,
                     alt: None,
                     charts: Vec::new(),
@@ -2247,10 +2319,13 @@ pub(crate) fn bundles(bundles: &[quack_config::Bundle], theme: &Theme) -> Modal 
             items,
         }],
     )
+    .with_scope(scope)
 }
 
 /// The `/theme` modal: switch between `auto`, `dark` and `light`.
-pub(crate) fn theme(current: &str, theme: &Theme) -> Modal {
+pub(crate) fn theme(current: &str, scope: WriteScope, theme: &Theme) -> Modal {
+    let target = scope_file(scope);
+    let flag = scope_flag(scope);
     const THEMES: [(&str, &str); 3] = [
         (
             "auto",
@@ -2283,14 +2358,14 @@ pub(crate) fn theme(current: &str, theme: &Theme) -> Modal {
                     Line::raw(""),
                     Line::styled(
                         if active {
-                            "in use"
+                            "in use".into()
                         } else {
-                            "⏎ use this theme (saved to [ui] theme in your config.toml)"
+                            format!("⏎ use this theme (saved to [ui] theme in {target})")
                         },
                         if active { theme.ok } else { theme.dim },
                     ),
                 ],
-                action: Some(format!("/theme {id}")),
+                action: Some(format!("/theme{flag} {id}")),
                 run: true,
                 alt: None,
                 charts: Vec::new(),
@@ -2304,6 +2379,7 @@ pub(crate) fn theme(current: &str, theme: &Theme) -> Modal {
             items,
         }],
     )
+    .with_scope(scope)
 }
 
 /// The `/hooks` modal: configured hooks from `hooks.d` and their recent runs.
@@ -2336,9 +2412,12 @@ pub(crate) fn hook_payload(id: &str, path: &str, theme: &Theme) -> Modal {
 pub(crate) fn hooks(
     hooks: &[quack_config::Item<quack_config::HookFile>],
     runs: &[crate::app::HookRun],
+    scope: WriteScope,
     theme: &Theme,
 ) -> Modal {
     use quack_config::{ItemState, LayerKind};
+    let target = scope_file(scope);
+    let flag = scope_flag(scope);
     let items = if hooks.is_empty() {
         vec![placeholder(
             "no hooks",
@@ -2355,7 +2434,7 @@ pub(crate) fn hooks(
                     runs.iter().filter(|r| r.id == h.id).collect();
                 let last = hook_runs.last().copied();
                 let mut detail = Vec::new();
-                let (hint, can_toggle, _enabled) = match &h.state {
+                let (hint, can_toggle, enabled) = match &h.state {
                     ItemState::Loaded(f) if f.enabled => {
                         detail.push(Line::styled(h.id.clone(), theme.ok));
                         detail.push(Line::raw(""));
@@ -2403,10 +2482,20 @@ pub(crate) fn hooks(
                     }
                 };
                 let action = if can_toggle {
-                    if matches!(&h.state, ItemState::Loaded(f) if f.setup.is_none()) {
-                        "Enter or Ctrl-S enables or disables this hook.".to_owned()
+                    if enabled {
+                        format!(
+                            "{}disables by adding `{}` to [hooks] disabled in {target}.",
+                            if matches!(&h.state, ItemState::Loaded(f) if f.setup.is_none()) {
+                                "Enter or Ctrl-S "
+                            } else {
+                                "Enter configures; Ctrl-S "
+                            },
+                            h.id,
+                        )
+                    } else if matches!(&h.state, ItemState::Loaded(f) if f.setup.is_none()) {
+                        "Enter or Ctrl-S enables this hook.".to_owned()
                     } else {
-                        "Enter configures the hook; Ctrl-S enables or disables it.".to_owned()
+                        "Enter configures the hook; Ctrl-S enables it.".to_owned()
                     }
                 } else {
                     String::new()
@@ -2441,18 +2530,14 @@ pub(crate) fn hooks(
                     hint,
                     detail,
                     action: can_toggle.then(|| {
-                        format!(
-                            "/hooks {} {}",
-                            if matches!(&h.state, ItemState::Loaded(f) if f.setup.is_none()) {
-                                "toggle"
-                            } else {
-                                "configure"
-                            },
-                            h.id
-                        )
+                        if matches!(&h.state, ItemState::Loaded(f) if f.setup.is_none()) {
+                            format!("/hooks toggle{flag} {}", h.id)
+                        } else {
+                            format!("/hooks configure {}", h.id)
+                        }
                     }),
                     run: can_toggle,
-                    alt: can_toggle.then(|| format!("/hooks toggle {}", h.id)),
+                    alt: can_toggle.then(|| format!("/hooks toggle{flag} {}", h.id)),
                     charts: Vec::new(),
                 }
             })
@@ -2466,6 +2551,7 @@ pub(crate) fn hooks(
         }],
     )
     .with_alt("enable/disable")
+    .with_scope(scope)
 }
 
 pub(crate) fn skills(skills: &[quack_protocol::SkillInfo], theme: &Theme) -> Modal {
@@ -2573,7 +2659,9 @@ pub(crate) type ProfileList<'a> = (&'a str, bool, &'a [quack_protocol::ProfileIn
 
 /// The `/profiles` modal: each profile previewed for the current model. `None` while
 /// asking the engine.
-pub(crate) fn profiles(list: Option<ProfileList<'_>>, theme: &Theme) -> Modal {
+pub(crate) fn profiles(list: Option<ProfileList<'_>>, scope: WriteScope, theme: &Theme) -> Modal {
+    let target = scope_file(scope);
+    let flag = scope_flag(scope);
     let Some((active, forced, profiles)) = list else {
         return Modal::new(
             "Profiles",
@@ -2581,7 +2669,9 @@ pub(crate) fn profiles(list: Option<ProfileList<'_>>, theme: &Theme) -> Modal {
                 title: "Profiles".into(),
                 items: vec![placeholder("rendering profiles…", "", theme)],
             }],
-        );
+        )
+        .with_alt("make default")
+        .with_scope(scope);
     };
     let mut items: Vec<ModalItem> = profiles
         .iter()
@@ -2600,6 +2690,11 @@ pub(crate) fn profiles(list: Option<ProfileList<'_>>, theme: &Theme) -> Modal {
                 field(theme, "edits", p.edit_format.replace('_', " ")),
                 field(theme, "tools", p.tools.join(", ")),
                 Line::raw(""),
+                Line::styled(
+                    format!("⏎ use for session · ^s set default ({target})"),
+                    theme.dim,
+                ),
+                Line::raw(""),
                 Line::styled("System prompt, rendered for this model", theme.dim),
             ];
             detail.extend(p.system.lines().map(|l| Line::raw(l.to_owned())));
@@ -2609,7 +2704,7 @@ pub(crate) fn profiles(list: Option<ProfileList<'_>>, theme: &Theme) -> Modal {
                 detail,
                 action: Some(format!("/profiles {}", p.id)),
                 run: true,
-                alt: Some(format!("/profiles default {}", p.id)),
+                alt: Some(format!("/profiles default{flag} {}", p.id)),
                 charts: Vec::new(),
             }
         })
@@ -2640,6 +2735,7 @@ pub(crate) fn profiles(list: Option<ProfileList<'_>>, theme: &Theme) -> Modal {
         }],
     )
     .with_alt("make default")
+    .with_scope(scope)
 }
 
 /// The `/commands` modal: custom slash commands from the `commands/` folders.
@@ -2699,6 +2795,7 @@ pub(crate) fn custom_commands(commands: &[quack_protocol::CommandInfo], theme: &
 pub(crate) fn mcp(
     servers: Option<&[quack_protocol::McpServerInfo]>,
     catalog: &[quack_config::McpSummary],
+    scope: WriteScope,
     theme: &Theme,
 ) -> Modal {
     let items = match servers {
@@ -2785,7 +2882,7 @@ pub(crate) fn mcp(
                     }
                 })
                 .collect();
-            out.extend(mcp_catalog_and_add_items(list, catalog, theme));
+            out.extend(mcp_catalog_and_add_items(list, catalog, scope, theme));
             out
         }
     };
@@ -2797,13 +2894,20 @@ pub(crate) fn mcp(
         }],
     )
     .with_alt("restart")
+    .with_scope(scope)
 }
 
 fn mcp_catalog_and_add_items(
     active: &[quack_protocol::McpServerInfo],
     catalog: &[quack_config::McpSummary],
+    scope: WriteScope,
     theme: &Theme,
 ) -> Vec<ModalItem> {
+    let flag = scope_flag(scope);
+    let mcp_dir = match scope {
+        WriteScope::Project => ".quack/mcp.d/",
+        WriteScope::User | WriteScope::Session => "user mcp.d/",
+    };
     let mut items = Vec::new();
     for entry in catalog {
         if active.iter().any(|s| s.id == entry.id) {
@@ -2873,11 +2977,13 @@ fn mcp_catalog_and_add_items(
             Line::styled("Connect a streamable HTTP MCP endpoint by URL", theme.accent),
             Line::raw(""),
             Line::styled(
-                "Prompts for the URL (e.g. https://mcp.context7.com/mcp), server id, and optional Bearer auth env var or token.",
+                format!(
+                    "Prompts for the URL (e.g. https://mcp.context7.com/mcp), server id, and optional Bearer auth env var or token. Saves to {mcp_dir}."
+                ),
                 theme.dim,
             ),
         ],
-        action: Some("/mcp add http".into()),
+        action: Some(format!("/mcp add{flag} http")),
         run: true,
         alt: None,
         charts: Vec::new(),
@@ -2892,11 +2998,13 @@ fn mcp_catalog_and_add_items(
             ),
             Line::raw(""),
             Line::styled(
-                "Prompts for the command line (e.g. npx -y @playwright/mcp@latest) and server id.",
+                format!(
+                    "Prompts for the command line (e.g. npx -y @playwright/mcp@latest) and server id. Saves to {mcp_dir}."
+                ),
                 theme.dim,
             ),
         ],
-        action: Some("/mcp add stdio".into()),
+        action: Some(format!("/mcp add{flag} stdio")),
         run: true,
         alt: None,
         charts: Vec::new(),

@@ -70,6 +70,9 @@ impl Loaded {
         if self.settings.policy.locks(key) {
             return Err(format!("`{key}` is locked by the system policy"));
         }
+        if layer == LayerKind::Project && self.project == ProjectStatus::DisabledByPolicy {
+            return Err("project config is disabled by the system policy".into());
+        }
         let file = self
             .layer_file(layer)
             .ok_or_else(|| format!("the {layer} layer has no directory"))?;
@@ -85,6 +88,12 @@ impl Loaded {
         }
         if let Some(decision) = in_project {
             self.trust_project(decision)?;
+        } else if layer == LayerKind::Project
+            && self.project == ProjectStatus::None
+            && self.dirs.project.is_dir()
+        {
+            // Newly created by the user for settings only; leave extensions unapproved until trusted.
+            self.trust_project(TrustDecision::SettingsOnly)?;
         }
         let note = match self.origin_of(key) {
             Origin::File { layer: l, path } if *l > layer => Some(format!(
@@ -93,6 +102,15 @@ impl Loaded {
             )),
             Origin::Env(var) => Some(format!("still overridden by {var}")),
             Origin::Cli => Some("overridden for this run by a command-line flag".into()),
+            _ if layer == LayerKind::Project
+                && raw.trim() != "null"
+                && matches!(
+                    self.project,
+                    ProjectStatus::Untrusted | ProjectStatus::Changed | ProjectStatus::Ignored
+                ) =>
+            {
+                Some("project config is not loaded until trusted".into())
+            }
             _ => None,
         };
         Ok((file, note))
@@ -573,5 +591,48 @@ mod tests {
                 .save_setting(LayerKind::User, "ui.bogus", "null")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn project_save_setting_clean_repo_and_policy_guard() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("repo")).expect("repo");
+        let mut vars = std::collections::HashMap::new();
+        for (k, sub) in [
+            ("QUACK_SYSTEM_DIR", "system"),
+            ("QUACK_CONFIG_DIR", "user"),
+            ("QUACK_DATA_DIR", "data"),
+            ("QUACK_CACHE_DIR", "cache"),
+        ] {
+            vars.insert(k.to_owned(), std::ffi::OsString::from(root.join(sub)));
+        }
+        vars.insert("QUACK_DEFAULTS_DIR".into(), "none".into());
+        let opts = crate::load::LoadOptions::new(root.join("repo"));
+
+        let clean = crate::load_with(&|k| vars.get(k).cloned(), &opts).expect("load");
+        assert_eq!(clean.project, ProjectStatus::None);
+        let (path, note) = clean
+            .save_setting(LayerKind::Project, "ui.theme", "\"light\"")
+            .expect("save project setting on clean repo");
+        assert_eq!(path, root.join("repo/.quack/config.toml"));
+        assert_eq!(note, None);
+
+        let reloaded = crate::load_with(&|k| vars.get(k).cloned(), &opts).expect("reload");
+        assert_eq!(reloaded.project, ProjectStatus::SettingsOnly);
+        assert_eq!(reloaded.settings.ui.theme, "light");
+
+        std::fs::create_dir_all(root.join("system")).expect("system");
+        std::fs::write(
+            root.join("system/config.toml"),
+            "[policy]\nproject_config = \"never\"\n",
+        )
+        .expect("policy");
+        let locked = crate::load_with(&|k| vars.get(k).cloned(), &opts).expect("reload policy");
+        assert_eq!(locked.project, ProjectStatus::DisabledByPolicy);
+        let err = locked
+            .save_setting(LayerKind::Project, "ui.theme", "\"dark\"")
+            .expect_err("disabled by policy");
+        assert!(err.contains("policy"), "{err}");
     }
 }

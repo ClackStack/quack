@@ -167,7 +167,8 @@ All configuration UIs share one modal widget, so they look and behave the same:
 | `/export [md\|json]` | | Write transcript to a file |
 | `/compact [focus]` | `/summarize`, `/summary` | Compact now, with optional focus instructions |
 | `/context` | | Context breakdown modal: segments, tokens, prunable items, cache state; actions: prune now, drop an item |
-| `/config` | `/settings` | **Settings editor**: tabs mirror `config.toml` tables (Model, UI, Context, Tools, Permissions, Memory, Sessions, Network). Each row shows the effective value, its source layer and a description from the JSON Schema. Edit inline with type-aware widgets (toggle, enum picker, number, string, list) |
+| `/config` | `/settings` | **Settings editor**: tabs mirror `config.toml` tables (Model, UI, Context, Tools, Permissions, Memory, Sessions, Network). Each row shows the effective value, its source layer and a description from the JSON Schema. Edit inline with type-aware widgets (toggle, enum picker, number, string, list); `Ctrl-L` toggles user config vs `.quack/config.toml` |
+| `/scope` | `[user\|project]` | Show or switch the TUI write scope between user config and project `.quack/` (built 2026-11-14) |
 | `/permissions [ask\|allow]` | | Ask/Allow approval picker, keeping Plan/Edit, plus allow/ask/deny rule lists per layer; add/remove rules; shows the compiled-in deny floor (read-only). Yolo stays under `/yolo`; an active legacy policy is named in the tab title |
 | `/mcp` | | MCP servers: state, tool count, token cost, deferred flag, logs. Actions: restart, enable/disable (session or persistent), view tools, add server (template or blank) |
 | `/lsp` | | LSP servers: state, indexing progress, diagnostics count; restart, enable/disable |
@@ -256,3 +257,12 @@ with the selected file path. The panes have a one-column gap on wide terminals
 and stack on narrow terminals. Enter copies the full path through the terminal’s
 OSC 52 clipboard support and keeps the modal open. Layers without a file path
 have no copy action.
+
+### Project `.quack/` writes and scope toggle (2026-11-14)
+
+The TUI exposes user vs project (`.quack/`) write scope across settings, defaults,
+extensions, and `always allow` approvals: `Ctrl-L` toggles scope inside `/config`,
+`/models`, `/profiles`, `/theme`, `/bundles`, `/hooks`, `/mcp` (list and add
+prompts), and approval bars (`A` saves into trusted/settings-only `.quack/` or user
+`config.toml`); `/scope [user|project]` sets the default write scope, and command
+forms accept `--project` or `--user` (`--user`/`--project` flags).

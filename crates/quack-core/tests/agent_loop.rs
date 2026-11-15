@@ -450,6 +450,133 @@ async fn new_list_resume_title_and_save_setting() {
     engine.shutdown().await;
 }
 
+#[tokio::test]
+async fn project_save_setting_refreshes_config_and_add_mcp_supports_project_scope() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = workspace(tmp.path(), &server.uri());
+    let project_dir = loaded.dirs.project.clone();
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    while !matches!(next(&mut engine.events).await, Event::StartupComplete) {}
+
+    // Writing a project setting refreshes the engine's config snapshot so an immediate
+    // user write sees the higher-priority project layer.
+    engine
+        .submit(Op::SaveSetting {
+            key: "ui.theme".into(),
+            value: "\"light\"".into(),
+            scope: quack_core::protocol::WriteScope::Project,
+        })
+        .await;
+    loop {
+        match next(&mut engine.events).await {
+            Event::SettingSaved { key, path, .. } => {
+                assert_eq!(key, "ui.theme");
+                assert_eq!(path, project_dir.join("config.toml").display().to_string());
+                break;
+            }
+            Event::Error { error } => panic!("{}", error.message),
+            _ => {}
+        }
+    }
+
+    engine
+        .submit(Op::SaveSetting {
+            key: "ui.theme".into(),
+            value: "\"dark\"".into(),
+            scope: quack_core::protocol::WriteScope::User,
+        })
+        .await;
+    loop {
+        match next(&mut engine.events).await {
+            Event::SettingSaved { key, note, .. } => {
+                assert_eq!(key, "ui.theme");
+                assert!(
+                    note.as_deref().is_some_and(|n| n.contains("project")),
+                    "expected override note referencing project layer, got {note:?}"
+                );
+                break;
+            }
+            Event::Error { error } => panic!("{}", error.message),
+            _ => {}
+        }
+    }
+
+    // `.quack/` now has `SettingsOnly` trust (from `ui.theme`), so MCP writes require explicit `trusted` approval.
+    engine
+        .submit(Op::TrustProject {
+            decision: "trusted".into(),
+        })
+        .await;
+    loop {
+        match next(&mut engine.events).await {
+            Event::ConfigReloaded => break,
+            Event::Error { error } => panic!("{}", error.message),
+            _ => {}
+        }
+    }
+
+    engine
+        .submit(Op::AddMcp {
+            id: "proj-docs".into(),
+            url: "https://docs.example.com/mcp".into(),
+            command: String::new(),
+            args: Vec::new(),
+            bearer_env: None,
+            bearer_token: None,
+            scope: Some(quack_core::protocol::WriteScope::Project),
+        })
+        .await;
+    loop {
+        match next(&mut engine.events).await {
+            Event::ConfigReloaded => break,
+            Event::Error { error } => panic!("{}", error.message),
+            _ => {}
+        }
+    }
+    assert!(project_dir.join("mcp.d/proj-docs.toml").is_file());
+    assert_eq!(
+        engine.config().project,
+        quack_config::ProjectStatus::Trusted
+    );
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn add_mcp_with_project_scope_on_clean_repo_creates_and_trusts() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = workspace(tmp.path(), &server.uri());
+    let project_dir = loaded.dirs.project.clone();
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    while !matches!(next(&mut engine.events).await, Event::StartupComplete) {}
+
+    engine
+        .submit(Op::AddMcp {
+            id: "clean-mcp".into(),
+            url: String::new(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "clean-mcp".into()],
+            bearer_env: None,
+            bearer_token: None,
+            scope: Some(quack_core::protocol::WriteScope::Project),
+        })
+        .await;
+    loop {
+        match next(&mut engine.events).await {
+            Event::ConfigReloaded => break,
+            Event::Error { error } => panic!("{}", error.message),
+            _ => {}
+        }
+    }
+    assert!(project_dir.join("mcp.d/clean-mcp.toml").is_file());
+    assert_eq!(
+        engine.config().project,
+        quack_config::ProjectStatus::Trusted
+    );
+    engine.shutdown().await;
+}
+
 /// The plan belongs to its session: `/new` starts without it and `/resume` brings it back.
 #[tokio::test]
 async fn the_plan_follows_its_session() {

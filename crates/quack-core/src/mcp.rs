@@ -737,6 +737,7 @@ pub(crate) struct AddMcpInput {
     pub args: Vec<String>,
     pub bearer_env: Option<String>,
     pub bearer_token: Option<String>,
+    pub project: bool,
 }
 
 /// Enable an MCP server on disk and return its path plus a summary with any unset env vars.
@@ -835,7 +836,7 @@ pub(crate) fn add_mcp_in_config(config: &Loaded, input: AddMcpInput) -> Result<S
         transport,
         auto_approve: Vec::new(),
         startup_timeout_secs: None,
-        project: false,
+        project: input.project,
         overwrite: false,
     };
     let path = config.add_mcp_server(&spec)?;
@@ -944,6 +945,7 @@ mod manage_tests {
                 args: Vec::new(),
                 bearer_env: Some("CONTEXT7_API_KEY".into()),
                 bearer_token: None,
+                project: false,
             },
         )
         .expect("add");
@@ -951,5 +953,22 @@ mod manage_tests {
         let saved = std::fs::read_to_string(f.root.join("user/mcp.d/context7.toml")).expect("read");
         assert!(saved.contains("https://mcp.context7.com/mcp"), "{saved}");
         assert!(saved.contains("CONTEXT7_API_KEY"), "{saved}");
+
+        let proj_added = add_mcp_in_config(
+            &f.load(),
+            AddMcpInput {
+                id: "proj".into(),
+                url: String::new(),
+                command: "npx".into(),
+                args: vec!["-y".into(), "proj-mcp".into()],
+                bearer_env: None,
+                bearer_token: None,
+                project: true,
+            },
+        )
+        .expect("add project");
+        assert!(proj_added.contains("proj"), "{proj_added}");
+        assert!(f.root.join("repo/.quack/mcp.d/proj.toml").is_file());
+        assert_eq!(f.load().project, quack_config::ProjectStatus::Trusted);
     }
 }

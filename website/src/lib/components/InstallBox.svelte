@@ -145,18 +145,18 @@
 	}
 </script>
 
-<div class="w-full rounded-2xl border-2 border-ink bg-paper p-3.5 sm:p-4 shadow-[0_8px_22px_-12px_rgba(29,42,58,0.28)]">
+<div class="@container w-full rounded-2xl border-2 border-ink bg-paper p-3.5 sm:p-4 shadow-[0_8px_22px_-12px_rgba(29,42,58,0.28)]">
 	<!-- 1. What to install -->
-	<div class="grid grid-cols-1 min-[440px]:grid-cols-3 gap-2 mb-3" role="group" aria-label="What to install">
+	<div class="grid grid-cols-1 @md:grid-cols-3 gap-2 mb-3" role="group" aria-label="What to install">
 		<button
 			type="button"
 			aria-pressed={target === 'both'}
 			onclick={() => (target = 'both')}
-			class="flex flex-col items-start gap-1 rounded-xl border-2 px-3 py-2 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink {target === 'both'
+			class="min-w-0 flex flex-col items-start gap-1 rounded-xl border-2 px-3 py-2 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink {target === 'both'
 				? 'border-ink bg-ink text-paper'
 				: 'border-rule bg-wash text-ink hover:border-ink/45'}"
 		>
-			<span class="flex w-full items-center justify-between gap-1.5">
+			<span class="flex w-full flex-wrap items-center justify-between gap-1.5">
 				<span class="inline-flex items-center gap-1.5 font-display font-bold text-sm">
 					<Layers class="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
 					Both
@@ -178,7 +178,7 @@
 			type="button"
 			aria-pressed={target === 'tui'}
 			onclick={() => (target = 'tui')}
-			class="flex flex-col items-start gap-1 rounded-xl border-2 px-3 py-2 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink {target === 'tui'
+			class="min-w-0 flex flex-col items-start gap-1 rounded-xl border-2 px-3 py-2 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink {target === 'tui'
 				? 'border-ink bg-ink text-paper'
 				: 'border-rule bg-wash text-ink hover:border-ink/45'}"
 		>
@@ -195,7 +195,7 @@
 			type="button"
 			aria-pressed={target === 'gui'}
 			onclick={() => (target = 'gui')}
-			class="flex flex-col items-start gap-1 rounded-xl border-2 px-3 py-2 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink {target === 'gui'
+			class="min-w-0 flex flex-col items-start gap-1 rounded-xl border-2 px-3 py-2 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink {target === 'gui'
 				? 'border-ink bg-ink text-paper'
 				: 'border-rule bg-wash text-ink hover:border-ink/45'}"
 		>

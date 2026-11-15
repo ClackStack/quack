@@ -485,8 +485,8 @@ impl Loaded {
         Ok(path)
     }
 
-    /// Create or update `<layer>/mcp.d/<id>.toml` in the user or trusted project layer,
-    /// remove `<id>` from `[mcp] disabled`, and refresh project trust when needed.
+    /// Create or update `<layer>/mcp.d/<id>.toml` in the user or project layer,
+    /// remove `<id>` from `[mcp] disabled`, and record/refresh project trust when needed.
     pub fn save_mcp_server(
         &self,
         layer: LayerKind,
@@ -496,8 +496,13 @@ impl Loaded {
         match layer {
             LayerKind::User => spec.project = false,
             LayerKind::Project => {
-                if self.project != ProjectStatus::Trusted {
-                    return Err("trust this project before saving project-level MCP servers".into());
+                if !matches!(self.project, ProjectStatus::Trusted | ProjectStatus::None) {
+                    let message = if self.project == ProjectStatus::DisabledByPolicy {
+                        "project config is disabled by the system policy"
+                    } else {
+                        "trust this project before saving project-level MCP servers"
+                    };
+                    return Err(message.into());
                 }
                 spec.project = true;
             }
@@ -1146,5 +1151,64 @@ mod tests {
                 format: Some("Bearer {}".into()),
             })
         );
+    }
+
+    #[test]
+    fn save_mcp_server_allows_clean_repo_and_blocks_policy_disabled() {
+        let f = Fixture::new();
+        let clean = f.load();
+        assert_eq!(clean.project, ProjectStatus::None);
+        let proj_path = clean
+            .save_mcp_server(
+                LayerKind::Project,
+                NewMcpServer {
+                    id: "clean".into(),
+                    description: None,
+                    transport: NewMcpTransport::Stdio {
+                        command: "npx".into(),
+                        args: vec!["-y".into(), "clean-mcp".into()],
+                        cwd: None,
+                        sandbox: None,
+                        env: BTreeMap::new(),
+                    },
+                    auto_approve: Vec::new(),
+                    startup_timeout_secs: None,
+                    project: false,
+                    overwrite: false,
+                },
+            )
+            .expect("save on clean repo creates .quack and trusts");
+        assert_eq!(proj_path, f.root.join("repo/.quack/mcp.d/clean.toml"));
+        let reloaded = f.load();
+        assert_eq!(reloaded.project, ProjectStatus::Trusted);
+        assert!(
+            crate::load_mcp(&reloaded)
+                .iter()
+                .any(|s| s.id == "clean" && s.loaded().is_some())
+        );
+
+        f.write(
+            "system/config.toml",
+            "[policy]\nproject_config = \"never\"\n",
+        );
+        let err = f
+            .load()
+            .save_mcp_server(
+                LayerKind::Project,
+                NewMcpServer {
+                    id: "blocked".into(),
+                    description: None,
+                    transport: NewMcpTransport::Http {
+                        url: "https://example.com/mcp".into(),
+                        headers: BTreeMap::new(),
+                    },
+                    auto_approve: Vec::new(),
+                    startup_timeout_secs: None,
+                    project: false,
+                    overwrite: false,
+                },
+            )
+            .expect_err("blocked by policy");
+        assert!(err.contains("policy"), "{err}");
     }
 }

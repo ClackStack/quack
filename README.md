@@ -198,7 +198,7 @@ configuration and migration from older modes.
 - **Wide-terminal sidebar**: At 140 columns × 24 rows and above, a right sidebar shows the session title, working folder, Git branch, running sub-agents, model, profile, context usage and generation speed. It grows from 36 up to 48 columns on wider terminals and adapts as you resize; set `ui.sidebar = false` to disable it, or toggle it in `/config`.
 - **Window title**: The terminal's title shows the duck and what the session is about (`_(•)> fix the login bug`), and marks when a turn runs or quack needs you. If `[model] small` is configured, quack makes one background request to title the session from the first message. The title also appears in `/resume`. The first line serves as the fallback, and `/title` sets it manually. `ui.terminal_title = false` turns it off.
 - **Smooth scrolling and selection**: Mouse wheel scrolling, click-to-position cursor, and OSC 52 terminal copy integration.
-- **Interactive pickers**: Fast, fuzzy-filtered modals for `/models`, `/providers`, `/config`, `/context`, `/stats`, `/doctor`, and `/help`. In `/config` → Layers, inspect each layer’s status and file path, then press Enter to copy the selected path.
+- **Interactive pickers**: Fast, fuzzy-filtered modals for `/models`, `/providers`, `/config`, `/context`, `/stats`, `/doctor`, and `/help`. In `/config` → Layers, inspect each layer’s status and file path, then press Enter to copy the selected path. In `/config`, `/models`, `/profiles`, `/theme`, `/bundles`, `/hooks`, `/mcp` (including MCP add prompts), and approval prompts (`always`), press `Ctrl-L` (or `/scope [user|project]` / `--project` / `--user`) to choose whether writes go to user config or the project's `.quack/` folder.
 - **Status bar**: Separate work mode and approval indicators, context window utilization, model generation speed, and background tasks.
 
 ### Editor Integration (ACP)
@@ -500,7 +500,7 @@ MCP servers live as individual `<id>.toml` files in your user config folder (`mc
 
 **Three ways to add or enable an MCP server:**
 
-1. **In the TUI (`/mcp`)**: Open `/mcp` to browse live servers alongside bundled disabled examples and `+ Add remote MCP server (HTTP)` / `+ Add local MCP server (stdio)`. Pressing `Enter` on an example copies, enables, and connects it right away without restarting quack; `/mcp add`, `/mcp enable <id>`, `/mcp disable <id>`, and `/mcp restart <id>` also work directly.
+1. **In the TUI (`/mcp`)**: Open `/mcp` to browse live servers alongside bundled disabled examples and `+ Add remote MCP server (HTTP)` / `+ Add local MCP server (stdio)`. Pressing `Enter` on an example copies, enables, and connects it right away without restarting quack; `/mcp add`, `/mcp enable <id>`, `/mcp disable <id>`, and `/mcp restart <id>` also work directly, and `Ctrl-L` (or `--project` / `--user`) chooses between user `mcp.d/` and project `.quack/mcp.d/`.
 2. **From the CLI (`quack mcp`)**:
    ```sh
    quack mcp list                                       # show configured servers & bundled examples
