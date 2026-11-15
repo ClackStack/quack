@@ -12,6 +12,7 @@ api_key = { env = "DEEPSEEK_API_KEY" }
 # https://api-docs.deepseek.com/guides/thinking_mode
 [[models]]
 id = "deepseek-flash"
+vision = true
 reasoning = { effort = "high", efforts = ["low", "high", "max"] }
 
 [[models]]

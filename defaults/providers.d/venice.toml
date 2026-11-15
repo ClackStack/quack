@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# Venice AI: privacy-focused OpenAI-compatible inference.
+# Not contacted until VENICE_API_KEY is set or `quack setup` stores a key.
+name = "Venice"
+group = "Open-model services"
+base_url = "https://api.venice.ai/api/v1"
+catalog = "venice"
+api_key = { env = "VENICE_API_KEY" }

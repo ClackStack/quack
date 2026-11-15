@@ -11,4 +11,5 @@ api_key = { env = "MISTRAL_API_KEY" }
 # effort sends nothing and the server picks. Other Mistral models were not looked at.
 [[models]]
 id = "mistral-large-4"
+vision = true
 reasoning = { efforts = ["none", "high"] }

@@ -1,0 +1,27 @@
+#:schema ../schemas/provider.json
+# Alibaba Cloud Model Studio (DashScope International OpenAI-compatible endpoint).
+# Not contacted until DASHSCOPE_API_KEY is set or `quack setup` stores a key.
+name = "Alibaba Cloud (Qwen)"
+group = "From the model makers"
+base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+catalog = "alibaba"
+api_key = { env = "DASHSCOPE_API_KEY" }
+
+[[models]]
+id = "qwen3.8-max"
+alias = "qwen-max"
+vision = true
+reasoning = { efforts = ["low", "medium", "high"] }
+
+[[models]]
+id = "qwen3.8-flash"
+alias = "qwen-flash"
+vision = true
+reasoning = { efforts = ["none", "minimal", "low", "medium", "high"] }
+
+[[models]]
+id = "qwen3.6-plus"
+reasoning = { efforts = ["minimal", "low", "medium", "high"] }
+
+[[models]]
+id = "qwen3-coder-plus"

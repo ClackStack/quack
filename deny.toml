@@ -5,11 +5,19 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error via gtk 0.18 / glib 0.18 (tauri/wry/tao Linux deps); compile-time proc-macro only, no upgrade until Tauri drops gtk3" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant 5 via zbus 5 required by tauri-plugin-{notification,opener,single-instance}; no upstream zbus 6 release yet" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names 4 via zbus 5 required by tauri-plugin-{notification,opener,single-instance}; no upstream zbus 6 release yet" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive 5 via zbus 5 required by tauri-plugin-{notification,opener,single-instance}; compile-time proc-macro, no upstream zbus 6 release yet" },
+]
 
 [licenses]
 version = 2
 confidence-threshold = 0.9
 # Apache-2.0-compatible licences only (docs/plan/00-architecture.md#key-dependencies-initial-picks).
+# MPL-2.0 is file-level weak copyleft: unmodified crates in an Apache-2.0 binary are permitted
+# as a Larger Work when notices and source availability for MPL-2.0 files are preserved.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -20,11 +28,7 @@ allow = [
     "Zlib",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
-]
-# MPL-2.0 is file-level copyleft: using the crate unmodified is fine for an Apache-2.0
-# binary, but it is allowed per crate rather than globally so new uses get a review.
-exceptions = [
-    { name = "nucleo-matcher", allow = ["MPL-2.0"] },
+    "MPL-2.0",
 ]
 
 [bans]

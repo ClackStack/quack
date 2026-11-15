@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# NVIDIA NIM hosted API.
+# Not contacted until NVIDIA_API_KEY is set or `quack setup` stores a key.
+name = "NVIDIA NIM"
+group = "Open-model services"
+base_url = "https://integrate.api.nvidia.com/v1"
+catalog = "nvidia"
+api_key = { env = "NVIDIA_API_KEY" }

@@ -12,7 +12,7 @@ api_key = { env = "CHARM_API_KEY" }
 # an unset `effort` leaves the choice to the server. Where the model's maker documents a
 # default (Z.ai, DeepSeek, Kimi, the Muse Spark card) it is pinned, so a reset restores
 # the vendor's own setting.
-# Kimi K3 takes images; the entry only marks that, and discovery fills in the rest.
+# Multimodal entries mark `vision = true`, and discovery fills in the rest.
 [[models]]
 id = "kimi-k3"
 vision = true
@@ -20,6 +20,7 @@ reasoning = { effort = "max", efforts = ["low", "high", "max"] }
 
 [[models]]
 id = "kimi-k3.1-pro"
+vision = true
 reasoning = { effort = "max", efforts = ["low", "high", "max"] }
 
 [[models]]
@@ -28,10 +29,12 @@ reasoning = { effort = "max", efforts = ["low", "high", "max"] }
 
 [[models]]
 id = "glm-5.3-flash"
+vision = true
 reasoning = { effort = "max", efforts = ["low", "high", "max"] }
 
 [[models]]
 id = "deepseek-v4.1-flash-1017"
+vision = true
 reasoning = { effort = "high", efforts = ["low", "high", "max"] }
 
 [[models]]

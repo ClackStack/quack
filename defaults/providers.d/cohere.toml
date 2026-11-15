@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# Cohere's OpenAI-compatible API.
+# Not contacted until COHERE_API_KEY is set or `quack setup` stores a key.
+name = "Cohere"
+group = "Proprietary models"
+base_url = "https://api.cohere.ai/compatibility/v1"
+catalog = "cohere"
+api_key = { env = "COHERE_API_KEY" }

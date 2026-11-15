@@ -60,8 +60,9 @@ bundles=${QUACK_GUI_BUNDLES:-$default_bundles}
 flavours=${QUACK_GUI_FLAVOURS:-quack-gui,quack-gui-plucked}
 
 version=$(awk '
+  { gsub(/\r/, "") }
   /^\[/ { in_pkg = ($0 == "[workspace.package]") }
-  in_pkg && /^version = / { gsub(/\r/, ""); gsub(/^version = "|"/, ""); print; exit }
+  in_pkg && /^version = / { gsub(/^version = "|"/, ""); print; exit }
 ' "$root/Cargo.toml")
 [ -n "$version" ] || { echo "package-gui.sh: could not read workspace version from Cargo.toml" >&2; exit 1; }
 
@@ -112,8 +113,23 @@ single_match() {
 
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+# Stage plucked defaults under $root/tmp so the path passed to Tauri is relative to
+# crates/quack-gui (../../tmp/...). tauri-utils's resource path normalizer drops Windows
+# drive prefixes (e.g. C:), turning absolute %TEMP% paths into /Users/... on the repo's drive.
+tmp_parent=$root/tmp
+tmp_parent_created=false
+if [ ! -d "$tmp_parent" ]; then
+  mkdir -p "$tmp_parent"
+  tmp_parent_created=true
+fi
+tmp=$(mktemp -d "$tmp_parent/package-gui.XXXXXX")
+cleanup() {
+  rm -rf "$tmp"
+  if [ "$tmp_parent_created" = true ]; then
+    rmdir "$tmp_parent" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 staged=()
 
 for flavour in "${flavour_list[@]}"; do
@@ -126,14 +142,10 @@ for flavour in "${flavour_list[@]}"; do
       tauri_cfg="{\"version\":\"$version\"}"
       ;;
     quack-gui-plucked)
-      rm -rf "$tmp/defaults"
+      rm -rf "$tmp/defaults" "$target_root/$target/release/defaults"
       "$root/scripts/copy-defaults.sh" "$tmp/defaults" --plucked
-      plucked_cfg=$tmp/defaults
-      if command -v cygpath >/dev/null; then
-        plucked_cfg=$(cygpath -m "$plucked_cfg")
-      fi
-      plucked_cfg=${plucked_cfg//\\/\/}
-      tauri_cfg="{\"version\":\"$version\",\"bundle\":{\"resources\":{\"../../defaults/\":null,\"$plucked_cfg/\":\"defaults/\"}}}"
+      plucked_rel=../../tmp/${tmp##*/}/defaults
+      tauri_cfg="{\"version\":\"$version\",\"bundle\":{\"resources\":{\"../../defaults/\":null,\"$plucked_rel/\":\"defaults/\"}}}"
       ;;
     *)
       echo "package-gui.sh: unknown flavour '$flavour'" >&2

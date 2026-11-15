@@ -15,7 +15,7 @@ QUACK_DEFAULTS_DIR=defaults cargo run
 
 | Directory | Contents | Lands in |
 |---|---|---|
-| `providers.d/` | Servers on this machine (Ollama, llama.cpp, vLLM, LM Studio, SGLang) and hosted services, each unused until it runs or has a key; see its README for restricting them | M1 |
+| `providers.d/` | Servers on this machine (Ollama, llama.cpp, vLLM, LM Studio, SGLang, Docker Model Runner) and hosted services, each unused until it runs or has a key; see its README for restricting them | M1 |
 | `profiles.d/` | Model profiles: `<id>/profile.toml` + prompt templates | M1 (`generic`), M2 (the rest) |
 | `mcp.d/` | Example MCP servers, all `enabled = false`: context7, roost, github, fetch, playwright, filesystem, time, everything | M3 (landed early) |
 | `hooks.d/` | Example hooks, all `enabled = false`: `jira` (Jira issues linked in the prompt, with a Python script); `/hooks` enables one by copying it into your config folder | M3 (landed early) |

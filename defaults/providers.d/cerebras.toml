@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# Cerebras: wafer-scale hosted open models.
+# Not contacted until CEREBRAS_API_KEY is set or `quack setup` stores a key.
+name = "Cerebras"
+group = "Open-model services"
+base_url = "https://api.cerebras.ai/v1"
+catalog = "cerebras"
+api_key = { env = "CEREBRAS_API_KEY" }

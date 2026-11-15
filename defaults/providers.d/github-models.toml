@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# GitHub Models inference router.
+# Not contacted until GITHUB_TOKEN is set or `quack setup` stores a key.
+name = "GitHub Models"
+group = "Open-model services"
+base_url = "https://models.github.ai/inference"
+catalog = "github-models"
+api_key = { env = "GITHUB_TOKEN" }

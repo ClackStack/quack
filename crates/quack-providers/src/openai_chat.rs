@@ -39,6 +39,12 @@ pub(crate) enum Dialect {
     /// Mistral's API: it rejects fields it doesn't know, takes `reasoning_effort` as
     /// `none` or `high`, and wants earlier reasoning sent back as `thinking` parts.
     Mistral,
+    /// Google Gemini's OpenAI-compatible API: `/models` returns `models/<id>` names and
+    /// tool calls carry `extra_content.google.thought_signature` that must come back on
+    /// the next turn (or the documented skip sentinel after `/resume` or compaction).
+    Google,
+    /// Cohere's OpenAI-compatible API: it rejects `stream_options`.
+    Cohere,
 }
 
 impl Dialect {
@@ -52,6 +58,12 @@ impl Dialect {
             .unwrap_or_default();
         if host.eq_ignore_ascii_case("api.mistral.ai") {
             Self::Mistral
+        } else if host.eq_ignore_ascii_case("generativelanguage.googleapis.com") {
+            Self::Google
+        } else if host.eq_ignore_ascii_case("api.cohere.ai")
+            || host.eq_ignore_ascii_case("api.cohere.com")
+        {
+            Self::Cohere
         } else {
             Self::Standard
         }
@@ -61,6 +73,7 @@ impl Dialect {
 /// How messages are written for one request.
 struct Shape<'a> {
     mistral: bool,
+    google: bool,
     /// Tool-call ids as Mistral's tokenizer takes them: exactly 9 letters or digits.
     short_ids: bool,
     /// Send earlier reasoning back: as `reasoning_content`, or a `thinking` part for
@@ -99,6 +112,7 @@ pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
         .map(|e| if mistral { mistral_effort(e) } else { e });
     let shape = Shape {
         mistral,
+        google: dialect == Dialect::Google,
         short_ids: mistral || is_mistral_large(&req.model),
         echo_reasoning: effort != Some("none") && req.preserve_reasoning != Some(false),
         names: req
@@ -144,11 +158,15 @@ pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
     body.insert("model".into(), json!(req.model));
     body.insert("messages".into(), Value::Array(messages));
     body.insert("stream".into(), json!(true));
-    if mistral {
-        // Usage comes in the last chunk anyway; a stable key raises prompt-cache hits.
-        body.insert("prompt_cache_key".into(), json!(cache_key(&req.messages)));
-    } else {
-        body.insert("stream_options".into(), json!({ "include_usage": true }));
+    match dialect {
+        Dialect::Mistral => {
+            // Usage comes in the last chunk anyway; a stable key raises prompt-cache hits.
+            body.insert("prompt_cache_key".into(), json!(cache_key(&req.messages)));
+        }
+        Dialect::Cohere => {}
+        Dialect::Standard | Dialect::Google => {
+            body.insert("stream_options".into(), json!({ "include_usage": true }));
+        }
     }
     if !req.tools.is_empty() {
         let tools = openai_tools_json(&req.tools);
@@ -158,8 +176,8 @@ pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
         body.insert("max_tokens".into(), json!(n));
     }
     let s = &req.sampling;
-    // Mistral rejects sampling settings it doesn't have.
-    let local = |v: Option<Value>| v.filter(|_| !mistral);
+    // Hosted APIs with strict schemas reject sampling settings they don't have.
+    let local = |v: Option<Value>| v.filter(|_| matches!(dialect, Dialect::Standard));
     let optional = [
         ("temperature", s.temperature.map(Value::from)),
         ("top_p", s.top_p.map(Value::from)),
@@ -261,7 +279,7 @@ fn message_json(m: &Message, shape: &Shape<'_>) -> Value {
             content,
             reasoning,
             tool_calls,
-            ..
+            sealed,
         } => {
             let mut v = json!({ "role": "assistant", "content": content });
             let echo = reasoning
@@ -285,14 +303,26 @@ fn message_json(m: &Message, shape: &Shape<'_>) -> Value {
                 if content.is_empty() && !shape.mistral {
                     v["content"] = Value::Null;
                 }
+                let extra_by_pos = sealed_tool_extra(sealed.as_ref());
                 v["tool_calls"] = tool_calls
                     .iter()
-                    .map(|c| {
-                        json!({
+                    .enumerate()
+                    .map(|(pos, c)| {
+                        let mut call = json!({
                             "id": id(&c.id),
                             "type": "function",
                             "function": { "name": c.name, "arguments": c.arguments },
-                        })
+                        });
+                        if let Some(extra) = extra_by_pos.get(&pos) {
+                            call["extra_content"] = (*extra).clone();
+                        } else if shape.google && pos == 0 && extra_by_pos.is_empty() {
+                            // Gemini rejects prior tool calls after `/resume` or compaction unless a
+                            // thought signature or its documented bypass sentinel is attached.
+                            call["extra_content"] = json!({
+                                "google": { "thought_signature": "skip_thought_signature_validator" }
+                            });
+                        }
+                        call
                     })
                     .collect();
             }
@@ -320,11 +350,30 @@ fn message_json(m: &Message, shape: &Shape<'_>) -> Value {
     }
 }
 
+/// Opaque per-tool-call `extra_content` saved in [`crate::types::Sealed`] by call index.
+fn sealed_tool_extra(sealed: Option<&crate::types::Sealed>) -> HashMap<usize, &Value> {
+    let Some(sealed) = sealed else {
+        return HashMap::new();
+    };
+    sealed
+        .items
+        .iter()
+        .filter_map(|item| {
+            let idx = item.get("tool_call").and_then(Value::as_u64)?;
+            let pos = usize::try_from(idx).ok()?;
+            let extra = item.get("extra_content")?;
+            Some((pos, extra))
+        })
+        .collect()
+}
+
 /// Turns `data:` payloads into [`StreamEvent`]s.
 #[derive(Debug)]
 pub(crate) struct ChunkParser {
     think: Option<ThinkSplitter>,
     started: HashSet<u32>,
+    call_pos: HashMap<u32, usize>,
+    tool_extra: HashMap<u32, Value>,
 }
 
 impl ChunkParser {
@@ -334,6 +383,8 @@ impl ChunkParser {
         Self {
             think,
             started: HashSet::new(),
+            call_pos: HashMap::new(),
+            tool_extra: HashMap::new(),
         }
     }
 
@@ -377,6 +428,7 @@ impl ChunkParser {
             }
             if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
                 self.flush(&mut out);
+                self.flush_sealed(&mut out);
                 out.push(StreamEvent::Finish(FinishReason::parse(reason)));
             }
         }
@@ -386,11 +438,36 @@ impl ChunkParser {
         Ok(out)
     }
 
-    /// End of stream: release text held by the think splitter.
+    /// End of stream: release text held by the think splitter and any sealed metadata.
     pub(crate) fn finish(&mut self) -> Vec<StreamEvent> {
         let mut out = Vec::new();
         self.flush(&mut out);
+        self.flush_sealed(&mut out);
         out
+    }
+
+    fn flush_sealed(&mut self, out: &mut Vec<StreamEvent>) {
+        if self.tool_extra.is_empty() {
+            return;
+        }
+        let mut items: Vec<(usize, Value)> = std::mem::take(&mut self.tool_extra)
+            .into_iter()
+            .filter_map(|(index, extra_content)| {
+                let pos = *self.call_pos.get(&index)?;
+                Some((pos, extra_content))
+            })
+            .collect();
+        items.sort_by_key(|(pos, _)| *pos);
+        if !items.is_empty() {
+            out.push(StreamEvent::Sealed(
+                items
+                    .into_iter()
+                    .map(|(pos, extra_content)| {
+                        json!({ "tool_call": pos, "extra_content": extra_content })
+                    })
+                    .collect(),
+            ));
+        }
     }
 
     fn flush(&mut self, out: &mut Vec<StreamEvent>) {
@@ -453,6 +530,9 @@ impl ChunkParser {
                 .and_then(Value::as_u64)
                 .and_then(|i| u32::try_from(i).ok())
                 .unwrap_or(0);
+            if let Some(extra) = call.get("extra_content").filter(|v| !v.is_null()) {
+                self.tool_extra.insert(index, extra.clone());
+            }
             let f = call.get("function");
             let name = f.and_then(|f| f.get("name")).and_then(Value::as_str);
             if !self.started.contains(&index) {
@@ -460,6 +540,7 @@ impl ChunkParser {
                     continue; // arguments before a name: nothing to attach them to
                 };
                 self.started.insert(index);
+                self.call_pos.insert(index, self.call_pos.len());
                 out.push(StreamEvent::ToolCallStart {
                     index,
                     id: call
@@ -527,8 +608,8 @@ pub(crate) fn llama_cpp_window(props: &Value) -> Option<u32> {
         .filter(|&n| n > 0)
 }
 
-/// Parse a `/models` response. Context sizes go by different names per server.
-pub(crate) fn parse_models(body: &Value) -> Vec<DiscoveredModel> {
+/// Parse a `/models` response with dialect-specific model id normalization.
+pub(crate) fn parse_models_for(body: &Value, dialect: Dialect) -> Vec<DiscoveredModel> {
     let list = body
         .get("data")
         .or_else(|| body.get("models"))
@@ -544,12 +625,17 @@ pub(crate) fn parse_models(body: &Value) -> Vec<DiscoveredModel> {
         // A ChatGPT sign-in's list marks the models it doesn't offer.
         .filter(|m| m["visibility"].as_str().is_none_or(|v| v == "list"))
         .filter_map(|m| {
-            let id = m
+            let raw_id = m
                 .get("id")
                 .or_else(|| m.get("slug"))
                 .or_else(|| m.get("name"))?
-                .as_str()?
-                .to_owned();
+                .as_str()?;
+            let id = if dialect == Dialect::Google {
+                raw_id.strip_prefix("models/").unwrap_or(raw_id)
+            } else {
+                raw_id
+            }
+            .to_owned();
             Some(DiscoveredModel {
                 id,
                 context_window: num(
@@ -613,6 +699,10 @@ fn pricing(p: &Value) -> Option<Cost> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_models(body: &Value) -> Vec<DiscoveredModel> {
+        parse_models_for(body, Dialect::Standard)
+    }
     use crate::types::{ResponseBuilder, ToolCall, ToolSpec};
     use quack_config::provider::Sampling;
 
@@ -1035,5 +1125,113 @@ mod tests {
         assert_eq!(models[0].max_output, Some(10));
         assert_eq!(models[1].context_window, Some(32768));
         assert_eq!(models[2].context_window, None);
+    }
+
+    #[test]
+    fn google_dialect_models_thought_signature_and_fallback() {
+        assert_eq!(
+            Dialect::of("https://generativelanguage.googleapis.com/v1beta/openai"),
+            Dialect::Google
+        );
+        let models = parse_models_for(
+            &json!({"data": [
+                {"id": "models/gemini-4-carbon"},
+                {"id": "gemini-3.8-flash"}
+            ]}),
+            Dialect::Google,
+        );
+        assert_eq!(models[0].id, "gemini-4-carbon");
+        assert_eq!(models[1].id, "gemini-3.8-flash");
+
+        // Parallel tool calls: Gemini attaches thought_signature to the first call only.
+        let chunks = [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","type":"function","function":{"name":"read","arguments":"{\"path\":\"a\"}"},"extra_content":{"google":{"thought_signature":"sig-abc"}}},{"index":1,"id":"c1","type":"function","function":{"name":"read","arguments":"{\"path\":\"b\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ];
+        let mut parser = ChunkParser::new(ReasoningFormat::Auto);
+        let mut b = ResponseBuilder::default();
+        for c in chunks {
+            for ev in parser.parse(c).expect("chunk") {
+                b.push(&ev);
+            }
+        }
+        for ev in parser.finish() {
+            b.push(&ev);
+        }
+        let msg = b.into_message();
+        let req = ChatRequest {
+            model: "gemini-4-carbon".into(),
+            messages: vec![
+                Message::User {
+                    content: "read a and b".into(),
+                    images: Vec::new(),
+                },
+                msg.clone(),
+                Message::Tool {
+                    call_id: "c0".into(),
+                    content: "A".into(),
+                    images: Vec::new(),
+                },
+                Message::Tool {
+                    call_id: "c1".into(),
+                    content: "B".into(),
+                    images: Vec::new(),
+                },
+            ],
+            ..ChatRequest::default()
+        };
+        let body = build_body(&req, Dialect::Google);
+        let calls = &body["messages"][1]["tool_calls"];
+        assert_eq!(
+            calls[0]["extra_content"]["google"]["thought_signature"],
+            "sig-abc"
+        );
+        assert!(calls[1].get("extra_content").is_none());
+
+        // After `/resume` or compaction (`sealed = None`), inject the documented skip sentinel
+        // on the first tool call for Google, and nowhere for standard providers.
+        let mut unsealed_req = req.clone();
+        if let Message::Assistant { sealed, .. } = &mut unsealed_req.messages[1] {
+            *sealed = None;
+        }
+        let resumed_google = build_body(&unsealed_req, Dialect::Google);
+        assert_eq!(
+            resumed_google["messages"][1]["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+            "skip_thought_signature_validator"
+        );
+        assert!(
+            resumed_google["messages"][1]["tool_calls"][1]
+                .get("extra_content")
+                .is_none()
+        );
+        let resumed_std = build_body(&unsealed_req, Dialect::Standard);
+        assert!(
+            resumed_std["messages"][1]["tool_calls"][0]
+                .get("extra_content")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cohere_and_google_omit_unsupported_fields() {
+        assert_eq!(
+            Dialect::of("https://api.cohere.ai/compatibility/v1"),
+            Dialect::Cohere
+        );
+        let mut req = ChatRequest::default();
+        req.sampling.top_k = Some(20);
+        req.sampling.min_p = Some(0.05);
+        req.sampling.repetition_penalty = Some(1.1);
+
+        let cohere = build_body(&req, Dialect::Cohere);
+        assert!(cohere.get("stream_options").is_none());
+        assert!(cohere.get("top_k").is_none());
+        assert!(cohere.get("min_p").is_none());
+        assert!(cohere.get("repetition_penalty").is_none());
+
+        let google = build_body(&req, Dialect::Google);
+        assert_eq!(google["stream_options"]["include_usage"], true);
+        assert!(google.get("top_k").is_none());
+        assert!(google.get("min_p").is_none());
+        assert!(google.get("repetition_penalty").is_none());
     }
 }

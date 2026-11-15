@@ -1,0 +1,18 @@
+#:schema ../schemas/provider.json
+# MiniMax's OpenAI-compatible API.
+# Not contacted until MINIMAX_API_KEY is set or `quack setup` stores a key.
+name = "MiniMax"
+group = "From the model makers"
+base_url = "https://api.minimax.io/v1"
+catalog = "minimax"
+api_key = { env = "MINIMAX_API_KEY" }
+
+[[models]]
+id = "MiniMax-M3"
+context_window = 1000000
+reasoning = { efforts = ["low", "medium", "high"] }
+
+[[models]]
+id = "MiniMax-M3.1-Flash"
+context_window = 1000000
+reasoning = { efforts = ["low", "medium", "high"] }

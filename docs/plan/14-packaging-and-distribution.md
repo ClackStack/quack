@@ -235,7 +235,7 @@ cargo build --release --locked --offline \
 
 - `LICENSE` (Apache-2.0) and a `NOTICE` that lists ported code: codex (Apache-2.0) for apply_patch, sandbox and execpolicy pieces; maki (MIT) for whatever we port; goose (Apache-2.0).
 - Ported files keep their original copyright header and add ours.
-- `cargo-deny` allowlist: Apache-2.0, MIT, BSD-2/3, ISC, Zlib, Unicode-3.0, MPL-2.0 (file-level, review case by case). **No** GPL/AGPL in the dependency graph, so enterprises can redistribute.
+- `cargo-deny` allowlist: Apache-2.0, MIT, BSD-2/3, ISC, Zlib, Unicode-3.0, CDLA-Permissive-2.0, and MPL-2.0 (file-level weak copyleft; unmodified crates permitted in distributed binaries). **No** GPL/AGPL in the dependency graph, so enterprises can redistribute.
 - Default profiles: provenance field required, permissive sources only ([03](03-model-profiles.md)).
 - Tokenizer files bundled in defaults: each one keeps its model's licence file alongside it. If redistribution isn't allowed, it is not bundled and `quack tokenizer fetch` is documented instead.
 

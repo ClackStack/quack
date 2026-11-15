@@ -12,20 +12,25 @@ api_key = { env = "KIMI_API_KEY" }
 # https://platform.kimi.ai/docs/guide/use-reasoning-effort
 [[models]]
 id = "k3"
+vision = true
 reasoning = { effort = "max", efforts = ["none", "low", "high", "max"] }
 
 [[models]]
 id = "k3-256k"
+vision = true
 reasoning = { effort = "max", efforts = ["none", "low", "high", "max"] }
 
 [[models]]
 id = "kimi-for-coding"
+vision = true
 reasoning = { effort = "max", efforts = ["none", "low", "high", "max"] }
 
 [[models]]
 id = "k3.1-pro"
+vision = true
 reasoning = { effort = "max", efforts = ["low", "high", "max"] }
 
 [[models]]
 id = "k3.1-pro-highspeed"
+vision = true
 reasoning = { effort = "max", efforts = ["low", "high", "max"] }

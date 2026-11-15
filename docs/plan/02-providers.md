@@ -228,12 +228,12 @@ Unknown keys are an error (`deny_unknown_fields`), except inside `extra_body` an
 
 Startup lists models when `enabled` is set, when no models are listed, or when the model to use is not listed or lacks `context_window` or `cost` (2026-10-24: before, an unlisted model in a provider with any `[[models]]` got neither, so evals on it went unpriced). A failed listing warns unless only the price was missing. The `/models` picker always lists. When discovery is enabled, `/models` results are merged with `[[models]]`. Declared entries win per field. Discovered-only models get `context_window` from the response when the server reports it (vLLM reports `max_model_len`, llama.cpp reports `n_ctx` via `/props`). Otherwise they are marked *unknown context*, and the UI asks for a value the first time the model is used, then writes it back into the TOML with `toml_edit`.
 
-### Model catalog (2026-11-04)
+### Model catalog (updated 2026-11-14)
 
 For prices and context windows nothing else reports. Precedence per field: the provider file, the models endpoint, the downloaded catalog, the bundle's snapshot (`quack_config::catalog`). `/models` shows the result, with a `price` line.
 
-- The snapshot is `defaults/catalog.json`, a cut-down copy of models.dev (MIT) for the bundle's providers: 772 models in 83 KB on 2026-11-04. `scripts/update-catalog.sh` regenerates it; run it before a release and read the diff. It is data in the bundle, not compiled in and not fetched by `build.rs`, so air-gapped builds and the no-built-ins rule hold.
-- models.dev rather than Catwalk: it has all 14 hosted providers in the bundle (Catwalk has 9, and not Charm Hyper) and one schema to read.
+- The snapshot is `defaults/catalog.json`, a cut-down copy of models.dev (MIT) for the bundle's providers: 1,809 models across 33 catalog providers in 187 KB on 2026-11-14. `scripts/update-catalog.sh` regenerates it; run it before a release and read the diff. It is data in the bundle, not compiled in and not fetched by `build.rs`, so air-gapped builds and the no-built-ins rule hold.
+- models.dev rather than Catwalk: it covers 33 of the 35 hosted providers in the bundle under one schema to read.
 - `quack catalog refresh` downloads `catalog.url` to the cache directory, keeping the configured providers; `catalog.refresh = true` does this in the background at most once a day, with the ETag. A new catalog applies from the next session. A bad download leaves the old file.
 - Entries the parser can't use are skipped, so one odd model doesn't lose the feed. Model ids match exactly, because a wrong price is worse than none.
 - `catalog` in a provider file names its catalog id where it differs (`fireworks-ai`); unset means the provider's id, except for a server on this machine, which serves its own window. `catalog = ""` turns it off.
@@ -363,8 +363,11 @@ The defaults bundle ships one small file per engine and service (`name`, `base_u
 | vLLM | `127.0.0.1:8000/v1` | `--enable-auto-tool-choice --tool-call-parser <parser>` |
 | LM Studio | `127.0.0.1:1234/v1` | — |
 | SGLang | `127.0.0.1:30000/v1` | `--tool-call-parser <parser>` |
+| Docker Model Runner | `127.0.0.1:12434/engines/v1` | Enable TCP host support |
 
-The hosted services come in two groups: open-model services (OpenRouter, Synthetic, Charm Hyper, Together, Fireworks, DeepInfra, Novita) and the model makers' own APIs and coding plans (Mistral, including Vibe plan keys; Kimi Code plan; Moonshot; Z.ai API; DeepSeek). Coding-plan keys only work on their plan's endpoint, so Kimi appears twice. The Z.ai GLM Coding Plan is left out: Z.ai's terms allow it only in their listed tools (https://docs.z.ai/devpack/tool/others). DeepSeek has no separate coding plan.
+The hosted services come in three groups: proprietary models (Anthropic, OpenAI, ChatGPT plan, Google Gemini, xAI, Cohere), open-model services & gateways (OpenRouter, Groq, Cerebras, Together, Fireworks, DeepInfra, Novita, Nebius, Baseten, Chutes, Hugging Face, NVIDIA NIM, SambaNova, SiliconFlow, Hyperbolic, Scaleway, Venice, Synthetic, Charm Hyper, Vercel AI Gateway, OpenCode Zen, GitHub Models), and the open-weight model makers' own APIs and coding plans (Alibaba Cloud Qwen, DeepSeek, Mistral including Vibe plan keys, Kimi Code plan, Moonshot, Z.ai API, MiniMax, Xiaomi MiMo). Coding-plan keys only work on their plan's endpoint, so Kimi appears twice. The Z.ai GLM Coding Plan is left out: Z.ai's terms allow it only in their listed tools (https://docs.z.ai/devpack/tool/others). DeepSeek has no separate coding plan. Claude Pro/Max stays excluded per Anthropic policy, and cloud-IAM/per-resource APIs (AWS Bedrock, Google Vertex AI, Azure OpenAI) are left out until SigV4 / ADC / per-deployment config is added.
+
+Google Gemini (`generativelanguage.googleapis.com/v1beta/openai`) and Cohere (`api.cohere.ai/compatibility/v1`) are handled via `Dialect` variants in `openai_chat.rs`: `Dialect::Google` strips `/models` `models/` prefixes, preserves `extra_content.google.thought_signature` per tool call via `Sealed` (falling back to Google's documented `skip_thought_signature_validator` sentinel when unsealed after `/resume` or compaction), and omits local-only sampling fields; `Dialect::Cohere` omits `stream_options` and local-only sampling fields.
 
 How the bundled providers behave:
 

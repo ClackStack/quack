@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# Hugging Face Inference Providers router.
+# Not contacted until HF_TOKEN is set or `quack setup` stores a key.
+name = "Hugging Face"
+group = "Open-model services"
+base_url = "https://router.huggingface.co/v1"
+catalog = "huggingface"
+api_key = { env = "HF_TOKEN" }

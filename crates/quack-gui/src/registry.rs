@@ -139,7 +139,8 @@ pub type Loader = Arc<dyn Fn(LoadOptions) -> Result<quack_config::Loaded, String
 struct Tab {
     session: watch::Receiver<Option<SessionId>>,
     cwd: PathBuf,
-    workspace: PathBuf,
+    root: PathBuf,
+    workspace_key: PathBuf,
     history_path: Arc<std::sync::RwLock<PathBuf>>,
     ops: mpsc::Sender<Op>,
     stop: watch::Sender<bool>,
@@ -312,7 +313,7 @@ impl Registry {
                 if let Some((&id, tab)) = tabs
                     .entries
                     .iter()
-                    .find(|(_, tab)| tab.workspace == workspace)
+                    .find(|(_, tab)| tab.workspace_key == workspace)
                 {
                     if !*tab.stop.borrow() {
                         return Err(OpenError::AlreadyOpen { tab: id });
@@ -321,8 +322,15 @@ impl Registry {
                 } else {
                     let id = tabs.next;
                     tabs.next += 1;
-                    let (tab, started) =
-                        spawn_tab(id, Arc::new(loaded), resume, sink, cwd.clone(), workspace);
+                    let (tab, started) = spawn_tab(
+                        id,
+                        Arc::new(loaded),
+                        resume,
+                        sink,
+                        cwd.clone(),
+                        recent_root.clone(),
+                        workspace,
+                    );
                     tabs.entries.insert(id, tab.clone());
                     break (id, tab, started);
                 }
@@ -540,8 +548,8 @@ impl Registry {
 }
 
 fn tab_root(tab: &Tab) -> PathBuf {
-    if tab.workspace.is_dir() {
-        tab.workspace.clone()
+    if tab.root.is_dir() {
+        tab.root.clone()
     } else {
         tab.cwd.clone()
     }
@@ -568,7 +576,8 @@ fn spawn_tab(
     resume: Resume,
     sink: Arc<dyn Sink>,
     cwd: PathBuf,
-    workspace: PathBuf,
+    root: PathBuf,
+    workspace_key: PathBuf,
 ) -> (Arc<Tab>, oneshot::Receiver<Result<(), String>>) {
     let (ops, ops_rx) = mpsc::channel(16);
     let (stop, stop_rx) = watch::channel(false);
@@ -579,7 +588,8 @@ fn spawn_tab(
     let tab = Arc::new(Tab {
         session: session_rx,
         cwd,
-        workspace,
+        root,
+        workspace_key,
         history_path: Arc::clone(&history_path),
         ops,
         stop,

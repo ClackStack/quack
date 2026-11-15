@@ -17,10 +17,12 @@ reasoning = { effort = "max", efforts = ["low", "high", "max"] }
 
 [[models]]
 id = "glm-5.3-flash"
+vision = true
 reasoning = { effort = "max", efforts = ["low", "high", "max"] }
 
 [[models]]
 id = "glm-5.3-flashx"
+vision = true
 reasoning = { effort = "max", efforts = ["low", "high", "max"] }
 
 [[models]]

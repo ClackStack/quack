@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# Chutes: decentralized inference for open models.
+# Not contacted until CHUTES_API_KEY is set or `quack setup` stores a key.
+name = "Chutes"
+group = "Open-model services"
+base_url = "https://llm.chutes.ai/v1"
+catalog = "chutes"
+api_key = { env = "CHUTES_API_KEY" }

@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# Vercel AI Gateway: many models behind one key.
+# Not contacted until AI_GATEWAY_API_KEY is set or `quack setup` stores a key.
+name = "Vercel AI Gateway"
+group = "Open-model services"
+base_url = "https://ai-gateway.vercel.sh/v1"
+catalog = "vercel"
+api_key = { env = "AI_GATEWAY_API_KEY" }

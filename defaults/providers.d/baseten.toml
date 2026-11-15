@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# Baseten: hosted open models.
+# Not contacted until BASETEN_API_KEY is set or `quack setup` stores a key.
+name = "Baseten"
+group = "Open-model services"
+base_url = "https://inference.baseten.co/v1"
+catalog = "baseten"
+api_key = { env = "BASETEN_API_KEY" }

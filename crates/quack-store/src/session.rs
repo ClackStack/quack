@@ -9,6 +9,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -144,6 +146,7 @@ impl ProjectSessions {
 
 const MAX_HISTORY: usize = 100;
 static HISTORY_SEQ: AtomicU64 = AtomicU64::new(0);
+static HISTORY_LOCK: Mutex<()> = Mutex::new(());
 
 /// Load prompt history from a `history.jsonl` file, oldest first.
 pub fn load_history_file(path: &Path) -> Vec<String> {
@@ -169,6 +172,9 @@ pub fn append_history_file(path: &Path, text: &str) -> std::io::Result<()> {
     if text.trim().is_empty() {
         return Ok(());
     }
+    // Serialize in-process updates so Windows NTFS does not collide on concurrent renames
+    // and concurrent threads do not drop entries.
+    let _guard = HISTORY_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let mut all = load_history_file(path);
     if all.last().map(String::as_str) == Some(text) {
         return Ok(());
@@ -190,10 +196,24 @@ pub fn append_history_file(path: &Path, text: &str) -> std::io::Result<()> {
     let seq = HISTORY_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = path.with_extension(format!("jsonl.{}.{seq}.tmp", std::process::id()));
     std::fs::write(&tmp, buf)
-        .and_then(|()| std::fs::rename(&tmp, path))
+        .and_then(|()| rename_replacing(&tmp, path))
         .inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp);
         })
+}
+
+fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    for attempt in 0..5u64 {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            // On Windows, a concurrent external reader can briefly cause `PermissionDenied`.
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                std::thread::sleep(Duration::from_millis(2 * (attempt + 1)));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    std::fs::rename(from, to)
 }
 
 /// A parsed log line.

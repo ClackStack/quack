@@ -305,7 +305,9 @@ async fn send_op_rejects_garbage_and_unknown_tabs() {
 async fn opens_without_a_ready_model_even_when_latest_was_requested() {
     let server = MockServer::start().await;
     let tmp = tempfile::tempdir().expect("tempdir");
-    let loaded = common::workspace(tmp.path(), &server.uri());
+    let mut loaded = common::workspace(tmp.path(), &server.uri());
+    // Isolate startup-warning checks from the unsandboxed-OS notice (e.g. Windows).
+    loaded.settings.sandbox.mode = quack_config::settings::SandboxMode::Off;
     std::fs::remove_file(
         tmp.path()
             .join("user")
@@ -809,7 +811,9 @@ async fn opening_new_project_with_latest_emits_no_warning() {
         .mount(&server)
         .await;
     let tmp = tempfile::tempdir().expect("tempdir");
-    let loaded = common::workspace(tmp.path(), &server.uri());
+    let mut loaded = common::workspace(tmp.path(), &server.uri());
+    // Isolate startup-warning checks from the unsandboxed-OS notice (e.g. Windows).
+    loaded.settings.sandbox.mode = quack_config::settings::SandboxMode::Off;
     let registry = Registry::with_parts(fixed_loader(loaded), tmp.path().join("gui-data"));
     let (sink, mut rx) = collecting_sink();
     let tab = registry

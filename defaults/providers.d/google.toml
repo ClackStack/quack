@@ -1,0 +1,43 @@
+#:schema ../schemas/provider.json
+# Google Gemini API (OpenAI-compatible endpoint).
+# Not contacted until GEMINI_API_KEY is set or `quack setup` stores a key.
+name = "Google Gemini"
+group = "Proprietary models"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+catalog = "google"
+api_key = { env = "GEMINI_API_KEY" }
+
+# Gemini 3/4 models always think (`none` is not accepted) and support
+# `low`/`medium`/`high`, with `xhigh` on Hydrogen. Prices and windows also come
+# from the `google` catalog.
+[[models]]
+id = "gemini-4-carbon"
+alias = "carbon"
+context_window = 1048576
+max_output = 65536
+vision = true
+reasoning = { effort = "medium", efforts = ["low", "medium", "high"] }
+
+[[models]]
+id = "gemini-4-argon"
+alias = "argon"
+context_window = 1048576
+max_output = 65536
+vision = true
+reasoning = { effort = "medium", efforts = ["low", "medium", "high"] }
+
+[[models]]
+id = "gemini-4-hydrogen"
+alias = "hydrogen"
+context_window = 1048576
+max_output = 65536
+vision = true
+reasoning = { effort = "high", efforts = ["low", "medium", "high", "xhigh"] }
+
+[[models]]
+id = "gemini-3.8-flash"
+alias = "gemini-flash"
+context_window = 1048576
+max_output = 65536
+vision = true
+reasoning = { effort = "medium", efforts = ["low", "medium", "high"] }

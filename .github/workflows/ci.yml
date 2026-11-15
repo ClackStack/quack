@@ -24,7 +24,7 @@ jobs:
           - { name: windows-arm64, os: windows-11-arm }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # rust-toolchain.toml pins the version; this installs it.
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -55,10 +55,10 @@ jobs:
     env:
       MODELS_DIR: ${{ github.workspace }}/.ci-models
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .ci-models
           # Bump when the model or image pins in scripts/local-server-ci.sh change.
@@ -81,10 +81,10 @@ jobs:
           - { name: windows-11-arm, os: windows-11-arm }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - name: install pnpm
@@ -113,7 +113,7 @@ jobs:
   msrv:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: read rust-version
         id: msrv
         run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
@@ -124,5 +124,5 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2

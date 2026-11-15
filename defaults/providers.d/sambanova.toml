@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# SambaNova Cloud: hosted open models.
+# Not contacted until SAMBANOVA_API_KEY is set or `quack setup` stores a key.
+name = "SambaNova"
+group = "Open-model services"
+base_url = "https://api.sambanova.ai/v1"
+catalog = "sambanova"
+api_key = { env = "SAMBANOVA_API_KEY" }

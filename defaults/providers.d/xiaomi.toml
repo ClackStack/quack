@@ -1,0 +1,17 @@
+#:schema ../schemas/provider.json
+# Xiaomi MiMo Open Platform.
+# Not contacted until MIMO_API_KEY is set or `quack setup` stores a key.
+name = "Xiaomi (MiMo)"
+group = "From the model makers"
+base_url = "https://api.xiaomimimo.com/v1"
+catalog = "xiaomi"
+api_key = { env = "MIMO_API_KEY" }
+
+[[models]]
+id = "mimo-v2.6-pro"
+
+[[models]]
+id = "mimo-v2.6-pro-ultraspeed"
+
+[[models]]
+id = "mimo-v2.6-flash"

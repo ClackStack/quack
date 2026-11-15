@@ -61,7 +61,9 @@ fn workspace_with_provider(root: &Path, provider_toml: Option<&str>) -> Loaded {
     load_with(&move |k| vars.get(k).cloned(), &LoadOptions::new(ws)).expect("load")
 }
 
-async fn collect_startup(loaded: Loaded, resume: Resume) -> (bool, Vec<String>) {
+async fn collect_startup(mut loaded: Loaded, resume: Resume) -> (bool, Vec<String>) {
+    // Isolate resume-warning checks from the unsandboxed-OS startup notice (e.g. Windows).
+    loaded.settings.sandbox.mode = quack_config::settings::SandboxMode::Off;
     let mut engine = Engine::spawn_with(Arc::new(loaded), resume);
     let mut configured = false;
     let mut warnings = Vec::new();

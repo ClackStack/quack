@@ -203,12 +203,15 @@ pub struct McpRow {
 
 impl AppInfo {
     pub fn from_config(config: &Loaded) -> Self {
-        let root = config.dirs.workspace_root.display().to_string();
-        let home =
-            std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default();
-        let cwd = match root.strip_prefix(&home) {
-            Some(rest) if !home.is_empty() => format!("~{rest}"),
-            _ => root,
+        let cwd = match config
+            .dirs
+            .home
+            .as_deref()
+            .and_then(|home| config.dirs.workspace_root.strip_prefix(home).ok())
+        {
+            Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+            Some(rest) => Path::new("~").join(rest).display().to_string(),
+            None => config.dirs.workspace_root.display().to_string(),
         };
         let permissions = &config.settings.permissions;
         Self {
@@ -637,5 +640,48 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".git")).expect("write .git");
         std::fs::write(dir.path().join(".git/HEAD"), "1a2b3c4d5e6f\n").expect("write HEAD");
         assert_eq!(git_branch(dir.path()).as_deref(), Some("1a2b3c4"));
+    }
+
+    #[test]
+    fn cwd_collapses_only_configured_home_at_component_boundary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("alice");
+        let proj = home.join("dev").join("proj");
+        let sibling = tmp.path().join("alice2").join("proj");
+        std::fs::create_dir_all(&proj).expect("proj");
+        std::fs::create_dir_all(&sibling).expect("sibling");
+
+        let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let load = |ws: &Path, with_home: bool| {
+            let vars = |key: &str| match key {
+                "QUACK_CONFIG_DIR" => Some(tmp.path().join("user").into_os_string()),
+                "QUACK_SYSTEM_DIR" => Some(tmp.path().join("system").into_os_string()),
+                "QUACK_DATA_DIR" => Some(tmp.path().join("data").into_os_string()),
+                "QUACK_CACHE_DIR" => Some(tmp.path().join("cache").into_os_string()),
+                "QUACK_DEFAULTS_DIR" => Some("none".into()),
+                k if with_home && k == home_var => Some(home.clone().into_os_string()),
+                _ => None,
+            };
+            quack_config::load_with(&vars, &quack_config::LoadOptions::new(ws.to_path_buf()))
+                .expect("load")
+        };
+
+        assert_eq!(
+            AppInfo::from_config(&load(&proj, true)).cwd,
+            Path::new("~")
+                .join("dev")
+                .join("proj")
+                .display()
+                .to_string()
+        );
+        assert_eq!(AppInfo::from_config(&load(&home, true)).cwd, "~");
+        assert_eq!(
+            AppInfo::from_config(&load(&sibling, true)).cwd,
+            sibling.display().to_string()
+        );
+        assert_eq!(
+            AppInfo::from_config(&load(&proj, false)).cwd,
+            proj.display().to_string()
+        );
     }
 }

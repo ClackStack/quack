@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# Nebius Token Factory: hosted open models.
+# Not contacted until NEBIUS_API_KEY is set or `quack setup` stores a key.
+name = "Nebius Token Factory"
+group = "Open-model services"
+base_url = "https://api.tokenfactory.nebius.com/v1"
+catalog = "nebius"
+api_key = { env = "NEBIUS_API_KEY" }

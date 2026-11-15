@@ -403,3 +403,68 @@ async fn sealed_replies_go_back_only_where_they_came_from() {
         serde_json::json!({ "type": "adaptive", "display": "omitted" })
     );
 }
+
+#[tokio::test]
+async fn openai_chat_preserves_tool_extra_content_via_sealed() {
+    let server = MockServer::start().await;
+    let first = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"},\"extra_content\":{\"google\":{\"thought_signature\":\"sig-turn-1\"}}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
+    let second = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(first),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(second),
+        )
+        .mount(&server)
+        .await;
+
+    let p = provider(&server, "");
+    let req1 = request();
+    let fp = quack_providers::fingerprint(&req1);
+    let mut rx1 = p.stream(
+        req1.clone(),
+        ReasoningFormat::Auto,
+        CancellationToken::new(),
+    );
+    let mut b = ResponseBuilder::default();
+    while let Some(ev) = rx1.recv().await {
+        b.push(&ev.expect("turn 1"));
+    }
+    let mut assistant = b.into_message();
+    if let Message::Assistant { sealed, .. } = &mut assistant {
+        let sd = sealed.as_mut().expect("sealed tool extra_content");
+        sd.provider = "mock".into();
+        sd.model = "m".into();
+        sd.fingerprint = fp;
+    }
+
+    let mut req2 = req1;
+    req2.messages.push(assistant);
+    req2.messages.push(Message::Tool {
+        call_id: "call_1".into(),
+        content: "done".into(),
+        images: Vec::new(),
+    });
+    let mut rx2 = p.stream(req2, ReasoningFormat::Auto, CancellationToken::new());
+    while let Some(ev) = rx2.recv().await {
+        ev.expect("turn 2");
+    }
+
+    let sent = &server.received_requests().await.expect("requests")[1];
+    let sent: serde_json::Value = serde_json::from_slice(&sent.body).expect("json");
+    assert_eq!(
+        sent["messages"][1]["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+        "sig-turn-1"
+    );
+}

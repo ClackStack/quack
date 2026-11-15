@@ -1,0 +1,5 @@
+#:schema ../schemas/provider.json
+# Docker Model Runner on this machine. Its models are listed while it runs.
+name = "Docker Model Runner"
+base_url = "http://127.0.0.1:12434/engines/v1"
+note = "Enable Docker Desktop Model Runner (TCP host support) or use `docker model`."

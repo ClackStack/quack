@@ -189,21 +189,45 @@ mod tests {
     fn touch_moves_to_front_and_deduplicates() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut recent = RecentFolders::at(dir.path().to_path_buf());
-        recent.touch(PathBuf::from("/a"));
-        recent.touch(PathBuf::from("/b"));
-        recent.touch(PathBuf::from("/a"));
+        let a = if cfg!(windows) { r"C:\a" } else { "/a" };
+        let b = if cfg!(windows) { r"C:\b" } else { "/b" };
+        recent.touch(PathBuf::from(a));
+        recent.touch(PathBuf::from(b));
+        recent.touch(PathBuf::from(a));
         let names: Vec<String> = recent.list(10).into_iter().map(|e| e.path).collect();
-        assert_eq!(names, vec!["/a", "/b"]);
+        assert_eq!(names, vec![a, b]);
     }
 
     #[test]
     fn list_respects_the_limit() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut recent = RecentFolders::at(dir.path().to_path_buf());
+        let prefix = if cfg!(windows) { r"C:\" } else { "/" };
         for i in 0..5 {
-            recent.touch(PathBuf::from(format!("/{i}")));
+            recent.touch(PathBuf::from(format!("{prefix}{i}")));
         }
         assert_eq!(recent.list(2).len(), 2);
+    }
+
+    #[test]
+    fn normalizes_separators_and_case_duplicates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut recent = RecentFolders::at(dir.path().to_path_buf());
+        let (first, second, expected) = if cfg!(windows) {
+            ("C:/Dev/Repo/", r"c:\dev\repo", r"c:\dev\repo")
+        } else if cfg!(target_os = "macos") {
+            (
+                "/Users/Alice/Repo/",
+                "/users/alice/repo",
+                "/users/alice/repo",
+            )
+        } else {
+            ("/tmp/Dev/Repo/", "/tmp/Dev/Repo", "/tmp/Dev/Repo")
+        };
+        recent.touch(PathBuf::from(first));
+        recent.touch(PathBuf::from(second));
+        let names: Vec<String> = recent.list(10).into_iter().map(|e| e.path).collect();
+        assert_eq!(names, vec![expected]);
     }
 
     #[test]

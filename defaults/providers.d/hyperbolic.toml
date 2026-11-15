@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# Hyperbolic: hosted open models.
+# Not contacted until HYPERBOLIC_API_KEY is set or `quack setup` stores a key.
+name = "Hyperbolic"
+group = "Open-model services"
+base_url = "https://api.hyperbolic.xyz/v1"
+catalog = "hyperbolic"
+api_key = { env = "HYPERBOLIC_API_KEY" }

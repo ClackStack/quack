@@ -6,10 +6,10 @@ server address, so deleting a file here removes that provider completely.
 
 | Files | Contacted when |
 |---|---|
-| `ollama`, `llama-cpp`, `vllm`, `lmstudio`, `sglang` (127.0.0.1) | Listing models, `doctor`, or startup with no default model. Only this machine |
-| Open-model services: `openrouter`, `synthetic`, `charm-hyper`, `together`, `fireworks`, `deepinfra`, `novita` | Only once the key is set (the variable in the file, or `quack setup` stores one) |
-| Model makers: `mistral`, `kimi-code`, `moonshot`, `zai`, `deepseek` | Same |
-| Proprietary models: `anthropic`, `openai` | Same |
+| `ollama`, `llama-cpp`, `vllm`, `lmstudio`, `sglang`, `docker-model-runner` (127.0.0.1) | Listing models, `doctor`, or startup with no default model. Only this machine |
+| Open-model services & gateways: `openrouter`, `groq`, `cerebras`, `together`, `fireworks`, `deepinfra`, `novita`, `nebius`, `baseten`, `chutes`, `huggingface`, `nvidia`, `sambanova`, `siliconflow`, `hyperbolic`, `scaleway`, `venice`, `synthetic`, `charm-hyper`, `vercel`, `opencode`, `github-models` | Only once the key is set (the variable in the file, or `quack setup` stores one) |
+| Model makers: `mistral`, `kimi-code`, `moonshot`, `zai`, `deepseek`, `alibaba`, `minimax`, `xiaomi` | Same |
+| Proprietary models: `anthropic`, `openai`, `google`, `xai`, `cohere` | Same |
 | `chatgpt` (a ChatGPT plan) | Only after `quack login chatgpt`. Its sign-in server, `auth.openai.com`, is contacted by `quack login`, `quack logout`, and to renew the token while it is in use |
 
 There is no file for a Claude subscription (Pro, Max): Anthropic allows its sign-in only

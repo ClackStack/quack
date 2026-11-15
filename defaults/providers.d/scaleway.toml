@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# Scaleway Generative APIs.
+# Not contacted until SCW_SECRET_KEY is set or `quack setup` stores a key.
+name = "Scaleway"
+group = "Open-model services"
+base_url = "https://api.scaleway.ai/v1"
+catalog = "scaleway"
+api_key = { env = "SCW_SECRET_KEY" }

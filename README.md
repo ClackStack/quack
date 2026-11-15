@@ -8,9 +8,9 @@
 ```
 
 A fast, terminal-native coding agent designed for open-weight models. Run it with local servers
-(**llama.cpp, Ollama, vLLM, SGLang, LM Studio**) or hosted open-model services (**OpenRouter,
-DeepSeek, Fireworks, Together, Moonshot, Mistral, and more**). It also works with Claude and
-OpenAI APIs or ChatGPT accounts.
+(**llama.cpp, Ollama, vLLM, SGLang, LM Studio, Docker Model Runner**) or hosted services (**OpenRouter,
+Groq, Cerebras, DeepSeek, Fireworks, Together, Alibaba Cloud, Google Gemini, xAI, and more**). It
+also works with Claude and OpenAI APIs or ChatGPT accounts.
 
 Written in Rust with a full-screen Ratatui UI, quack delivers sub-10ms startup, OS-level
 sandboxing, AST-aware command security, Tree-sitter syntax validation, and background LSP code
@@ -47,7 +47,7 @@ quack-gui  # desktop app
 ```
 
 On first launch, the interactive `/setup` wizard helps you configure a model in seconds:
-- **Local servers**: Automatically detects running instances of Ollama, llama.cpp, vLLM, or LM Studio.
+- **Local servers**: Automatically detects running instances of Ollama, llama.cpp, vLLM, LM Studio, SGLang, or Docker Model Runner.
 - **Hosted providers**: Configure API keys for OpenRouter, DeepSeek, Fireworks, and others (securely saved in your OS keyring; on headless Linux such as WSL, where no Secret Service runs, in a file only your user can read instead). Setup writes only a minimal override to your config, so new models a quack update brings in the defaults bundle reach you on their own; if your own file pins a model list that has moved on, `quack doctor` says so.
 - **Subscriptions**: In **Hosted services**, choose **ChatGPT plan** to sign in through your browser, allow plan usage, and pick a model. This also works in `quack setup`; `quack login chatgpt` remains available for standalone sign-in.
 - **Custom endpoints**: Connect any OpenAI-compatible server URL.
@@ -104,7 +104,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 
 ### Models & Reasoning
 
-- **Local and hosted engines**: Works with local servers (Ollama, llama.cpp, vLLM, SGLang, LM Studio) and 12+ hosted providers (OpenRouter, Fireworks, Together, DeepInfra, Novita, DeepSeek, Moonshot, Kimi, Mistral, Charm Hyper), plus Anthropic and OpenAI APIs.
+- **Local and hosted engines**: Works with local servers (Ollama, llama.cpp, vLLM, SGLang, LM Studio, Docker Model Runner) and 30+ hosted providers (Anthropic, OpenAI, Google Gemini, xAI, Cohere, OpenRouter, Groq, Cerebras, Fireworks, Together, DeepInfra, Novita, Nebius, Baseten, Hugging Face, NVIDIA NIM, SambaNova, SiliconFlow, Alibaba Cloud, DeepSeek, Moonshot, Kimi, Z.ai, MiniMax, Xiaomi MiMo, Mistral, Vercel AI Gateway, OpenCode Zen, GitHub Models, Venice, Hyperbolic, Scaleway, Synthetic, Charm Hyper).
 - **Thinking and reasoning models**: `/thinking` picks the active model's supported effort level; `/thinking high` sets it directly and `/thinking default` restores its configured default. The toolbar and sidebar show the level beside the model, and each model's selection survives reload, session resume and restarts. `Ctrl-T` or `/thinking show|hide` controls the reasoning display. Reasoning tokens are preserved across tool steps as required by DeepSeek, Kimi, MiniMax, GLM, Claude, and OpenAI.
 - **Tool-call repair**: Automatically parses and heals calls returned as text or markup (Hermes, Qwen-XML, GLM, DeepSeek, Kimi formats), recovers loose arguments, and deduplicates call IDs.
 - **Guided decoding**: Enforces schema-guided grammar decoding (`ToolCallMode::Grammar`) on supported local engines to eliminate JSON malformations.

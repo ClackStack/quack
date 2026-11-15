@@ -1,0 +1,33 @@
+#:schema ../schemas/provider.json
+# xAI's API (Grok models via the Responses endpoint).
+# Not contacted until XAI_API_KEY is set or `quack setup` stores a key.
+name = "xAI"
+group = "Proprietary models"
+api = "openai-responses"
+base_url = "https://api.x.ai/v1"
+catalog = "xai"
+api_key = { env = "XAI_API_KEY" }
+
+# Discovery via `/models` and the `xai` catalog fill in windows, prices, and
+# the rest of the lineup.
+[[models]]
+id = "grok-4.7"
+alias = "grok"
+context_window = 500000
+vision = true
+reasoning = { effort = "high", efforts = ["low", "medium", "high", "xhigh"] }
+
+[[models]]
+id = "grok-4.6"
+context_window = 500000
+vision = true
+reasoning = { effort = "high", efforts = ["low", "medium", "high"] }
+
+[[models]]
+id = "grok-4.20-0309-reasoning"
+context_window = 1000000
+vision = true
+
+[[models]]
+id = "grok-build-0.1"
+context_window = 256000

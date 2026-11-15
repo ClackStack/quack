@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# OpenCode Zen: hosted coding models.
+# Not contacted until OPENCODE_API_KEY is set or `quack setup` stores a key.
+name = "OpenCode Zen"
+group = "Open-model services"
+base_url = "https://opencode.ai/zen/v1"
+catalog = "opencode"
+api_key = { env = "OPENCODE_API_KEY" }

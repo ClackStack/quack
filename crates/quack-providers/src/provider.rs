@@ -406,7 +406,8 @@ impl Provider {
         match self.api {
             Api::OpenAiChat => {
                 let body = self.get_json(openai_chat::MODELS_PATH).await?;
-                let mut models = openai_chat::parse_models(&body);
+                let mut models =
+                    openai_chat::parse_models_for(&body, openai_chat::Dialect::of(&self.base_url));
                 // llama-server serves one model with the window it was started with.
                 if let [only] = models.as_mut_slice()
                     && openai_chat::is_llama_cpp(&body)
@@ -422,14 +423,16 @@ impl Provider {
                 Ok(models)
             }
             #[cfg(feature = "proto-openai-responses")]
-            Api::Responses => Ok(openai_chat::parse_models(
+            Api::Responses => Ok(openai_chat::parse_models_for(
                 &self.get_json(openai_chat::MODELS_PATH).await?,
+                openai_chat::Dialect::Standard,
             )),
             #[cfg(feature = "proto-anthropic")]
-            Api::Anthropic => Ok(openai_chat::parse_models(
+            Api::Anthropic => Ok(openai_chat::parse_models_for(
                 &self
                     .get_json(&anthropic::path(&self.base_url, "models"))
                     .await?,
+                openai_chat::Dialect::Standard,
             )),
             #[cfg(feature = "proto-ollama")]
             Api::Ollama => {

@@ -1,0 +1,8 @@
+#:schema ../schemas/provider.json
+# SiliconFlow: hosted open models.
+# Not contacted until SILICONFLOW_API_KEY is set or `quack setup` stores a key.
+name = "SiliconFlow"
+group = "Open-model services"
+base_url = "https://api.siliconflow.com/v1"
+catalog = "siliconflow"
+api_key = { env = "SILICONFLOW_API_KEY" }

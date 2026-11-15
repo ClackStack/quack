@@ -12,12 +12,15 @@ api_key = { env = "MOONSHOT_API_KEY" }
 # https://platform.kimi.ai/docs/guide/use-reasoning-effort
 [[models]]
 id = "kimi-k3"
+vision = true
 reasoning = { effort = "max", efforts = ["low", "high", "max"] }
 
 [[models]]
 id = "kimi-k3.1-pro"
+vision = true
 reasoning = { effort = "max", efforts = ["low", "high", "max"] }
 
 [[models]]
 id = "kimi-k3.1-pro-highspeed"
+vision = true
 reasoning = { effort = "max", efforts = ["low", "high", "max"] }
