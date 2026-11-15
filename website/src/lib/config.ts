@@ -54,10 +54,10 @@ info  network    llm.internal.example · policy allows only
                  llm.internal.example, *.internal.example`;
 
 export const guarantees: [string, string][] = [
-	['Only what the files name', 'No telemetry, update checks or model downloads. A recording-proxy test and a CI run in a loopback-only network namespace check every build.'],
-	['Hosts are a policy, not a hope', 'With `[policy.providers] hosts` set, a provider pointing anywhere else doesn’t load, whoever wrote it: a user, a project or a bundle.'],
-	['Locks hold everywhere', 'User files, a repo’s `.quack/`, environment variables, `-c` and `/config` can’t change a locked key. `QUACK_SYSTEM_DIR` is ignored while the real system folder holds a policy.'],
-	['Commands stay offline too', 'The model’s shell commands run in the OS sandbox with no network on Linux and macOS. Windows has no sandbox yet, so there, `deny` rules are the only control on commands.']
+	['Only what you configure', 'No implicit telemetry, background update checks, or silent model downloads. A recording-proxy test and a loopback-only network namespace check every build, and the Session Egress Ledger logs every outbound request and block live.'],
+	['Hosts and redirects stay in policy', 'When `[policy.providers] hosts` is set, providers pointing anywhere else are rejected regardless of which layer defined them — and cross-host HTTP redirects must pass the same egress gate before following.'],
+	['Locks hold everywhere', 'User files, trusted repo `.quack/` writes (`Ctrl-L` / `/scope`), environment variables, `-c` flags, and `/config` cannot change a locked key such as `[network] secret_guard`. `QUACK_SYSTEM_DIR` is ignored while the system directory holds an active policy.'],
+	['Sandboxed commands & screened prompts', 'Shell commands run inside an OS sandbox with no network on Linux and macOS (on Windows, `deny` rules restrict commands), while Pre-Egress Secret Shield screens outbound prompts, `@` slices, and tool output before sending over HTTP.']
 ];
 
 export const layers: [string, string, string][] = [
@@ -118,10 +118,14 @@ export const reference: Group[] = [
 		title: 'Network',
 		file: 'config.toml [network]',
 		rows: [
-			['offline', 'false', 'Remote MCP servers must be on this machine or in `egress_allow`'],
-			['egress_allow', '[]', 'Host globs allowed while offline'],
-			['proxy', '""', 'Proxy for model requests. Empty: `HTTPS_PROXY` or the system’s'],
-			['ca_bundle', '""', 'PEM file of extra root certificates, for an internal CA']
+			['offline', 'false', 'Block all egress except provider base URLs, loopback and `egress_allow`'],
+			['egress_allow', '[]', 'Host globs allowed while offline (applies to cross-host HTTP redirects too)'],
+			['http1_only', 'false', 'Speak HTTP/1.1 only, one connection per request; try when a VPN or proxy leaves HTTP/2 stale'],
+			['proxy', '""', 'Proxy for model requests. Empty: `HTTPS_PROXY` or the system’s (`NO_PROXY` always direct)'],
+			['ca_bundle', '""', 'PEM file of extra root certificates, for an internal CA'],
+			['secret_guard', '"ask"', 'Pre-egress secret scan: `ask`, `redact`, or `off` (headless falls back from `ask` to `redact`)'],
+			['secret_guard_local', 'false', 'Apply `secret_guard` even when talking to loopback servers (`127.0.0.1` / `localhost`)'],
+			['secret_allowlist', '[]', 'SHA-256 fingerprints (`sha256:…`) trusted to pass without secret-guard prompts']
 		]
 	},
 	{
@@ -148,6 +152,13 @@ export const reference: Group[] = [
 		]
 	},
 	{
+		title: 'Agent',
+		file: 'config.toml [agent]',
+		rows: [
+			['max_steps', '100', 'Model calls before a turn pauses and asks whether to continue (headless stops instead; sub-agents use their own limit)']
+		]
+	},
+	{
 		title: 'Tools',
 		file: 'config.toml [tools]',
 		rows: [
@@ -161,14 +172,25 @@ export const reference: Group[] = [
 		title: 'Interface',
 		file: 'config.toml [ui]',
 		rows: [
-			['theme', '"auto"', '`dark` or `light`'],
+			['theme', '"auto"', '`dark`, `light`, or a theme name from `themes/`'],
 			['show_reasoning', '"collapsed"', '`collapsed`, `expanded` or `hidden`'],
 			['startup_panel', '"auto"', 'Startup diagnostics: in the sidebar until the first turn; on narrow terminals only on problems. `always` or `never`'],
 			['ascii', 'false', 'ASCII instead of box-drawing glyphs'],
 			['mouse', 'true', '`false` leaves the mouse to the terminal'],
 			['reduced_motion', 'false', 'Static indicators instead of spinners'],
 			['terminal_title', 'true', 'Window title shows the duck and the session title. `false`: leave it alone'],
-			['sidebar', 'true', 'Session details on the right at 140 columns × 24 rows and above, growing from 36 up to 48 columns on wider terminals. `false`: use the full width for the conversation']
+			['sidebar', 'true', 'Session details on the right at 140 columns × 24 rows and above, growing from 36 up to 48 columns on wider terminals. `false`: use the full width for the conversation'],
+			['gui_restore_tabs', 'true', 'Restore previously opened workspace tabs when launching `quack-gui`']
+		]
+	},
+	{
+		title: 'Catalog & updates',
+		file: 'config.toml [catalog] / [updates]',
+		rows: [
+			['catalog.refresh', 'false', 'Opt-in daily background refresh of the model catalog snapshot from `catalog.url` (`quack catalog refresh` runs on demand)'],
+			['catalog.url', '""', 'models.dev snapshot URL (defaults bundle sets it; `quack-plucked` leaves it empty)'],
+			['updates.check', 'false', 'Opt-in daily check against `updates.url` for new versions (`quack update` checks on demand)'],
+			['updates.url', '""', 'Release redirect URL (defaults bundle sets GitHub releases; `quack-plucked` leaves it empty)']
 		]
 	},
 	{
@@ -201,6 +223,8 @@ export const reference: Group[] = [
 			['extra_body', '{}', 'Merged into every request'],
 			['tls.ca_file', 'none', 'An extra CA for this server'],
 			['tls.client_cert / client_key', 'none', 'Mutual TLS'],
+			['http.timeout_connect_secs', '30', 'TCP connect, proxy handshake and TLS timeout across addresses'],
+			['http.timeout_first_byte_secs', '0', 'Wait for response headers before retrying (`0`: use `timeout_idle_secs`)'],
 			['http.timeout_idle_secs', '300', 'How long the stream may go quiet'],
 			['http.max_retries', '3', 'Retries, honouring `Retry-After`'],
 			['http.proxy', '""', 'A proxy for this provider only']
@@ -216,7 +240,8 @@ export const reference: Group[] = [
 			['vision', 'false', 'Offer images to the model'],
 			['tool_calling.mode', '"native"', '`native`, `text` or `grammar` (schema-guided decoding)'],
 			['tool_calling.text_format', '"auto"', '`hermes`, `qwen3-xml`, `glm`, `json-block`, `deepseek` or `kimi`'],
-			['reasoning.effort', '""', 'e.g. `low`, `medium`, `high`'],
+			['reasoning.effort', '""', 'Default effort, e.g. `low`, `medium`, `high`'],
+			['reasoning.efforts', '[]', 'Supported levels in `/thinking` picker order; empty means no picker levels'],
 			['sampling', 'from the profile', '`temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`'],
 			['cost', 'from the server', 'Dollars per million tokens, for `/stats`']
 		]
@@ -254,7 +279,9 @@ export const reference: Group[] = [
 			['command', 'required', 'Program and arguments; `{dir}` is the file’s folder, `{python}` the Python on `PATH`'],
 			['match', '{}', '`tool` and `pattern` globs for tool events, a `prompt` regex for prompts'],
 			['timeout_secs', '10', 'How long it may run'],
-			['on_error', '"warn"', '`warn`, `allow` or `deny`']
+			['on_error', '"warn"', '`warn`, `allow` or `deny`'],
+			['full_context', 'false', 'Keep stdout and added context in full (warns above 32,000 estimated tokens)'],
+			['setup / connections', 'none', 'Declarative `/hooks` form fields and saved preset bindings with secret references']
 		]
 	},
 	{

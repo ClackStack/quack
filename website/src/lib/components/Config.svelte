@@ -37,29 +37,29 @@
 
 	const steps = [
 		{
-			title: 'Install the plucked duck',
-			text: 'The whole agent (prompts, sub-agents, MCP, ACP, language servers) minus the hosted-service providers, so nothing in it points off the machine. Offline, use `--archive`, or the `.deb` and `.rpm` packages.',
+			title: 'Install quack-plucked',
+			text: 'The complete agent (prompts, sub-agents, MCP, ACP, language servers) without preinstalled hosted-service providers, so nothing points outside your network. For offline installs, pass `--archive`, or use the `.deb` and `.rpm` packages.',
 			file: 'shell',
 			code: installCmd,
 			lang: 'sh'
 		},
 		{
 			title: 'Describe your server',
-			text: 'Anything OpenAI-compatible: vLLM, SGLang, llama.cpp. `base_url` is the only required line; leave out `models` and they’re listed from the server.',
+			text: 'Works with any OpenAI-compatible server: vLLM, SGLang, or llama.cpp. `base_url` is the only required field; omit `models` and quack lists them automatically from the server.',
 			file: 'providers.d/corp.toml',
 			code: providerFile,
 			lang: 'toml'
 		},
 		{
 			title: 'Lock it down',
-			text: 'The system layer’s policy holds against user files, a repo’s `.quack/`, environment variables and the command line.',
+			text: 'Policies in the system config directory cannot be overridden by user files, a repo’s `.quack/` folder, environment variables, or CLI flags.',
 			file: 'config.toml',
 			code: policyFile,
 			lang: 'toml'
 		},
 		{
 			title: 'Check it',
-			text: 'There’s nothing else to install. `quack doctor` makes no model call; a user’s provider pointing elsewhere shows as blocked, and the only host listed is yours.',
+			text: 'No extra dependencies to install. `quack doctor` checks your setup without calling a model: any provider pointing outside your allowlist is marked blocked, leaving only your internal host reachable.',
 			file: 'terminal',
 			code: doctorOutput,
 			lang: 'text'
@@ -109,9 +109,9 @@
 
 	<h3 class="mt-20 font-display text-3xl sm:text-4xl font-extrabold tracking-[-0.02em]">Where it lives</h3>
 	<p class="mt-4 text-lg text-ink-2 leading-relaxed max-w-[65ch]">
-		Each layer overrides the one before. Every layer’s folder has the same shape, one file per item, and a file with
-		the same name in a higher layer replaces the lower one. <code class="text-ink">quack config paths</code> prints the
-		folders for this machine.
+		Each layer overrides the ones below it. Every layer uses the same directory layout, so a file with
+		the same name in a higher layer replaces the lower one. Run <code class="text-ink">quack config paths</code>
+		to print the exact directories on your machine.
 	</p>
 	<div class="mt-8 grid grid-cols-1 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] gap-10 items-start">
 		<div class="rounded-xl border border-rule overflow-hidden">
@@ -147,10 +147,11 @@
 
 	<h3 class="mt-20 font-display text-3xl sm:text-4xl font-extrabold tracking-[-0.02em]">Every option</h3>
 	<p class="mt-4 text-lg text-ink-2 leading-relaxed max-w-[65ch]">
-		Any subset works; everything left out keeps its default. <code class="text-ink">quack config check</code> validates
-		every file against its JSON schema, <code class="text-ink">/config</code> edits settings in the UI, and the
+		Override only what you need; omitted settings keep their defaults. Run
+		<code class="text-ink">quack config check</code> to validate every file against its JSON schema, edit
+		settings interactively with <code class="text-ink">/config</code>, or browse the
 		<a href="https://github.com/ClackStack/quack#configuration-reference" class="text-sky-ink font-semibold" rel="noreferrer">README</a>
-		has the full list.
+		for the complete reference.
 	</p>
 	<div class="mt-8 lg:columns-2 gap-10">
 		{#each reference as g}

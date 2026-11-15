@@ -1,0 +1,147 @@
+version: '3'
+
+vars:
+  DEFAULTS_DIR: '{{clean (printf "%s/../../defaults" .TASKFILE_DIR)}}'
+  TAURI_CLI: '{{.TASKFILE_DIR}}/ui/node_modules/@tauri-apps/cli/tauri.js'
+  PM:
+    sh: command -v pnpm >/dev/null 2>&1 && echo pnpm || echo npm
+
+tasks:
+  default:
+    desc: List desktop GUI tasks
+    silent: true
+    cmds:
+      - task --taskfile '{{.TASKFILE_DIR}}/Taskfile.yml' --list
+
+  deps:
+    desc: Install GUI frontend Node dependencies (skipped if already present; use --force to reinstall)
+    dir: ui
+    status:
+      - test -f node_modules/@tauri-apps/cli/tauri.js
+      - test -x node_modules/.bin/vite
+    cmds:
+      - |
+        if [ "{{.PM}}" = "pnpm" ]; then
+          pnpm install --frozen-lockfile
+        else
+          npm install
+        fi
+
+  ui-dev:
+    desc: Start the GUI SvelteKit Vite dev server (browser mode with scripted dev transport)
+    dir: ui
+    cmds:
+      - task: deps
+      - |
+        if [ "{{.PM}}" = "pnpm" ]; then
+          pnpm run dev {{.CLI_ARGS}}
+        else
+          npm run dev {{if .CLI_ARGS}}-- {{.CLI_ARGS}}{{end}}
+        fi
+
+  ui-build:
+    desc: Build the GUI SvelteKit static SPA bundle into ui/build/
+    dir: ui
+    cmds:
+      - task: deps
+      - '{{.PM}} run build'
+
+  ui-check:
+    desc: Run svelte-check type and template diagnostics on the GUI frontend
+    dir: ui
+    cmds:
+      - task: deps
+      - '{{.PM}} run check'
+
+  ui-test:
+    desc: Run Vitest unit tests for the GUI frontend
+    dir: ui
+    cmds:
+      - task: deps
+      - '{{.PM}} test'
+
+  protocol-ts:
+    desc: Regenerate ui/src/lib/protocol.ts from crates/quack-protocol
+    dir: ../..
+    cmds:
+      - cargo test -p quack-protocol --features ts --locked export
+
+  build:
+    desc: Build the GUI frontend and compile the quack-gui desktop binary (debug)
+    dir: ../..
+    preconditions:
+      - sh: '[ "{{OS}}" != "linux" ] || ! command -v pkg-config >/dev/null 2>&1 || pkg-config --exists webkit2gtk-4.1'
+        msg: 'Missing webkit2gtk-4.1 dev libraries. On Debian/Ubuntu/Mint run: sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev'
+    cmds:
+      - task: ui-build
+      - cargo build --locked -p quack-gui --features desktop
+
+  build-release:
+    desc: Build the GUI frontend and compile the quack-gui desktop binary (release)
+    dir: ../..
+    preconditions:
+      - sh: '[ "{{OS}}" != "linux" ] || ! command -v pkg-config >/dev/null 2>&1 || pkg-config --exists webkit2gtk-4.1'
+        msg: 'Missing webkit2gtk-4.1 dev libraries. On Debian/Ubuntu/Mint run: sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev'
+    cmds:
+      - task: ui-build
+      - cargo build --release --locked -p quack-gui --features desktop
+
+  run:
+    desc: Build and launch the desktop GUI binary (debug)
+    dir: ../..
+    cmds:
+      - task: build
+      - |
+        TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
+        QUACK_DEFAULTS_DIR="${QUACK_DEFAULTS_DIR:-{{.DEFAULTS_DIR}}}" "$TARGET_DIR/debug/quack-gui" {{.CLI_ARGS}}
+
+  dev:
+    desc: Start the full desktop GUI dev environment (Vite HMR dev server + Tauri window)
+    preconditions:
+      - sh: '[ "{{OS}}" != "linux" ] || ! command -v pkg-config >/dev/null 2>&1 || pkg-config --exists webkit2gtk-4.1'
+        msg: 'Missing webkit2gtk-4.1 dev libraries. On Debian/Ubuntu/Mint run: sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev'
+    cmds:
+      - task: deps
+      - |
+        export QUACK_DEFAULTS_DIR="${QUACK_DEFAULTS_DIR:-{{.DEFAULTS_DIR}}}"
+        if [ "{{.PM}}" = "pnpm" ]; then
+          node "{{.TAURI_CLI}}" dev --features desktop {{if .CLI_ARGS}}-- -- {{.CLI_ARGS}}{{end}}
+        else
+          node "{{.TAURI_CLI}}" dev --features desktop --config '{"build":{"beforeDevCommand":"npm run dev"}}' {{if .CLI_ARGS}}-- -- {{.CLI_ARGS}}{{end}}
+        fi
+
+  clippy:
+    desc: Run Clippy on quack-gui with desktop features enabled (-D warnings)
+    dir: ../..
+    preconditions:
+      - sh: '[ "{{OS}}" != "linux" ] || ! command -v pkg-config >/dev/null 2>&1 || pkg-config --exists webkit2gtk-4.1'
+        msg: 'Missing webkit2gtk-4.1 dev libraries. On Debian/Ubuntu/Mint run: sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev'
+    cmds:
+      - task: ui-build
+      - RUSTFLAGS="-D warnings" cargo clippy -p quack-gui --features desktop --all-targets --locked
+
+  test:
+    desc: Run Rust tests for quack-gui with desktop features enabled
+    dir: ../..
+    preconditions:
+      - sh: '[ "{{OS}}" != "linux" ] || ! command -v pkg-config >/dev/null 2>&1 || pkg-config --exists webkit2gtk-4.1'
+        msg: 'Missing webkit2gtk-4.1 dev libraries. On Debian/Ubuntu/Mint run: sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev'
+    cmds:
+      - task: ui-build
+      - QUACK_DEFAULTS_DIR=none cargo test -p quack-gui --features desktop --locked {{.CLI_ARGS}}
+
+  check:
+    desc: Run GUI frontend checks/tests and Rust desktop Clippy/tests
+    cmds:
+      - task: ui-check
+      - task: ui-test
+      - task: clippy
+      - task: test
+
+  package:
+    desc: Build unsigned desktop GUI release installers/bundles (defaults to host target; pass triple via --)
+    dir: ../..
+    cmds:
+      - task: deps
+      - |
+        ./scripts/package-gui.sh {{if .CLI_ARGS}}{{.CLI_ARGS}}{{else}}$(rustc -vV | awk '/^host:/ {print $2}'){{end}}

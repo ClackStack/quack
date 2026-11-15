@@ -624,26 +624,58 @@ and confirms the hook is active. Turning a hook off lists its id in `[hooks] dis
 
 ## Development
 
+If you have [`task`](https://taskfile.dev) (`go-task`) installed, [Taskfile.yml](Taskfile.yml) (plus [crates/quack-gui/Taskfile.yml](crates/quack-gui/Taskfile.yml) and [website/Taskfile.yml](website/Taskfile.yml)) wraps the common TUI, desktop GUI, and website workflows:
+
 ```sh
-# Build binary
+# List all tasks
+task
+
+# Build TUI (`quack`), desktop GUI (`quack-gui`), or both
+task build-tui
+task build-gui         # builds crates/quack-gui/ui + quack-gui (--features desktop)
+task build             # builds both (add -release suffix for release builds)
+
+# Run from checkout (automatically points QUACK_DEFAULTS_DIR at defaults/)
+task run-tui
+task run-gui
+task gui-dev           # Vite HMR dev server + live-reloading Tauri desktop window
+task gui-ui-dev        # GUI frontend Vite dev server only (browser scripted mode)
+task website-dev       # marketing website Vite dev server
+
+# Build from source & install into ~/.local (wraps scripts/install.sh --from-source)
+task install           # installs both TUI and GUI
+task install-tui       # TUI only
+task install-gui       # GUI only
+
+# Checks & tests
+task check             # fmt, clippy, workspace tests, and GUI checks
+task gui:protocol-ts   # regenerate ui/src/lib/protocol.ts from quack-protocol
+```
+
+On glibc Linux, building or running the desktop GUI requires `libwebkit2gtk-4.1-dev` and `libgtk-3-dev` (plus Node.js and `pnpm` or `npm`).
+
+Direct Cargo commands (without `task`):
+
+```sh
+# Build CLI/TUI binary (default-members is quack-cli)
 cargo build
 
-# Run interactive TUI
-cargo run
+# Build desktop GUI (requires built SPA in crates/quack-gui/ui/build)
+(cd crates/quack-gui/ui && pnpm install --frozen-lockfile && pnpm run build)
+cargo build -p quack-gui --features desktop
 
-# Run with bundled defaults from checkout
+# Run interactive TUI with bundled defaults from checkout
 QUACK_DEFAULTS_DIR=defaults cargo run
+
+# Run desktop GUI with bundled defaults from checkout
+QUACK_DEFAULTS_DIR=defaults target/debug/quack-gui
 
 # Run headless turn
 cargo run -- exec "explain src/main.rs"
 
-# Run tests
-cargo test --workspace --locked
-
-# Run linter
+# Run tests, linter, and formatter
+QUACK_DEFAULTS_DIR=none cargo test --workspace --locked
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --locked
-
-# Format code
 cargo fmt --all --check
 ```
 

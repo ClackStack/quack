@@ -9,12 +9,12 @@ Built with **SvelteKit 3** (Svelte 5 runes), **Tailwind CSS v4** and `@sveltejs/
 It is laid out as plates in a field guide, with the TUI's own ASCII duck (`_(o)>` and the animated welcome duck) and its colours (duck yellow, beak orange, water sky). Coloured thumb tabs down the right edge are the section nav. It follows the OS light or dark setting, with a toggle in the header (`mode-watcher`); colours are tokens in `src/routes/layout.css`, with the dark values under `:root.dark`.
 
 1. **quack**: "Any model. Any provider. No leaks.", the interactive installer (defaulting to both GUI and TUI together, with standalone TUI/GUI toggles, Plucked switch for both, and direct downloads for the visitor's detected platform), and the duck with four field marks that link into the grinder.
-2. **Grinder**: the same models through a generic harness and through quack; pick a failure to see what each does.
+2. **Grinder**: the same models through a generic harness and through quack; pick a failure (including prompt cache / KV zoning, HTTP redirect gating, and Pre-Egress Secret Shield) to see what each does.
 3. **In the wild**: three example sessions drawn the way the TUI draws them, including Plan + Allow proposing tests for review. Work mode and approvals appear separately in the status bar.
-4. **Desktop app**: eight interactive screenshots of `quack-gui` (diff-preview edit approvals, multi-project Jobs queue, context and cache telemetry, model & planner picker, provider setup, network & sandbox boundary, shared Memory notes, and layered Settings) with Light/Dark theme switching and full-size zoom.
+4. **Desktop app**: eight interactive screenshots of `quack-gui` (diff-preview & secret-shield approvals, multi-project Jobs queue & `Cmd/Ctrl-K` palette, KV-zoned context & cache telemetry, model/planner/probe picker, 42-provider setup, two-tab Shield & Session Egress Ledger boundary passport, shared Memory notes, and layered Settings + guided hooks/MCP) with Light/Dark theme switching, full-size zoom, `quack gui` / `/gui` handoff, and persistent workspace tab restore.
 5. **Field marks**: the Plan/Edit × Ask/Allow matrix, then every other README feature, one line each, grouped. Mode descriptions follow [`docs/modes.md`](../docs/modes.md); keep the matrix, terminal example and configuration reference in step.
-6. **Measured**: quack's own dated eval runs from `docs/plan/roadmap.md`, newest first, and the FrontierHarness Eval chart (quack has not been run on it).
-7. **For teams**: what administrators need: nothing built in, host policy, locked settings, enforced hooks, `quack-plucked`.
+6. **Measured**: how `quack eval` measures harnesses, and the FrontierHarness Eval chart (quack has not been run on it).
+7. **For teams**: what administrators need: nothing built in, host & redirect policy, Session Egress Ledger, locked settings & Secret Shield (`secret_guard`), enforced hooks, `quack-plucked`.
 8. **Config**: the administrator's path (`quack-plucked`, a provider file, a locked policy, `quack doctor`), what is guaranteed, where each layer lives, and every option, folded by file. Its content is in `src/lib/config.ts` and follows the repo README's Configuration section; keep the two in step.
 9. **Install** and the footer.
 

@@ -29,13 +29,13 @@
 			id: 'approval',
 			tab: 'Edit approvals',
 			short: 'Numbered diff & rules',
-			title: 'Approve file edits with full context',
+			title: 'Approve file edits and secret guards with context',
 			summary:
-				'Writes and patches pause for review before touching disk. Circled line markers highlight every added or removed line alongside persistent rules and rejection feedback.',
+				'Writes, patches, and Pre-Egress Secret Shield detections pause for review before touching disk or leaving your machine over HTTP. Circled line markers highlight diffs alongside persistent rules and rejection feedback.',
 			points: [
-				['Decision & rule actions', 'Approve a single write, allow it for this session, save a persistent rule, or explain why not.'],
-				['Attachments & planner strip', 'Attach @ File mentions or images and switch mode, permissions, main model, and planner model below the composer.'],
-				['Exports, undo & memory', 'Branch jobs, export Markdown or JSON transcripts, Undo last writes, and jump to Memory notes in the sidebar.']
+				['Decision, rule & secret actions', 'Approve writes, save scoped rules, explain why not, or choose Redact & send / Allowlist on Pre-Egress Secret Shield alerts.'],
+				['Precision @ slices & planner strip', 'Attach @file#symbol or @file:Lstart-Lend slices via tree-sitter and images, and switch mode, permissions, main model, and planner model below.'],
+				['Exports, undo & memory', 'Branch jobs, try another model from a turn, export Markdown or JSON, Undo last writes, and open shared Memory notes.']
 			],
 			alt: 'quack desktop app paused for approval on a diff preview of src/pond/ducks.ts, with numbered additions, Approve change, Allow for this session, Save rule, Not this — tell quack why, header boundary pills, and model/planner controls below the composer'
 		},
@@ -45,39 +45,39 @@
 			short: 'Urgency queue across repos',
 			title: 'Triage parallel jobs across repositories',
 			summary:
-				'Keep turns running across multiple repositories at once and switch from Projects to the live Jobs queue whenever an approval or timeout needs attention.',
+				'Keep turns running across multiple repositories at once, switch from Projects to the live Jobs queue on approvals or step-limit pauses, and reopen tabs where you left off.',
 			points: [
-				['Sorted by urgency', 'Waiting approvals and failures rise above running and ready conversations, with quick filter chips by state.'],
-				['Sub-agent & plan status', 'Track active explore sub-agents, tool counts, and plan steps directly on each card.'],
-				['Header waterline & pills', 'Inspect LSP diagnostics, Offline egress status, and a thin streaming progress line right under the header.']
+				['Sorted by urgency', 'Waiting approvals, secret guards, step-limit pauses, and failures rise above running and ready conversations.'],
+				['Sub-agent & plan status', 'Track active explore sub-agents, tool counts, and plan steps directly on each card, with persistent workspace tab restore.'],
+				['Header waterline & Cmd/Ctrl-K', 'Inspect LSP diagnostics, Offline/Shield egress status, streaming progress, and jump to any modal via the Cmd/Ctrl-K palette or slash commands.']
 			],
 			alt: 'quack desktop app Jobs tab triaging four jobs across quack, orderly, demo-pond, and field-notes, showing an outside-sandbox approval, a provider timeout error, and an active turn with an explore sub-agent and plan progress bar'
 		},
 		{
 			id: 'workspace',
 			tab: 'Context & cache',
-			short: 'Token meter & sparkline',
-			title: 'Watch context pressure and prompt cache hits',
+			short: 'KV zones, meter & trim',
+			title: 'Inspect KV zones and selectively trim stale tail items',
 			summary:
-				'Settled turns fold reasoning into collapsible thinking traces while the sidebar plots live cache reuse, throughput, and pruning thresholds.',
+				'Settled turns fold reasoning into collapsible traces while the sidebar tracks cache reuse and throughput, and /context splits the immutable KV prefix from the prunable tail.',
 			points: [
-				['Pruning threshold tick', 'The context bar marks where automatic pruning kicks in so you know when to compact.'],
-				['Per-call cache chart', 'Compare sent tokens, % reused from cache, throughput (tok/s), and time to first token.'],
-				['Branch & transcript export', 'Branch a conversation or export Markdown or JSON transcripts directly from the active project card.']
+				['KV prefix vs prunable tail', 'Inspect immutable KV prefix, session context, and prunable tail zones in /context and manually Trim stale items without busting the cache.'],
+				['Per-call cache chart', 'Compare sent tokens, % reused from cache, throughput (tok/s), time to first token, and automatic pruning thresholds.'],
+				['Modal parity & Cmd/Ctrl-K', 'Open /doctor, /diagnostics, /instructions, /profiles, or transcript exports directly from the palette or / slash menu.']
 			],
 			alt: 'quack desktop app settled conversation showing collapsed thinking toggle, written lines in src/pond/ducks.ts, 16% context meter with pruning tick, 80% cache hit usage sparkline at 43 tok/s, and attachment buttons below the composer'
 		},
 		{
 			id: 'models',
 			tab: 'Model & planner',
-			short: 'Main & plan-mode switch',
-			title: 'Switch execution and planner models separately',
+			short: 'Main, planner & probe',
+			title: 'Switch models, tune thinking, and probe tool calling',
 			summary:
-				'Pin a dedicated Plan-mode architect model beside your main model across multiple workspaces, with live context limits and measured throughput shown inline.',
+				'Pin a dedicated Plan-mode architect beside your main model across workspaces, switch declared thinking efforts, and probe endpoints live for native tool-calling reliability.',
 			points: [
-				['Planner split pill', 'Pair a reasoning model for planning with a fast local model for edits right from one modal.'],
-				['Local tags & throughput', 'Spot Local / Free endpoints, context window sizes, ~tok/s speed, and thinking effort levels.'],
-				['Same TOML layers as CLI', 'Reads your existing provider files and local server discovery with nothing hardcoded inside.']
+				['Synthetic tool-calling probe', 'Run a fast live /probe right from the model picker to test native tool_calls support against text fallback markup.'],
+				['Planner split & effort levels', 'Pair a reasoning planner with a fast local editor and inspect Local / Free tags, context windows, ~tok/s speed, and thinking efforts.'],
+				['Same TOML layers as CLI', 'Reads 42 bundled provider definitions and local server discovery with nothing hardcoded inside.']
 			],
 			alt: 'quack desktop app Choose a model dialog open over four pinned projects, showing active dev-local/tiny at ~43 tok/s alongside Plan mode architect dev-local/thinker'
 		},
@@ -87,25 +87,25 @@
 			short: 'Local servers & API keys',
 			title: 'Discover local servers or wire up providers',
 			summary:
-				'Scan this machine for running local servers without sending inference requests, store API keys in the OS credential store, or point at any OpenAI-compatible URL.',
+				'Scan this machine for running local servers without sending inference requests, store API keys in the OS credential store, sign in to subscriptions, or add any compatible URL.',
 			points: [
-				['Local server discovery', 'Looks for running local endpoints on this machine without sending model requests.'],
-				['OS credential storage', 'Hosted keys are stored in the OS credential store, or a private key file when unavailable.'],
-				['Connect by URL', 'Add any lab or gateway endpoint by base URL directly from the setup panel.']
+				['6 local server backends', 'Finds llama.cpp, Ollama, vLLM, SGLang, LM Studio, and Docker Model Runner on loopback without model requests.'],
+				['OS credential storage', 'Hosted keys live in the OS credential store or a private key file; ChatGPT plans authenticate via browser OAuth in setup.'],
+				['Connect by URL', 'Add any OpenAI-compatible, Responses, Anthropic, Gemini, or Cohere gateway endpoint directly from setup.']
 			],
 			alt: 'quack desktop app Providers setup page showing available dev-local models, Find local servers button, Hosted provider API key form with OS credential store note, and Connect by URL fields'
 		},
 		{
 			id: 'egress',
 			tab: 'Network & sandbox',
-			short: 'Egress & isolation passport',
-			title: 'Inspect network egress and sandbox bounds live',
+			short: 'Shield, ledger & sandbox',
+			title: 'Audit every HTTP hop, secret guard, and sandbox bound',
 			summary:
-				'Click the Offline or Bounded pill in the header to verify every configured host, toggle strict offline mode, and check the active OS command sandbox.',
+				'Click the header Shield / Offline pill for the two-tab Boundary Passport: configure Policy & Secret Shield, audit the live Session Egress Ledger, and check OS command sandboxing.',
 			points: [
-				['Strict offline mode', 'Restrict outbound traffic to loopback servers, configured providers, and explicit allow-list hosts.'],
-				['Default-off checks', 'Confirm at a glance that model catalog refresh, update checks, and OpenTelemetry export stay Off.'],
-				['Command sandbox scope', 'Shows active OS command isolation boundaries with a session pause toggle.']
+				['Pre-Egress Secret Shield', 'Choose ask, redact, or off to scan outbound prompts, @ slices, and tool results before they leave your machine, manage SHA-256 allowlists, and choose whether loopback is scanned.'],
+				['Live Session Egress Ledger', 'Inspect every outbound HTTP call, redirect check, byte count, and blocked hop across inference, MCP, OAuth, catalog, and update checks.'],
+				['Strict offline & OS sandbox', 'Restrict hosts to loopback and egress_allow, keep background checks Off by default, and inspect active OS command isolation bounds.']
 			],
 			alt: 'quack desktop app Network & Sandbox Boundary dialog showing Strict offline mode ON, dev-local localhost:11434 Local / Loopback destination, catalog/update/OpenTelemetry Off, and active Command Sandbox status'
 		},
@@ -127,13 +127,13 @@
 			id: 'settings',
 			tab: 'Settings',
 			short: 'Layered TOML & extensions',
-			title: 'Configure layered TOML, hooks, and MCP servers',
+			title: 'Configure layered TOML, guided hooks, and MCP servers',
 			summary:
-				'Browse paths, model defaults, agent tools, network, sandbox, Hooks & MCP servers, and raw TOML keys in one UI, saving cleanly to user or project config.',
+				'Edit paths, model defaults, context, network, sandbox, guided Hooks & MCP servers, and tab restoration in one UI, saving cleanly to user or project config.',
 			points: [
-				['Explicit save layer', 'Choose whether changes write to user config.toml or workspace .quack/config.toml, with layer badges per key.'],
-				['Cross-section search', 'Filter settings, descriptions, hooks, and MCP servers together without hunting through TOML files.'],
-				['Hooks & MCP lifecycle', 'Inspect stdio/HTTP servers and lifecycle hooks, toggle defaults, and reload config live.']
+				['Explicit save layer', 'Choose whether changes write to user config.toml or workspace .quack/config.toml, with layer badges and tab-restore controls.'],
+				['Guided Hook setup & test', 'Configure bundled forge-review and jira hooks with masked credentials and run live draft connection checks from the form.'],
+				['Live MCP lifecycle', 'Enable, add, inspect capabilities, or toggle stdio/HTTP MCP servers live without restarting active sessions.']
 			],
 			alt: 'quack desktop app Settings page with Save to User config or Project (.quack) toggle, filter box, seven-section rail, Setup & Models controls with layer badges, Reload config, and Done'
 		}
@@ -239,9 +239,10 @@
 
 <Plate id="desktop" color="var(--color-duck)">
 	<PlateHeading title="The same engine, in a window">
-		Prefer a native window for reviewing diffs and juggling repos? <code class="text-[0.95em]">quack-gui</code>
-		wraps the exact same <code class="text-[0.95em]">quack-core</code> engine with Tauri 2 and SvelteKit over
-		local IPC — no background server port, no telemetry, on Linux, macOS and Windows.
+		Prefer a native window for reviewing diffs, secret alerts, and parallel repositories? <code class="text-[0.95em]">quack-gui</code>
+		wraps the exact same <code class="text-[0.95em]">quack-core</code> engine in Tauri 2 over local IPC —
+		complete with a <code class="text-[0.95em]">Cmd/Ctrl-K</code> command palette and live egress ledger, and
+		no background server port or telemetry on Linux, macOS, and Windows.
 	</PlateHeading>
 
 	<div class="flex flex-wrap items-center justify-between gap-3 mb-5">
@@ -369,7 +370,9 @@
 		<strong class="font-semibold text-ink">Two apps sharing one core:</strong> installing
 		<code>quack-gui</code> does not install the <code>quack</code> terminal command (and installing the
 		TUI does not install the GUI), though both share one config, sessions, memory notes, and prompt
-		history. The default installer in
+		history. Open workspace folders directly with <code>quack gui [PATH...]</code> (with single-instance
+		tab forwarding and persistent tab restore) or type <code>/gui</code> inside the TUI to hand off.
+		The default installer in
 		<a href="#install" class="text-sky-ink underline underline-offset-2 font-semibold">Install</a> sets up
 		both, or install the GUI alone with <code>--gui</code> (and <code>--plucked</code> for
 		<code>quack-gui-plucked</code>). Tagged GitHub releases also publish unsigned <code>.dmg</code>,

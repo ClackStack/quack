@@ -1,0 +1,137 @@
+version: '3'
+
+includes:
+  gui:
+    taskfile: ./crates/quack-gui
+    dir: ./crates/quack-gui
+  website:
+    taskfile: ./website
+    dir: ./website
+
+tasks:
+  default:
+    desc: List available tasks
+    silent: true
+    cmds:
+      - task --list
+
+  # --- Build ---
+
+  build-tui:
+    desc: Build the CLI/TUI binary (quack) in debug mode
+    cmds:
+      - cargo build --locked -p quack-cli
+
+  build-tui-release:
+    desc: Build the CLI/TUI binary (quack) in release mode
+    cmds:
+      - cargo build --release --locked -p quack-cli
+
+  build-gui:
+    desc: Build the desktop GUI frontend and binary (quack-gui) in debug mode
+    cmds:
+      - task: gui:build
+
+  build-gui-release:
+    desc: Build the desktop GUI frontend and binary (quack-gui) in release mode
+    cmds:
+      - task: gui:build-release
+
+  build:
+    desc: Build both the TUI (quack) and desktop GUI (quack-gui) in debug mode
+    cmds:
+      - task: build-tui
+      - task: build-gui
+
+  build-release:
+    desc: Build both the TUI (quack) and desktop GUI (quack-gui) in release mode
+    cmds:
+      - task: build-tui-release
+      - task: build-gui-release
+
+  # --- Run & Dev ---
+
+  run-tui:
+    aliases: [tui]
+    desc: Build and run the interactive TUI using the repo defaults/
+    cmds:
+      - |
+        QUACK_DEFAULTS_DIR="${QUACK_DEFAULTS_DIR:-{{.TASKFILE_DIR}}/defaults}" cargo run --locked -p quack-cli -- {{.CLI_ARGS}}
+
+  run-gui:
+    desc: Build and launch the desktop GUI binary using the repo defaults/
+    cmds:
+      - task: gui:run
+
+  gui-dev:
+    desc: Start the full desktop GUI dev environment (Vite HMR dev server + Tauri window)
+    cmds:
+      - task: gui:dev
+
+  gui-ui-dev:
+    aliases: [dev-server, ui-dev]
+    desc: Start the GUI frontend Vite dev server only (browser mode with scripted dev transport)
+    cmds:
+      - task: gui:ui-dev
+
+  website-dev:
+    desc: Start the marketing website Vite dev server
+    cmds:
+      - task: website:dev
+
+  website-build:
+    desc: Build the static marketing website
+    cmds:
+      - task: website:build
+
+  # --- Install locally ---
+
+  install:
+    desc: Build from source and install both TUI and desktop GUI locally (~/.local by default)
+    cmds:
+      - ./scripts/install.sh --from-source {{.CLI_ARGS}}
+
+  install-tui:
+    desc: Build from source and install only the TUI (quack) locally
+    cmds:
+      - ./scripts/install.sh --from-source --tui {{.CLI_ARGS}}
+
+  install-gui:
+    desc: Build from source and install only the desktop GUI (quack-gui) locally
+    cmds:
+      - ./scripts/install.sh --from-source --gui {{.CLI_ARGS}}
+
+  uninstall:
+    desc: Uninstall locally installed quack binaries and desktop entries
+    cmds:
+      - ./scripts/install.sh --uninstall {{.CLI_ARGS}}
+
+  # --- Verification ---
+
+  fmt:
+    desc: Check Rust formatting across the workspace
+    cmds:
+      - cargo fmt --all --check
+
+  fmt-fix:
+    desc: Format all Rust code in the workspace
+    cmds:
+      - cargo fmt --all
+
+  clippy:
+    desc: Run Clippy across the workspace with -D warnings
+    cmds:
+      - RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --locked
+
+  test:
+    desc: Run workspace Rust unit and integration tests (with QUACK_DEFAULTS_DIR=none)
+    cmds:
+      - QUACK_DEFAULTS_DIR=none cargo test --workspace --locked {{.CLI_ARGS}}
+
+  check:
+    desc: Run formatting, Clippy, workspace tests, and GUI checks
+    cmds:
+      - task: fmt
+      - task: clippy
+      - task: test
+      - task: gui:check

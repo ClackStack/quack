@@ -35,7 +35,7 @@
 		{
 			id: 'plan',
 			label: 'Plan before editing',
-			caption: 'Plan + Allow reads and searches automatically, then lists proposed changes and tests for review. Accepting starts implementation with the same approvals.',
+			caption: 'Plan + Allow reads and searches automatically, then proposes edits and test commands for review. Approving the plan switches straight to implementation with those same approvals.',
 			status: [['badge-plan', ' plan '], ['badge-allow', ' allow '], ['dim', ' charm/qwen3.8-flash · 70k/104k · 48 t/s']],
 			lines: [
 				[['dim', ' › '], ['', 'make the parser faster']],
@@ -60,7 +60,7 @@
 		{
 			id: 'models',
 			label: 'Switch models',
-			caption: 'Every model of every provider in one picker. Switch mid-conversation and keep the history.',
+			caption: 'Every model across every configured provider in one picker. Switch mid-conversation without losing history.',
 			status: [['badge-edit', ' edit '], ['badge-ask', ' ask '], ['dim', ' ollama/qwen3-coder:30b · 8.1k/32k']],
 			lines: [
 				[['box', ' ╭ models ─────────────────────────────────── 24 ╮']],
@@ -94,8 +94,8 @@
 
 <Plate id="session" color="var(--color-sky)">
 		<PlateHeading title="Seen in the wild">
-			A full-screen terminal UI that works over SSH, in any terminal, on Linux, macOS and Windows. These
-			are drawn the way quack draws them; the model names and output are examples.
+			A full-screen terminal UI built to work smoothly over SSH on Linux, macOS, and Windows. These mockups
+			match how quack renders sessions in your terminal (with example models and outputs).
 		</PlateHeading>
 
 		<div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,2.2fr)] gap-8 items-start">
@@ -119,7 +119,7 @@
 			<figure class="-mx-2 sm:mx-0">
 				<div class="term rounded-xl overflow-hidden border-2 border-ink shadow-[0_18px_40px_-18px_rgba(29,42,58,0.55)]">
 					<div class="flex justify-between px-3 py-1.5 text-term-dim text-[11px] sm:text-[13px]">
-						<span><span class="text-term-text">quack 0.1.0</span> · ~/src/calendar</span>
+						<span><span class="text-term-text">quack 0.3.3</span> · ~/src/calendar</span>
 						<span>⎇ main</span>
 					</div>
 					<div class="screen px-1 pt-2 pb-4 min-h-[24.5em] overflow-x-auto" role="tabpanel">

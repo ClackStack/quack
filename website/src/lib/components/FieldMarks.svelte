@@ -9,72 +9,75 @@
 			name: 'Models and providers',
 			color: 'var(--color-duck)',
 			items: [
-				['Local servers', 'llama.cpp, Ollama, vLLM, SGLang and LM Studio, found on this machine by `/setup`.'],
-				['Hosted services', '12 open-model APIs, from OpenRouter and DeepSeek to Kimi, Z.ai and Mistral, or any OpenAI-compatible URL.'],
-				['Claude and GPT', 'The Anthropic and OpenAI APIs with a key, or a ChatGPT plan through `quack login chatgpt`.'],
-				['Reasoning kept', 'Thinking survives tool calls and `/resume`, sent back the way each API expects.'],
-				['Switch any time', '`/models` lists every model; switching keeps the history and approvals.'],
-				['A planner model', 'Plan with a big model, carry it out with your usual one, and keep its cache warm.']
+				['Local servers', 'Connect to llama.cpp, Ollama, vLLM, SGLang, LM Studio, or Docker Model Runner; `/setup` detects running local servers automatically.'],
+				['Hosted services', 'Includes 35 hosted provider presets (OpenRouter, DeepSeek, Kimi, Z.ai, Mistral, Groq, Cerebras, Alibaba and more — 42 bundled provider files total), or any OpenAI-compatible URL.'],
+				['Frontier & plan access', 'Use Anthropic, OpenAI, Google Gemini (preserving `thought_signature`), xAI Grok or Cohere with an API key, or sign in to a ChatGPT plan right inside `/setup`.'],
+				['Reasoning & thinking', 'Thinking blocks survive tool calls and `/resume`, formatted as each API expects; switch effort levels any time with `/thinking`.'],
+				['Switch & probe', 'Switch models mid-session with `/models` without losing history or approvals, and run `/probe` to check native tool calling before relying on it.'],
+				['Dedicated planner model', 'Use a larger model in Plan mode, then hand execution off to your everyday model while keeping its prompt cache warm.']
 			]
 		},
 		{
 			name: 'Editing code',
 			color: 'var(--color-beak)',
 			items: [
-				['Five edit formats', 'hashline, str_replace, apply_patch, search/replace blocks or whole files, chosen per model.'],
-				['A forgiving edit', 'Matches past stray whitespace, copied line numbers and smart quotes; keeps CRLF and BOMs.'],
-				['All or nothing', 'A multi-file change that fails partway rolls every file back.'],
-				['Undo and rewind', '`/undo` the last call, or `/rewind` the conversation, the files, or both.'],
-				['Code intelligence', 'Language servers for 11 languages, plus an `lsp` tool for definitions, references and hover.'],
-				['Outlines', '`index` outlines a file or folder with tree-sitter; `read` a symbol by name.']
+				['Five edit formats', 'Supports `hashline`, `str_replace`, `apply_patch`, search/replace blocks, or whole-file writes, selected per model.'],
+				['Forgiving edit matching', 'Handles stray whitespace, copied line numbers and smart quotes when matching edits, while preserving CRLF line endings and BOMs.'],
+				['Atomic multi-file edits', 'If a multi-file patch fails partway through, every modified file rolls back cleanly.'],
+				['Undo and rewind', 'Roll back the last call with `/undo`, or rewind conversation history, files, or both with `/rewind`.'],
+				['Code intelligence', 'Integrates with language servers across 11 languages and provides an `lsp` tool for definitions, references, and hover info.'],
+				['Symbol outlines', 'Use `index` to summarize a file or folder with tree-sitter, or `read` to inspect a specific symbol by name.']
 			]
 		},
 		{
 			name: 'Long tasks',
 			color: 'var(--color-sky)',
 			items: [
-				['A live todo list', 'The model keeps a checklist and sees it at every step.'],
-				['Sub-agents', '`explore` scouts the repo in its own context and hands back paths and line ranges.'],
-				['Loop guards', 'Repeated calls, edit-test-edit cycles and empty replies are caught.'],
-				['Changed-file reminders', 'The model is told which files it has touched, without rewriting history.'],
-				['Small windows', 'Old reads and outputs are pruned first; compaction keeps your request word for word.'],
-				['Sessions', 'Saved as they happen, crash-proof, and resumed with exactly the same context.']
+				['Live todo list', 'The model maintains a working checklist that stays visible across steps.'],
+				['Sub-agents', 'Built-in `explore` sub-agents scout the repository in an isolated context and return relevant paths and line ranges.'],
+				['Loop guards & step pauses', 'Detects repeated calls, edit-test-edit thrashing, and empty replies; turns pause at `agent.max_steps` so you can steer or continue.'],
+				['Changed-file reminders', 'Keeps track of files touched in the session without rewriting earlier turns.'],
+				['Precision @ slices', 'Attach specific `@file#symbol` definitions or `@file:Lstart-Lend` line ranges via tree-sitter instead of loading whole files.'],
+				['KV zoning & small windows', 'Inspect the immutable KV prefix separately from the prunable tail in `/context` (`Trim` in `quack-gui`). Compaction keeps your original request verbatim.'],
+				['Crash-proof sessions', 'Sessions save incrementally as you work and resume with identical prompt context.']
 			]
 		},
 		{
 			name: 'Safety',
 			color: 'var(--color-leaf)',
 			items: [
-				['Sandboxed shell', 'Commands write only in the workspace and have no network: Landlock + seccomp, or Seatbelt.'],
-				['Plan or Edit', 'Plan only reads and searches, then proposes changes and test commands for review. Edit may implement.'],
-				['Ask or Allow', 'Choose approvals separately. Allow keeps the configured sandbox and rules; `/yolo` disables approvals and sandboxing.'],
-				['Commands parsed', 'Under Ask, the `rm` in `git status && rm -rf x` needs approval, even inside subshells and heredocs.'],
-				['Project trust', 'A cloned repo’s `.quack/` runs nothing until you trust it.']
+				['Sandboxed shell', 'Shell commands can write only inside the workspace and have no network access (Landlock + seccomp on Linux, Seatbelt on macOS).'],
+				['Plan or Edit', 'Plan mode only reads and searches, then proposes edits and test commands for review. Edit mode can modify files and run approved commands.'],
+				['Ask or Allow', 'Approval rules are separate from mode: Allow skips prompts while keeping your sandbox and deny rules active, while `/yolo` disables both.'],
+				['Parsed shell commands', 'In Ask mode, destructive commands like `rm` in `git status && rm -rf x` still require approval, even inside subshells and heredocs.'],
+				['Pre-Egress Secret Shield', 'Scans outbound prompts, `@` slices and tool output locally with built-in detectors and active session keys (`ask`, `redact`, or `off`) before sending over HTTP.'],
+				['Gated redirects & ledger', 'Cross-host HTTP redirects must pass your egress policy, and every outbound call or block is recorded in the Session Egress Ledger.'],
+				['Project trust & scope', 'A cloned repository’s `.quack/` folder never loads until you trust it; press `Ctrl-L` or run `/scope` to choose user vs `.quack/` when saving settings or rules.']
 			]
 		},
 		{
 			name: 'Making it yours',
 			color: 'var(--color-pink)',
 			items: [
-				['MCP', 'Local and remote servers, deferred tool search, prompts as slash commands, forms and sampling.'],
-				['Hooks', 'Programs in any language on seven agent events; they can add context, block or rewrite calls.'],
-				['Agent skills', 'Reads generic, standard Agent Skills (`SKILL.md`) from `.agents/skills/`, `~/.agents/skills/` and `skills/` (plus `compat_paths`), loaded on demand with `skill` or `/<name>`.'],
-				['Slash commands', 'Any markdown file in `commands/` becomes a slash command (for example, `commands/git/pr.md` becomes `/git:pr`).'],
-				['Your agent files', 'Reads AGENTS.md, CLAUDE.md, GEMINI.md, `.cursorrules` and Copilot instructions.'],
-				['Memory', 'Notes per project and global, with configurable write approvals. Plan never writes them.'],
-				['Your own queries', 'Drop in `tags.scm` or `highlights.scm` to outline or colour a framework’s macros.']
+				['MCP', 'Connect local and remote MCP servers via `quack mcp` or toggle them live in `/mcp` — with deferred tool search, prompts as slash commands, forms and sampling (8 bundled examples including `context7`, `roost`, `github`, `playwright`).'],
+				['Hooks', 'Run custom programs in any language on seven lifecycle events; `/hooks` provides guided setup and live checks for bundled `forge-review` (GitHub, GitLab, Gitea/Forgejo, Bitbucket) and `jira` hooks with masked credentials.'],
+				['Agent skills', 'Loads standard `SKILL.md` Agent Skills from `.agents/skills/`, `~/.agents/skills/` and `skills/` (plus `compat_paths`), triggered on demand with `skill` or `/<name>`.'],
+				['Slash commands', 'Turn any Markdown file in `commands/` into a slash command (for example, `commands/git/pr.md` becomes `/git:pr`).'],
+				['Project instruction files', 'Reads `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, and Copilot instruction files automatically.'],
+				['Shared memory notes', 'Keep project and global Markdown notes with configurable write approvals (never modified in Plan mode).'],
+				['Custom tree-sitter queries', 'Drop in `tags.scm` or `highlights.scm` files to customize symbol outlining and syntax highlighting for a framework.']
 			]
 		},
 		{
 			name: 'Everywhere',
 			color: 'var(--color-duck)',
 			items: [
-				['Three systems', 'Linux, macOS and Windows on x64 and ARM64; PowerShell and Job Objects on Windows.'],
-				['Starts at once', 'The first frame draws in about <10 ms on Linux.'],
-				['Headless', '`quack exec "…"` runs one turn for scripts and CI.'],
-				['Sees itself', '`/context` and `/stats` chart tokens, cache hits, cost and time.'],
-				['Over SSH', 'Mouse selection and `/copy` go through the terminal (OSC 52).'],
-				['Desktop window', '`quack-gui` wraps the same engine in a Tauri window for approvals, diffs and parallel repo jobs.']
+				['Cross-platform', 'Runs natively on Linux, macOS and Windows across x64 and ARM64, using PowerShell and Job Objects on Windows.'],
+				['Fast startup', 'Draws the first terminal frame in under 10 ms on Linux.'],
+				['Headless & GUI handoff', 'Run one-off turns in scripts with `quack exec "…"`, open repositories directly via `quack gui [PATH...]`, or jump from TUI to GUI using `/gui`.'],
+				['Built-in diagnostics', 'Inspect token usage, cache hits, cost, and speed in `/context` and `/stats`, and verify providers or runtime health with `/doctor` and `/diagnostics`.'],
+				['SSH & wide terminals', 'Mouse selection and `/copy` work over SSH via OSC 52, while terminals `140×24` and wider show a live sidebar with Git branch, context fill, and speed.'],
+				['Desktop app', '`quack-gui` wraps the same engine in Tauri with a `Cmd/Ctrl-K` command palette, restored workspace tabs, parallel jobs, and an egress ledger.']
 			]
 		}
 	];
@@ -85,16 +88,17 @@
 
 <Plate id="field-marks" color="var(--color-leaf)">
 		<PlateHeading title="Field marks">
-			Everything else it does today, one line each. The full list is in the
+			A quick overview of everything else quack supports today. For the complete list, see the
 			<a href="https://github.com/ClackStack/quack#features" class="text-sky-ink font-semibold" rel="noreferrer">README</a>.
 		</PlateHeading>
 
 		<section aria-labelledby="work-modes" class="mb-14">
 			<h3 id="work-modes" class="font-display text-2xl sm:text-3xl font-extrabold">Plan or edit. Ask or allow.</h3>
 			<p class="mt-3 text-ink-2 leading-relaxed max-w-[65ch]">
-				Choose what the agent can do and when it asks independently. New sessions start in
-				<strong class="text-ink">Edit + Ask</strong>. Choose <strong class="text-ink">Plan + Allow</strong>
-				to investigate automatically and review the proposed changes and tests before implementation.
+				Decide what the agent is allowed to do separately from when it must ask for approval. New sessions
+				start in <strong class="text-ink">Edit + Ask</strong>. Switch to
+				<strong class="text-ink">Plan + Allow</strong> to investigate read-only and review proposed edits
+				and test commands before any files change.
 			</p>
 			<div class="mt-5 rounded-xl border border-rule overflow-x-auto">
 				<table class="w-full text-left text-sm sm:text-base">
@@ -121,14 +125,15 @@
 				</table>
 			</div>
 			<p class="mt-4 text-ink-2 leading-relaxed max-w-[75ch]">
-				Plan never runs tests, builds or scripts, or changes files or memory. Allow keeps explicit ask rules,
-				deny rules and approval for leaving the sandbox. <code class="text-ink">Shift-Tab</code> switches
-				Plan/Edit; <code class="text-ink">/permissions</code> picks Ask/Allow. Accepting a plan starts
-				implementation with the same approvals.
+				In Plan mode, quack never runs tests, builds, or scripts, and never changes files or memory. Allow
+				skips routine confirmation prompts while keeping explicit ask rules, deny rules, and sandbox boundaries
+				active. Press <code class="text-ink">Shift-Tab</code> to toggle Plan/Edit, or run
+				<code class="text-ink">/permissions</code> to switch between Ask and Allow. Approving a plan carries
+				straight into implementation under those same approval settings.
 			</p>
 			<p class="mt-3 text-sm text-ink-2 leading-relaxed max-w-[75ch]">
-				Older Auto-edit and Read-only settings keep their behavior for compatibility.
-				<a href="https://github.com/ClackStack/quack/blob/main/docs/modes.md" class="text-sky-ink font-semibold" rel="noreferrer">Commands, configuration and migration guide</a>.
+				Legacy Auto-edit and Read-only settings remain supported for compatibility.
+				<a href="https://github.com/ClackStack/quack/blob/main/docs/modes.md" class="text-sky-ink font-semibold" rel="noreferrer">Commands, configuration, and migration guide</a>.
 			</p>
 		</section>
 

@@ -1,0 +1,58 @@
+version: '3'
+
+vars:
+  PM:
+    sh: command -v pnpm >/dev/null 2>&1 && echo pnpm || echo npm
+
+tasks:
+  default:
+    desc: List website tasks
+    silent: true
+    cmds:
+      - task --taskfile '{{.TASKFILE_DIR}}/Taskfile.yml' --list
+
+  deps:
+    desc: Install website Node dependencies (skipped if already present; use --force to reinstall)
+    status:
+      - test -x node_modules/.bin/vite
+    cmds:
+      - |
+        if [ "{{.PM}}" = "pnpm" ]; then
+          pnpm install --frozen-lockfile
+        else
+          npm install
+        fi
+
+  dev:
+    desc: Start the marketing website Vite dev server
+    cmds:
+      - task: deps
+      - |
+        if [ "{{.PM}}" = "pnpm" ]; then
+          pnpm run dev {{.CLI_ARGS}}
+        else
+          npm run dev {{if .CLI_ARGS}}-- {{.CLI_ARGS}}{{end}}
+        fi
+
+  build:
+    desc: Build the static marketing website into website/build/
+    cmds:
+      - task: deps
+      - '{{.PM}} run build'
+
+  preview:
+    desc: Preview the built static marketing website
+    cmds:
+      - task: build
+      - |
+        if [ "{{.PM}}" = "pnpm" ]; then
+          pnpm run preview {{.CLI_ARGS}}
+        else
+          npm run preview {{if .CLI_ARGS}}-- {{.CLI_ARGS}}{{end}}
+        fi
+
+  check:
+    desc: Run svelte-check on the marketing website
+    cmds:
+      - task: deps
+      - '{{.PM}} run check'

@@ -3,19 +3,19 @@
 	import PlateHeading from '#lib/components/PlateHeading.svelte';
 
 	const points = [
-		['Nothing built in that reaches out', 'Every provider and MCP server is a small TOML file. Delete one and that capability is gone; a test checks startup stays clean for every default file. Only the core prompt and sub-agents are compiled in.'],
-		['Hosts you allow', 'On top of contacting only what’s configured, `[policy.providers] hosts` and `[policy.mcp] hosts` narrow where providers and MCP servers may point, and `quack doctor` lists every host it can reach.'],
-		['Settings you can lock', 'Config layers from system to user, project, environment and command line. An administrator’s locks hold in `/config`, and `quack config show --origin` says where each value came from.'],
-		['Hooks users can’t remove', 'Hooks in the system config folder are enforced: block a tool call, add context, or check a prompt, in any language.'],
-		['Ship your own files', '`quack-plucked` is the duck without its feathers: the whole agent minus the hosted-service providers, for teams with their own model server. The Config plate below walks through it.'],
-		['Apache-2.0, few crates', 'Every dependency is counted per OS before it’s added. The keyring adds no crates on Linux.']
+		['No hardcoded external endpoints', 'Every provider and MCP server lives in a small TOML file (42 provider files ship as data). Delete a file and that integration is gone; automated tests verify startup stays clean with any default file removed. Only the core prompt and sub-agents are compiled in.'],
+		['Hosts, redirects & egress ledger', 'Beyond contacting only what you configure, `[policy.providers] hosts` and `[policy.mcp] hosts` restrict allowed endpoints, cross-host HTTP redirects must pass the same policy, `quack doctor` lists reachable hosts, and the Session Egress Ledger logs every hop and block.'],
+		['Settings & secret guards you can lock', 'Config layers merge from system to user, `.quack/`, env, and CLI. Admin locks hold against `/config` and `Ctrl-L` / `/scope` project writes — including locking `[network] secret_guard` so Pre-Egress Secret Shield masks keys before sending.'],
+		['Hooks users can’t remove', 'Hooks in the system config directory are enforced across seven events (including guided `forge-review` and `jira` hooks with masked credentials and live draft checks) in any language.'],
+		['Internal-only bundles (quack-plucked)', '`quack-plucked` ships the complete agent without any preinstalled hosted-service providers, ready for teams running internal model servers. See the Config section below for setup.'],
+		['Apache-2.0 with minimal dependencies', 'Every dependency is audited per OS before being added. TLS uses `ring`, and Linux keyring support calls `secret-tool` directly instead of pulling in a D-Bus stack.']
 	];
 	const parts = (t: string) => t.split(/(`[^`]+`)/).filter(Boolean);
 </script>
 
 <Plate id="organisations" color="var(--color-duck)">
 		<PlateHeading title="For teams rolling it out">
-			The same agent, with the controls an administrator needs to say yes to it.
+			The same coding agent, with the policy and audit controls security teams need to approve it.
 		</PlateHeading>
 
 		<div class="grid grid-cols-1 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] gap-12 items-start">

@@ -9,12 +9,32 @@ CI (`.github/workflows/ci.yml`) runs with `RUSTFLAGS: -D warnings` and `QUACK_DE
 `.forgejo/workflows/ci.yml` is the same CI for Forgejo, Linux only. Change the two together. It installs Rust in a `node` container and takes runner labels from the repository variables `CI_RUNS_ON` and `CI_HOST_RUNS_ON`; the `no-egress` and `local-servers` jobs need the host runner and are skipped without it.
 
 ```sh
-cargo build                                   # default-members is quack-cli
+cargo build                                   # default-members is quack-cli (TUI/CLI only, not quack-gui)
 cargo test --workspace --locked
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --locked   # what CI runs
 cargo fmt --all --check                       # max_width = 100; run `cargo fmt --all` first
 cargo build -p quack-cli --locked --no-default-features --features proto-openai-chat,lang-common  # minimal feature set, CI checks this
 cargo run -q -p quack-cli -- config schema --dir defaults/schemas   # after changing any config struct
+```
+
+Desktop GUI (`quack-gui`) commands (Tauri is gated behind `--features desktop` and embeds `crates/quack-gui/ui/build`; Linux requires `libwebkit2gtk-4.1-dev` and `libgtk-3-dev`):
+
+```sh
+(cd crates/quack-gui/ui && pnpm install --frozen-lockfile && pnpm run build)
+cargo build -p quack-gui --features desktop --locked
+RUSTFLAGS="-D warnings" cargo clippy -p quack-gui --features desktop --all-targets --locked
+QUACK_DEFAULTS_DIR=none cargo test -p quack-gui --features desktop --locked
+cargo test -p quack-protocol --features ts --locked export   # regenerate ui/src/lib/protocol.ts
+```
+
+`Taskfile.yml`, `crates/quack-gui/Taskfile.yml`, and `website/Taskfile.yml` wrap these for `task` (`go-task`):
+
+```sh
+task build-tui | build-gui | build            # debug builds (or *-release)
+task run-tui | run-gui                        # run from checkout with defaults/
+task gui-dev | gui-ui-dev | website-dev       # Tauri+Vite HMR desktop dev, UI-only Vite, website Vite
+task install | install-tui | install-gui      # scripts/install.sh --from-source
+task check | test | clippy | fmt | gui:check  # verification tasks
 ```
 
 - The toolchain is pinned to 1.99.1 (`rust-toolchain.toml`). The workspace MSRV is 1.97 (`rust-version`), checked by a separate CI job with `cargo check`, so avoid language and std features newer than that.
