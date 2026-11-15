@@ -1346,7 +1346,26 @@ fn draw_approval(f: &mut Frame<'_>, app: &App, above: Rect) {
             format!(" Allow {name}? "),
             vec![Line::styled(arguments.clone(), t.dim)],
         ),
+        ApprovalRequest::EgressSecrets {
+            provider,
+            host,
+            findings,
+        } => (
+            format!(" Potential secret bound for {provider} ({host}) "),
+            findings
+                .iter()
+                .map(|f| {
+                    Line::from(vec![
+                        Span::styled(format!(" {} ", f.kind), t.error),
+                        Span::raw(format!(" {} · ", f.location)),
+                        Span::styled(f.preview.clone(), t.accent),
+                        Span::styled(format!(" ({})", f.fingerprint), t.dim),
+                    ])
+                })
+                .collect(),
+        ),
     };
+    let is_secrets = matches!(approval.request, ApprovalRequest::EgressSecrets { .. });
     // Borders, a blank row under the title and one above the keys, the rules `A` saves,
     // and the keys.
     let always = !approval.always.is_empty();
@@ -1384,12 +1403,19 @@ fn draw_approval(f: &mut Frame<'_>, app: &App, above: Rect) {
             t.dim,
         ));
     }
-    let mut keys = vec![
+    let mut keys = Vec::new();
+    if is_secrets {
+        keys.extend([
+            Span::styled(" r ", t.pill(t.ok)),
+            Span::raw(" redact & send  "),
+        ]);
+    }
+    keys.extend([
         Span::styled(" y ", t.pill(t.ok)),
         Span::raw(" allow  "),
         Span::styled(" a ", t.pill(t.accent)),
         Span::raw(" this session  "),
-    ];
+    ]);
     if always {
         keys.extend([
             Span::styled(" A ", t.pill(t.accent)),
@@ -2056,6 +2082,8 @@ mod tests {
             name: name.into(),
             tokens,
             detail: detail.into(),
+            zone: None,
+            prunable_indices: Vec::new(),
         };
         let report = ContextReport {
             model: "charm/qwen3.8-flash".into(),
@@ -2072,6 +2100,7 @@ mod tests {
                 seg("Model replies and tool calls", 4_300, "31 messages"),
                 seg("Tool results", 31_700, "29 results, 8 pruned"),
             ],
+            tail_items: Vec::new(),
             note: None,
         };
         let growth = [9_000, 16_000, 22_500, 30_000, 41_870];

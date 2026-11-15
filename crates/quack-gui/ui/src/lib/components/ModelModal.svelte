@@ -195,10 +195,51 @@
 					{query.trim() ? `No models match “${query.trim()}”.` : 'No providers ready.'}
 				</p>
 			{/each}
+
+			{#if session.toolProbe || session.toolProbing}
+				<section class="probe-card" aria-live="polite">
+					<div class="probe-head">
+						<div>
+							<h3>Tool-calling capability probe</h3>
+							{#if session.toolProbe}
+								<p class="probe-sub">
+									Configured: <code>{session.toolProbe.configured_mode}</code> · Recommended:
+									<code>{session.toolProbe.recommended_mode}</code>
+									{#if session.toolProbe.recommended_text_format}
+										(<code>{session.toolProbe.recommended_text_format}</code>)
+									{/if}
+								</p>
+							{:else}
+								<p class="probe-sub">Running synthetic tool-calling &amp; JSON repair checks…</p>
+							{/if}
+						</div>
+					</div>
+					{#if session.toolProbe}
+						<div class="probe-cases">
+							{#each session.toolProbe.cases as c (c.name)}
+								<div class="probe-case" class:fail={!c.passed}>
+									<span class={`probe-pill ${c.passed ? 'ok' : 'fail'}`}>
+										{c.passed ? 'pass' : 'fail'}
+									</span>
+									<div class="probe-case-body">
+										<div class="probe-case-top">
+											<span class="probe-name">{c.name}</span>
+											<span class="probe-ms">{c.latency_ms} ms</span>
+										</div>
+										<p class="probe-detail">{c.detail}</p>
+									</div>
+								</div>
+							{/each}
+						</div>
+						<p class="probe-summary">{session.toolProbe.summary}</p>
+					{/if}
+				</section>
+			{/if}
 		</div>
 
 		<div class="modal-foot">
 			<button
+				type="button"
 				class="btn"
 				{disabled}
 				onclick={() => {
@@ -208,8 +249,17 @@
 			>
 				Connect a provider…
 			</button>
+			<button
+				type="button"
+				class="btn"
+				disabled={disabled || session.toolProbing || !session.currentModel}
+				onclick={() => void session.probeToolCalling()}
+				title="Test native tool calling vs text fallback on the active model"
+			>
+				{session.toolProbing ? 'Probing tools…' : 'Probe tool calling'}
+			</button>
 			<div class="grow"></div>
-			<button class="btn" onclick={onClose}>
+			<button type="button" class="btn" onclick={onClose}>
 				Close <span class="kbd">esc</span>
 			</button>
 		</div>
@@ -505,5 +555,98 @@
 
 	.grow {
 		flex: 1;
+	}
+
+	.probe-card {
+		margin-top: 10px;
+		padding: 12px 14px;
+		border: 1px solid var(--rule);
+		border-radius: var(--r-lg);
+		background: var(--bg-panel);
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.probe-head h3 {
+		margin: 0;
+		font-size: 0.84375rem;
+		color: var(--ink);
+	}
+
+	.probe-sub,
+	.probe-summary {
+		margin: 3px 0 0;
+		font-size: 0.75rem;
+		color: var(--ink-2);
+	}
+
+	.probe-cases {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.probe-case {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		padding: 6px 8px;
+		border: 1px solid var(--rule-soft);
+		border-radius: var(--r-md);
+		background: var(--bg-raised);
+	}
+
+	.probe-pill {
+		font-family: var(--font-mono);
+		font-size: 0.625rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		padding: 1px 6px;
+		border-radius: 999px;
+		border: 1px solid var(--rule);
+		flex: none;
+	}
+
+	.probe-pill.ok {
+		background: var(--ok-soft);
+		color: var(--ok);
+	}
+
+	.probe-pill.fail {
+		background: var(--fail-soft);
+		color: var(--fail);
+	}
+
+	.probe-case-body {
+		min-width: 0;
+		flex: 1;
+	}
+
+	.probe-case-top {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+	}
+
+	.probe-name {
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+		font-weight: 600;
+		color: var(--ink);
+	}
+
+	.probe-ms {
+		font-family: var(--font-mono);
+		font-size: 0.6875rem;
+		color: var(--ink-3);
+	}
+
+	.probe-detail {
+		margin: 2px 0 0;
+		font-size: 0.71875rem;
+		color: var(--ink-2);
+		overflow-wrap: anywhere;
 	}
 </style>

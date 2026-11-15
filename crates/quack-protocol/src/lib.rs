@@ -326,6 +326,26 @@ pub enum Op {
     /// Look for a newer release at the configured `updates.url` now; answered with
     /// `Event::UpdateCheckResult`.
     CheckUpdates,
+    /// Ask for the session's outbound HTTP / egress boundary ledger; answered with
+    /// `Event::EgressLedger`.
+    ListEgress,
+    /// Run epoch pruning now (`indices = None`), or manually collapse selected tool-result
+    /// history entries (`indices = Some(...)`).
+    PruneContext {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        indices: Option<Vec<usize>>,
+    },
+    /// Explicitly run an on-demand tool-calling diagnostic probe on the active model;
+    /// answered with `Event::ToolProbeResult`.
+    ProbeToolCalling,
+    /// Ask for per-file diagnostics collected by active language servers; answered with
+    /// `Event::LspDiagnostics`.
+    ListLspDiagnostics {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        server_id: Option<String>,
+    },
     Shutdown,
 }
 
@@ -700,6 +720,23 @@ pub enum Event {
     Error {
         error: EngineError,
     },
+    /// Current session egress ledger snapshot, answering [`Op::ListEgress`].
+    EgressLedger {
+        entries: Vec<EgressEntry>,
+        stats: EgressStats,
+    },
+    /// Incremental live outbound/blocked request recorded during the session.
+    EgressRecorded {
+        entry: EgressEntry,
+    },
+    /// On-demand tool-calling probe result, answering [`Op::ProbeToolCalling`].
+    ToolProbeResult {
+        report: ToolProbeReport,
+    },
+    /// Per-file LSP diagnostics snapshot, answering [`Op::ListLspDiagnostics`].
+    LspDiagnostics {
+        items: Vec<LspDiagnosticItem>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -762,6 +799,7 @@ pub enum ApprovalDecision {
     AllowOnce,
     AllowSession,
     AlwaysAllow { scope: WriteScope },
+    RedactAndSend,
     Deny,
     DenyWithFeedback { feedback: String },
 }
@@ -826,6 +864,29 @@ pub enum ApprovalRequest {
         name: String,
         arguments: String,
     },
+    EgressSecrets {
+        provider: String,
+        host: String,
+        findings: Vec<SecretFinding>,
+    },
+}
+
+/// Masked credential or high-entropy match flagged before outbound transmission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct SecretFinding {
+    pub id: String,
+    /// Detector family / rule id (e.g. `aws_access_key`, `resolved_secret`).
+    pub kind: String,
+    /// Source location label (`prompt`, `@src/config.rs`, or `tool:shell`).
+    pub location: String,
+    /// Masked preview (`sk-live-••••9f2a`), never the plaintext secret.
+    pub preview: String,
+    /// Short SHA-256 fingerprint (`sha256:a1b2c3d4e5f6`) for allowlisting.
+    pub fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub line: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1257,10 +1318,39 @@ pub struct ContextReport {
     /// `[context] cache_strategy`.
     pub strategy: String,
     pub segments: Vec<ContextSegment>,
+    /// Optional per-message / tool-output breakdown for interactive inspection and trim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tail_items: Vec<ContextItem>,
     /// Caveats, e.g. that the history is in use by a running turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub note: Option<String>,
+}
+
+/// Which cache region a context segment or message belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum ContextZone {
+    CachedPrefix,
+    SessionContext,
+    UncachedTail,
+}
+
+/// One inspectable / individually prunable message in the conversation tail.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ContextItem {
+    /// Index in the live session history.
+    pub index: usize,
+    /// `user`, `assistant`, `tool`, or `summary`.
+    pub role: String,
+    /// Short preview or tool summary.
+    pub label: String,
+    pub tokens: u32,
+    pub pruned: bool,
+    pub cached: bool,
+    pub prunable: bool,
 }
 
 /// Usage of one session. Token totals include earlier runs of a resumed session; timings
@@ -1403,6 +1493,97 @@ pub struct ContextSegment {
     pub tokens: u32,
     /// One line, e.g. `12 messages, 3 pruned`.
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub zone: Option<ContextZone>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prunable_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum EgressKind {
+    Inference,
+    Models,
+    McpHttp,
+    Auth,
+    Fetch,
+    BlockedRedirect,
+    BlockedEgress,
+}
+
+/// One recorded outbound or blocked network transaction in this session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EgressEntry {
+    pub seq: u64,
+    pub timestamp_ms: u64,
+    pub kind: EgressKind,
+    pub host: String,
+    pub path: String,
+    pub protocol: String,
+    pub local: bool,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub status: Option<u16>,
+    pub redactions: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub blocked_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EgressStats {
+    pub total_requests: u64,
+    pub total_bytes_sent: u64,
+    pub total_bytes_received: u64,
+    pub local_requests: u64,
+    pub remote_requests: u64,
+    pub blocked_count: u64,
+    pub redacted_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ToolProbeCase {
+    pub name: String,
+    pub passed: bool,
+    pub latency_ms: u64,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ToolProbeReport {
+    pub model: String,
+    pub configured_mode: String,
+    pub recommended_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub recommended_text_format: Option<String>,
+    pub cases: Vec<ToolProbeCase>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct LspDiagnosticItem {
+    pub server: String,
+    pub path: String,
+    /// 1-based line number for display.
+    pub line: u32,
+    /// 1-based column number for display.
+    pub column: u32,
+    /// `error`, `warning`, `info`, or `hint`.
+    pub severity: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -79,8 +79,22 @@ pub async fn run(
         PopTitle
     );
     ratatui::restore();
+    let gui_root = engine.config().dirs.workspace_root.clone();
+    let handoff = result.is_ok() && app.wants_gui_handoff();
+    let resume = app.resume_id();
     engine.shutdown().await;
-    result.map(|()| app.resume_id())
+    if handoff && let Some(bin) = quack_core::gui::find_binary() {
+        let args = quack_core::gui::build_args(
+            std::slice::from_ref(&gui_root),
+            resume.as_deref(),
+            false,
+            false,
+        );
+        if let Err(e) = quack_core::gui::spawn(&bin, &args, Some(&gui_root)) {
+            tracing::warn!(%e, "could not launch quack-gui");
+        }
+    }
+    result.map(|()| resume)
 }
 
 async fn event_loop(

@@ -10,10 +10,10 @@ use quack_mcp::{McpManager, ServerAsk};
 use quack_protocol::PermissionMode;
 use quack_protocol::{
     ApprovalPolicy, CallId, EngineError, EngineErrorKind, Event, ExportFormat, InputItem,
-    InstructionFile, McpSecretValue, Op, SessionId, SessionInfo, SessionSummary, TurnId, WorkMode,
-    WriteScope,
+    InstructionFile, LspDiagnosticItem, McpSecretValue, Op, SessionId, SessionInfo, SessionSummary,
+    TurnId, WorkMode, WriteScope,
 };
-use quack_providers::{Message, Provider, StreamEvent};
+use quack_providers::{EgressLedger, Message, Provider, StreamEvent};
 use quack_tools::Permissions;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -92,6 +92,8 @@ enum Queued {
     Switch(Option<SessionId>),
     /// `/compact`, with an optional focus.
     Compact(Option<String>),
+    /// `/prune` or manual context trim.
+    Prune(Option<Vec<usize>>),
     /// `/reload`, or a trust decision.
     Reload(Option<(String, String)>),
     /// `/plan accept`, into this mode.
@@ -198,6 +200,12 @@ pub struct Engine {
     sign_in: Option<JoinHandle<()>>,
     hook_tasks: JoinSet<()>,
     hook_checks: BTreeMap<u64, CancellationToken>,
+    /// Live session outbound/blocked network ledger.
+    ledger: Arc<EgressLedger>,
+    /// Active session log handle shared with `ledger`'s recording hook.
+    ledger_log: Arc<Mutex<Option<SharedLog>>>,
+    /// SHA-256 secret fingerprints explicitly allowed for the active session.
+    secret_allowlist: Arc<Mutex<Vec<String>>>,
 }
 
 impl Engine {
@@ -221,6 +229,11 @@ impl Engine {
             reasoning_effort: None,
             reasoning_efforts: Vec::new(),
         };
+        let ledger = EgressLedger::new();
+        let ledger_log: Arc<Mutex<Option<SharedLog>>> = Arc::default();
+        let secret_allowlist =
+            Arc::new(Mutex::new(config.settings.network.secret_allowlist.clone()));
+        wire_ledger(&ledger, &tx, &ledger_log);
         let engine = Self {
             config,
             config_tx,
@@ -267,6 +280,9 @@ impl Engine {
                 Default::default(),
             )),
             lsp: LspManager::empty(),
+            ledger,
+            ledger_log,
+            secret_allowlist,
         };
         let task = tokio::spawn(engine.run(ops_rx, asks_rx));
         EngineHandle {
@@ -408,6 +424,9 @@ impl Engine {
             futures::future::join(self.mcp.manager.shutdown(), self.lsp.shutdown()),
         )
         .await;
+        self.sync_log();
+        self.log = None;
+        self.sync_ledger_log();
         self.emit(Event::ShutdownComplete);
     }
 
@@ -478,6 +497,7 @@ impl Engine {
             crate::sandbox::server_policy(&self.config),
         );
         manager.set_asker(self.asks.clone());
+        manager.set_ledger(self.ledger.clone());
         manager.start();
         crate::mcp::report(manager.clone(), self.tx.clone());
         self.mcp = crate::mcp::Mcp::new(manager);
@@ -561,6 +581,7 @@ impl Engine {
             }
             return;
         };
+        setup.provider.set_ledger(self.ledger.clone());
         self.session.model = Some(setup.model_ref.clone());
         self.session.profile = setup.profile.id.clone();
         let resume = std::mem::take(&mut self.resume);
@@ -642,6 +663,9 @@ impl Engine {
         self.saved_mode = session::modes(&records);
         self.reasoning_efforts = session::reasoning_efforts(&records);
         self.stats = Arc::new(Mutex::new(crate::stats::Stats::from_log(&records)));
+        let egress = session::egress_entries(&records);
+        self.ledger.reset(&egress);
+        self.reset_secret_allowlist();
         self.log = None;
         match ps.reopen(entry.clone()) {
             Ok(log) => {
@@ -657,6 +681,7 @@ impl Engine {
                 "session log is read-only ({e}); new turns will not be saved"
             )),
         }
+        self.sync_ledger_log();
         self.session.id = SessionId(entry.id.clone());
         self.turns = turns;
         self.title_tasks = JoinSet::new();
@@ -666,6 +691,8 @@ impl Engine {
             session: self.session.clone(),
             items,
         });
+        let (entries, stats) = self.ledger.snapshot();
+        self.emit(Event::EgressLedger { entries, stats });
         Some((history, plan))
     }
 
@@ -750,6 +777,7 @@ impl Engine {
         };
         let parent = std::mem::replace(&mut self.session.id, id);
         self.log = Some(Arc::new(Mutex::new(log)));
+        self.sync_ledger_log();
         let title = self.title.as_ref().map(|t| format!("{t} (fork)"));
         self.title_tasks = JoinSet::new();
         self.set_title(title);
@@ -790,6 +818,9 @@ impl Engine {
             None => {
                 self.sync_log();
                 self.log = None;
+                self.sync_ledger_log();
+                self.ledger.reset(&[]);
+                self.reset_secret_allowlist();
                 self.reasoning_efforts.clear();
                 self.saved_mode = None;
                 self.saved_plan_start = None;
@@ -798,6 +829,10 @@ impl Engine {
                 self.turns = 0;
                 self.title_tasks = JoinSet::new();
                 self.set_title(None);
+                self.emit(Event::EgressLedger {
+                    entries: Vec::new(),
+                    stats: Default::default(),
+                });
                 (Vec::new(), String::new())
             }
         };
@@ -1588,6 +1623,14 @@ impl Engine {
         };
         self.session.model = Some(setup.model_ref.clone());
         self.session.profile = setup.profile.id.clone();
+        setup.provider.set_ledger(self.ledger.clone());
+        if let Ok(mut list) = self.secret_allowlist.lock() {
+            for fp in &self.config.settings.network.secret_allowlist {
+                if !list.contains(fp) {
+                    list.push(fp.clone());
+                }
+            }
+        }
         self.configure_reasoning(&setup);
         if self.config.settings.model.remember_last
             && let Err(e) =
@@ -1663,6 +1706,7 @@ impl Engine {
         if c.editor.is_some() || !c.perms.lock().is_ok_and(|p| p.work_mode == WorkMode::Plan) {
             return;
         }
+        setup.provider.set_ledger(self.ledger.clone());
         setup.tool_ctx.plan = c.setup.tool_ctx.plan.clone();
         c.editor = Some(std::mem::replace(&mut c.setup, Arc::new(setup)));
         c.plan_start = self.saved_plan_start.take();
@@ -1687,6 +1731,14 @@ impl Engine {
         };
         self.session.model = Some(setup.model_ref.clone());
         self.session.profile = setup.profile.id.clone();
+        setup.provider.set_ledger(self.ledger.clone());
+        if let Ok(mut list) = self.secret_allowlist.lock() {
+            for fp in &self.config.settings.network.secret_allowlist {
+                if !list.contains(fp) {
+                    list.push(fp.clone());
+                }
+            }
+        }
         self.configure_reasoning(&setup);
         session::record(
             self.log.as_ref(),
@@ -1795,6 +1847,11 @@ impl Engine {
                     }),
                 );
                 self.log = Some(log);
+                self.sync_ledger_log();
+                let (pre_entries, _) = self.ledger.snapshot();
+                for entry in &pre_entries {
+                    session::record(self.log.as_ref(), "egress", serde_json::json!(entry));
+                }
                 self.emit_mode();
                 for (model, effort) in &self.reasoning_efforts {
                     session::record(
@@ -2005,6 +2062,27 @@ impl Engine {
             Op::ListLsp => self.emit(Event::LspServers {
                 servers: crate::lsp::info(&self.lsp),
             }),
+            Op::ListEgress => {
+                let (entries, stats) = self.ledger.snapshot();
+                self.emit(Event::EgressLedger { entries, stats });
+            }
+            Op::PruneContext { indices } => {
+                if !self.started || self.running.is_some() {
+                    self.emit(Event::TurnQueued {
+                        waiting_for: if self.started {
+                            "the current turn".into()
+                        } else {
+                            "startup".into()
+                        },
+                    });
+                }
+                self.queued.push_back(Queued::Prune(indices));
+                self.next_queued(done, reload);
+            }
+            Op::ProbeToolCalling => self.probe_tool_calling(),
+            Op::ListLspDiagnostics { server_id } => {
+                self.list_lsp_diagnostics(server_id.as_deref());
+            }
             Op::ListMcp => self.emit(Event::McpServers {
                 servers: self
                     .mcp
@@ -2452,6 +2530,7 @@ impl Engine {
                 Some(Queued::Turn(items)) => self.start_turn(items, done.clone()),
                 Some(Queued::Switch(target)) => self.switch_session(target),
                 Some(Queued::Compact(focus)) => self.start_compact(focus, done.clone()),
+                Some(Queued::Prune(indices)) => self.prune_context(indices),
                 Some(Queued::Reload(hook)) => self.begin_reload(reload.clone(), hook),
                 Some(Queued::Accept(mode)) => self.accept_plan(&mode, done.clone()),
                 Some(Queued::Fork) => self.fork_session(),
@@ -2638,6 +2717,14 @@ impl Engine {
         self.problem = None;
         self.session.model = Some(setup.model_ref.clone());
         self.session.profile = setup.profile.id.clone();
+        setup.provider.set_ledger(self.ledger.clone());
+        if let Ok(mut list) = self.secret_allowlist.lock() {
+            for fp in &self.config.settings.network.secret_allowlist {
+                if !list.contains(fp) {
+                    list.push(fp.clone());
+                }
+            }
+        }
         self.configure_reasoning(&setup);
         let mut perms = setup.permissions.clone();
         let history = match self.convo.take() {
@@ -2728,6 +2815,9 @@ impl Engine {
             pool,
             prompt_lock: Arc::default(),
             continues: self.continues.clone(),
+            network: self.config.settings.network.clone(),
+            ledger: self.ledger.clone(),
+            secret_allowlist: self.secret_allowlist.clone(),
         };
         tokio::spawn(async move {
             ctx.emit(Event::TurnStarted { turn });
@@ -2987,8 +3077,12 @@ impl Engine {
             pool,
             prompt_lock: Arc::default(),
             continues: self.continues.clone(),
+            network: self.config.settings.network.clone(),
+            ledger: self.ledger.clone(),
+            secret_allowlist: self.secret_allowlist.clone(),
         };
         let start = self.start_context.take();
+        let is_mcp_prompt = mcp_prompt.is_some();
         tokio::spawn(async move {
             let body = match mcp_prompt {
                 None => expanded.unwrap_or_else(|| typed.clone()),
@@ -3011,6 +3105,30 @@ impl Engine {
                     }
                 }
             };
+            let body = if !is_mcp_prompt {
+                let mention_setup = ctx.setup.clone();
+                let mention_tx = ctx.tx.clone();
+                let raw_body = body.clone();
+                let expansion = tokio::task::spawn_blocking(move || {
+                    crate::mentions::expand(
+                        &mention_setup.tool_ctx.root,
+                        &mention_setup.tool_ctx.grammars,
+                        &raw_body,
+                    )
+                })
+                .await
+                .unwrap_or_default();
+                for message in expansion.warnings {
+                    let _ = mention_tx.send(Event::Warning { message });
+                }
+                if expansion.attachments.is_empty() {
+                    body
+                } else {
+                    format!("{body}\n\n{}", expansion.attachments)
+                }
+            } else {
+                body
+            };
             let prompt = turn::Prompt {
                 text: compose(body),
                 typed,
@@ -3020,6 +3138,90 @@ impl Engine {
             let history = turn::run(ctx, history, prompt).await;
             let _ = done.send((turn, history)).await;
         });
+    }
+
+    fn sync_ledger_log(&self) {
+        if let Ok(mut guard) = self.ledger_log.lock() {
+            *guard = self.log.clone();
+        }
+    }
+
+    fn reset_secret_allowlist(&self) {
+        if let Ok(mut list) = self.secret_allowlist.lock() {
+            *list = self.config.settings.network.secret_allowlist.clone();
+        }
+    }
+
+    fn prune_context(&mut self, indices: Option<Vec<usize>>) {
+        let Some((report, ctx_report)) = (match &mut self.convo {
+            None => {
+                self.warn("no model is ready, so there is no context to prune".into());
+                return;
+            }
+            Some(c) => {
+                let Some(history) = c.history.as_mut() else {
+                    return;
+                };
+                let report = crate::context::prune_selected(
+                    &c.setup,
+                    history,
+                    indices.as_deref(),
+                    self.log.as_ref(),
+                    &self.tx,
+                );
+                let ctx_report = crate::context::report(&c.setup, Some(history));
+                Some((report, ctx_report))
+            }
+        }) else {
+            return;
+        };
+        if report.items.is_empty() {
+            self.emit(Event::ContextPruned { report });
+        }
+        self.emit(Event::ContextReport { report: ctx_report });
+    }
+
+    fn probe_tool_calling(&self) {
+        let Some(c) = &self.convo else {
+            return self.warn("no model is ready to probe".into());
+        };
+        let provider = c.setup.provider.clone();
+        let model = c.setup.model.id.clone();
+        let mode = c.setup.model.tool_calling.mode;
+        let reasoning = c.setup.model.reasoning.format;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            match quack_providers::probe::run_tool_probe(&provider, &model, mode, reasoning).await {
+                Ok(report) => {
+                    let _ = tx.send(Event::ToolProbeResult { report });
+                }
+                Err(e) => {
+                    let _ = tx.send(Event::Warning {
+                        message: format!("tool probe failed: {e}"),
+                    });
+                }
+            }
+        });
+    }
+
+    fn list_lsp_diagnostics(&self, server_id: Option<&str>) {
+        let root = &self.config.dirs.workspace_root;
+        let items = self
+            .lsp
+            .diagnostics()
+            .into_iter()
+            .filter(|entry| server_id.is_none_or(|id| entry.server == id))
+            .map(|entry| LspDiagnosticItem {
+                server: entry.server,
+                path: quack_tools::paths::display(root, &entry.path),
+                line: entry.diagnostic.line.saturating_add(1),
+                column: entry.diagnostic.column.saturating_add(1),
+                severity: entry.diagnostic.severity.label().to_owned(),
+                message: entry.diagnostic.message,
+                code: entry.diagnostic.code,
+            })
+            .collect();
+        self.emit(Event::LspDiagnostics { items });
     }
 }
 
@@ -3233,6 +3435,10 @@ fn op_name(op: &Op) -> &'static str {
         Op::SaveHookSetup { .. } => "save_hook_setup",
         Op::CheckHookSetup { .. } => "check_hook_setup",
         Op::CancelHookCheck { .. } => "cancel_hook_check",
+        Op::ListEgress => "list_egress",
+        Op::PruneContext { .. } => "prune_context",
+        Op::ProbeToolCalling => "probe_tool_calling",
+        Op::ListLspDiagnostics { .. } => "list_lsp_diagnostics",
         Op::Shutdown => "shutdown",
     }
 }
@@ -3332,4 +3538,23 @@ fn secret_from_mcp(value: McpSecretValue) -> Secret {
         McpSecretValue::Env { env, format } => Secret::Env { env, format },
         McpSecretValue::Keyring { keyring } => Secret::Keyring { keyring },
     }
+}
+
+fn wire_ledger(
+    ledger: &Arc<EgressLedger>,
+    tx: &broadcast::Sender<Event>,
+    log_slot: &Arc<Mutex<Option<SharedLog>>>,
+) {
+    let tx = tx.clone();
+    let log_slot = Arc::clone(log_slot);
+    ledger.set_hook(Arc::new(move |entry| {
+        if let Ok(guard) = log_slot.lock()
+            && let Some(log) = guard.as_ref()
+        {
+            session::record(Some(log), "egress", serde_json::json!(entry));
+        }
+        let _ = tx.send(Event::EgressRecorded {
+            entry: entry.clone(),
+        });
+    }));
 }

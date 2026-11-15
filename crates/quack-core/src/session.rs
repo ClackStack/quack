@@ -117,6 +117,14 @@ pub(crate) fn reasoning_efforts(records: &[Record]) -> std::collections::BTreeMa
     efforts
 }
 
+pub(crate) fn egress_entries(records: &[Record]) -> Vec<quack_protocol::EgressEntry> {
+    records
+        .iter()
+        .filter(|r| r.kind == "egress")
+        .filter_map(|r| serde_json::from_value(serde_json::Value::Object(r.data.clone())).ok())
+        .collect()
+}
+
 /// A session rebuilt from its records.
 #[derive(Debug, Default)]
 pub(crate) struct Replayed {

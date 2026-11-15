@@ -16,8 +16,11 @@ import type {
 	OpenedTab,
 	RecentFolder,
 	ResumeRequest,
+	SavedTab,
+	StartupPayload,
 	TabMessage,
-	Transport
+	Transport,
+	WorkspaceSymbol
 } from './types';
 
 /**
@@ -245,7 +248,7 @@ const INFO: AppInfo = {
 	planner_locked: false,
 	permission_mode: 'ask',
 	work_mode: 'edit',
-	ui: { theme: 'auto', reduced_motion: false },
+	ui: { theme: 'auto', reduced_motion: false, gui_restore_tabs: true },
 	egress: {
 		offline: true,
 		offline_locked: false,
@@ -256,7 +259,10 @@ const INFO: AppInfo = {
 		has_proxy: false,
 		updates_check: false,
 		catalog_refresh: false,
-		telemetry_enabled: false
+		telemetry_enabled: false,
+		secret_guard: 'ask',
+		secret_guard_local: false,
+		secret_allowlist: []
 	},
 	sandbox: {
 		mode: 'auto',
@@ -758,7 +764,8 @@ export function devTransport(): Transport {
 			work_mode: parseTomlString(devSetting(state, 'permissions.work_mode')) || 'edit',
 			ui: {
 				theme: parseTomlString(devSetting(state, 'ui.theme')) || 'auto',
-				reduced_motion: devSetting(state, 'ui.reduced_motion') === 'true'
+				reduced_motion: devSetting(state, 'ui.reduced_motion') === 'true',
+				gui_restore_tabs: devSetting(state, 'ui.gui_restore_tabs') !== 'false'
 			},
 			egress: {
 				...INFO.egress,
@@ -768,7 +775,10 @@ export function devTransport(): Transport {
 				has_proxy: proxyUrl.length > 0,
 				catalog_refresh: catalogRefresh,
 				updates_check: updatesCheck,
-				telemetry_enabled: otelUrl.length > 0
+				telemetry_enabled: otelUrl.length > 0,
+				secret_guard: parseTomlString(devSetting(state, 'network.secret_guard')) || 'ask',
+				secret_guard_local: devSetting(state, 'network.secret_guard_local') === 'true',
+				secret_allowlist: parseTomlStringArray(devSetting(state, 'network.secret_allowlist'))
 			},
 			sandbox: {
 				...INFO.sandbox,
@@ -1477,14 +1487,212 @@ export function devTransport(): Transport {
 							budget: 26214,
 							threshold: 24576,
 							used: 4132,
-							strategy: 'cache',
+							strategy: 'preserve',
 							segments: [
-								{ name: 'System prompt', tokens: 910, detail: 'generic profile' },
-								{ name: 'History', tokens: 2871, detail: '2 messages, 1 pruned' },
-								{ name: 'Tools', tokens: 351, detail: '11 tools' }
+								{
+									name: 'System prompt',
+									tokens: 910,
+									detail: 'generic profile · immutable KV prefix',
+									zone: 'cached_prefix'
+								},
+								{
+									name: 'Tools',
+									tokens: 351,
+									detail: '11 tools · immutable KV prefix',
+									zone: 'cached_prefix'
+								},
+								{
+									name: 'Workspace instructions',
+									tokens: 280,
+									detail: 'AGENTS.md · attached to session start',
+									zone: 'session_context'
+								},
+								{
+									name: 'History',
+									tokens: 2591,
+									detail: '4 messages, 1 pruned',
+									zone: 'uncached_tail',
+									prunable_indices: [1, 2]
+								}
+							],
+							tail_items: [
+								{
+									index: 0,
+									role: 'user',
+									label: 'Count ducks in src/pond/ducks.ts',
+									tokens: 48,
+									pruned: false,
+									cached: true,
+									prunable: false
+								},
+								{
+									index: 1,
+									role: 'tool',
+									label: 'read src/pond/ducks.ts (lines 1-140)',
+									tokens: 1820,
+									pruned: false,
+									cached: false,
+									prunable: true
+								},
+								{
+									index: 2,
+									role: 'tool',
+									label: 'grep "mallard" across src/',
+									tokens: 420,
+									pruned: false,
+									cached: false,
+									prunable: true
+								},
+								{
+									index: 3,
+									role: 'assistant',
+									label: 'Found 14 mallards in src/pond/ducks.ts',
+									tokens: 303,
+									pruned: false,
+									cached: false,
+									prunable: false
+								}
 							]
 						}
 					});
+					break;
+				case 'prune_context': {
+					const indices = op.indices ?? [1];
+					send(tab, {
+						event: 'context_pruned',
+						report: {
+							removed_tokens: indices.length * 420,
+							items: indices.map((i) => `History item #${i + 1}`)
+						}
+					});
+					break;
+				}
+				case 'list_egress':
+					send(tab, {
+						event: 'egress_ledger',
+						entries: [
+							{
+								seq: 1,
+								timestamp_ms: Date.now() - 45_000,
+								kind: 'models',
+								host: 'localhost:11434',
+								path: '/v1/models',
+								protocol: 'http',
+								local: true,
+								bytes_sent: 0,
+								bytes_received: 1420,
+								status: 200,
+								redactions: 0
+							},
+							{
+								seq: 2,
+								timestamp_ms: Date.now() - 12_000,
+								kind: 'inference',
+								host: 'localhost:11434',
+								path: '/v1/chat/completions',
+								protocol: 'http',
+								local: true,
+								bytes_sent: 3180,
+								bytes_received: 842,
+								status: 200,
+								redactions: 0
+							},
+							{
+								seq: 3,
+								timestamp_ms: Date.now() - 5_000,
+								kind: 'blocked_egress',
+								host: 'telemetry.invalid:443',
+								path: '/v1/metrics',
+								protocol: 'https',
+								local: false,
+								bytes_sent: 0,
+								bytes_received: 0,
+								redactions: 0,
+								blocked_reason: 'blocked by network.offline policy'
+							}
+						],
+						stats: {
+							total_requests: 3,
+							total_bytes_sent: 3180,
+							total_bytes_received: 2262,
+							local_requests: 2,
+							remote_requests: 1,
+							blocked_count: 1,
+							redacted_count: 0
+						}
+					});
+					break;
+				case 'probe_tool_calling':
+					send(tab, {
+						event: 'tool_probe_result',
+						report: {
+							model:
+								(state ? parseTomlString(devSetting(state, 'model.default')) : null) ||
+								INFO.model ||
+								'dev-local/tiny',
+							configured_mode: 'native',
+							recommended_mode: 'native',
+							cases: [
+								{
+									name: 'native_tool_call',
+									passed: true,
+									latency_ms: 84,
+									detail: 'Structured tool_call emitted with valid JSON arguments.'
+								},
+								{
+									name: 'tool_result_continuation',
+									passed: true,
+									latency_ms: 61,
+									detail: 'Accepted tool response and returned final assistant message.'
+								}
+							],
+							summary: 'Model handles native structured tool calling reliably (demo response).'
+						}
+					});
+					break;
+				case 'run_doctor':
+					send(tab, {
+						event: 'doctor_report',
+						checks: [
+							{ name: 'config.layers', status: 'ok', detail: '3 config layers parsed without errors' },
+							{ name: 'defaults.bundle', status: 'ok', detail: 'defaults/ loaded' },
+							{ name: 'provider.dev-local', status: 'ok', detail: 'localhost:11434 reachable (loopback)' },
+							{ name: 'sandbox', status: 'ok', detail: 'Landlock + seccomp active' },
+							{ name: 'git', status: 'ok', detail: 'git repository detected on branch main' }
+						]
+					});
+					break;
+				case 'list_instructions':
+					send(tab, {
+						event: 'instructions',
+						files: [
+							{
+								source: 'AGENTS.md',
+								in_prompt: true,
+								tokens: 280,
+								text: '# Workspace instructions\nRun `cargo test` before concluding changes.'
+							}
+						]
+					});
+					break;
+				case 'list_lsp_diagnostics':
+					send(tab, {
+						event: 'lsp_diagnostics',
+						items: [
+							{
+								server: 'rust-analyzer',
+								path: 'src/pond/ducks.ts',
+								line: 14,
+								column: 5,
+								severity: 'warning',
+								message: 'unused variable `wingSpan`',
+								code: 'unused_variables'
+							}
+						]
+					});
+					break;
+				case 'set_title':
+					send(tab, { event: 'session_title', title: op.title });
 					break;
 				case 'list_memory': {
 					const notes = state?.memoryNotes ?? [];
@@ -1634,6 +1842,48 @@ export function devTransport(): Transport {
 				'README.md'
 			];
 		},
+
+		async listSymbols(_tab: number, path: string, query = ''): Promise<WorkspaceSymbol[]> {
+			const samples: Record<string, WorkspaceSymbol[]> = {
+				'src/main.rs': [
+					{ name: 'main', kind: 'function', start: 1, end: 18, signature: 'fn main()' },
+					{
+						name: 'Session::run',
+						kind: 'method',
+						start: 24,
+						end: 62,
+						signature: 'pub async fn run(&mut self) -> Result<()>'
+					}
+				],
+				'src/export.rs': [
+					{
+						name: 'export_markdown',
+						kind: 'function',
+						start: 10,
+						end: 45,
+						signature: 'pub fn export_markdown(items: &[Item]) -> String'
+					}
+				],
+				'src/pond/ducks.ts': [
+					{
+						name: 'countDucks',
+						kind: 'function',
+						start: 1,
+						end: 22,
+						signature: 'export function countDucks(flock: Duck[]): number'
+					}
+				]
+			};
+			const list = samples[path] ?? [];
+			const q = query.trim().toLowerCase();
+			return q ? list.filter((s) => s.name.toLowerCase().includes(q)) : list;
+		},
+
+		async startupTargets(): Promise<StartupPayload> {
+			return { targets: [], active_index: null };
+		},
+
+		async saveOpenTabs(_tabs: SavedTab[]): Promise<void> {},
 
 		async inputHistory(tab: number): Promise<string[]> {
 			return [...(tabs.get(tab)?.inputHistory ?? INFO.history)];

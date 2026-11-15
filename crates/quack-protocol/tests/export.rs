@@ -9,15 +9,17 @@ use std::path::PathBuf;
 
 use quack_protocol::{
     Answer, ApprovalDecision, ApprovalPolicy, ApprovalRequest, CallId, CheckStatus, CheckpointId,
-    CommandInfo, ContextReport, ContextSegment, DetectedServer, DoctorCheck, EngineError,
-    EngineErrorKind, Event, EventIndex, ExportFormat, HookConnection, HookConnectionDraft,
-    HookConnectionInfo, HookCredentialChange, HookDescriptor, HookField, HookOutcome, HookPreset,
-    HookSetupInfo, Image, InputItem, InstructionFile, KeySource, LoadState, LspServerInfo,
+    CommandInfo, ContextItem, ContextReport, ContextSegment, ContextZone, DetectedServer,
+    DoctorCheck, EgressEntry, EgressKind, EgressStats, EngineError, EngineErrorKind, Event,
+    EventIndex, ExportFormat, HookConnection, HookConnectionDraft, HookConnectionInfo,
+    HookCredentialChange, HookDescriptor, HookField, HookOutcome, HookPreset, HookSetupInfo, Image,
+    InputItem, InstructionFile, KeySource, LoadState, LspDiagnosticItem, LspServerInfo,
     LspServerState, McpSecretValue, McpServerInfo, McpServerState, MemoryNote, ModelId, ModelInfo,
     Op, PermissionMode, ProfileInfo, ProviderId, ProviderModels, PruneReport, Question,
-    QuestionOption, ReplayItem, RequestStat, RewindPoint, SecretText, ServiceInfo, SessionId,
-    SessionInfo, SessionSummary, SkillInfo, StatsReport, Subsystem, ToolCallInfo,
-    ToolResultSummary, ToolStat, TurnId, TurnOverrides, Usage, WorkMode, WriteScope,
+    QuestionOption, ReplayItem, RequestStat, RewindPoint, SecretFinding, SecretText, ServiceInfo,
+    SessionId, SessionInfo, SessionSummary, SkillInfo, StatsReport, Subsystem, ToolCallInfo,
+    ToolProbeCase, ToolProbeReport, ToolResultSummary, ToolStat, TurnId, TurnOverrides, Usage,
+    WorkMode, WriteScope,
 };
 use ts_rs::TS;
 
@@ -347,6 +349,51 @@ fn export_protocol_ts() {
             StatsReport::decl(&cfg),
         ),
         // transcript, then the two enums the SPA matches on
+        (
+            "ContextZone",
+            ContextZone::docs().unwrap_or_default(),
+            ContextZone::decl(&cfg),
+        ),
+        (
+            "ContextItem",
+            ContextItem::docs().unwrap_or_default(),
+            ContextItem::decl(&cfg),
+        ),
+        (
+            "EgressKind",
+            EgressKind::docs().unwrap_or_default(),
+            EgressKind::decl(&cfg),
+        ),
+        (
+            "EgressEntry",
+            EgressEntry::docs().unwrap_or_default(),
+            EgressEntry::decl(&cfg),
+        ),
+        (
+            "EgressStats",
+            EgressStats::docs().unwrap_or_default(),
+            EgressStats::decl(&cfg),
+        ),
+        (
+            "SecretFinding",
+            SecretFinding::docs().unwrap_or_default(),
+            SecretFinding::decl(&cfg),
+        ),
+        (
+            "ToolProbeCase",
+            ToolProbeCase::docs().unwrap_or_default(),
+            ToolProbeCase::decl(&cfg),
+        ),
+        (
+            "ToolProbeReport",
+            ToolProbeReport::docs().unwrap_or_default(),
+            ToolProbeReport::decl(&cfg),
+        ),
+        (
+            "LspDiagnosticItem",
+            LspDiagnosticItem::docs().unwrap_or_default(),
+            LspDiagnosticItem::decl(&cfg),
+        ),
         (
             "ReplayItem",
             ReplayItem::docs().unwrap_or_default(),

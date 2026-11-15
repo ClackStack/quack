@@ -301,6 +301,20 @@ pub(crate) const COMMANDS: &[Command] = &[
         "Copy the last response, or its last code block, to the clipboard",
         None,
     ),
+    c(
+        "probe",
+        &[],
+        "",
+        "Probe whether the active model returns structured tool calls cleanly",
+        None,
+    ),
+    c(
+        "gui",
+        &[],
+        "",
+        "Hand off this workspace and session to the desktop GUI",
+        None,
+    ),
     c("help", &["?"], "", "Commands and keys", None),
     c("quit", &["exit"], "", "Quit", None),
 ];

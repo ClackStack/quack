@@ -23,9 +23,11 @@ pub mod highlight;
 pub mod path_env;
 pub mod recent;
 pub mod registry;
+pub mod tabs;
 
 pub use appinfo::AppInfo;
 pub use coalesce::DeltaCoalescer;
 pub use highlight::{HighlightSpan, highlight_code};
 pub use recent::{RecentFolder, RecentFolders};
-pub use registry::{OpenError, Payload, Registry, Sink, TabId, TabMessage};
+pub use registry::{OpenError, Payload, Registry, Sink, TabId, TabMessage, WorkspaceSymbol};
+pub use tabs::{LaunchTarget, OpenTabsStore, ParsedLaunch, SavedTab, StartupPayload};

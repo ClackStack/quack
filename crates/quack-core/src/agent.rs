@@ -104,7 +104,10 @@ impl Pool {
                 )
                 .await
                 {
-                    Ok(s) => Arc::new(s),
+                    Ok(s) => {
+                        s.provider.set_ledger(parent.ledger.clone());
+                        Arc::new(s)
+                    }
                     Err(e) => {
                         parent.emit(Event::Warning {
                             message: format!(
@@ -283,6 +286,9 @@ async fn start(parent: &TurnCtx, call_key: &str, req: TaskRequest) -> TaskReport
         max_steps,
         pool: parent.pool.clone(),
         prompt_lock: parent.prompt_lock.clone(),
+        network: parent.network.clone(),
+        ledger: parent.ledger.clone(),
+        secret_allowlist: parent.secret_allowlist.clone(),
     };
     let cancel = ctx.cancel.clone();
     let prompt = turn::Prompt {

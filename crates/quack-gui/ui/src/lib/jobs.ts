@@ -102,6 +102,8 @@ function approvalDetail(request: ApprovalRequest): string {
 			return request.arguments
 				? `Tool ${request.name}: ${compactSnippet(request.arguments, 72)}`
 				: `Tool ${request.name}`;
+		case 'egress_secrets':
+			return `Secret Shield (${request.findings.length} finding${request.findings.length === 1 ? '' : 's'}) -> ${request.host}`;
 	}
 }
 

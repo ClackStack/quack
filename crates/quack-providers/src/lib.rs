@@ -11,11 +11,13 @@
 mod anthropic;
 mod error;
 pub mod fetch;
+pub mod ledger;
 #[cfg(feature = "auth-chatgpt")]
 pub mod login;
 #[cfg(feature = "proto-ollama")]
 mod ollama;
 mod openai_chat;
+pub mod probe;
 mod provider;
 mod reasoning;
 #[cfg(feature = "proto-openai-responses")]
@@ -26,7 +28,8 @@ pub mod toolparse;
 mod types;
 
 pub use error::{ErrorKind, ProviderError};
-pub use provider::{Provider, http_client, supports};
+pub use ledger::{EgressDraft, EgressLedger};
+pub use provider::{Provider, http_client, http_client_observed, supports};
 pub use reqwest;
 pub use types::{
     ChatRequest, DiscoveredModel, FinishReason, Message, ResponseBuilder, Sealed, StreamEvent,

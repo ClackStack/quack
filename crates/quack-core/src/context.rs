@@ -5,7 +5,7 @@
 use quack_config::settings::CacheStrategy;
 use quack_context::compact;
 use quack_context::prune::{self, Access};
-use quack_protocol::{ContextReport, ContextSegment, Event, PruneReport};
+use quack_protocol::{ContextItem, ContextReport, ContextSegment, ContextZone, Event, PruneReport};
 use quack_providers::{FinishReason, Message, ResponseBuilder, ToolCall, tokens};
 use quack_tools::Subject;
 use serde_json::{Value, json};
@@ -49,36 +49,86 @@ fn percent(s: &Setup) -> u32 {
 /// Apply the pruning rules to everything but the most recent messages.
 pub(crate) fn prune_now(ctx: &TurnCtx, history: &mut [Message]) {
     let protect_from = history.len().saturating_sub(PROTECT_MESSAGES);
-    let s = &ctx.setup;
-    let root = &s.tool_ctx.root;
+    let ops = plan_rule_ops(&ctx.setup, history, protect_from);
+    apply_prune_ops(
+        &ctx.setup,
+        history,
+        ops,
+        ctx.log.as_ref(),
+        &ctx.tx,
+        Some(&ctx.stats),
+    );
+}
+
+/// Apply manual or rule-based pruning triggered between turns (`Op::PruneContext`).
+pub(crate) fn prune_selected(
+    setup: &Setup,
+    history: &mut [Message],
+    indices: Option<&[usize]>,
+    log: Option<&session::SharedLog>,
+    tx: &tokio::sync::broadcast::Sender<Event>,
+) -> PruneReport {
+    let ops = match indices {
+        Some(idxs) => prune::manual_indices(history, idxs),
+        None => {
+            let protect_from = history.len().saturating_sub(PROTECT_MESSAGES);
+            plan_rule_ops(setup, history, protect_from)
+        }
+    };
+    apply_prune_ops(setup, history, ops, log, tx, None)
+}
+
+fn plan_rule_ops(setup: &Setup, history: &[Message], protect_from: usize) -> Vec<prune::PruneOp> {
+    let root = &setup.tool_ctx.root;
     let hooks = prune::Hooks {
-        classify: &|c| classify(s, c),
-        stale: &|p| s.tool_ctx.reads.is_stale(std::path::Path::new(p)),
+        classify: &|c| classify(setup, c),
+        stale: &|p| setup.tool_ctx.reads.is_stale(std::path::Path::new(p)),
         outline: &|p, text| {
             let path = std::path::Path::new(p);
-            s.tool_ctx
+            setup
+                .tool_ctx
                 .grammars
                 .outline(path, text)
                 .filter(|o| !o.symbols.is_empty())
                 .map(|o| o.render(&quack_tools::paths::display(root, path)))
         },
     };
-    let ops = prune::plan(history, protect_from, &hooks);
+    prune::plan(history, protect_from, &hooks)
+}
+
+fn apply_prune_ops(
+    setup: &Setup,
+    history: &mut [Message],
+    ops: Vec<prune::PruneOp>,
+    log: Option<&session::SharedLog>,
+    tx: &tokio::sync::broadcast::Sender<Event>,
+    stats: Option<&std::sync::Mutex<crate::stats::Stats>>,
+) -> PruneReport {
     if ops.is_empty() {
-        return;
+        return PruneReport::default();
     }
     let removed = prune::apply(history, &ops);
-    session::record(ctx.log.as_ref(), "prune", json!({ "ops": ops }));
+    quack_providers::unseal(history);
+    session::record(log, "prune", json!({ "ops": ops }));
     let items = ops
         .iter()
         .map(|o| o.content.lines().next().unwrap_or_default().to_owned())
         .collect();
-    ctx.emit(Event::ContextPruned {
-        report: PruneReport {
-            removed_tokens: u32::try_from(removed * 2 / 7).unwrap_or(u32::MAX),
-            items,
-        },
-    });
+    let report = PruneReport {
+        removed_tokens: u32::try_from(removed * 2 / 7).unwrap_or(u32::MAX),
+        items,
+    };
+    let ev = Event::ContextPruned {
+        report: report.clone(),
+    };
+    if let Some(stats) = stats
+        && let Ok(mut st) = stats.lock()
+    {
+        st.observe(&ev);
+    }
+    let _ = tx.send(ev);
+    let _ = setup;
+    report
 }
 
 /// What a call did to files, through the same mapping and tools that ran it.
@@ -286,58 +336,120 @@ pub(crate) fn threshold(s: &Setup) -> Option<u32> {
 pub(crate) fn report(s: &Setup, history: Option<&[Message]>) -> ContextReport {
     let ratio = s.estimator.lock().map_or(1.0, |e| e.ratio());
     let tok = |text: &str| (f64::from(tokens::estimate(text)) * ratio).round() as u32;
-    let mut segments = vec![
-        ContextSegment {
-            name: "System prompt".into(),
-            tokens: tok(&s.system) + tok(&s.session_context),
-            detail: format!("profile {}, with instructions", s.profile.id),
-        },
-        ContextSegment {
-            name: "Tool definitions".into(),
-            tokens: tok(
-                &serde_json::to_string(&turn::request(s, Vec::new(), true).tools)
-                    .unwrap_or_default(),
-            ),
-            detail: format!("{} tools", s.surface.tools.len()),
-        },
-    ];
+    let mut segments = vec![ContextSegment {
+        name: "System prompt".into(),
+        tokens: tok(&s.system),
+        detail: format!("profile {}, core prompt", s.profile.id),
+        zone: Some(ContextZone::CachedPrefix),
+        prunable_indices: Vec::new(),
+    }];
+    if !s.session_context.is_empty() {
+        segments.push(ContextSegment {
+            name: "Session context".into(),
+            tokens: tok(&s.session_context),
+            detail: "workspace rules, memory & env".into(),
+            zone: Some(ContextZone::SessionContext),
+            prunable_indices: Vec::new(),
+        });
+    }
+    segments.push(ContextSegment {
+        name: "Tool definitions".into(),
+        tokens: tok(
+            &serde_json::to_string(&turn::request(s, Vec::new(), true).tools).unwrap_or_default(),
+        ),
+        detail: format!("{} tools", s.surface.tools.len()),
+        zone: Some(ContextZone::CachedPrefix),
+        prunable_indices: Vec::new(),
+    });
     let mut note = None;
+    let mut tail_items = Vec::new();
     match history {
         None => note = Some("a turn is running; the conversation is shown between turns".into()),
         Some(history) => {
-            let mut groups: [(&str, u32, usize, usize); 4] = [
-                ("Summary", 0, 0, 0),
-                ("Your messages", 0, 0, 0),
-                ("Model replies and tool calls", 0, 0, 0),
-                ("Tool results", 0, 0, 0),
+            struct GroupAcc {
+                name: &'static str,
+                tokens: u32,
+                count: usize,
+                pruned: usize,
+                prunable_indices: Vec<usize>,
+                all_cached: bool,
+            }
+            impl GroupAcc {
+                fn new(name: &'static str) -> Self {
+                    Self {
+                        name,
+                        tokens: 0,
+                        count: 0,
+                        pruned: 0,
+                        prunable_indices: Vec::new(),
+                        all_cached: true,
+                    }
+                }
+            }
+            let uncached_from = history
+                .iter()
+                .rposition(|m| matches!(m, Message::User { .. }))
+                .unwrap_or(history.len());
+            let mut groups = [
+                GroupAcc::new("Summary"),
+                GroupAcc::new("Your messages"),
+                GroupAcc::new("Model replies and tool calls"),
+                GroupAcc::new("Tool results"),
             ];
-            for m in history {
+            for (idx, m) in history.iter().enumerate() {
                 let g = match m {
                     _ if compact::is_summary(m) => 0,
                     Message::User { .. } | Message::System { .. } => 1,
                     Message::Assistant { .. } => 2,
                     Message::Tool { .. } => 3,
                 };
-                groups[g].1 += tok(&serde_json::to_string(m).unwrap_or_default());
-                groups[g].2 += 1;
-                if matches!(m, Message::Tool { content, .. } if content.starts_with(prune::MARKER))
-                {
-                    groups[g].3 += 1;
+                let msg_tokens = tok(&serde_json::to_string(m).unwrap_or_default());
+                let pruned = matches!(m, Message::Tool { content, .. } if content.starts_with(prune::MARKER));
+                let prunable = matches!(m, Message::Tool { .. }) && !pruned;
+                let cached = idx < uncached_from;
+                groups[g].tokens += msg_tokens;
+                groups[g].count += 1;
+                if pruned {
+                    groups[g].pruned += 1;
                 }
+                if prunable {
+                    groups[g].prunable_indices.push(idx);
+                }
+                if !cached {
+                    groups[g].all_cached = false;
+                }
+                tail_items.push(ContextItem {
+                    index: idx,
+                    role: item_role(m),
+                    label: item_label(m),
+                    tokens: msg_tokens,
+                    pruned,
+                    cached,
+                    prunable,
+                });
             }
-            for (i, (name, tokens, count, pruned)) in groups.into_iter().enumerate() {
-                if count == 0 {
+            for (i, group) in groups.into_iter().enumerate() {
+                if group.count == 0 {
                     continue;
                 }
                 let detail = match i {
                     0 => "earlier conversation, summarized".to_owned(),
-                    3 if pruned > 0 => format!("{count} results, {pruned} pruned"),
-                    _ => format!("{count} messages"),
+                    3 if group.pruned > 0 => {
+                        format!("{} results, {} pruned", group.count, group.pruned)
+                    }
+                    _ => format!("{} messages", group.count),
+                };
+                let zone = if i == 0 || group.all_cached {
+                    ContextZone::CachedPrefix
+                } else {
+                    ContextZone::UncachedTail
                 };
                 segments.push(ContextSegment {
-                    name: name.into(),
-                    tokens,
+                    name: group.name.into(),
+                    tokens: group.tokens,
                     detail,
+                    zone: Some(zone),
+                    prunable_indices: group.prunable_indices,
                 });
             }
         }
@@ -352,7 +464,49 @@ pub(crate) fn report(s: &Setup, history: Option<&[Message]>) -> ContextReport {
         strategy: format!("{:?}", s.context.cache_strategy).to_lowercase(),
         segments,
         note,
+        tail_items,
     }
+}
+
+fn item_role(m: &Message) -> String {
+    match m {
+        _ if compact::is_summary(m) => "summary".into(),
+        Message::User { .. } => "user".into(),
+        Message::System { .. } => "system".into(),
+        Message::Assistant { .. } => "assistant".into(),
+        Message::Tool { .. } => "tool".into(),
+    }
+}
+
+fn item_label(m: &Message) -> String {
+    let raw = match m {
+        Message::User { content, .. } | Message::System { content } => content.as_str(),
+        Message::Assistant {
+            content,
+            tool_calls,
+            ..
+        } => {
+            if !tool_calls.is_empty() && content.trim().is_empty() {
+                return format!(
+                    "called {} tool{}",
+                    tool_calls.len(),
+                    if tool_calls.len() == 1 { "" } else { "s" }
+                );
+            }
+            content.as_str()
+        }
+        Message::Tool { content, .. } => content.as_str(),
+    };
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("(empty)");
+    let mut clipped: String = line.chars().take(88).collect();
+    if line.chars().count() > 88 {
+        clipped.push('…');
+    }
+    clipped
 }
 
 #[cfg(test)]

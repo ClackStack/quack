@@ -6,8 +6,11 @@
 use std::time::Duration;
 
 use quack_config::{Env, Settings};
+use quack_protocol::EgressKind;
 use reqwest::header::{ETAG, IF_NONE_MATCH, LOCATION};
 use reqwest::{StatusCode, Url};
+
+use crate::ledger::{EgressDraft, EgressLedger};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 5;
@@ -45,9 +48,36 @@ pub async fn get(
     settings: &Settings,
     req: Get<'_>,
 ) -> Result<Fetched, String> {
+    get_observed(client, settings, req, None).await
+}
+
+pub async fn get_observed(
+    client: &reqwest::Client,
+    settings: &Settings,
+    req: Get<'_>,
+    ledger: Option<&EgressLedger>,
+) -> Result<Fetched, String> {
     let mut url = Url::parse(req.url).map_err(|e| format!("`{}`: {e}", req.url))?;
-    for _ in 0..=MAX_REDIRECTS {
-        settings.check_fetch(url.as_str())?;
+    for hop in 0..=MAX_REDIRECTS {
+        if let Err(why) = settings.check_fetch(url.as_str()) {
+            if let Some(ledger) = ledger {
+                ledger.record(EgressDraft {
+                    kind: if hop == 0 {
+                        EgressKind::BlockedEgress
+                    } else {
+                        EgressKind::BlockedRedirect
+                    },
+                    url: url.to_string(),
+                    protocol: "fetch".into(),
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                    status: None,
+                    redactions: 0,
+                    blocked_reason: Some(why.clone()),
+                });
+            }
+            return Err(why);
+        }
         let mut request = client.get(url.clone()).timeout(TIMEOUT);
         if let Some(tag) = req.etag {
             request = request.header(IF_NONE_MATCH, tag);
@@ -55,6 +85,18 @@ pub async fn get(
         let mut resp = request.send().await.map_err(|e| failed(&url, &e))?;
         let status = resp.status();
         if status == StatusCode::NOT_MODIFIED {
+            if let Some(ledger) = ledger {
+                ledger.record(EgressDraft {
+                    kind: EgressKind::Fetch,
+                    url: url.to_string(),
+                    protocol: "fetch".into(),
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                    status: Some(status.as_u16()),
+                    redactions: 0,
+                    blocked_reason: None,
+                });
+            }
             return Ok(Fetched::NotModified);
         }
         if status.is_redirection() {
@@ -64,6 +106,18 @@ pub async fn get(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|l| url.join(l).ok())
                 .ok_or_else(|| format!("{url} redirected without saying where"))?;
+            if let Some(ledger) = ledger {
+                ledger.record(EgressDraft {
+                    kind: EgressKind::Fetch,
+                    url: url.to_string(),
+                    protocol: "fetch".into(),
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                    status: Some(status.as_u16()),
+                    redactions: 0,
+                    blocked_reason: None,
+                });
+            }
             if !req.follow {
                 return Ok(Fetched::Moved(target.into()));
             }
@@ -71,6 +125,18 @@ pub async fn get(
             continue;
         }
         if !status.is_success() {
+            if let Some(ledger) = ledger {
+                ledger.record(EgressDraft {
+                    kind: EgressKind::Fetch,
+                    url: url.to_string(),
+                    protocol: "fetch".into(),
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                    status: Some(status.as_u16()),
+                    redactions: 0,
+                    blocked_reason: Some(format!("HTTP {status}")),
+                });
+            }
             return Err(format!("{url} answered {status}"));
         }
         let etag = resp
@@ -84,6 +150,18 @@ pub async fn get(
                 return Err(format!("{url} sent more than {} bytes", req.max_bytes));
             }
             bytes.extend_from_slice(&chunk);
+        }
+        if let Some(ledger) = ledger {
+            ledger.record(EgressDraft {
+                kind: EgressKind::Fetch,
+                url: url.to_string(),
+                protocol: "fetch".into(),
+                bytes_sent: 0,
+                bytes_received: bytes.len() as u64,
+                status: Some(status.as_u16()),
+                redactions: 0,
+                blocked_reason: None,
+            });
         }
         return Ok(Fetched::Body { bytes, etag });
     }

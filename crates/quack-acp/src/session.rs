@@ -458,7 +458,29 @@ impl Run {
                 format!("Use {name}"),
                 convert::fenced(arguments, "json"),
             ),
+            ApprovalRequest::EgressSecrets {
+                provider,
+                host,
+                findings,
+            } => {
+                let body = findings
+                    .iter()
+                    .map(|f| {
+                        format!(
+                            "- `{}` in `{}` (`{}`): `{}`",
+                            f.kind, f.location, f.fingerprint, f.preview
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (
+                    "secret_guard",
+                    format!("Possible secret bound for {provider} ({host})"),
+                    body,
+                )
+            }
         };
+        let is_secrets = matches!(request, ApprovalRequest::EgressSecrets { .. });
         self.announce(&call_id, name, &title, "pending");
         let req = json!({
             "sessionId": self.id,
@@ -467,7 +489,7 @@ impl Run {
                 "title": title,
                 "content": [text_content(&detail)],
             },
-            "options": options(always),
+            "options": options(always, is_secrets),
         });
         let peer = self.peer.clone();
         let ops = self.ops.clone();
@@ -479,6 +501,7 @@ impl Run {
                 .map(|r| r.outcome)
             {
                 Some(PermissionOutcome::Selected { option_id }) => match option_id.as_str() {
+                    "redact" => ApprovalDecision::RedactAndSend,
                     "allow" => ApprovalDecision::AllowOnce,
                     "allow-session" => ApprovalDecision::AllowSession,
                     "allow-always" => ApprovalDecision::AlwaysAllow {
@@ -556,11 +579,15 @@ fn choices(providers: &[ProviderModels]) -> Vec<(String, String)> {
 
 /// The choices for an approval. "Always allow" is offered when a rule can allow the call,
 /// and names the rule it saves to `[permissions] allow`.
-fn options(always: &[String]) -> Value {
-    let mut out = vec![
+fn options(always: &[String], is_secrets: bool) -> Value {
+    let mut out = Vec::new();
+    if is_secrets {
+        out.push(json!({"optionId": "redact", "name": "Redact & Send", "kind": "allow_once"}));
+    }
+    out.extend([
         json!({"optionId": "allow", "name": "Allow", "kind": "allow_once"}),
         json!({"optionId": "allow-session", "name": "Allow for this session", "kind": "allow_always"}),
-    ];
+    ]);
     if !always.is_empty() {
         let rules = always
             .iter()

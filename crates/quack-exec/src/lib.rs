@@ -101,18 +101,28 @@ pub async fn run(mut engine: EngineHandle, prompt: String, format: OutputFormat)
                     let _ = writeln!(stderr, "  ✗ {}", result.summary);
                 }
             }
-            Event::ApprovalRequest { call_id, .. } => {
+            Event::ApprovalRequest {
+                call_id, request, ..
+            } => {
+                let is_egress = matches!(
+                    request,
+                    quack_protocol::ApprovalRequest::EgressSecrets { .. }
+                );
+                let decision = if is_egress {
+                    ApprovalDecision::RedactAndSend
+                } else {
+                    ApprovalDecision::DenyWithFeedback {
+                        feedback: HEADLESS_DENIAL.into(),
+                    }
+                };
                 let _ = engine
                     .ops
-                    .send(Op::ApprovalResponse {
-                        call_id,
-                        decision: ApprovalDecision::DenyWithFeedback {
-                            feedback: HEADLESS_DENIAL.into(),
-                        },
-                    })
+                    .send(Op::ApprovalResponse { call_id, decision })
                     .await;
-                if text_mode {
+                if text_mode && !is_egress {
                     let _ = writeln!(stderr, "  ✗ denied: needs approval (see --approvals)");
+                } else if text_mode && is_egress {
+                    let _ = writeln!(stderr, "  › redacted potential secret(s) before sending");
                 }
             }
             Event::Questions { call_id, .. } => {

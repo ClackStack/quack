@@ -16,6 +16,12 @@
 	import EgressModal from './EgressModal.svelte';
 	import MemoryModal from './MemoryModal.svelte';
 	import SettingsPanel from './SettingsPanel.svelte';
+	import CommandPalette from './CommandPalette.svelte';
+	import DoctorModal from './DoctorModal.svelte';
+	import DiagnosticsModal from './DiagnosticsModal.svelte';
+	import InstructionsModal from './InstructionsModal.svelte';
+	import ProfileModal from './ProfileModal.svelte';
+	import type { CommandUiHost, ModalKind } from '#lib/commands';
 
 	let {
 		session,
@@ -50,13 +56,34 @@
 	} = $props();
 
 	let sidebarOpen = $state(false);
-	let activeModal = $state<'model' | 'context' | 'egress' | 'memory' | null>(null);
+	let activeModal = $state<ModalKind | null>(null);
+	let paletteOpen = $state(false);
 	let memoryTarget = $state<{ scope: string; name: string; create?: boolean } | null>(null);
 
 	function openMemory(target?: { scope: string; name: string; create?: boolean }) {
 		memoryTarget = target ?? null;
 		activeModal = 'memory';
 	}
+
+	const commandUiHost: CommandUiHost = $derived({
+		openModal(modal: ModalKind) {
+			if (awaiting || session.trust || session.setupOpen) return;
+			if (modal === 'memory') openMemory();
+			else activeModal = modal;
+		},
+		openPalette() {
+			if (session.trust) return;
+			paletteOpen = true;
+		},
+		openRewind() {
+			session.requestRewind();
+		},
+		setTheme(mode?: string) {
+			if (mode === 'light' || mode === 'dark') theme.set(mode);
+			else if (mode === 'auto' || mode === 'system') theme.set('system');
+			else theme.cycle();
+		}
+	});
 	const attentionCount = $derived(summarizeJobs(sessions).attention);
 
 	const planReady = $derived(
@@ -67,7 +94,10 @@
 	const awaiting = $derived(!!session.approval || !!session.questions || !!session.stepLimit);
 
 	$effect(() => {
-		if (awaiting || session.trust || session.setupOpen) activeModal = null;
+		if (awaiting || session.trust || session.setupOpen) {
+			activeModal = null;
+			paletteOpen = false;
+		}
 	});
 
 	$effect(() => {
@@ -87,6 +117,7 @@
 	$effect(() => {
 		void session.tab;
 		activeModal = null;
+		paletteOpen = false;
 		memoryTarget = null;
 	});
 
@@ -95,7 +126,17 @@
 			theme.initFromSession(session.info.ui.theme);
 		}
 	});
+
+	function onWindowKeydown(event: KeyboardEvent) {
+		if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+			if (session.trust) return;
+			event.preventDefault();
+			paletteOpen = !paletteOpen;
+		}
+	}
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 <div class="workspace" class:awaiting>
 	<div id="workspace-sidebar" class="sidebar" class:open={sidebarOpen}>
@@ -134,6 +175,12 @@
 			onToggleSidebar={() => (sidebarOpen = !sidebarOpen)}
 			onOpenEgress={() => (activeModal = 'egress')}
 			onOpenMemory={() => openMemory()}
+			onOpenDiagnostics={() => {
+				void session.refreshLsp();
+				void session.refreshLspDiagnostics();
+				activeModal = 'diagnostics';
+			}}
+			onOpenPalette={() => (paletteOpen = true)}
 		/>
 		<main>
 			{#if session.actionError || openError}
@@ -251,7 +298,8 @@
 				{/if}
 				<Composer
 					{session}
-					modalOpen={activeModal !== null}
+					modalOpen={activeModal !== null || paletteOpen}
+					{commandUiHost}
 					onOpenModels={() => (activeModal = 'model')}
 					onOpenContext={() => (activeModal = 'context')}
 				/>
@@ -286,6 +334,24 @@
 			memoryTarget = null;
 			session.openSettings('paths');
 		}}
+	/>
+{:else if activeModal === 'doctor'}
+	<DoctorModal {session} onClose={() => (activeModal = null)} />
+{:else if activeModal === 'diagnostics'}
+	<DiagnosticsModal {session} onClose={() => (activeModal = null)} />
+{:else if activeModal === 'instructions'}
+	<InstructionsModal {session} onClose={() => (activeModal = null)} />
+{:else if activeModal === 'profiles'}
+	<ProfileModal {session} onClose={() => (activeModal = null)} />
+{/if}
+
+{#if paletteOpen}
+	<CommandPalette
+		{session}
+		{sessions}
+		uiHost={commandUiHost}
+		onClose={() => (paletteOpen = false)}
+		onSelectJob={(tab) => onSelectJob(tab)}
 	/>
 {/if}
 

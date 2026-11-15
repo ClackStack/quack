@@ -9,4 +9,6 @@ pub mod pos;
 mod rpc;
 
 pub use client::Client;
-pub use manager::{LspManager, MAX_RESTARTS, Prepare, ServerSpec, Status, TOOL_WAIT};
+pub use manager::{
+    DiagnosticEntry, LspManager, MAX_RESTARTS, Prepare, ServerSpec, Status, TOOL_WAIT,
+};

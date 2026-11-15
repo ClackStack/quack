@@ -30,7 +30,7 @@ pub mod provider;
 pub mod schema;
 mod secret;
 pub mod settings;
-mod sha256;
+pub mod sha256;
 mod state;
 mod trust;
 

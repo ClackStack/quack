@@ -1,5 +1,6 @@
 //! A provider ready to use: resolved secrets, one HTTP client, retries and streaming.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -7,6 +8,7 @@ use futures::StreamExt;
 use quack_config::provider::ReasoningFormat;
 use quack_config::settings::NetworkSettings;
 use quack_config::{Env, ProviderFile, expand_home};
+use quack_protocol::EgressKind;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -14,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(feature = "proto-anthropic")]
 use crate::anthropic;
 use crate::error::{ErrorKind, ProviderError};
+use crate::ledger::{EgressDraft, EgressLedger};
 #[cfg(feature = "proto-ollama")]
 use crate::ollama;
 use crate::openai_chat::{self, ChunkParser};
@@ -67,6 +70,9 @@ pub struct Provider {
     route: responses::Route,
     #[cfg(feature = "auth-chatgpt")]
     login: Option<Arc<crate::login::Login>>,
+    ledger: Arc<RwLock<Option<Arc<EgressLedger>>>>,
+    pending_redactions: Arc<AtomicU32>,
+    dynamic_secrets: Arc<RwLock<Vec<String>>>,
 }
 
 impl Provider {
@@ -189,6 +195,7 @@ impl Provider {
             _ => file.base_url.trim_end_matches('/'),
         }
         .to_owned();
+        let ledger = spec.ledger.clone();
         Ok(Self {
             id: id.to_owned(),
             api,
@@ -206,7 +213,62 @@ impl Provider {
             route,
             #[cfg(feature = "auth-chatgpt")]
             login,
+            ledger,
+            pending_redactions: Arc::new(AtomicU32::new(0)),
+            dynamic_secrets: Arc::new(RwLock::new(Vec::new())),
         })
+    }
+
+    /// Attach a session egress ledger so HTTP requests and blocked redirects are recorded.
+    pub fn set_ledger(&self, ledger: Arc<EgressLedger>) {
+        match self.ledger.write() {
+            Ok(mut slot) => *slot = Some(ledger),
+            Err(poisoned) => *poisoned.into_inner() = Some(ledger),
+        }
+    }
+
+    /// Configured endpoint base URL (without trailing slash).
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Add `count` redactions to attribute to the next inference stream entry.
+    pub fn add_pending_redactions(&self, count: u32) {
+        if count > 0 {
+            self.pending_redactions.fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
+    /// Active credential values resolved in memory (static headers + refreshed tokens) so
+    /// outbound prompts and tool results can guard against echoing them back out.
+    pub fn secret_values(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let headers = self.headers();
+        for (_, val) in headers.iter() {
+            if val.is_sensitive()
+                && let Ok(s) = val.to_str()
+            {
+                collect_secret_token(&mut out, s);
+            }
+        }
+        let dynamic = match self.dynamic_secrets.read() {
+            Ok(d) => d.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        for s in dynamic {
+            collect_secret_token(&mut out, &s);
+        }
+        out
+    }
+
+    fn record_ledger(&self, draft: EgressDraft) {
+        let ledger = match self.ledger.read() {
+            Ok(g) => g.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        if let Some(ledger) = ledger {
+            ledger.record(draft);
+        }
     }
 
     /// The sign-in behind this provider, for `quack login` and `quack logout`.
@@ -315,6 +377,15 @@ impl Provider {
         if let Some(login) = &self.login {
             let mut h = (*self.headers()).clone();
             let token = login.bearer().await?;
+            if let Ok(mut dyn_s) = self.dynamic_secrets.write()
+                && token.len() >= 8
+                && !dyn_s.contains(&token)
+            {
+                if dyn_s.len() >= 16 {
+                    dyn_s.remove(0);
+                }
+                dyn_s.push(token.clone());
+            }
             insert_header(&mut h, "Authorization", &format!("Bearer {token}"), true)?;
             return Ok(RequestHeaders::Owned(h));
         }
@@ -386,19 +457,69 @@ impl Provider {
 
     async fn get_json_at(&self, url: String) -> Result<serde_json::Value, ProviderError> {
         let (generation, client) = self.client();
-        let resp = self
+        let req_url = url.clone();
+        let resp = match self
             .request_headers()
             .await?
             .apply(client.get(url))
             .timeout(self.discovery_timeout())
             .send()
             .await
-            .map_err(|e| ProviderError::from_reqwest(&e))
-            .inspect_err(|e| self.renew_client(generation, e))?;
-        let resp = check_status(resp).await?;
-        resp.json()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let pe = ProviderError::from_reqwest(&e);
+                self.renew_client(generation, &pe);
+                self.record_ledger(EgressDraft {
+                    kind: EgressKind::Models,
+                    url: req_url,
+                    protocol: self.file.api.clone(),
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                    status: None,
+                    redactions: 0,
+                    blocked_reason: Some(pe.message.clone()),
+                });
+                return Err(pe);
+            }
+        };
+        let status = Some(resp.status().as_u16());
+        let resp = match check_status(resp).await {
+            Ok(r) => r,
+            Err(e) => {
+                self.record_ledger(EgressDraft {
+                    kind: EgressKind::Models,
+                    url: req_url,
+                    protocol: self.file.api.clone(),
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                    status,
+                    redactions: 0,
+                    blocked_reason: Some(e.message.clone()),
+                });
+                return Err(e);
+            }
+        };
+        let bytes = resp
+            .bytes()
             .await
-            .map_err(|e| ProviderError::from_reqwest(&e))
+            .map_err(|e| ProviderError::from_reqwest(&e))?;
+        self.record_ledger(EgressDraft {
+            kind: EgressKind::Models,
+            url: req_url,
+            protocol: self.file.api.clone(),
+            bytes_sent: 0,
+            bytes_received: bytes.len() as u64,
+            status,
+            redactions: 0,
+            blocked_reason: None,
+        });
+        serde_json::from_slice(&bytes).map_err(|e| {
+            ProviderError::new(
+                ErrorKind::Protocol,
+                format!("invalid JSON from server: {e}"),
+            )
+        })
     }
 
     /// Query the models endpoint.
@@ -451,17 +572,35 @@ impl Provider {
 
     #[cfg(feature = "proto-ollama")]
     async fn ollama_show(&self, model: &str) -> Option<u32> {
+        let req_url = self.url(ollama::SHOW_PATH);
+        let payload = serde_json::json!({ "model": model });
+        let bytes_sent = serde_json::to_vec(&payload)
+            .map(|v| v.len() as u64)
+            .unwrap_or(0);
         let resp = self
             .request_headers()
             .await
             .ok()?
-            .apply(self.client().1.post(self.url(ollama::SHOW_PATH)))
+            .apply(self.client().1.post(&req_url))
             .timeout(self.discovery_timeout())
-            .json(&serde_json::json!({ "model": model }))
+            .json(&payload)
             .send()
             .await
             .ok()?;
-        let body: serde_json::Value = check_status(resp).await.ok()?.json().await.ok()?;
+        let status = Some(resp.status().as_u16());
+        let resp = check_status(resp).await.ok()?;
+        let raw = resp.bytes().await.ok()?;
+        self.record_ledger(EgressDraft {
+            kind: EgressKind::Models,
+            url: req_url,
+            protocol: self.file.api.clone(),
+            bytes_sent,
+            bytes_received: raw.len() as u64,
+            status,
+            redactions: 0,
+            blocked_reason: None,
+        });
+        let body: serde_json::Value = serde_json::from_slice(&raw).ok()?;
         ollama::parse_show(&body)
     }
 
@@ -531,6 +670,22 @@ impl Provider {
                 "text/event-stream",
             ),
         };
+        let body_bytes = match serde_json::to_vec(&body) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                let _ = tx
+                    .send(Err(ProviderError::new(
+                        ErrorKind::Protocol,
+                        format!("encode request: {e}"),
+                    )))
+                    .await;
+                return;
+            }
+        };
+        let bytes_sent = body_bytes.len() as u64;
+        let redactions = self.pending_redactions.swap(0, Ordering::Relaxed);
+        let req_url = self.url(&path);
+
         let mut attempt = 0;
         // A plain header set never changes mid-turn, so every retry reuses the first clone;
         // a signed-in provider refreshes its token per attempt.
@@ -542,6 +697,16 @@ impl Provider {
                     let h = match self.request_headers().await {
                         Ok(h) => h,
                         Err(e) => {
+                            self.record_ledger(EgressDraft {
+                                kind: EgressKind::Inference,
+                                url: req_url.clone(),
+                                protocol: self.file.api.clone(),
+                                bytes_sent,
+                                bytes_received: 0,
+                                status: None,
+                                redactions,
+                                blocked_reason: Some(e.message.clone()),
+                            });
                             let _ = tx.send(Err(e)).await;
                             return;
                         }
@@ -557,14 +722,19 @@ impl Provider {
             let send = headers
                 .apply(
                     client
-                        .post(self.url(&path))
+                        .post(&req_url)
                         .header(reqwest::header::ACCEPT, accept)
-                        .json(&body),
+                        .header(reqwest::header::CONTENT_TYPE, "application/json")
+                        .body(body_bytes.clone()),
                 )
                 .send();
             let first_byte = self.first_byte_timeout(attempt);
+            let mut status = None;
             let result = match tokio::time::timeout(first_byte, send).await {
-                Ok(Ok(r)) => check_status(r).await,
+                Ok(Ok(r)) => {
+                    status = Some(r.status().as_u16());
+                    check_status(r).await
+                }
                 Ok(Err(e)) => Err(ProviderError::from_reqwest(&e)),
                 Err(_) => Err(ProviderError::new(
                     ErrorKind::Timeout,
@@ -583,10 +753,35 @@ impl Provider {
                     tokio::time::sleep(wait).await;
                 }
                 Err(e) => {
+                    self.record_ledger(EgressDraft {
+                        kind: EgressKind::Inference,
+                        url: req_url,
+                        protocol: self.file.api.clone(),
+                        bytes_sent,
+                        bytes_received: 0,
+                        status,
+                        redactions,
+                        blocked_reason: Some(e.message.clone()),
+                    });
                     let _ = tx.send(Err(e)).await;
                     return;
                 }
             }
+        };
+
+        let status = Some(resp.status().as_u16());
+        let mut ledger_guard = StreamLedgerGuard {
+            provider: self,
+            draft: Some(EgressDraft {
+                kind: EgressKind::Inference,
+                url: req_url,
+                protocol: self.file.api.clone(),
+                bytes_sent,
+                bytes_received: 0,
+                status,
+                redactions,
+                blocked_reason: None,
+            }),
         };
 
         // Once bytes flow we never retry: the user has already seen part of the answer.
@@ -621,11 +816,17 @@ impl Provider {
                 Err(e) => {
                     // Not retried, but the next request shouldn't use this connection.
                     let e = ProviderError::from_reqwest(&e);
+                    if let Some(d) = &mut ledger_guard.draft {
+                        d.blocked_reason = Some(e.message.clone());
+                    }
                     self.renew_client(generation, &e);
                     let _ = tx.send(Err(e)).await;
                     return;
                 }
             };
+            if let Some(d) = &mut ledger_guard.draft {
+                d.bytes_received = d.bytes_received.saturating_add(chunk.len() as u64);
+            }
             wire.feed(&chunk, &mut frames, &mut parsed);
             for parsed in parsed.drain(..) {
                 if !forward(parsed, tx).await {
@@ -840,11 +1041,56 @@ fn install_ring() {
 /// An HTTP client with the user's proxy and CA settings, for other HTTP services such as
 /// remote MCP servers.
 pub fn http_client(network: &NetworkSettings, env: Env<'_>) -> Result<reqwest::Client, String> {
+    http_client_observed(network, env, None)
+}
+
+/// Like [`http_client`], recording blocked redirects into `ledger` when supplied.
+pub fn http_client_observed(
+    network: &NetworkSettings,
+    env: Env<'_>,
+    ledger: Option<Arc<EgressLedger>>,
+) -> Result<reqwest::Client, String> {
     let file: ProviderFile =
         serde_json::from_value(serde_json::json!({ "base_url": "" })).map_err(|e| e.to_string())?;
-    ClientSpec::resolve(&file, network, env)
-        .and_then(|spec| spec.build())
-        .map_err(|e| e.message)
+    let spec = ClientSpec::resolve(&file, network, env).map_err(|e| e.message)?;
+    if let Some(ledger) = ledger
+        && let Ok(mut slot) = spec.ledger.write()
+    {
+        *slot = Some(ledger);
+    }
+    spec.build().map_err(|e| e.message)
+}
+
+struct StreamLedgerGuard<'a> {
+    provider: &'a Provider,
+    draft: Option<EgressDraft>,
+}
+
+impl Drop for StreamLedgerGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(draft) = self.draft.take() {
+            self.provider.record_ledger(draft);
+        }
+    }
+}
+
+fn collect_secret_token(out: &mut Vec<String>, raw: &str) {
+    let trimmed = raw.trim();
+    if trimmed.len() >= 8 && !out.iter().any(|existing| existing == trimmed) {
+        out.push(trimmed.to_owned());
+    }
+    if let Some((prefix, rest)) = trimmed.split_once(' ') {
+        let lower = prefix.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "bearer" | "token" | "basic" | "apikey" | "api-key" | "ssws"
+        ) {
+            let bare = rest.trim();
+            if bare.len() >= 8 && !out.iter().any(|existing| existing == bare) {
+                out.push(bare.to_owned());
+            }
+        }
+    }
 }
 
 /// Like [`http_client`], leaving redirects to the caller, who can check each destination.
@@ -898,6 +1144,7 @@ struct ClientSpec {
     insecure: bool,
     http1_only: bool,
     network: NetworkSettings,
+    ledger: Arc<RwLock<Option<Arc<EgressLedger>>>>,
     /// HTTP/2 without TLS, so tests can reach a plain mock server over HTTP/2.
     #[cfg(test)]
     h2c: bool,
@@ -1005,6 +1252,7 @@ impl ClientSpec {
             insecure: file.tls.insecure_skip_verify,
             http1_only: network.http1_only,
             network: network.clone(),
+            ledger: Arc::new(RwLock::new(None)),
             #[cfg(test)]
             h2c: false,
         })
@@ -1039,8 +1287,10 @@ impl ClientSpec {
             b = b.tls_danger_accept_invalid_certs(true);
         }
         let gate = self.network.clone();
+        let ledger = self.ledger.clone();
         b.redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            gate_redirect(attempt, &gate)
+            let guard = ledger.read().ok().and_then(|g| g.clone());
+            gate_redirect_observed(attempt, &gate, guard.as_deref())
         }))
     }
 
@@ -1055,13 +1305,31 @@ impl ClientSpec {
 /// started from; any other destination must pass the egress gate, so a redirect can
 /// never lead somewhere the gate would refuse. A custom policy guards its own hop
 /// count; reqwest still refuses loops and strips credentials on cross-origin hops.
-fn gate_redirect(
+fn gate_redirect_observed(
     attempt: reqwest::redirect::Attempt<'_>,
     network: &NetworkSettings,
+    ledger: Option<&EgressLedger>,
 ) -> reqwest::redirect::Action {
     const MAX_HOPS: usize = 10;
+    let url = attempt.url().as_str().to_owned();
+    let record_block = |reason: &str| {
+        if let Some(ledger) = ledger {
+            ledger.record(EgressDraft {
+                kind: EgressKind::BlockedRedirect,
+                url: url.clone(),
+                protocol: "http".into(),
+                bytes_sent: 0,
+                bytes_received: 0,
+                status: Some(302),
+                redactions: 0,
+                blocked_reason: Some(reason.to_owned()),
+            });
+        }
+    };
     if attempt.previous().len() > MAX_HOPS {
-        return attempt.error("too many redirects");
+        let reason = "too many redirects";
+        record_block(reason);
+        return attempt.error(reason);
     }
     let target = attempt.url();
     let scheme = target.scheme().to_owned();
@@ -1072,16 +1340,20 @@ fn gate_redirect(
         .and_then(reqwest::Url::host_str)
         .unwrap_or_default()
         .to_owned();
-    let url = target.as_str().to_owned();
     if !matches!(scheme.as_str(), "http" | "https") {
-        return attempt.error(format!("refused a redirect to the `{scheme}` scheme"));
+        let reason = format!("refused a redirect to the `{scheme}` scheme");
+        record_block(&reason);
+        return attempt.error(reason);
     }
     if host == started_on {
         return attempt.follow();
     }
     match network.check_egress(&url) {
         Ok(()) => attempt.follow(),
-        Err(why) => attempt.error(why),
+        Err(why) => {
+            record_block(&why);
+            attempt.error(why)
+        }
     }
 }
 

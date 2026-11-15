@@ -583,6 +583,40 @@ export const SETTING_FIELDS: readonly SettingFieldDef[] = [
 		fallbackDescription: 'Disable HTTP/2 negotiation for proxies or gateways that mishandle it.'
 	},
 	{
+		key: 'network.secret_guard',
+		section: 'network',
+		group: 'Pre-egress secret shield',
+		label: 'Secret Shield mode',
+		kind: 'select',
+		defaultValue: '"ask"',
+		options: [
+			{ value: 'ask', label: 'ask', detail: 'Pause remote requests to redact or allow secrets' },
+			{ value: 'redact', label: 'redact', detail: 'Automatically redact detected secrets before send' },
+			{ value: 'off', label: 'off', detail: 'Disable pre-egress secret scanning' }
+		],
+		fallbackDescription: 'How pre-egress Secret Shield handles API keys and credentials before network calls.'
+	},
+	{
+		key: 'network.secret_guard_local',
+		section: 'network',
+		group: 'Pre-egress secret shield',
+		label: 'Scan loopback requests too',
+		kind: 'bool',
+		defaultValue: 'false',
+		fallbackDescription: 'Also run Secret Shield on localhost / loopback providers instead of skipping local inference.'
+	},
+	{
+		key: 'network.secret_allowlist',
+		section: 'network',
+		group: 'Pre-egress secret shield',
+		label: 'Allowed secret fingerprints',
+		kind: 'list',
+		defaultValue: '[]',
+		placeholder: 'sha256:a1b2c3d4e5f6',
+		emptyMeaning: 'No allowlisted fingerprints',
+		fallbackDescription: 'Short SHA-256 secret fingerprints (`sha256:...`) permitted outbound without prompting.'
+	},
+	{
 		key: 'telemetry.otel_endpoint',
 		section: 'network',
 		group: 'Telemetry',
@@ -763,6 +797,15 @@ export const SETTING_FIELDS: readonly SettingFieldDef[] = [
 		kind: 'bool',
 		defaultValue: 'false',
 		fallbackDescription: 'Replace animated spinners and transitions with static indicators.'
+	},
+	{
+		key: 'ui.gui_restore_tabs',
+		section: 'interface',
+		group: 'Desktop & terminal appearance',
+		label: 'Restore open tabs on launch',
+		kind: 'bool',
+		defaultValue: 'true',
+		fallbackDescription: 'Reopen previously open workspace tabs when starting the desktop GUI.'
 	},
 	{
 		key: 'ui.show_reasoning',

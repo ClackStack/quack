@@ -746,10 +746,19 @@ pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
                 }
                 tools.push(tool);
             }
-            Event::ApprovalRequest { call_id, .. } => {
-                let decision = ApprovalDecision::DenyWithFeedback {
-                    feedback: "this is an unattended evaluation run; nobody can approve this"
-                        .into(),
+            Event::ApprovalRequest {
+                call_id, request, ..
+            } => {
+                let decision = if matches!(
+                    request,
+                    quack_protocol::ApprovalRequest::EgressSecrets { .. }
+                ) {
+                    ApprovalDecision::RedactAndSend
+                } else {
+                    ApprovalDecision::DenyWithFeedback {
+                        feedback: "this is an unattended evaluation run; nobody can approve this"
+                            .into(),
+                    }
                 };
                 engine
                     .submit(Op::ApprovalResponse { call_id, decision })

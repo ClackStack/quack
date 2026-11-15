@@ -13,7 +13,7 @@ use tokio::process::Command;
 use tokio::sync::{OnceCell, watch};
 
 use crate::client::{Client, Launch};
-use crate::diag::{self, Limits, Severity, Snapshot};
+use crate::diag::{self, Diagnostic, Limits, Severity, Snapshot};
 
 pub const MAX_RESTARTS: u32 = 3;
 /// How long a tool waits for a server that is still starting.
@@ -77,6 +77,13 @@ struct Slot {
 }
 
 /// What `/lsp` shows for one client or one unused server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticEntry {
+    pub server: String,
+    pub path: PathBuf,
+    pub diagnostic: Diagnostic,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     pub id: String,
@@ -454,6 +461,47 @@ impl LspManager {
                 out.push(s);
             }
         }
+        out
+    }
+
+    /// Collect all cached diagnostics across running servers, ordered Error -> Hint.
+    pub fn diagnostics(&self) -> Vec<DiagnosticEntry> {
+        let cells: Vec<(String, Arc<Client>)> = {
+            let Ok(slots) = self.slots.lock() else {
+                return Vec::new();
+            };
+            slots
+                .iter()
+                .filter_map(|((idx, _), slot)| {
+                    let spec = self.specs.get(*idx)?;
+                    let client = match slot.cell.get() {
+                        Some(Ok(c)) => c.clone(),
+                        _ => return None,
+                    };
+                    Some((spec.id.clone(), client))
+                })
+                .collect()
+        };
+        let mut out = Vec::new();
+        for (server, client) in cells {
+            for (path, list) in client.snapshot() {
+                for diagnostic in list {
+                    out.push(DiagnosticEntry {
+                        server: server.clone(),
+                        path: path.clone(),
+                        diagnostic,
+                    });
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            a.diagnostic
+                .severity
+                .cmp(&b.diagnostic.severity)
+                .then_with(|| a.path.cmp(&b.path))
+                .then_with(|| a.diagnostic.line.cmp(&b.diagnostic.line))
+                .then_with(|| a.diagnostic.column.cmp(&b.diagnostic.column))
+        });
         out
     }
 

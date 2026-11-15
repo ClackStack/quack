@@ -82,6 +82,8 @@ pub struct UiSnapshot {
     pub theme: String,
     /// Replace animation with static indicators.
     pub reduced_motion: bool,
+    /// Restore previously open workspace tabs on desktop startup.
+    pub gui_restore_tabs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -105,6 +107,9 @@ pub struct EgressSnapshot {
     pub updates_check: bool,
     pub catalog_refresh: bool,
     pub telemetry_enabled: bool,
+    pub secret_guard: String,
+    pub secret_guard_local: bool,
+    pub secret_allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -226,6 +231,7 @@ impl AppInfo {
             ui: UiSnapshot {
                 theme: config.settings.ui.theme.clone(),
                 reduced_motion: config.settings.ui.reduced_motion,
+                gui_restore_tabs: config.settings.ui.gui_restore_tabs,
             },
             egress: egress_snapshot(config),
             sandbox: sandbox_snapshot(config),
@@ -361,6 +367,12 @@ fn egress_snapshot(config: &Loaded) -> EgressSnapshot {
         })
         .collect();
     let net = &config.settings.network;
+    let secret_guard = match net.secret_guard {
+        quack_config::settings::SecretGuardMode::Off => "off",
+        quack_config::settings::SecretGuardMode::Ask => "ask",
+        quack_config::settings::SecretGuardMode::Redact => "redact",
+    }
+    .to_owned();
     EgressSnapshot {
         offline: net.offline,
         offline_locked: config.settings.policy.locks("network.offline"),
@@ -372,6 +384,9 @@ fn egress_snapshot(config: &Loaded) -> EgressSnapshot {
         updates_check: config.settings.updates.check,
         catalog_refresh: config.settings.catalog.refresh,
         telemetry_enabled: !config.settings.telemetry.otel_endpoint.trim().is_empty(),
+        secret_guard,
+        secret_guard_local: net.secret_guard_local,
+        secret_allowlist: net.secret_allowlist.clone(),
     }
 }
 
@@ -679,9 +694,10 @@ mod tests {
             AppInfo::from_config(&load(&sibling, true)).cwd,
             sibling.display().to_string()
         );
-        assert_eq!(
-            AppInfo::from_config(&load(&proj, false)).cwd,
-            proj.display().to_string()
-        );
+        let info = AppInfo::from_config(&load(&proj, false));
+        assert_eq!(info.cwd, proj.display().to_string());
+        assert!(info.ui.gui_restore_tabs);
+        assert_eq!(info.egress.secret_guard, "ask");
+        assert!(!info.egress.secret_guard_local);
     }
 }

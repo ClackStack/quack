@@ -22,6 +22,19 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::appinfo::AppInfo;
 use crate::coalesce::DeltaCoalescer;
 use crate::recent::{RecentFolders, expand_tilde_with, workspace_key};
+use crate::tabs::{
+    OpenTabsStore, ParsedLaunch, SavedTab, StartupPayload, merge_startup_targets, parse_argv,
+};
+
+/// A syntax symbol returned to the composer's `@file#symbol` picker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkspaceSymbol {
+    pub name: String,
+    pub kind: String,
+    pub start: usize,
+    pub end: usize,
+    pub signature: String,
+}
 
 /// How long opening a tab may take: config, the model, and replaying a saved log.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -179,6 +192,8 @@ pub struct Registry {
     tabs: Mutex<Tabs>,
     load: Loader,
     recent: Mutex<RecentFolders>,
+    session_tabs: Mutex<OpenTabsStore>,
+    initial_launch: Mutex<Option<ParsedLaunch>>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -214,6 +229,8 @@ impl Registry {
             tabs: Mutex::default(),
             load,
             recent: Mutex::new(RecentFolders::load()),
+            session_tabs: Mutex::new(OpenTabsStore::load()),
+            initial_launch: Mutex::new(None),
         }
     }
 
@@ -222,8 +239,51 @@ impl Registry {
         Self {
             tabs: Mutex::default(),
             load,
-            recent: Mutex::new(RecentFolders::at(recent_dir)),
+            recent: Mutex::new(RecentFolders::at(recent_dir.clone())),
+            session_tabs: Mutex::new(OpenTabsStore::at(recent_dir)),
+            initial_launch: Mutex::new(None),
         }
+    }
+
+    /// Capture the desktop process's launch arguments once during startup.
+    pub fn set_initial_argv(&self, argv: &[String], base_cwd: Option<&Path>) {
+        let parsed = parse_argv(argv, base_cwd);
+        *self.initial_launch.lock().expect("initial launch lock") = Some(parsed);
+    }
+
+    /// Compute initial tabs to open on webview startup, merging restored tabs with launch paths.
+    pub fn startup_targets_for(&self, client: u64) -> Result<StartupPayload, String> {
+        self.check_client(client)?;
+        let restore_tabs = (self.load)(LoadOptions::default())
+            .map(|cfg| cfg.settings.ui.gui_restore_tabs)
+            .unwrap_or(true);
+        let launch = self
+            .initial_launch
+            .lock()
+            .expect("initial launch lock")
+            .take()
+            .unwrap_or_default();
+        let saved = self
+            .session_tabs
+            .lock()
+            .expect("session tabs lock")
+            .existing_saved();
+        Ok(merge_startup_targets(
+            &saved,
+            &launch.targets,
+            restore_tabs,
+            launch.no_restore,
+        ))
+    }
+
+    /// Persist the current open workspace tabs to `session-tabs.json`.
+    pub fn save_open_tabs_for(&self, client: u64, tabs: &[SavedTab]) -> Result<(), String> {
+        self.check_client(client)?;
+        self.session_tabs
+            .lock()
+            .expect("session tabs lock")
+            .save(tabs);
+        Ok(())
     }
 
     /// Recently opened folders, most recent first.
@@ -425,6 +485,46 @@ impl Registry {
         tokio::task::spawn_blocking(move || quack_tools::workspace_files(&root, limit))
             .await
             .map_err(|e| format!("could not list workspace files: {e}"))
+    }
+
+    /// List syntax symbols in `rel_path` inside the tab's workspace for `@file#symbol`.
+    pub async fn list_symbols_for(
+        &self,
+        client: u64,
+        tab: TabId,
+        rel_path: String,
+        query: Option<String>,
+        limit: usize,
+    ) -> Result<Vec<WorkspaceSymbol>, String> {
+        let Some(tab) = self.get_tab(client, tab)? else {
+            return Err("this workspace tab is closed".to_owned());
+        };
+        let root = tab_root(&tab);
+        let query = query.unwrap_or_default();
+        tokio::task::spawn_blocking(move || {
+            match quack_tools::outline::list_symbols(
+                &root,
+                &quack_tools::grammar::Grammars::builtin(),
+                &rel_path,
+                &query,
+                limit,
+            ) {
+                Ok(syms) => Ok(syms
+                    .into_iter()
+                    .map(|s| WorkspaceSymbol {
+                        name: s.name,
+                        kind: s.kind,
+                        start: s.start,
+                        end: s.end,
+                        signature: s.signature,
+                    })
+                    .collect()),
+                Err(msg) if msg.starts_with("no syntax outline available") => Ok(Vec::new()),
+                Err(msg) => Err(msg),
+            }
+        })
+        .await
+        .map_err(|e| format!("could not list symbols: {e}"))?
     }
 
     /// Read shared workspace prompt history (`history.jsonl`), oldest first.
@@ -862,5 +962,49 @@ mod tests {
             .await
             .expect_err("missing dir must fail");
         assert!(matches!(err, OpenError::Config(_)), "{err:?}");
+    }
+
+    #[test]
+    fn startup_targets_merges_and_persists_isolated_tabs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws1 = dir.path().join("ws1");
+        let ws2 = dir.path().join("ws2");
+        std::fs::create_dir_all(&ws1).expect("ws1");
+        std::fs::create_dir_all(&ws2).expect("ws2");
+        let data = dir.path().join("data");
+        let load: Loader = Arc::new(move |opts| {
+            let vars = |k: &str| match k {
+                "QUACK_DEFAULTS_DIR" => Some("none".into()),
+                "QUACK_CONFIG_DIR" | "QUACK_SYSTEM_DIR" | "QUACK_DATA_DIR" | "QUACK_CACHE_DIR" => {
+                    Some(data.clone().into_os_string())
+                }
+                _ => None,
+            };
+            quack_config::load_with(&vars, &opts).map_err(|e| e.to_string())
+        });
+        let reg = Registry::with_parts(load, dir.path().join("gui"));
+        let client = reg.tabs.lock().expect("lock").client;
+        reg.save_open_tabs_for(
+            client,
+            &[SavedTab {
+                path: ws1.display().to_string(),
+                session_id: Some("sess1".into()),
+                active: true,
+            }],
+        )
+        .expect("save");
+        reg.set_initial_argv(
+            &["quack-gui".into(), ws2.display().to_string()],
+            Some(dir.path()),
+        );
+        let first = reg.startup_targets_for(client).expect("startup");
+        assert_eq!(first.targets.len(), 2);
+        assert_eq!(first.active_index, Some(1));
+        assert!(first.targets[1].focus);
+
+        // Second call (e.g. webview reload) uses saved tabs without replaying initial argv.
+        let second = reg.startup_targets_for(client).expect("reload");
+        assert_eq!(second.targets.len(), 1);
+        assert_eq!(second.targets[0].path, ws1.display().to_string());
     }
 }

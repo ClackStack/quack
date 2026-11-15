@@ -3752,6 +3752,7 @@ dependencies = [
  "quack-shell",
  "quack-store",
  "quack-tools",
+ "redact-secret",
  "regex",
  "serde",
  "serde_json",
@@ -3835,6 +3836,7 @@ name = "quack-mcp"
 version = "0.0.0"
 dependencies = [
  "quack-config",
+ "quack-protocol",
  "quack-providers",
  "quack-sandbox",
  "quack-shell",
@@ -4146,6 +4148,15 @@ name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
+
+[[package]]
+name = "redact-secret"
+version = "0.1.0-beta.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41d4dfd613c394c0b106cb0b102aa3c570d9c49cacdf2fe298a54eef457cb8a0"
+dependencies = [
+ "unicode-normalization",
+]
 
 [[package]]
 name = "redox_syscall"
@@ -6243,6 +6254,15 @@ name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-segmentation"

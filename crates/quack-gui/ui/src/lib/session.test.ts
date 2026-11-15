@@ -1071,4 +1071,141 @@ describe('update checks', () => {
 		off();
 		await dev.closeTab(opened.tab);
 	});
+
+	it('tracks live egress ledger entries, Secret Shield approvals, LSP diagnostics, tool probe, and context pruning', async () => {
+		const { session, send } = fixture();
+
+		await session.refreshEgress();
+		expect(send).toHaveBeenCalledWith(3, { op: 'list_egress' });
+		session.onEvent({
+			event: 'egress_ledger',
+			entries: [
+				{
+					seq: 1,
+					timestamp_ms: 1000,
+					kind: 'inference',
+					host: 'api.example.test',
+					path: '/v1/chat/completions',
+					protocol: 'https',
+					local: false,
+					bytes_sent: 512,
+					bytes_received: 2048,
+					status: 200,
+					redactions: 0
+				}
+			],
+			stats: {
+				total_requests: 1,
+				total_bytes_sent: 512,
+				total_bytes_received: 2048,
+				local_requests: 0,
+				remote_requests: 1,
+				blocked_count: 0,
+				redacted_count: 0
+			}
+		});
+		// Duplicate seq should be ignored while new seq increments totals.
+		session.onEvent({
+			event: 'egress_recorded',
+			entry: {
+				seq: 1,
+				timestamp_ms: 1000,
+				kind: 'inference',
+				host: 'api.example.test',
+				path: '/v1/chat/completions',
+				protocol: 'https',
+				local: false,
+				bytes_sent: 512,
+				bytes_received: 2048,
+				status: 200,
+				redactions: 0
+			}
+		});
+		expect(session.egressEntries).toHaveLength(1);
+		session.onEvent({
+			event: 'egress_recorded',
+			entry: {
+				seq: 2,
+				timestamp_ms: 2000,
+				kind: 'inference',
+				host: 'api.example.test',
+				path: '/v1/chat/completions',
+				protocol: 'https',
+				local: false,
+				bytes_sent: 256,
+				bytes_received: 1024,
+				status: 200,
+				redactions: 1
+			}
+		});
+		expect(session.egressEntries).toHaveLength(2);
+		expect(session.egressStats?.total_requests).toBe(2);
+		expect(session.egressStats?.redacted_count).toBe(1);
+
+		// Secret Shield approval flow (`redact_and_send`).
+		session.onEvent({
+			event: 'approval_request',
+			call_id: 'egress-1',
+			request: {
+				kind: 'egress_secrets',
+				provider: 'mock',
+				host: 'api.example.test',
+				findings: [
+					{
+						id: 'f1',
+						kind: 'aws_access_key',
+						location: 'prompt',
+						preview: 'AKIA••••••••1234',
+						fingerprint: 'fp-1234567890abcdef'
+					}
+				]
+			},
+			always: []
+		});
+		expect(session.approval?.request.kind).toBe('egress_secrets');
+		await session.answerApproval('redact_and_send');
+		expect(send).toHaveBeenCalledWith(3, {
+			op: 'approval_response',
+			call_id: 'egress-1',
+			decision: { decision: 'redact_and_send' }
+		});
+		expect(session.approval).toBeNull();
+
+		// Tool-calling capability probe + LSP diagnostics + selective prune.
+		await session.probeToolCalling();
+		expect(send).toHaveBeenCalledWith(3, { op: 'probe_tool_calling' });
+		expect(session.toolProbing).toBe(true);
+		session.onEvent({
+			event: 'tool_probe_result',
+			report: {
+				model: 'mock/org/model',
+				configured_mode: 'auto',
+				recommended_mode: 'native',
+				cases: [{ name: 'native_echo', passed: true, latency_ms: 42, detail: 'ok' }],
+				summary: 'Native tool calling verified.'
+			}
+		});
+		expect(session.toolProbing).toBe(false);
+		expect(session.toolProbe?.recommended_mode).toBe('native');
+
+		await session.refreshLspDiagnostics('rust-analyzer');
+		expect(send).toHaveBeenCalledWith(3, { op: 'list_lsp_diagnostics', server_id: 'rust-analyzer' });
+		session.onEvent({
+			event: 'lsp_diagnostics',
+			items: [
+				{
+					server: 'rust-analyzer',
+					path: 'src/main.rs',
+					line: 12,
+					column: 5,
+					severity: 'error',
+					message: 'mismatched types'
+				}
+			]
+		});
+		expect(session.lspDiagnostics).toHaveLength(1);
+
+		await session.pruneContext([4]);
+		expect(send).toHaveBeenCalledWith(3, { op: 'prune_context', indices: [4] });
+	});
 });

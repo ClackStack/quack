@@ -23,6 +23,7 @@ quack-sandbox.workspace = true
 quack-store.workspace = true
 quack-instructions.workspace = true
 futures.workspace = true
+redact-secret.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -16,6 +16,7 @@ test = false
 doc = false
 
 [dependencies]
+quack-protocol.workspace = true
 quack-config.workspace = true
 quack-providers.workspace = true
 quack-shell.workspace = true

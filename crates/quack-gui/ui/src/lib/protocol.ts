@@ -120,12 +120,12 @@ recommended?: number, };
  * The user's answer to one [`Question`].
  */
 export type Answer = { "answer": "picked", index: number, } | { "answer": "text", text: string, } | { "answer": "skipped" };
-export type ApprovalDecision = { "decision": "allow_once" } | { "decision": "allow_session" } | { "decision": "always_allow", scope: WriteScope, } | { "decision": "deny" } | { "decision": "deny_with_feedback", feedback: string, };
+export type ApprovalDecision = { "decision": "allow_once" } | { "decision": "allow_session" } | { "decision": "always_allow", scope: WriteScope, } | { "decision": "redact_and_send" } | { "decision": "deny" } | { "decision": "deny_with_feedback", feedback: string, };
 export type ApprovalRequest = { "kind": "shell", command: string, cwd: string,
 /**
  * The sandbox is on, but this command would run outside it.
  */
-outside_sandbox?: boolean, } | { "kind": "edit", path: string, diff: string, } | { "kind": "tool", name: string, arguments: string, };
+outside_sandbox?: boolean, } | { "kind": "edit", path: string, diff: string, } | { "kind": "tool", name: string, arguments: string, } | { "kind": "egress_secrets", provider: string, host: string, findings: Array<SecretFinding>, };
 export type HookField = { id: string, label: string,
 /**
  * text, url, integer, boolean, choice, or secret.
@@ -176,7 +176,7 @@ export type ContextSegment = { name: string, tokens: number,
 /**
  * One line, e.g. `12 messages, 3 pruned`.
  */
-detail: string, };
+detail: string, zone?: ContextZone, prunable_indices?: Array<number>, };
 export type PruneReport = { removed_tokens: number, items: Array<string>, };
 export type MemoryNote = {
 /**
@@ -439,6 +439,10 @@ used: number,
  */
 strategy: string, segments: Array<ContextSegment>,
 /**
+ * Optional per-message / tool-output breakdown for interactive inspection and trim.
+ */
+tail_items?: Array<ContextItem>,
+/**
  * Caveats, e.g. that the history is in use by a running turn.
  */
 note?: string, };
@@ -514,6 +518,67 @@ sampling?: Array<[string, number]>,
  */
 history?: Array<RequestStat>, };
 /**
+ * Which cache region a context segment or message belongs to.
+ */
+export type ContextZone = "cached_prefix" | "session_context" | "uncached_tail";
+/**
+ * One inspectable / individually prunable message in the conversation tail.
+ */
+export type ContextItem = {
+/**
+ * Index in the live session history.
+ */
+index: number,
+/**
+ * `user`, `assistant`, `tool`, or `summary`.
+ */
+role: string,
+/**
+ * Short preview or tool summary.
+ */
+label: string, tokens: number, pruned: boolean, cached: boolean, prunable: boolean, };
+export type EgressKind = "inference" | "models" | "mcp_http" | "auth" | "fetch" | "blocked_redirect" | "blocked_egress";
+/**
+ * One recorded outbound or blocked network transaction in this session.
+ */
+export type EgressEntry = { seq: number, timestamp_ms: number, kind: EgressKind, host: string, path: string, protocol: string, local: boolean, bytes_sent: number, bytes_received: number, status?: number, redactions: number, blocked_reason?: string, };
+export type EgressStats = { total_requests: number, total_bytes_sent: number, total_bytes_received: number, local_requests: number, remote_requests: number, blocked_count: number, redacted_count: number, };
+/**
+ * Masked credential or high-entropy match flagged before outbound transmission.
+ */
+export type SecretFinding = { id: string,
+/**
+ * Detector family / rule id (e.g. `aws_access_key`, `resolved_secret`).
+ */
+kind: string,
+/**
+ * Source location label (`prompt`, `@src/config.rs`, or `tool:shell`).
+ */
+location: string,
+/**
+ * Masked preview (`sk-live-••••9f2a`), never the plaintext secret.
+ */
+preview: string,
+/**
+ * Short SHA-256 fingerprint (`sha256:a1b2c3d4e5f6`) for allowlisting.
+ */
+fingerprint: string, line?: number, };
+export type ToolProbeCase = { name: string, passed: boolean, latency_ms: number, detail: string, };
+export type ToolProbeReport = { model: string, configured_mode: string, recommended_mode: string, recommended_text_format?: string, cases: Array<ToolProbeCase>, summary: string, };
+export type LspDiagnosticItem = { server: string, path: string,
+/**
+ * 1-based line number for display.
+ */
+line: number,
+/**
+ * 1-based column number for display.
+ */
+column: number,
+/**
+ * `error`, `warning`, `info`, or `hint`.
+ */
+severity: string, message: string, code?: string, };
+/**
  * A transcript entry of a resumed session.
  */
 export type ReplayItem = { "kind": "user", text: string, } | { "kind": "assistant", text: string, } | { "kind": "tool", summary: string, ok: boolean, result: string,
@@ -582,7 +647,7 @@ model: string, } | { "event": "agent", id: string, inner: Event, } | { "event": 
 /**
  * e.g. `12 steps · 34.5k tokens`.
  */
-summary: string, } | { "event": "plan", checklist: string, } | { "event": "diagnostics", errors: number, warnings: number, } | { "event": "notice", message: string, } | { "event": "update_available", current: string, latest: string, } | { "event": "update_check_result", current: string, latest: string | null, update_available: boolean, url: string | null, error: string | null, } | { "event": "warning", message: string, } | { "event": "error", error: EngineError, };
+summary: string, } | { "event": "plan", checklist: string, } | { "event": "diagnostics", errors: number, warnings: number, } | { "event": "notice", message: string, } | { "event": "update_available", current: string, latest: string, } | { "event": "update_check_result", current: string, latest: string | null, update_available: boolean, url: string | null, error: string | null, } | { "event": "warning", message: string, } | { "event": "error", error: EngineError, } | { "event": "egress_ledger", entries: Array<EgressEntry>, stats: EgressStats, } | { "event": "egress_recorded", entry: EgressEntry, } | { "event": "tool_probe_result", report: ToolProbeReport, } | { "event": "lsp_diagnostics", items: Array<LspDiagnosticItem>, };
 /**
  * A request from a client to the engine.
  */
@@ -594,4 +659,4 @@ mode: string, } | { "op": "run_doctor" } | { "op": "list_mcp" } | { "op": "resta
 /**
  * None keeps the current enabled state.
  */
-enable: boolean | null, replace_payload: boolean | null, } | { "op": "check_hook_setup", id: string, request: number, revision: string, connection: HookConnectionDraft, url: string, } | { "op": "cancel_hook_check", request: number, } | { "op": "check_updates" } | { "op": "shutdown" };
+enable: boolean | null, replace_payload: boolean | null, } | { "op": "check_hook_setup", id: string, request: number, revision: string, connection: HookConnectionDraft, url: string, } | { "op": "cancel_hook_check", request: number, } | { "op": "check_updates" } | { "op": "list_egress" } | { "op": "prune_context", indices?: Array<number>, } | { "op": "probe_tool_calling" } | { "op": "list_lsp_diagnostics", server_id?: string, } | { "op": "shutdown" };

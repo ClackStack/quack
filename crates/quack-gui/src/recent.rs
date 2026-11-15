@@ -122,7 +122,10 @@ pub(crate) fn workspace_key(path: &Path) -> PathBuf {
     }
 }
 
-fn normalize_recent_path(path: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+pub(crate) fn normalize_recent_path(
+    path: &Path,
+    env: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
     if path.as_os_str().is_empty() || path.to_string_lossy().trim().is_empty() {
         return None;
     }

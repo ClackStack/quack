@@ -112,17 +112,73 @@
 			{/if}
 
 			{#if session.contextReport}
+				{#if session.contextReport.strategy}
+					<div class="strategy-strip">
+						<span>Strategy: <code>{session.contextReport.strategy}</code></span>
+						{#if session.contextReport.tail_items?.some((t) => t.cached)}
+							<span class="zone-pill prefix">KV prefix cached</span>
+						{/if}
+					</div>
+				{/if}
+
 				<div class="segments">
-					{#each session.contextReport.segments as segment (segment.name)}
-						<div class="segment">
+					{#each session.contextReport.segments as segment (`${segment.zone ?? 'all'}:${segment.name}`)}
+						<div class="segment" class:cached-zone={segment.zone === 'cached_prefix'}>
 							<div class="seg-top">
-								<span class="seg-name">{segment.name}</span>
+								<span class="seg-title-wrap">
+									<span class="seg-name">{segment.name}</span>
+									{#if segment.zone === 'cached_prefix'}
+										<span class="zone-badge prefix">Immutable KV prefix</span>
+									{:else if segment.zone === 'session_context'}
+										<span class="zone-badge session">Session context</span>
+									{:else if segment.zone === 'uncached_tail'}
+										<span class="zone-badge tail">Prunable tail</span>
+									{/if}
+								</span>
 								<span class="seg-tokens">{segment.tokens.toLocaleString()} tok</span>
 							</div>
 							<span class="seg-detail">{segment.detail}</span>
 						</div>
 					{/each}
 				</div>
+
+				{#if session.contextReport.tail_items && session.contextReport.tail_items.length > 0}
+					<div class="tail-section">
+						<div class="tail-head">
+							<span class="tail-title">Turn items ({session.contextReport.tail_items.length})</span>
+							<span class="tail-sub">Click Trim on older uncached tool/message outputs to free space without breaking prefix caching.</span>
+						</div>
+						<div class="tail-list">
+							{#each session.contextReport.tail_items as item (item.index)}
+								<div class="tail-item" class:pruned={item.pruned}>
+									<div class="tail-meta">
+										<span class="tail-role">{item.role}</span>
+										<span class="tail-label">{item.label}</span>
+									</div>
+									<div class="tail-actions">
+										{#if item.cached}
+											<span class="item-badge cached">cached</span>
+										{/if}
+										{#if item.pruned}
+											<span class="item-badge pruned">pruned</span>
+										{/if}
+										<span class="tail-tok">{item.tokens.toLocaleString()} tok</span>
+										{#if item.prunable && !item.pruned}
+											<button
+												type="button"
+												class="trim-btn"
+												{disabled}
+												onclick={() => void session.pruneContext([item.index])}
+											>
+												Trim
+											</button>
+										{/if}
+									</div>
+								</div>
+							{/each}
+						</div>
+					</div>
+				{/if}
 				{#if session.contextReport.note}
 					<p class="report-note">{session.contextReport.note}</p>
 				{/if}
@@ -137,6 +193,16 @@
 
 		<div class="modal-foot">
 			<button
+				type="button"
+				class="btn"
+				disabled={disabled || (!session.context && !session.contextReport)}
+				onclick={() => void session.pruneContext()}
+				title="Prune stale tool outputs while keeping the cached KV prefix byte-identical"
+			>
+				Prune stale
+			</button>
+			<button
+				type="button"
 				class="btn"
 				disabled={disabled || (!session.context && !session.contextReport)}
 				onclick={() => {
@@ -361,5 +427,157 @@
 
 	.grow {
 		flex: 1;
+	}
+
+	.strategy-strip {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		font-size: 0.75rem;
+		color: var(--ink-2);
+	}
+
+	.seg-title-wrap {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		flex-wrap: wrap;
+	}
+
+	.segment.cached-zone {
+		border-color: color-mix(in srgb, var(--ok) 35%, var(--rule));
+	}
+
+	.zone-pill,
+	.zone-badge,
+	.item-badge {
+		font-family: var(--font-mono);
+		font-size: 0.625rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		padding: 1px 6px;
+		border-radius: 999px;
+		border: 1px solid var(--rule);
+		background: var(--bg-raised);
+		color: var(--ink-2);
+	}
+
+	.zone-pill.prefix,
+	.zone-badge.prefix,
+	.item-badge.cached {
+		background: var(--ok-soft);
+		color: var(--ok);
+	}
+
+	.zone-badge.tail {
+		background: var(--duck-soft);
+		color: var(--duck-ink);
+	}
+
+	.item-badge.pruned {
+		background: var(--sky-soft);
+		color: var(--sky-ink);
+	}
+
+	.tail-section {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding-top: 6px;
+		border-top: 1px solid var(--rule-soft);
+	}
+
+	.tail-head {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.tail-title {
+		font-size: 0.78125rem;
+		font-weight: 600;
+		color: var(--ink);
+	}
+
+	.tail-sub {
+		font-size: 0.71875rem;
+		color: var(--ink-3);
+	}
+
+	.tail-list {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		max-height: 220px;
+		overflow-y: auto;
+	}
+
+	.tail-item {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		padding: 6px 10px;
+		border: 1px solid var(--rule-soft);
+		border-radius: var(--r-md);
+		background: var(--bg-panel);
+		font-size: 0.75rem;
+	}
+
+	.tail-item.pruned {
+		opacity: 0.65;
+	}
+
+	.tail-meta {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		min-width: 0;
+		flex: 1;
+	}
+
+	.tail-role {
+		font-family: var(--font-mono);
+		font-size: 0.6875rem;
+		font-weight: 600;
+		color: var(--ink-2);
+		flex: none;
+	}
+
+	.tail-label {
+		color: var(--ink);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.tail-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		flex: none;
+	}
+
+	.tail-tok {
+		font-family: var(--font-mono);
+		font-size: 0.71875rem;
+		color: var(--ink-3);
+	}
+
+	.trim-btn {
+		padding: 2px 7px;
+		font-size: 0.6875rem;
+		font-weight: 600;
+		border-radius: var(--r-md);
+		border: 1px solid var(--rule);
+		background: var(--bg-raised);
+		color: var(--ink);
+	}
+
+	.trim-btn:hover:not(:disabled) {
+		background: var(--duck-soft);
+		color: var(--duck-ink);
 	}
 </style>

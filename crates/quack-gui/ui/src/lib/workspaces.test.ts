@@ -320,4 +320,56 @@ describe('workspace lifecycle', () => {
 		receive({ tab: 3, history: ['initial tui prompt', 'gui turn'] });
 		expect(workspaces.sessions[0].inputHistory).toEqual(['initial tui prompt', 'gui turn']);
 	});
+
+	it('restores startup tabs, focuses active_index, and handles single-instance open requests', async () => {
+		let openReqCb: ((targets: import('./transport/types').LaunchTarget[]) => void) | undefined;
+		let tabCounter = 1;
+		const saveOpenTabs = vi.fn().mockResolvedValue(undefined);
+		const startupTargets = vi.fn().mockResolvedValue({
+			targets: [
+				{ path: '/workspace/one', resume: 'sess-1', continue_latest: false, focus: false },
+				{ path: '/workspace/two', resume: null, continue_latest: false, focus: true }
+			],
+			active_index: 1
+		});
+		const transport: Transport = {
+			kind: 'tauri',
+			pickFolder: vi.fn(),
+			recentFolders: vi.fn(),
+			openFolder: vi.fn().mockImplementation(async (cwd: string) => ({
+				tab: tabCounter++,
+				info: makeInfo(cwd)
+			})),
+			sendOp: vi.fn().mockResolvedValue(undefined),
+			closeTab: vi.fn().mockResolvedValue(undefined),
+			openUrl: vi.fn().mockResolvedValue(undefined),
+			listen: () => () => {},
+			startupTargets,
+			saveOpenTabs,
+			onOpenRequest(cb) {
+				openReqCb = cb;
+				return () => {};
+			}
+		};
+
+		const workspaces = new Workspaces(transport);
+		await workspaces.restoreStartupTabs();
+		expect(workspaces.sessions.map((s) => s.info?.cwd)).toEqual(['/workspace/one', '/workspace/two']);
+		expect(workspaces.activeIndex).toBe(1);
+		expect(transport.openFolder).toHaveBeenNthCalledWith(1, '/workspace/one', {
+			resume: 'id',
+			id: 'sess-1'
+		});
+		expect(transport.openFolder).toHaveBeenNthCalledWith(2, '/workspace/two', {
+			resume: 'new'
+		});
+
+		// Single-instance open request focuses an already open folder cleanly.
+		openReqCb?.([{ path: '/workspace/one', resume: null, continue_latest: false, focus: true }]);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(workspaces.activeIndex).toBe(0);
+		expect(saveOpenTabs).toHaveBeenCalled();
+		workspaces.dispose();
+	});
 });

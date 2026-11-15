@@ -1,6 +1,12 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import {
+		BUILTIN_COMMANDS,
+		executeBuiltinCommand,
+		parseSlashCommand,
+		type CommandUiHost
+	} from '#lib/commands';
+	import {
 		initialHistoryCursor,
 		isOnFirstLine,
 		isOnLastLine,
@@ -15,16 +21,18 @@
 		type Session,
 		type WorkMode
 	} from '#lib/session.svelte';
-	import { getTransport } from '#lib/transport';
+	import { getTransport, type WorkspaceSymbol } from '#lib/transport';
 
 	let {
 		session,
 		modalOpen = false,
+		commandUiHost,
 		onOpenModels,
 		onOpenContext
 	}: {
 		session: Session;
 		modalOpen?: boolean;
+		commandUiHost?: CommandUiHost;
 		onOpenModels: () => void;
 		onOpenContext: () => void;
 	} = $props();
@@ -51,6 +59,8 @@
 	let attachedImages = $state<string[]>([]);
 	let attachmentError = $state<string | null>(null);
 	let dragOver = $state(false);
+	let symbolCache = $state<Record<string, WorkspaceSymbol[]>>({});
+	let symbolLoadingPath = $state<string | null>(null);
 	let historyState = $state<{ tab: number; cursor: HistoryCursor }>({
 		tab: -1,
 		cursor: initialHistoryCursor()
@@ -97,9 +107,22 @@
 		const file = /(?:^|[\s(])@([^\s@]*)$/.exec(before);
 		if (file) {
 			const atIdx = before.lastIndexOf('@');
+			const raw = file[1];
+			const hashIdx = raw.indexOf('#');
+			if (hashIdx > 0) {
+				const filePath = raw.slice(0, hashIdx);
+				return {
+					kind: 'symbol' as const,
+					path: filePath,
+					query: raw.slice(hashIdx + 1).toLowerCase(),
+					start: atIdx,
+					end: pos,
+					anchor: `sym:${atIdx}:${filePath}`
+				};
+			}
 			return {
 				kind: 'file' as const,
-				query: file[1].toLowerCase(),
+				query: raw.toLowerCase(),
 				start: atIdx,
 				end: pos,
 				anchor: `file:${atIdx}`
@@ -112,31 +135,49 @@
 		if (!trigger || dismissedAnchor === trigger.anchor) return [];
 		if (trigger.kind === 'slash') {
 			const q = trigger.query;
-			const all: AutocompleteItem[] = [
-				...session.commands.map((c) => ({
+			const seen: Record<string, true> = {};
+			const all: AutocompleteItem[] = [];
+			for (const b of BUILTIN_COMMANDS) {
+				seen[b.name] = true;
+				all.push({
+					id: `builtin:${b.name}`,
+					label: `/${b.name}`,
+					badge: b.category.toLowerCase(),
+					detail: b.description,
+					args: b.args || undefined,
+					insert: `/${b.name}${b.args ? ' ' : ''}`
+				});
+			}
+			for (const c of session.commands) {
+				if (seen[c.name]) continue;
+				all.push({
 					id: `cmd:${c.name}`,
 					label: `/${c.name}`,
 					badge: c.source || 'command',
 					detail: c.description,
 					args: c.args || undefined,
 					insert: `/${c.name} `
-				})),
-				...session.skills.map((s) => ({
+				});
+			}
+			for (const s of session.skills) {
+				all.push({
 					id: `skill:${s.name}`,
 					label: `/${s.name}`,
 					badge: `skill · ${s.source}`,
 					detail: s.description,
 					insert: `/${s.name} `
-				})),
-				...session.mcpPrompts.map((p) => ({
+				});
+			}
+			for (const p of session.mcpPrompts) {
+				all.push({
 					id: `mcp:${p.name}`,
 					label: `/${p.name}`,
 					badge: p.source || 'mcp',
 					detail: p.description,
 					args: p.args || undefined,
 					insert: `/${p.name} `
-				}))
-			];
+				});
+			}
 			return all
 				.filter(
 					(it) =>
@@ -145,6 +186,26 @@
 						it.detail.toLowerCase().includes(q)
 				)
 				.slice(0, 12);
+		}
+
+		if (trigger.kind === 'symbol') {
+			const list = symbolCache[`${session.tab}:${trigger.path}`] ?? [];
+			const q = trigger.query;
+			const ranked: { sym: WorkspaceSymbol; rank: number }[] = [];
+			for (const sym of list) {
+				const low = sym.name.toLowerCase();
+				if (!q) ranked.push({ sym, rank: 0 });
+				else if (low.startsWith(q)) ranked.push({ sym, rank: 0 });
+				else if (low.includes(q)) ranked.push({ sym, rank: 1 });
+			}
+			ranked.sort((a, b) => a.rank - b.rank || a.sym.start - b.sym.start);
+			return ranked.slice(0, 14).map(({ sym }) => ({
+				id: `sym:${trigger.path}#${sym.name}:${sym.start}`,
+				label: `@${trigger.path}#${sym.name}`,
+				badge: sym.kind,
+				detail: `L${sym.start}-${sym.end}`,
+				insert: `@${trigger.path}#${sym.name} `
+			}));
 		}
 
 		const files = session.workspaceFiles ?? [];
@@ -166,7 +227,7 @@
 			id: `file:${path}`,
 			label: `@${path}`,
 			badge: 'file',
-			detail: '',
+			detail: 'tip: add #symbol or :L1-L40 for a slice',
 			insert: `@${path} `
 		}));
 	});
@@ -334,6 +395,18 @@
 		if (!canSend) return;
 		const files = [...attachedFiles];
 		const images = [...attachedImages];
+		const parsedCmd = files.length === 0 && images.length === 0 ? parseSlashCommand(body) : null;
+		if (parsedCmd && commandUiHost) {
+			if (session.draft === draft) session.draft = '';
+			setHistoryCursor(initialHistoryCursor());
+			attachedFiles = [];
+			attachedImages = [];
+			attachmentError = null;
+			caret = 0;
+			autogrow();
+			await executeBuiltinCommand(parsedCmd, session, commandUiHost);
+			return;
+		}
 		if (await session.submit(body, files, images)) {
 			if (session.draft === draft) session.draft = '';
 			setHistoryCursor(initialHistoryCursor());
@@ -437,6 +510,20 @@
 		if (!trigger) dismissedAnchor = null;
 		else if (trigger.kind === 'file' && session.workspaceFiles === null && !session.loadingFiles && !session.closed) {
 			void session.refreshWorkspaceFiles();
+		} else if (trigger.kind === 'symbol' && !session.closed) {
+			const path = trigger.path;
+			const key = `${session.tab}:${path}`;
+			if (!symbolCache[key] && symbolLoadingPath !== key) {
+				symbolLoadingPath = key;
+				void session
+					.listSymbols(path, '')
+					.then((syms) => {
+						symbolCache = { ...symbolCache, [key]: syms };
+					})
+					.finally(() => {
+						if (symbolLoadingPath === key) symbolLoadingPath = null;
+					});
+			}
 		}
 	});
 
@@ -519,10 +606,12 @@
 		ondragleave={() => (dragOver = false)}
 		ondrop={(e) => void onDrop(e)}
 	>
-		{#if suggestions.length > 0 || (trigger?.kind === 'file' && session.loadingFiles)}
+		{#if suggestions.length > 0 || (trigger?.kind === 'file' && session.loadingFiles) || (trigger?.kind === 'symbol' && symbolLoadingPath === `${session.tab}:${trigger.path}`)}
 			<div class="ac-popup" role="listbox" aria-label="Suggestions">
 				{#if trigger?.kind === 'file' && session.loadingFiles && suggestions.length === 0}
 					<div class="ac-empty">Scanning workspace files…</div>
+				{:else if trigger?.kind === 'symbol' && symbolLoadingPath === `${session.tab}:${trigger.path}` && suggestions.length === 0}
+					<div class="ac-empty">Indexing symbols in {trigger.path}…</div>
 				{:else}
 					{#each suggestions as item, idx (item.id)}
 						<button

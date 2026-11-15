@@ -46,6 +46,8 @@ pub enum Rule {
     OldRead,
     /// Rule 5: a failed call followed by a successful one with the same aim.
     FailedAttempt,
+    /// Explicit user-triggered trim of a specific tool result from `/context`.
+    Manual,
 }
 
 /// What the rules need to know beyond the history.
@@ -351,6 +353,42 @@ pub fn apply(history: &mut [Message], ops: &[PruneOp]) -> usize {
     removed
 }
 
+/// Build [`PruneOp`]s collapsing the user-selected tool result indices.
+pub fn manual_indices(history: &[Message], indices: &[usize]) -> Vec<PruneOp> {
+    let mut unique: Vec<usize> = indices.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    unique
+        .into_iter()
+        .filter_map(|index| {
+            let Some(Message::Tool { content, .. }) = history.get(index) else {
+                return None;
+            };
+            if content.starts_with(MARKER) {
+                return None;
+            }
+            let preview = content
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .map(|l| l.chars().take(72).collect::<String>())
+                .unwrap_or_default();
+            let note = if preview.is_empty() {
+                format!("{MARKER} manually: {} chars]", content.len())
+            } else {
+                format!(
+                    "{MARKER} manually: {} chars · {preview}; re-read if needed]",
+                    content.len()
+                )
+            };
+            Some(PruneOp {
+                index,
+                rule: Rule::Manual,
+                content: note,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,5 +601,27 @@ mod tests {
         assert!(covers(Some((1, 10)), Some((2, 5))));
         assert!(!covers(Some((3, 10)), Some((2, 5))));
         assert!(!covers(Some((1, 10)), None));
+    }
+
+    #[test]
+    fn manual_indices_collapses_selected_tool_results_only() {
+        let mut h = vec![
+            Message::User {
+                content: "check files".into(),
+                images: Vec::new(),
+            },
+            call("1", "read", "a.rs"),
+            result("1", "line a\nline b\nline c\n".repeat(40)),
+            call("2", "read", "b.rs"),
+            result("2", "keep this output\n".into()),
+        ];
+        let ops = manual_indices(&h, &[0, 2, 2, 99]);
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].index, 2);
+        assert_eq!(ops[0].rule, Rule::Manual);
+        let removed = apply(&mut h, &ops);
+        assert!(removed > 100);
+        assert!(manual_indices(&h, &[2]).is_empty());
+        assert!(matches!(&h[4], Message::Tool { content, .. } if content.contains("keep this")));
     }
 }

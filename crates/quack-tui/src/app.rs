@@ -859,6 +859,7 @@ pub struct App {
     frame: u64,
     dirty: bool,
     quit: bool,
+    gui_handoff: bool,
     ops: Vec<Op>,
     last_ctrl_c: Option<Instant>,
     /// For Esc Esc, which opens the rewind picker.
@@ -973,6 +974,7 @@ impl App {
             frame: 0,
             dirty: true,
             quit: false,
+            gui_handoff: false,
             ops: Vec::new(),
             last_ctrl_c: None,
             last_esc: None,
@@ -982,6 +984,22 @@ impl App {
 
     pub fn should_quit(&self) -> bool {
         self.quit
+    }
+
+    pub fn wants_gui_handoff(&self) -> bool {
+        self.gui_handoff
+    }
+
+    fn request_gui_handoff(&mut self, gui_found: bool) {
+        if gui_found {
+            self.gui_handoff = true;
+            self.quit = true;
+        } else {
+            self.note(
+                "quack-gui binary was not found in PATH or beside quack (build with: cargo build -p quack-gui --features desktop)"
+                    .into(),
+            );
+        }
     }
 
     /// Short id of the current session if it has been saved on disk, for a resume hint on exit.
@@ -1611,6 +1629,11 @@ impl App {
             Event::DoctorReport { checks } => {
                 if self.modal.as_ref().is_some_and(|m| m.title == "Doctor") {
                     self.modal = Some(modal::doctor(Some(&checks), &self.theme));
+                }
+            }
+            Event::ToolProbeResult { report } => {
+                if self.modal.as_ref().is_some_and(|m| m.title == "Tool Probe") {
+                    self.modal = Some(modal::tool_probe(Some(&report), &self.theme));
                 }
             }
             Event::MemoryNotes { notes, index_fill } => {
@@ -2549,6 +2572,13 @@ impl App {
             return;
         }
         let decision = match key.code {
+            KeyCode::Char('r' | 'R')
+                if self.approval.as_ref().is_some_and(|a| {
+                    matches!(a.request, ApprovalRequest::EgressSecrets { .. })
+                }) =>
+            {
+                ApprovalDecision::RedactAndSend
+            }
             KeyCode::Char('y' | 'Y') | KeyCode::Enter => ApprovalDecision::AllowOnce,
             KeyCode::Char('A') if self.approval.as_ref().is_some_and(|a| !a.always.is_empty()) => {
                 let scope = self
@@ -3619,6 +3649,11 @@ impl App {
                 self.modal = Some(modal::doctor(None, &self.theme));
                 self.ops.push(Op::RunDoctor);
             }
+            "probe" => {
+                self.modal = Some(modal::tool_probe(None, &self.theme));
+                self.ops.push(Op::ProbeToolCalling);
+            }
+            "gui" => self.request_gui_handoff(quack_core::gui::find_binary().is_some()),
             "copy" => {
                 let last = self.transcript.iter().rev().find_map(|e| match e {
                     Entry::Assistant(t) if !t.trim().is_empty() => Some(t.clone()),
@@ -5616,5 +5651,45 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn probe_opens_modal_and_updates_on_report() {
+        let mut app = App::new(info());
+        type_str(&mut app, "/probe");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.take_ops(), vec![Op::ProbeToolCalling]);
+        assert_eq!(
+            app.modal.as_ref().map(|m| m.title.as_str()),
+            Some("Tool Probe")
+        );
+        app.on_engine(Event::ToolProbeResult {
+            report: quack_protocol::ToolProbeReport {
+                model: "test/m".into(),
+                configured_mode: "native".into(),
+                recommended_mode: "native".into(),
+                recommended_text_format: None,
+                cases: vec![quack_protocol::ToolProbeCase {
+                    name: "native_tool".into(),
+                    passed: true,
+                    latency_ms: 42,
+                    detail: "tool invoked cleanly".into(),
+                }],
+                summary: "Ready for native tool calls".into(),
+            },
+        });
+        assert!(app.modal.is_some());
+    }
+
+    #[test]
+    fn gui_handoff_quits_only_when_binary_available() {
+        let mut app = App::new(info());
+        app.request_gui_handoff(false);
+        assert!(!app.wants_gui_handoff());
+        assert!(!app.should_quit());
+
+        app.request_gui_handoff(true);
+        assert!(app.wants_gui_handoff());
+        assert!(app.should_quit());
     }
 }

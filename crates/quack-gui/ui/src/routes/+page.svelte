@@ -19,7 +19,13 @@
 	// The dev demo can open its scripted folder by itself (`?demo=turn` or `?demo=jobs`),
 	// so a headless capture reaches the workspace without a click.
 	let demoStarted = false;
+	let startupRestored = false;
 	$effect(() => {
+		if (!startupRestored && !initialDemo && typeof window !== 'undefined' && transport.startupTargets) {
+			startupRestored = true;
+			void workspaces.restoreStartupTabs();
+			return;
+		}
 		if (demoStarted || transport.kind !== 'dev' || active) return;
 		if (initialDemo === 'turn') {
 			demoStarted = true;

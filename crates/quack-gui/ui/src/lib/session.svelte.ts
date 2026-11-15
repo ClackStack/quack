@@ -1,10 +1,16 @@
 import type {
 	ApprovalRequest,
 	CommandInfo,
+	ContextItem,
 	ContextSegment,
 	DetectedServer,
+	DoctorCheck,
+	EgressEntry,
+	EgressStats,
 	HookConnectionDraft,
 	HookSetupInfo,
+	InstructionFile,
+	LspDiagnosticItem,
 	LspServerInfo,
 	McpSecretValue,
 	McpServerInfo,
@@ -19,9 +25,16 @@ import type {
 	SessionSummary,
 	SkillInfo,
 	StatsReport,
+	ToolProbeReport,
 	WriteScope
 } from '#lib/protocol';
-import type { AppInfo, ClientEvent, ClientOp, Transport } from '#lib/transport/types';
+import type {
+	AppInfo,
+	ClientEvent,
+	ClientOp,
+	Transport,
+	WorkspaceSymbol
+} from '#lib/transport/types';
 import type { HookRunEntry } from './extensions';
 import { recordModelSpeed } from './modelStats';
 import { formatTomlStringArray, parseTomlString, type SettingsSectionId } from './settings';
@@ -240,9 +253,17 @@ export class Session {
 	sandboxOff = $state(false);
 	sandboxAvailable = $state(true);
 	context = $state<ContextState | null>(null);
-	contextReport = $state<{ model: string; segments: ContextSegment[]; note: string | null } | null>(
-		null
-	);
+	contextReport = $state<{
+		model: string;
+		strategy?: string;
+		window?: number;
+		budget?: number;
+		threshold?: number;
+		used?: number;
+		segments: ContextSegment[];
+		tail_items?: ContextItem[];
+		note: string | null;
+	} | null>(null);
 	plan = $state('');
 	agents = $state<AgentRun[]>([]);
 	sessions = $state<SessionSummary[]>([]);
@@ -291,6 +312,18 @@ export class Session {
 	settingError = $state<string | null>(null);
 	profiles = $state<{ active: string; forced: boolean; profiles: ProfileInfo[] } | null>(null);
 	egressOpen = $state(false);
+	egressEntries = $state<EgressEntry[]>([]);
+	egressStats = $state<EgressStats | null>(null);
+	egressLoading = $state(false);
+	doctorChecks = $state<DoctorCheck[] | null>(null);
+	doctorLoading = $state(false);
+	instructions = $state<InstructionFile[] | null>(null);
+	instructionsLoading = $state(false);
+	lspDiagnostics = $state<LspDiagnosticItem[]>([]);
+	lspDiagnosticsLoading = $state(false);
+	toolProbe = $state<ToolProbeReport | null>(null);
+	toolProbing = $state(false);
+	rewindTriggerNonce = $state(0);
 	workspaceFiles = $state<string[] | null>(null);
 	loadingFiles = $state(false);
 	/** The engine's `/stats` report, fetched after each turn. */
@@ -567,7 +600,13 @@ export class Session {
 			case 'context_report':
 				this.contextReport = {
 					model: ev.report.model,
+					strategy: ev.report.strategy,
+					window: ev.report.window,
+					budget: ev.report.budget,
+					threshold: ev.report.threshold,
+					used: ev.report.used,
 					segments: ev.report.segments,
+					tail_items: ev.report.tail_items,
 					note: ev.report.note ?? null
 				};
 				break;
@@ -647,6 +686,50 @@ export class Session {
 			case 'diagnostics':
 				this.diagnostics = { errors: ev.errors, warnings: ev.warnings };
 				break;
+			case 'lsp_diagnostics':
+				this.lspDiagnosticsLoading = false;
+				this.lspDiagnostics = ev.items;
+				break;
+			case 'doctor_report':
+				this.doctorLoading = false;
+				this.doctorChecks = ev.checks;
+				break;
+			case 'instructions':
+				this.instructionsLoading = false;
+				this.instructions = ev.files;
+				break;
+			case 'egress_ledger':
+				this.egressLoading = false;
+				this.egressEntries = ev.entries;
+				this.egressStats = ev.stats;
+				break;
+			case 'egress_recorded':
+				if (!this.egressEntries.some((e) => e.seq === ev.entry.seq)) {
+					this.egressEntries = [...this.egressEntries, ev.entry];
+					const prev = this.egressStats ?? {
+						total_requests: 0,
+						total_bytes_sent: 0,
+						total_bytes_received: 0,
+						local_requests: 0,
+						remote_requests: 0,
+						blocked_count: 0,
+						redacted_count: 0
+					};
+					this.egressStats = {
+						total_requests: prev.total_requests + 1,
+						total_bytes_sent: prev.total_bytes_sent + ev.entry.bytes_sent,
+						total_bytes_received: prev.total_bytes_received + ev.entry.bytes_received,
+						local_requests: prev.local_requests + (ev.entry.local ? 1 : 0),
+						remote_requests: prev.remote_requests + (ev.entry.local ? 0 : 1),
+						blocked_count: prev.blocked_count + (ev.entry.blocked_reason ? 1 : 0),
+						redacted_count: prev.redacted_count + ev.entry.redactions
+					};
+				}
+				break;
+			case 'tool_probe_result':
+				this.toolProbing = false;
+				this.toolProbe = ev.report;
+				break;
 			case 'context_pruned':
 				this.#sealStreams();
 				this.items.push({
@@ -655,6 +738,7 @@ export class Session {
 					removedTokens: ev.report.removed_tokens,
 					items: ev.report.items
 				});
+				void this.refreshContext();
 				break;
 			case 'setting_saved':
 				this.settingSaving = false;
@@ -953,6 +1037,11 @@ export class Session {
 				this.switching = false;
 				this.setupWorking = false;
 				this.trustSaving = false;
+				this.egressLoading = false;
+				this.doctorLoading = false;
+				this.instructionsLoading = false;
+				this.lspDiagnosticsLoading = false;
+				this.toolProbing = false;
 				this.items.push({
 					kind: 'system',
 					id: nextId(),
@@ -995,6 +1084,11 @@ export class Session {
 		this.hookSetupChecking = false;
 		this.hookSetupPendingRequest = null;
 		this.memorySaving = false;
+		this.egressLoading = false;
+		this.doctorLoading = false;
+		this.instructionsLoading = false;
+		this.lspDiagnosticsLoading = false;
+		this.toolProbing = false;
 		this.#sealStreams();
 		this.approval = null;
 		this.questions = null;
@@ -1017,6 +1111,13 @@ export class Session {
 		this.speed = null;
 		this.lastUsage = null;
 		this.stats = null;
+		this.egressEntries = [];
+		this.egressStats = null;
+		this.egressLoading = false;
+		this.toolProbe = null;
+		this.toolProbing = false;
+		this.lspDiagnostics = [];
+		this.lspDiagnosticsLoading = false;
 		this.approval = null;
 		this.questions = null;
 		this.stepLimit = null;
@@ -1144,7 +1245,7 @@ export class Session {
 	}
 
 	async answerApproval(
-		decision: 'allow_once' | 'allow_session' | 'always_allow' | 'deny',
+		decision: 'allow_once' | 'allow_session' | 'always_allow' | 'redact_and_send' | 'deny',
 		feedback?: string,
 		scope: WriteScope = 'project'
 	) {
@@ -1251,6 +1352,68 @@ export class Session {
 	}
 	async compact(focus?: string) {
 		return this.#send({ op: 'compact', ...(focus ? { focus } : {}) });
+	}
+	async pruneContext(indices?: number[]) {
+		if (this.closed || this.streaming || this.turnPending) return false;
+		return this.#send({ op: 'prune_context', ...(indices ? { indices } : {}) });
+	}
+	async refreshEgress() {
+		if (this.closed) return false;
+		this.egressLoading = true;
+		const sent = await this.#send({ op: 'list_egress' });
+		if (!sent) this.egressLoading = false;
+		return sent;
+	}
+	async probeToolCalling() {
+		if (this.closed || this.streaming || this.turnPending || !this.currentModel) return false;
+		this.toolProbing = true;
+		const sent = await this.#send({ op: 'probe_tool_calling' });
+		if (!sent) this.toolProbing = false;
+		return sent;
+	}
+	async runDoctor() {
+		if (this.closed) return false;
+		this.doctorLoading = true;
+		const sent = await this.#send({ op: 'run_doctor' });
+		if (!sent) this.doctorLoading = false;
+		return sent;
+	}
+	async listInstructions() {
+		if (this.closed) return false;
+		this.instructionsLoading = true;
+		const sent = await this.#send({ op: 'list_instructions' });
+		if (!sent) this.instructionsLoading = false;
+		return sent;
+	}
+	async initInstructions() {
+		if (this.closed || this.streaming || this.turnPending) return false;
+		return this.#send({ op: 'init_instructions' });
+	}
+	async refreshLspDiagnostics(serverId?: string) {
+		if (this.closed) return false;
+		this.lspDiagnosticsLoading = true;
+		const sent = await this.#send({
+			op: 'list_lsp_diagnostics',
+			...(serverId ? { server_id: serverId } : {})
+		});
+		if (!sent) this.lspDiagnosticsLoading = false;
+		return sent;
+	}
+	async setSessionTitle(title: string) {
+		const trimmed = title.trim();
+		if (this.closed || !trimmed) return false;
+		return this.#send({ op: 'set_title', title: trimmed });
+	}
+	async listSymbols(path: string, query?: string, limit = 50): Promise<WorkspaceSymbol[]> {
+		if (this.closed || !this.#transport.listSymbols) return [];
+		try {
+			return await this.#transport.listSymbols(this.tab, path, query, limit);
+		} catch {
+			return [];
+		}
+	}
+	requestRewind() {
+		this.rewindTriggerNonce += 1;
 	}
 	async listModels() {
 		return this.#send({ op: 'list_models' });

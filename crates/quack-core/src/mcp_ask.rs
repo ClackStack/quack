@@ -152,7 +152,11 @@ impl Sampler {
                         p.allow_session(subject);
                     }
                 }
-                Some(ApprovalDecision::Deny | ApprovalDecision::DenyWithFeedback { .. }) => {
+                Some(
+                    ApprovalDecision::RedactAndSend
+                    | ApprovalDecision::Deny
+                    | ApprovalDecision::DenyWithFeedback { .. },
+                ) => {
                     return Err("the user declined the request".into());
                 }
                 None => return Err("the user interrupted the request".into()),

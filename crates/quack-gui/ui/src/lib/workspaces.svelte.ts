@@ -1,5 +1,12 @@
 import { Session } from '#lib/session.svelte';
-import type { RecentFolder, ResumeRequest, TabMessage, Transport } from '#lib/transport/types';
+import type {
+	LaunchTarget,
+	RecentFolder,
+	ResumeRequest,
+	SavedTab,
+	TabMessage,
+	Transport
+} from '#lib/transport/types';
 
 export const PROJECTS_STORAGE_KEY = 'quack-projects';
 
@@ -159,12 +166,19 @@ export class Workspaces {
 	#storage: ProjectStorage | null;
 	#homePrefix = '';
 	#unlisten: () => void;
+	#unlistenOpen: () => void;
+	#startupDone = false;
+	#persistingReady = false;
 
 	constructor(transport: Transport, storage: ProjectStorage | null = defaultStorage()) {
 		this.#transport = transport;
 		this.#storage = storage;
 		this.projects = loadProjects(storage);
 		this.#unlisten = transport.listen((msg) => this.#receive(msg));
+		this.#unlistenOpen =
+			transport.onOpenRequest?.((targets) => {
+				void this.applyLaunchTargets(targets);
+			}) ?? (() => {});
 		if (this.projects.some(isTildePath)) {
 			void this.#repairTildeProjects();
 		}
@@ -316,6 +330,9 @@ export class Workspaces {
 		if ('event' in msg) {
 			session.onEvent(msg.event);
 			this.#maybeNotifyAttention(session, msg.event);
+			if (msg.event.event === 'session_configured' || msg.event.event === 'session_resumed') {
+				this.#persistOpenTabs();
+			}
 		} else if ('info' in msg) session.onInfo(msg.info);
 		else if ('history' in msg) session.setInputHistory(msg.history);
 		else session.onClosed(msg.closed.reason);
@@ -336,7 +353,9 @@ export class Workspaces {
 						? event.request.command
 						: event.request.kind === 'edit'
 							? event.request.path
-							: event.request.name
+							: event.request.kind === 'egress_secrets'
+								? `Blocked secret(s) before ${event.request.host}`
+								: event.request.name
 				);
 				break;
 			case 'questions':
@@ -391,7 +410,66 @@ export class Workspaces {
 		} finally {
 			this.opening = false;
 			this.openingCwd = null;
+			this.#persistingReady = true;
+			this.#persistOpenTabs();
 		}
+	}
+
+	/** Restore persisted tabs & CLI launch targets once on app mount. */
+	async restoreStartupTabs(): Promise<boolean> {
+		if (this.#startupDone || this.sessions.length > 0) return false;
+		this.#startupDone = true;
+		if (!this.#transport.startupTargets) {
+			this.#persistingReady = true;
+			return false;
+		}
+		try {
+			const payload = await this.#transport.startupTargets();
+			if (!payload.targets.length) {
+				this.#persistingReady = true;
+				return false;
+			}
+			await this.applyLaunchTargets(payload.targets, payload.active_index ?? null);
+			return this.sessions.length > 0;
+		} finally {
+			this.#persistingReady = true;
+			this.#persistOpenTabs();
+		}
+	}
+
+	/** Merge CLI/single-instance folder targets into open tabs and focus the requested tab. */
+	async applyLaunchTargets(
+		targets: readonly LaunchTarget[],
+		explicitActiveIndex: number | null = null
+	) {
+		let focusCwd: string | null = null;
+		for (let i = 0; i < targets.length; i++) {
+			const target = targets[i];
+			const resolved = this.#expandHome(target.path);
+			if (!resolved) continue;
+			const resume: ResumeRequest = target.resume
+				? { resume: 'id', id: target.resume }
+				: target.continue_latest
+					? { resume: 'latest' }
+					: { resume: 'new' };
+			const existingIdx = this.sessions.findIndex((s) => samePath(s.cwd, resolved));
+			if (existingIdx >= 0) {
+				const existing = this.sessions[existingIdx];
+				if (target.resume && existing.sessionId !== target.resume) {
+					await existing.resumeSession(target.resume);
+				}
+			} else {
+				await this.open(resolved, resume);
+			}
+			if (target.focus || i === explicitActiveIndex) {
+				focusCwd = resolved;
+			}
+		}
+		if (focusCwd) {
+			const focusIdx = this.sessions.findIndex((s) => samePath(s.cwd, focusCwd));
+			if (focusIdx >= 0) this.activeIndex = focusIdx;
+		}
+		this.#persistOpenTabs();
 	}
 
 	/** Focus a live (or closed) workspace tab by its engine tab id. */
@@ -400,6 +478,7 @@ export class Workspaces {
 		if (idx < 0) return false;
 		this.activeIndex = idx;
 		this.error = null;
+		this.#persistOpenTabs();
 		return true;
 	}
 
@@ -430,6 +509,7 @@ export class Workspaces {
 		if (idx >= 0) {
 			this.activeIndex = idx;
 			this.error = null;
+			this.#persistOpenTabs();
 			return;
 		}
 		await this.open(cwd, { resume: 'latest' });
@@ -460,13 +540,27 @@ export class Workspaces {
 			if (cwd && !this.sessions.some((s) => samePath(s.cwd, cwd))) {
 				this.#removeProject(cwd);
 			}
+			this.#persistOpenTabs();
 		} catch (error) {
 			this.error = errorMessage(error);
 		}
 	}
 
+	#persistOpenTabs() {
+		if (!this.#persistingReady || !this.#transport.saveOpenTabs) return;
+		const tabs: SavedTab[] = this.sessions
+			.filter((s) => Boolean(s.cwd))
+			.map((s, i) => ({
+				path: s.cwd,
+				session_id: s.sessionId ?? null,
+				active: i === this.activeIndex
+			}));
+		void this.#transport.saveOpenTabs(tabs);
+	}
+
 	dispose() {
 		this.#unlisten();
+		this.#unlistenOpen();
 	}
 }
 

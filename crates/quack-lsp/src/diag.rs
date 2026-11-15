@@ -23,7 +23,7 @@ impl Severity {
         }
     }
 
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Error => "error",
             Self::Warning => "warning",

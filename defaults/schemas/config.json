@@ -320,6 +320,21 @@
           "default": "",
           "description": "Empty: `HTTPS_PROXY` / system. Hosts in `NO_PROXY` always go direct.",
           "type": "string"
+        },
+        "secret_allowlist": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": [],
+          "description": "SHA-256 fingerprints (`sha256:...`) trusted to pass without secret-guard prompts."
+        },
+        "secret_guard": {
+          "$ref": "#/$defs/SecretGuardMode",
+          "default": "ask",
+          "description": "Pre-egress secret scanning policy (`ask`, `redact`, or `off`). Non-interactive\nclients automatically fall back from `ask` to `redact`."
+        },
+        "secret_guard_local": {
+          "default": false,
+          "description": "Apply `secret_guard` even when talking to loopback servers (`127.0.0.1`/`localhost`).",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -444,6 +459,15 @@
       },
       "type": "object"
     },
+    "SecretGuardMode": {
+      "description": "What the pre-egress secret shield does when it finds potential secrets in outbound\nprompts, attachments, or tool results.",
+      "enum": [
+        "off",
+        "redact",
+        "ask"
+      ],
+      "type": "string"
+    },
     "SessionSettings": {
       "additionalProperties": false,
       "properties": {
@@ -554,6 +578,11 @@
         "ascii": {
           "default": false,
           "description": "Use ASCII instead of box-drawing and spinner glyphs.",
+          "type": "boolean"
+        },
+        "gui_restore_tabs": {
+          "default": true,
+          "description": "Restore previously opened workspace tabs when launching `quack-gui`.",
           "type": "boolean"
         },
         "mouse": {
@@ -720,7 +749,10 @@
         "egress_allow": [],
         "http1_only": false,
         "offline": false,
-        "proxy": ""
+        "proxy": "",
+        "secret_allowlist": [],
+        "secret_guard": "ask",
+        "secret_guard_local": false
       }
     },
     "permissions": {
@@ -798,6 +830,7 @@
       "$ref": "#/$defs/UiSettings",
       "default": {
         "ascii": false,
+        "gui_restore_tabs": true,
         "mouse": true,
         "reduced_motion": false,
         "show_reasoning": "collapsed",

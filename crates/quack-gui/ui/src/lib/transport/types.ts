@@ -18,6 +18,35 @@ export interface EgressSnapshot {
 	updates_check: boolean;
 	catalog_refresh: boolean;
 	telemetry_enabled: boolean;
+	secret_guard?: string;
+	secret_guard_local?: boolean;
+	secret_allowlist?: string[];
+}
+
+export interface WorkspaceSymbol {
+	name: string;
+	kind: string;
+	start: number;
+	end: number;
+	signature: string;
+}
+
+export interface LaunchTarget {
+	path: string;
+	resume?: string | null;
+	continue_latest: boolean;
+	focus: boolean;
+}
+
+export interface SavedTab {
+	path: string;
+	session_id?: string | null;
+	active: boolean;
+}
+
+export interface StartupPayload {
+	targets: LaunchTarget[];
+	active_index?: number | null;
 }
 
 export interface SandboxSnapshot {
@@ -121,7 +150,7 @@ export interface AppInfo {
 	permission_mode: string;
 	/** The work mode label: `plan` or `edit`. */
 	work_mode: string;
-	ui: { theme: string; reduced_motion: boolean };
+	ui: { theme: string; reduced_motion: boolean; gui_restore_tabs?: boolean };
 	egress: EgressSnapshot;
 	sandbox: SandboxSnapshot;
 	settings: {
@@ -182,6 +211,14 @@ export interface Transport {
 	listen(listener: (message: TabMessage) => void): () => void;
 	/** List workspace-relative file paths for `@` mentions. */
 	listFiles?(tab: number, limit?: number): Promise<string[]>;
+	/** List syntax symbols inside a workspace file for `@file#symbol` mentions. */
+	listSymbols?(tab: number, path: string, query?: string, limit?: number): Promise<WorkspaceSymbol[]>;
+	/** Fetch merged startup tabs (`session-tabs.json` + CLI arguments). */
+	startupTargets?(): Promise<StartupPayload>;
+	/** Persist currently open tabs for desktop restore. */
+	saveOpenTabs?(tabs: SavedTab[]): Promise<void>;
+	/** Listen for single-instance folder open requests (`quack://open-request`). */
+	onOpenRequest?(handler: (targets: LaunchTarget[]) => void): () => void;
 	/** Read shared workspace prompt input history (`history.jsonl`), oldest first. */
 	inputHistory?(tab: number): Promise<string[]>;
 	/** Reveal or open a file inside the active tab's workspace. */

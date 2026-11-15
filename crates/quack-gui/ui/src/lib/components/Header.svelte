@@ -8,7 +8,9 @@
 		attentionCount = 0,
 		onToggleSidebar = () => {},
 		onOpenEgress = () => {},
-		onOpenMemory = () => {}
+		onOpenMemory = () => {},
+		onOpenDiagnostics = () => {},
+		onOpenPalette = () => {}
 	}: {
 		session: Session;
 		sidebarOpen?: boolean;
@@ -16,10 +18,16 @@
 		onToggleSidebar?: () => void;
 		onOpenEgress?: () => void;
 		onOpenMemory?: () => void;
+		onOpenDiagnostics?: () => void;
+		onOpenPalette?: () => void;
 	} = $props();
 
 	const egress = $derived(session.info?.egress);
 	const sandbox = $derived(session.info?.sandbox);
+	const shieldMode = $derived(egress?.secret_guard ?? 'ask');
+	const shieldEvents = $derived(
+		(session.egressStats?.redacted_count ?? 0) + (session.egressStats?.blocked_count ?? 0)
+	);
 	const activeProviderId = $derived(session.currentModel?.split('/')[0] ?? null);
 	const activeEndpoint = $derived(
 		activeProviderId ? (egress?.providers.find((p) => p.id === activeProviderId) ?? null) : null
@@ -138,8 +146,8 @@
 			class="diag-pill"
 			class:has-errors={session.diagnostics.errors > 0}
 			disabled={session.closed}
-			title={lspTitle}
-			onclick={() => void session.refreshLsp()}
+			title={`${lspTitle}. Click to inspect LSP diagnostics across files.`}
+			onclick={onOpenDiagnostics}
 		>
 			{#if session.diagnostics.errors > 0}
 				<span>{session.diagnostics.errors} err</span>
@@ -156,11 +164,18 @@
 			class="egress-pill"
 			class:local={egressPill.tone === 'local'}
 			class:warn={sandboxWeak}
-			title={egressPill.title}
+			title={`${egressPill.title} · Secret Shield: ${shieldMode}`}
 			onclick={onOpenEgress}
 		>
 			<span class="egress-dot" aria-hidden="true"></span>
 			<span>{egressPill.label}</span>
+			<span class="shield-state">
+				{shieldMode === 'off'
+					? '· Shield off'
+					: shieldEvents > 0
+						? `· Shield (${shieldEvents})`
+						: '· Shield'}
+			</span>
 			{#if sandboxWeak}
 				<span class="sandbox-state">· No sandbox</span>
 			{/if}
@@ -181,6 +196,16 @@
 		{#if session.memoryNotes.length > 0}
 			<span class="mem-count">{session.memoryNotes.length}</span>
 		{/if}
+	</button>
+	<button
+		type="button"
+		class="btn palette-btn"
+		disabled={session.closed || session.starting}
+		title="Open Command Palette (⌘K / Ctrl+K)"
+		onclick={onOpenPalette}
+	>
+		<span>Commands</span>
+		<span class="kbd">⌘K</span>
 	</button>
 	<button class="btn providers-btn" {disabled} onclick={() => session.openSetup()}>Providers</button>
 	<button
@@ -361,15 +386,22 @@
 		border-color: color-mix(in srgb, var(--fail) 45%, var(--rule));
 	}
 
+	.sandbox-state,
+	.shield-state {
+		color: var(--ink-3);
+	}
+
 	@media (max-width: 680px) {
-		.sandbox-state {
+		.sandbox-state,
+		.shield-state {
 			display: none;
 		}
 	}
 
 	.providers-btn,
 	.settings-btn,
-	.memory-btn {
+	.memory-btn,
+	.palette-btn {
 		padding: 4px 11px;
 		font-size: 0.78125rem;
 		display: inline-flex;

@@ -10,13 +10,17 @@ export type {
 	EgressEndpoint,
 	EgressSnapshot,
 	HighlightSpan,
+	LaunchTarget,
 	OpenedTab,
 	RecentFolder,
 	ResumeRequest,
 	SandboxSnapshot,
+	SavedTab,
+	StartupPayload,
 	StepLimitEvent,
 	TabMessage,
-	Transport
+	Transport,
+	WorkspaceSymbol
 } from './types';
 
 let transport: Transport | undefined;

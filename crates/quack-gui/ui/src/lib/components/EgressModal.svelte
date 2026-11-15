@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { formatTomlStringArray } from '#lib/settings';
 	import { isHttpUrl, type Session } from '#lib/session.svelte';
 
 	let {
@@ -8,8 +9,13 @@
 	}: { session: Session; onClose: () => void; onOpenSettings?: () => void } = $props();
 
 	let dialogEl: HTMLElement | undefined = $state();
+	let activeTab = $state<'policy' | 'ledger'>('policy');
 	const egress = $derived(session.info?.egress);
 	const sandbox = $derived(session.info?.sandbox);
+	const shieldMode = $derived(egress?.secret_guard ?? 'ask');
+	const shieldLocal = $derived(egress?.secret_guard_local ?? false);
+	const shieldAllowlist = $derived(egress?.secret_allowlist ?? []);
+	const entries = $derived([...session.egressEntries].reverse());
 
 	const busy = $derived(
 		session.closed ||
@@ -22,8 +28,37 @@
 
 	const activeProviderId = $derived(session.currentModel?.split('/')[0] ?? null);
 
+	function formatBytes(bytes: number): string {
+		if (bytes < 1024) return `${bytes} B`;
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+		return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+	}
+
+	function formatTime(ms: number): string {
+		try {
+			return new Date(ms).toLocaleTimeString([], {
+				hour: '2-digit',
+				minute: '2-digit',
+				second: '2-digit'
+			});
+		} catch {
+			return '';
+		}
+	}
+
+	async function revokeAllowlistEntry(fingerprint: string) {
+		const next = shieldAllowlist.filter((fp) => fp !== fingerprint);
+		await session.saveSetting('network.secret_allowlist', formatTomlStringArray(next), 'user', true);
+	}
+
 	$effect(() => {
 		dialogEl?.focus();
+	});
+
+	$effect(() => {
+		if (activeTab === 'ledger' && !session.closed) {
+			void session.refreshEgress();
+		}
 	});
 
 	function onKeydown(event: KeyboardEvent) {
@@ -55,14 +90,41 @@
 			<div>
 				<h2 id="egress-modal-title">Network &amp; Sandbox Boundary</h2>
 				<p class="sub">
-					quack only connects to endpoints you configure. Background telemetry and update checks stay off unless enabled.
+					quack only connects to endpoints you configure, scans outbound payloads for secrets, and records every network hop in this session ledger.
 				</p>
 			</div>
-			<button class="close-btn" aria-label="Close boundary passport" onclick={onClose}>×</button>
+			<button type="button" class="close-btn" aria-label="Close boundary passport" onclick={onClose}>×</button>
+		</div>
+
+		<div class="modal-tabs" role="tablist" aria-label="Boundary sections">
+			<button
+				type="button"
+				role="tab"
+				aria-selected={activeTab === 'policy'}
+				class="tab-btn"
+				class:active={activeTab === 'policy'}
+				onclick={() => (activeTab = 'policy')}
+			>
+				Policy &amp; Shield
+			</button>
+			<button
+				type="button"
+				role="tab"
+				aria-selected={activeTab === 'ledger'}
+				class="tab-btn"
+				class:active={activeTab === 'ledger'}
+				onclick={() => (activeTab = 'ledger')}
+			>
+				Session Ledger
+				{#if session.egressEntries.length > 0}
+					<span class="tab-count">{session.egressEntries.length}</span>
+				{/if}
+			</button>
 		</div>
 
 		<div class="modal-body">
-			<section class="card">
+			{#if activeTab === 'policy'}
+				<section class="card">
 				<div class="card-head">
 					<div>
 						<h3>Network Egress</h3>
@@ -232,6 +294,157 @@
 					</p>
 				</div>
 			</section>
+
+			<section class="card">
+				<div class="card-head">
+					<div>
+						<h3>Pre-Egress Secret Shield</h3>
+						<p class="desc">
+							Scans prompts and tool outputs locally with <code>redact-secret</code> + resolved provider credentials before an outbound HTTP request leaves this machine.
+						</p>
+					</div>
+				</div>
+
+				<div class="block">
+					<span class="label">Shield policy (<code>network.secret_guard</code>)</span>
+					<div class="seg-row" role="group" aria-label="Secret Shield mode">
+						{#each [['ask', 'Ask'], ['redact', 'Auto-redact'], ['block', 'Block'], ['off', 'Off']] as [mode, label] (mode)}
+							<button
+								type="button"
+								class="seg-btn"
+								class:active={shieldMode === mode}
+								disabled={busy}
+								onclick={() =>
+									void session.saveSetting(
+										'network.secret_guard',
+										JSON.stringify(mode),
+										'user',
+										true
+									)}
+							>
+								{label}
+							</button>
+						{/each}
+					</div>
+				</div>
+
+				<div class="block inline-row">
+					<div>
+						<span class="label">Scan loopback destinations (<code>network.secret_guard_local</code>)</span>
+						<p class="desc">
+							{shieldLocal
+								? 'Loopback servers (localhost / 127.0.0.1) are also scanned before egress.'
+								: 'Loopback servers skip secret prompts so local weights stay fast.'}
+						</p>
+					</div>
+					<button
+						type="button"
+						class="btn"
+						disabled={busy}
+						onclick={() =>
+							void session.saveSetting(
+								'network.secret_guard_local',
+								shieldLocal ? 'false' : 'true',
+								'user',
+								true
+							)}
+					>
+						{shieldLocal ? 'Scanning local' : 'Local bypass'}
+					</button>
+				</div>
+
+				<div class="block">
+					<span class="label">Allowlisted Secret Fingerprints ({shieldAllowlist.length})</span>
+					{#if shieldAllowlist.length > 0}
+						<ul class="dest-list">
+							{#each shieldAllowlist as fp (fp)}
+								<li>
+									<span class="dest-host">{fp}</span>
+									<button
+										type="button"
+										class="revoke-btn"
+										disabled={busy}
+										onclick={() => void revokeAllowlistEntry(fp)}
+									>
+										Revoke
+									</button>
+								</li>
+							{/each}
+						</ul>
+					{:else}
+						<p class="empty">No allowlisted secrets saved yet.</p>
+					{/if}
+				</div>
+			</section>
+			{:else}
+				<div class="ledger-head">
+					<div class="stats-grid">
+						<div class="stat-tile">
+							<span class="stat-k">Requests</span>
+							<strong class="stat-v">{session.egressStats?.total_requests ?? entries.length}</strong>
+						</div>
+						<div class="stat-tile">
+							<span class="stat-k">Sent</span>
+							<strong class="stat-v">{formatBytes(session.egressStats?.total_bytes_sent ?? 0)}</strong>
+						</div>
+						<div class="stat-tile">
+							<span class="stat-k">Received</span>
+							<strong class="stat-v">{formatBytes(session.egressStats?.total_bytes_received ?? 0)}</strong>
+						</div>
+						<div class="stat-tile">
+							<span class="stat-k">Redacted</span>
+							<strong class="stat-v">{session.egressStats?.redacted_count ?? 0}</strong>
+						</div>
+						<div class="stat-tile">
+							<span class="stat-k">Blocked</span>
+							<strong class="stat-v">{session.egressStats?.blocked_count ?? 0}</strong>
+						</div>
+					</div>
+					<button
+						type="button"
+						class="btn"
+						disabled={session.closed || session.egressLoading}
+						onclick={() => void session.refreshEgress()}
+					>
+						{session.egressLoading ? 'Refreshing…' : 'Refresh ledger'}
+					</button>
+				</div>
+
+				{#if entries.length > 0}
+					<div class="ledger-list">
+						{#each entries as entry (entry.seq)}
+							<div class="ledger-row" class:blocked={Boolean(entry.blocked_reason)}>
+								<div class="ledger-top">
+									<span class="ledger-seq">#{entry.seq}</span>
+									<span class="tag">{entry.kind}</span>
+									<span class="ledger-dest">{entry.host}{entry.path}</span>
+									<span class="tag" class:tag-local={entry.local}>{entry.local ? 'local' : 'remote'}</span>
+								</div>
+								<div class="ledger-meta">
+									<span>{formatTime(entry.timestamp_ms)}</span>
+									<span>{entry.protocol}</span>
+									<span>↑ {formatBytes(entry.bytes_sent)} · ↓ {formatBytes(entry.bytes_received)}</span>
+									{#if entry.status !== undefined && entry.status !== null}
+										<span>HTTP {entry.status}</span>
+									{/if}
+									{#if entry.redactions > 0}
+										<span class="badge-warn">{entry.redactions} redacted</span>
+									{/if}
+									{#if entry.blocked_reason}
+										<span class="badge-fail">{entry.blocked_reason}</span>
+									{/if}
+								</div>
+							</div>
+						{/each}
+					</div>
+				{:else if session.egressLoading}
+					<p class="empty">Reading session egress ledger…</p>
+				{:else}
+					<p class="empty">
+						No outbound HTTP requests recorded in this session yet — zero implicit traffic.
+					</p>
+				{/if}
+			{/if}
 		</div>
 
 		<div class="modal-foot">
@@ -528,5 +741,178 @@
 		align-items: center;
 		gap: 6px;
 		flex: none;
+	}
+
+	.modal-tabs {
+		display: flex;
+		gap: 6px;
+		padding: 10px 20px 0;
+		background: var(--bg-panel);
+		border-bottom: 1px solid var(--rule);
+	}
+
+	.tab-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 7px 12px;
+		font-size: 0.78125rem;
+		font-weight: 500;
+		color: var(--ink-2);
+		border-bottom: 2px solid transparent;
+	}
+
+	.tab-btn.active {
+		color: var(--ink);
+		font-weight: 600;
+		border-bottom-color: var(--duck);
+	}
+
+	.tab-count {
+		font-family: var(--font-mono);
+		font-size: 0.65625rem;
+		padding: 1px 6px;
+		border-radius: 999px;
+		background: var(--bg-soft);
+		color: var(--ink-2);
+	}
+
+	.seg-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+
+	.seg-btn {
+		padding: 5px 10px;
+		font-size: 0.75rem;
+		border-radius: var(--r-md);
+		border: 1px solid var(--rule);
+		background: var(--bg-panel);
+		color: var(--ink-2);
+	}
+
+	.seg-btn.active {
+		background: var(--duck-soft);
+		color: var(--duck-ink);
+		border-color: var(--duck);
+		font-weight: 600;
+	}
+
+	.inline-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+	}
+
+	.revoke-btn {
+		font-size: 0.71875rem;
+		padding: 2px 8px;
+		border-radius: var(--r-md);
+		border: 1px solid var(--rule);
+		color: var(--fail);
+		background: var(--bg-raised);
+	}
+
+	.ledger-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+	}
+
+	.stats-grid {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		flex: 1;
+	}
+
+	.stat-tile {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		padding: 6px 10px;
+		border: 1px solid var(--rule);
+		border-radius: var(--r-md);
+		background: var(--bg-panel);
+		min-width: 72px;
+	}
+
+	.stat-k {
+		font-size: 0.65625rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--ink-3);
+	}
+
+	.stat-v {
+		font-family: var(--font-mono);
+		font-size: 0.8125rem;
+		color: var(--ink);
+	}
+
+	.ledger-list {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.ledger-row {
+		padding: 8px 10px;
+		border: 1px solid var(--rule);
+		border-radius: var(--r-lg);
+		background: var(--bg-panel);
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.ledger-row.blocked {
+		border-color: color-mix(in srgb, var(--fail) 45%, var(--rule));
+		background: color-mix(in srgb, var(--fail-soft) 35%, var(--bg-panel));
+	}
+
+	.ledger-top {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex-wrap: wrap;
+	}
+
+	.ledger-seq {
+		font-family: var(--font-mono);
+		font-size: 0.71875rem;
+		color: var(--ink-3);
+	}
+
+	.ledger-dest {
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+		color: var(--ink);
+		overflow-wrap: anywhere;
+		flex: 1;
+		min-width: 0;
+	}
+
+	.ledger-meta {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+		font-family: var(--font-mono);
+		font-size: 0.6875rem;
+		color: var(--ink-3);
+	}
+
+	.badge-warn {
+		color: var(--duck-ink);
+		font-weight: 600;
+	}
+
+	.badge-fail {
+		color: var(--fail);
+		font-weight: 600;
 	}
 </style>

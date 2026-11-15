@@ -11,13 +11,14 @@
 //! invoke("open_url", { url })                    // a sign-in address from the engine
 //! ```
 
+use std::path::Path;
 use std::sync::Arc;
 
 use quack_core::Resume;
-use quack_gui::{OpenError, Registry, Sink, TabMessage};
+use quack_gui::{OpenError, Registry, SavedTab, Sink, StartupPayload, TabMessage, WorkspaceSymbol};
 use serde::Deserialize;
 use tauri::ipc::Channel;
-use tauri::{Manager, RunEvent, State};
+use tauri::{Emitter, Manager, RunEvent, State};
 
 /// What the webview asked a new tab to open with (`Resume` is a `quack-core` type, so
 /// it crosses the IPC as this small tagged JSON).
@@ -136,6 +137,40 @@ async fn list_workspace_files(
 }
 
 #[tauri::command]
+async fn list_workspace_symbols(
+    state: State<'_, Registry>,
+    client: u64,
+    tab: u64,
+    path: String,
+    query: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<WorkspaceSymbol>, String> {
+    state
+        .list_symbols_for(
+            client,
+            tab,
+            path,
+            query,
+            limit.unwrap_or(50).clamp(1, 200) as usize,
+        )
+        .await
+}
+
+#[tauri::command]
+fn startup_targets(state: State<'_, Registry>, client: u64) -> Result<StartupPayload, String> {
+    state.startup_targets_for(client)
+}
+
+#[tauri::command]
+fn save_open_tabs(
+    state: State<'_, Registry>,
+    client: u64,
+    tabs: Vec<SavedTab>,
+) -> Result<(), String> {
+    state.save_open_tabs_for(client, &tabs)
+}
+
+#[tauri::command]
 async fn reveal_path(
     app: tauri::AppHandle,
     state: State<'_, Registry>,
@@ -145,7 +180,7 @@ async fn reveal_path(
     open_file: Option<bool>,
 ) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let resolved = state.resolve_workspace_path_for(client, tab, std::path::Path::new(&path))?;
+    let resolved = state.resolve_workspace_path_for(client, tab, Path::new(&path))?;
     if open_file.unwrap_or(false) {
         app.opener()
             .open_path(resolved.display().to_string(), None::<&str>)
@@ -188,8 +223,13 @@ fn main() {
     // login shell's so npx, cargo and friends are found (macOS/Linux).
     quack_gui::path_env::apply_login_shell_path();
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            let parsed = quack_gui::tabs::parse_argv(&argv, Some(Path::new(&cwd)));
+            if !parsed.targets.is_empty() {
+                let _ = app.emit("quack://open-request", &parsed.targets);
+            }
             if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
                 let _ = window.set_focus();
             }
         }))
@@ -199,7 +239,11 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let resource_dir = app.path().resource_dir()?;
-            app.manage(Registry::with_resource_dir(resource_dir));
+            let registry = Registry::with_resource_dir(resource_dir);
+            let argv: Vec<String> = std::env::args().collect();
+            let cwd = std::env::current_dir().ok();
+            registry.set_initial_argv(&argv, cwd.as_deref());
+            app.manage(registry);
             Ok(())
         })
         .on_page_load(|webview, payload| {
@@ -216,9 +260,12 @@ fn main() {
             send_op,
             close_tab,
             recent_folders,
+            startup_targets,
+            save_open_tabs,
             input_history,
             open_url,
             list_workspace_files,
+            list_workspace_symbols,
             reveal_path,
             highlight_code,
             stage_pasted_image,

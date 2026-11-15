@@ -13,7 +13,7 @@ const K: [u32; 64] = [
 ];
 
 #[derive(Debug, Clone)]
-pub(crate) struct Sha256 {
+pub struct Sha256 {
     state: [u32; 8],
     block: Vec<u8>,
     len: u64,
@@ -33,7 +33,7 @@ impl Default for Sha256 {
 }
 
 impl Sha256 {
-    pub(crate) fn update(&mut self, mut data: &[u8]) {
+    pub fn update(&mut self, mut data: &[u8]) {
         self.len = self.len.wrapping_add(data.len() as u64);
         while !data.is_empty() {
             let take = (64 - self.block.len()).min(data.len());
@@ -49,7 +49,7 @@ impl Sha256 {
     }
 
     /// The digest as lowercase hex.
-    pub(crate) fn hex(mut self) -> String {
+    pub fn hex(mut self) -> String {
         let bits = self.len.wrapping_mul(8);
         self.update(&[0x80]);
         while self.block.len() != 56 {
@@ -57,6 +57,13 @@ impl Sha256 {
         }
         self.update(&bits.to_be_bytes());
         self.state.iter().map(|w| format!("{w:08x}")).collect()
+    }
+
+    /// Convenience one-shot lowercase hex digest.
+    pub fn digest_hex(data: &[u8]) -> String {
+        let mut h = Self::default();
+        h.update(data);
+        h.hex()
     }
 
     fn compress(&mut self, block: &[u8]) {

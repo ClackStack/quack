@@ -3,11 +3,15 @@ import type {
 	AppInfo,
 	ClientOp,
 	HighlightSpan,
+	LaunchTarget,
 	OpenedTab,
 	RecentFolder,
 	ResumeRequest,
+	SavedTab,
+	StartupPayload,
 	TabMessage,
-	Transport
+	Transport,
+	WorkspaceSymbol
 } from './types';
 
 /**
@@ -73,6 +77,49 @@ export function tauriTransport(): Transport {
 
 		async listFiles(tab: number, limit = 5000): Promise<string[]> {
 			return await invoke<string[]>('list_workspace_files', { client: await connect(), tab, limit });
+		},
+
+		async listSymbols(
+			tab: number,
+			path: string,
+			query?: string,
+			limit = 50
+		): Promise<WorkspaceSymbol[]> {
+			return await invoke<WorkspaceSymbol[]>('list_workspace_symbols', {
+				client: await connect(),
+				tab,
+				path,
+				query: query ?? null,
+				limit
+			});
+		},
+
+		async startupTargets(): Promise<StartupPayload> {
+			return await invoke<StartupPayload>('startup_targets', { client: await connect() });
+		},
+
+		async saveOpenTabs(tabs: SavedTab[]): Promise<void> {
+			await invoke('save_open_tabs', { client: await connect(), tabs });
+		},
+
+		onOpenRequest(handler: (targets: LaunchTarget[]) => void): () => void {
+			let active = true;
+			let unlisten: (() => void) | undefined;
+			void import('@tauri-apps/api/event')
+				.then(({ listen }) =>
+					listen<LaunchTarget[]>('quack://open-request', (event) => {
+						if (active) handler(event.payload);
+					})
+				)
+				.then((fn) => {
+					if (active) unlisten = fn;
+					else fn();
+				})
+				.catch(() => {});
+			return () => {
+				active = false;
+				unlisten?.();
+			};
 		},
 
 		async inputHistory(tab: number): Promise<string[]> {

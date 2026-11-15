@@ -2144,6 +2144,93 @@ pub(crate) fn doctor(checks: Option<&[quack_protocol::DoctorCheck]>, theme: &The
     )
 }
 
+/// The `/probe` modal: synthetic tool-calling capability probe report.
+pub(crate) fn tool_probe(report: Option<&quack_protocol::ToolProbeReport>, theme: &Theme) -> Modal {
+    let items = match report {
+        None => vec![placeholder(
+            "probing…",
+            "Sending minimal synthetic probe calls to verify tool-calling and reasoning compatibility.",
+            theme,
+        )],
+        Some(report) => {
+            let passed = report.cases.iter().filter(|c| c.passed).count();
+            let total = report.cases.len();
+            let mut summary = Detail::default();
+            summary
+                .line(Line::styled(
+                    format!("Model: {}", report.model),
+                    theme.accent,
+                ))
+                .gap()
+                .chart(Visual::Tiles(vec![
+                    (
+                        format!("{passed}/{total}"),
+                        "passed".into(),
+                        if passed == total {
+                            theme.ok
+                        } else if passed > 0 {
+                            theme.warn
+                        } else {
+                            theme.error
+                        },
+                    ),
+                    (
+                        report.configured_mode.clone(),
+                        "configured".into(),
+                        theme.dim,
+                    ),
+                    (
+                        report.recommended_mode.clone(),
+                        "recommended".into(),
+                        theme.accent,
+                    ),
+                ]));
+            if let Some(fmt) = &report.recommended_text_format {
+                summary.line(Line::raw(format!("Text fallback parser: {fmt}")));
+                summary.gap();
+            }
+            for line in report.summary.lines() {
+                summary.line(Line::styled(line.to_owned(), theme.dim));
+            }
+            let mut items = vec![summary.item("Summary", report.recommended_mode.clone())];
+            items.extend(report.cases.iter().map(|c| {
+                let (badge, style) = if c.passed {
+                    ("pass", theme.ok)
+                } else {
+                    ("FAIL", theme.error)
+                };
+                let mut detail = vec![
+                    Line::styled(c.name.clone(), theme.accent),
+                    Line::raw(""),
+                    Line::from(Span::styled(
+                        format!(" {badge} · {} ms ", c.latency_ms),
+                        theme.pill(style),
+                    )),
+                    Line::raw(""),
+                ];
+                detail.extend(c.detail.lines().map(|l| Line::raw(l.to_owned())));
+                ModalItem {
+                    label: c.name.clone(),
+                    hint: format!("{badge} · {} ms", c.latency_ms),
+                    detail,
+                    action: None,
+                    run: false,
+                    alt: None,
+                    charts: Vec::new(),
+                }
+            }));
+            items
+        }
+    };
+    Modal::new(
+        "Tool Probe",
+        vec![ModalTab {
+            title: "Probe".into(),
+            items,
+        }],
+    )
+}
+
 /// The `/providers` modal: each provider file with its state. `None` while probing.
 /// Where a key is read from, as the end of "read from …".
 pub(crate) fn key_source(key: &quack_protocol::KeySource) -> String {

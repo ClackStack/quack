@@ -121,6 +121,13 @@ fn main() -> ExitCode {
         #[cfg(feature = "auth-chatgpt")]
         Cmd::Logout { provider } => block_on(commands::logout(&loaded, provider)),
         Cmd::Eval(args) => block_on(commands::eval(&loaded, opts, args)),
+        Cmd::Gui(args) => code(launch_gui(
+            &loaded.dirs.workspace_root,
+            cli.global.cd.is_some(),
+            cli.global.resume.as_deref(),
+            cli.global.continue_,
+            &args,
+        )),
         #[cfg(feature = "acp")]
         Cmd::Acp => block_on(async move {
             // Each ACP session loads the config of its own folder, with this command
@@ -215,6 +222,44 @@ fn block_on(fut: impl Future<Output = i32>) -> ExitCode {
             code(exit::AGENT_ERROR)
         }
     }
+}
+
+fn launch_gui(
+    workspace_root: &std::path::Path,
+    has_cd: bool,
+    resume: Option<&str>,
+    continue_latest: bool,
+    args: &cli::GuiArgs,
+) -> i32 {
+    let Some(bin) = quack_core::gui::find_binary() else {
+        eprintln!(
+            "error: quack-gui binary not found in PATH or beside quack\n  help: build the desktop shell with `cargo build -p quack-gui --features desktop`"
+        );
+        return exit::AGENT_ERROR;
+    };
+    let mut paths: Vec<std::path::PathBuf> = args
+        .paths
+        .iter()
+        .map(|p| {
+            let joined = if p.is_relative() {
+                workspace_root.join(p)
+            } else {
+                p.clone()
+            };
+            std::path::absolute(&joined).unwrap_or(joined)
+        })
+        .collect();
+    if paths.is_empty() && (has_cd || resume.is_some() || continue_latest) {
+        paths.push(
+            std::path::absolute(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf()),
+        );
+    }
+    let spawn_args = quack_core::gui::build_args(&paths, resume, continue_latest, args.no_restore);
+    if let Err(e) = quack_core::gui::spawn(&bin, &spawn_args, Some(workspace_root)) {
+        eprintln!("error: could not launch {}: {e}", bin.display());
+        return exit::AGENT_ERROR;
+    }
+    exit::OK
 }
 
 fn code(c: i32) -> ExitCode {

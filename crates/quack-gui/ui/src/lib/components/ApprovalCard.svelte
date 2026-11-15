@@ -10,7 +10,7 @@
 		approval: { callId: string; request: ApprovalRequest; always: string[] };
 		busy?: boolean;
 		onAnswer: (
-			decision: 'allow_once' | 'allow_session' | 'always_allow' | 'deny',
+			decision: 'allow_once' | 'allow_session' | 'always_allow' | 'redact_and_send' | 'deny',
 			feedback?: string,
 			scope?: WriteScope
 		) => void;
@@ -38,7 +38,9 @@
 			? 'quack asks to run a command'
 			: approval.request.kind === 'edit'
 				? 'quack asks to change a file'
-				: `quack asks to use ${approval.request.name}`
+				: approval.request.kind === 'egress_secrets'
+					? 'Secret Shield paused outbound request'
+					: `quack asks to use ${approval.request.name}`
 	);
 
 	const shellRisk = $derived(
@@ -77,6 +79,14 @@
 				event.target.closest('button, input, textarea, select'))
 		)
 			return;
+		if (approval.request.kind === 'egress_secrets') {
+			if (event.key === 'Enter' || event.key === 'r' || event.key === 'R') {
+				onAnswer('redact_and_send');
+			} else if (event.key === 'Escape') {
+				onAnswer('deny');
+			}
+			return;
+		}
 		if (event.key === 'Enter') onAnswer('allow_once');
 		else if (event.key === 'Escape') onAnswer('deny');
 	}
@@ -120,15 +130,50 @@
 		<p class="marks">
 			Field marks · {adds} addition{adds === 1 ? '' : 's'} · {dels} deletion{dels === 1 ? '' : 's'}
 		</p>
+	{:else if approval.request.kind === 'egress_secrets'}
+		<p class="lead">
+			Pre-egress Secret Shield detected {approval.request.findings.length} possible secret{approval.request.findings.length === 1 ? '' : 's'}
+			before sending to <code>{approval.request.provider}</code> (<code>{approval.request.host}</code>).
+			Redacting replaces each matched span with a stable masked token so model context stays coherent without transmitting the secret.
+		</p>
+		<div class="shield-findings">
+			{#each approval.request.findings as finding (finding.id)}
+				<div class="shield-row">
+					<div class="shield-meta">
+						<span class="shield-kind">{finding.kind}</span>
+						<span class="shield-loc">{finding.location}</span>
+						<span class="shield-fp">{finding.fingerprint.slice(0, 12)}</span>
+					</div>
+					<code class="shield-preview">{finding.preview}</code>
+				</div>
+			{/each}
+		</div>
 	{:else}
 		<pre class="command">{approval.request.arguments}</pre>
 	{/if}
 
 	<div class="actions">
-		<button class="btn btn-primary" disabled={busy} onclick={() => onAnswer('allow_once')}>
-			{approval.request.kind === 'edit' ? 'Approve change' : 'Allow'}
-			<span class="kbd kbd-invert">⏎</span>
-		</button>
+		{#if approval.request.kind === 'egress_secrets'}
+			<button
+				class="btn btn-primary"
+				disabled={busy}
+				onclick={() => onAnswer('redact_and_send')}
+			>
+				Redact &amp; send <span class="kbd kbd-invert">⏎</span>
+			</button>
+			<button
+				class="btn"
+				disabled={busy}
+				onclick={() => onAnswer('allow_once')}
+			>
+				Send unredacted once
+			</button>
+		{:else}
+			<button class="btn btn-primary" disabled={busy} onclick={() => onAnswer('allow_once')}>
+				{approval.request.kind === 'edit' ? 'Approve change' : 'Allow'}
+				<span class="kbd kbd-invert">⏎</span>
+			</button>
+		{/if}
 		{#if approval.always.length > 0}
 			<button
 				class="btn"
@@ -565,5 +610,53 @@
 	.feedback-input:focus {
 		outline: none;
 		border-color: var(--focus);
+	}
+
+	.shield-findings {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		margin: 10px 0 12px;
+	}
+
+	.shield-row {
+		padding: 9px 12px;
+		border: 1px solid color-mix(in srgb, var(--fail) 35%, var(--rule));
+		border-radius: var(--r-lg);
+		background: color-mix(in srgb, var(--fail-soft) 55%, var(--bg-panel));
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.shield-meta {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+		font-size: 0.71875rem;
+	}
+
+	.shield-kind {
+		font-family: var(--font-mono);
+		font-weight: 700;
+		color: var(--fail);
+	}
+
+	.shield-loc {
+		font-family: var(--font-mono);
+		color: var(--ink-2);
+	}
+
+	.shield-fp {
+		font-family: var(--font-mono);
+		color: var(--ink-3);
+	}
+
+	.shield-preview {
+		font-family: var(--font-mono);
+		font-size: 0.78125rem;
+		color: var(--ink);
+		overflow-wrap: anywhere;
 	}
 </style>

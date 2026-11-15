@@ -6,13 +6,14 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use quack_config::hooks::HookEvent;
+use quack_config::settings::{NetworkSettings, SecretGuardMode};
 use quack_protocol::{
-    ApprovalDecision, CallId, EngineError, EngineErrorKind, Event, Question, ToolCallInfo,
-    ToolResultSummary, TurnId, Usage, WriteScope,
+    ApprovalDecision, ApprovalRequest, CallId, EgressKind, EngineError, EngineErrorKind, Event,
+    Question, ToolCallInfo, ToolResultSummary, TurnId, Usage, WriteScope,
 };
 use quack_providers::{
-    ChatRequest, ErrorKind, FinishReason, Message, ResponseBuilder, StreamEvent, ToolCall,
-    ToolSpec, tokens, toolparse,
+    ChatRequest, EgressDraft, EgressLedger, ErrorKind, FinishReason, Message, ResponseBuilder,
+    StreamEvent, ToolCall, ToolSpec, tokens, toolparse,
 };
 use quack_store::checkpoint::Checkpoints;
 use quack_tools::{Answers, Decision, Permissions, Subject, ToolOutput};
@@ -92,6 +93,12 @@ pub(crate) struct TurnCtx {
     pub pool: Arc<crate::agent::Pool>,
     /// One approval or question on screen at a time, while sub-agents run side by side.
     pub prompt_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Network settings governing pre-egress Secret Shield.
+    pub network: NetworkSettings,
+    /// Session-scoped outbound ledger.
+    pub ledger: Arc<EgressLedger>,
+    /// Runtime session-level secret fingerprint allowlist shared across turns.
+    pub secret_allowlist: Arc<Mutex<Vec<String>>>,
 }
 
 /// What the user sent, ready for the model, and what they typed (which hooks see).
@@ -250,6 +257,132 @@ impl TurnCtx {
             },
         });
     }
+
+    async fn guard_egress(&self, location: &str, text: String, ask_id: &str) -> Result<String, ()> {
+        if crate::secrets::should_skip_guard(&self.network, self.setup.provider.base_url()) {
+            return Ok(text);
+        }
+        let mut active = self.setup.provider.secret_values();
+        active.extend(self.setup.mcp.manager.secret_values());
+        let mut allowlist = self.network.secret_allowlist.clone();
+        if let Ok(extra) = self.secret_allowlist.lock() {
+            allowlist.extend(extra.iter().cloned());
+        }
+        let report = crate::secrets::scan_text(&text, location, &active, &allowlist);
+        if report.findings.is_empty() {
+            return Ok(text);
+        }
+        let kinds: Vec<&str> = report.findings.iter().map(|f| f.kind.as_str()).collect();
+        let fingerprints: Vec<&str> = report
+            .findings
+            .iter()
+            .map(|f| f.fingerprint.as_str())
+            .collect();
+        session::record(
+            self.log.as_ref(),
+            "secret_scan",
+            json!({
+                "location": location,
+                "count": report.redaction_count,
+                "kinds": kinds,
+                "fingerprints": fingerprints,
+            }),
+        );
+        match self.network.secret_guard {
+            SecretGuardMode::Off => Ok(text),
+            SecretGuardMode::Redact => {
+                self.setup
+                    .provider
+                    .add_pending_redactions(report.redaction_count);
+                self.emit(Event::Notice {
+                    message: format!(
+                        "Secret Shield redacted {} credential(s) in {location}.",
+                        report.redaction_count
+                    ),
+                });
+                Ok(report.redacted)
+            }
+            SecretGuardMode::Ask => {
+                let _one_at_a_time = self.prompt_lock.lock().await;
+                let (otx, orx) = oneshot::channel();
+                if let Ok(mut pending) = self.approvals.lock() {
+                    pending.insert(ask_id.to_owned(), otx);
+                }
+                self.emit(Event::ApprovalRequest {
+                    call_id: CallId(ask_id.to_owned()),
+                    request: ApprovalRequest::EgressSecrets {
+                        provider: self.setup.provider.id.clone(),
+                        host: crate::secrets::host_of(self.setup.provider.base_url()),
+                        findings: report.findings.clone(),
+                    },
+                    always: Vec::new(),
+                });
+                let asked = std::time::Instant::now();
+                let answer = tokio::select! {
+                    () = self.cancel.cancelled() => None,
+                    a = orx => a.ok(),
+                };
+                if let Ok(mut st) = self.stats.lock() {
+                    st.waited(asked.elapsed());
+                }
+                if let Ok(mut pending) = self.approvals.lock() {
+                    pending.remove(ask_id);
+                }
+                session::record(
+                    self.log.as_ref(),
+                    "approval",
+                    json!({ "call_id": ask_id, "decision": answer }),
+                );
+                match answer {
+                    Some(ApprovalDecision::RedactAndSend) => {
+                        self.setup
+                            .provider
+                            .add_pending_redactions(report.redaction_count);
+                        Ok(report.redacted)
+                    }
+                    Some(ApprovalDecision::AllowOnce) => Ok(text),
+                    Some(ApprovalDecision::AllowSession)
+                    | Some(ApprovalDecision::AlwaysAllow { .. }) => {
+                        if let Ok(mut extra) = self.secret_allowlist.lock() {
+                            for f in &report.findings {
+                                if !extra.contains(&f.fingerprint) {
+                                    extra.push(f.fingerprint.clone());
+                                }
+                            }
+                        }
+                        Ok(text)
+                    }
+                    None
+                    | Some(ApprovalDecision::Deny)
+                    | Some(ApprovalDecision::DenyWithFeedback { .. }) => {
+                        self.ledger.record(EgressDraft {
+                            kind: EgressKind::BlockedEgress,
+                            url: self.setup.provider.base_url().to_owned(),
+                            protocol: "secret-guard".into(),
+                            bytes_sent: 0,
+                            bytes_received: 0,
+                            status: None,
+                            redactions: 0,
+                            blocked_reason: Some(format!("blocked by secret_guard in {location}")),
+                        });
+                        Err(())
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn apply_tool_guard(ctx: &TurnCtx, call: &ToolCall, content: String) -> String {
+    let ask_id = ctx.key(&format!("egress-{}", call.id));
+    let location = format!("tool:{}", call.name);
+    match ctx.guard_egress(&location, content, &ask_id).await {
+        Ok(clean) => clean,
+        Err(()) => format!(
+            "[Blocked by Secret Shield: output of `{}` contained unredacted credential(s) and sending was denied.]",
+            call.name
+        ),
+    }
 }
 
 /// Sent once per turn after an empty reply.
@@ -316,6 +449,23 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
         prompt.text
     } else {
         format!("{}\n\n{}", prompt.text, extra.join("\n\n"))
+    };
+    let ask_id = ctx.key(&format!("egress-user-{}", ctx.turn.0));
+    let content = match ctx.guard_egress("user_prompt", content, &ask_id).await {
+        Ok(clean) => clean,
+        Err(()) => {
+            ctx.emit(Event::Warning {
+                message:
+                    "Blocked outbound prompt containing sensitive credentials; nothing was sent."
+                        .into(),
+            });
+            ctx.emit(Event::TurnAborted {
+                turn: ctx.turn,
+                reason: "blocked by Secret Shield".into(),
+            });
+            ctx.turn_end(json!({ "turn": ctx.turn.0, "outcome": "blocked" }));
+            return history;
+        }
     };
     ctx.push(
         &mut history,
@@ -502,6 +652,7 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                             images,
                             ..
                         } = out;
+                        content = apply_tool_guard(&ctx, call, content).await;
                         ctx.keep_plan(&mut content, end && n + 1 == together);
                         ctx.push(
                             &mut history,
@@ -531,6 +682,7 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                          Read the file to check its actual state or try a different fix."
                     ));
                 }
+                out.model = apply_tool_guard(&ctx, call, out.model).await;
                 ctx.keep_plan(&mut out.model, i == calls.len());
                 ctx.push(
                     &mut history,
@@ -1311,7 +1463,7 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
             );
             match answer {
                 None => return done(ToolOutput::error("interrupted by the user")),
-                Some(ApprovalDecision::AllowOnce) => {}
+                Some(ApprovalDecision::AllowOnce | ApprovalDecision::RedactAndSend) => {}
                 Some(ApprovalDecision::AllowSession) => {
                     if let Ok(mut p) = ctx.perms.lock() {
                         p.allow_session(subject.clone());

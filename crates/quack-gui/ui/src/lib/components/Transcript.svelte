@@ -33,6 +33,19 @@
 		return map;
 	});
 
+	let lastRewindNonce = 0;
+
+	$effect(() => {
+		const nonce = session.rewindTriggerNonce;
+		if (nonce > 0 && nonce !== lastRewindNonce) {
+			lastRewindNonce = nonce;
+			if (idle && userBackById.size > 0) {
+				rewindTargetBack = 1;
+				void session.listRewindPoints();
+			}
+		}
+	});
+
 	function toggleRewind(back: number) {
 		if (!idle) return;
 		if (rewindTargetBack === back) {

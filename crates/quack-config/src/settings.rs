@@ -133,6 +133,8 @@ pub struct UiSettings {
     /// Show session details in a right sidebar on terminals at least 140 columns wide
     /// and 24 rows tall.
     pub sidebar: bool,
+    /// Restore previously opened workspace tabs when launching `quack-gui`.
+    pub gui_restore_tabs: bool,
 }
 
 impl Default for UiSettings {
@@ -146,6 +148,7 @@ impl Default for UiSettings {
             reduced_motion: false,
             terminal_title: true,
             sidebar: true,
+            gui_restore_tabs: true,
         }
     }
 }
@@ -352,6 +355,17 @@ pub struct SessionSettings {
     pub retention_days: u32,
 }
 
+/// What the pre-egress secret shield does when it finds potential secrets in outbound
+/// prompts, attachments, or tool results.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretGuardMode {
+    Off,
+    Redact,
+    #[default]
+    Ask,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetworkSettings {
@@ -367,6 +381,15 @@ pub struct NetworkSettings {
     /// Speak HTTP/1.1 only, one connection per request, instead of sharing one HTTP/2
     /// connection. Try it when a VPN or proxy leaves connections stale.
     pub http1_only: bool,
+    /// Pre-egress secret scanning policy (`ask`, `redact`, or `off`). Non-interactive
+    /// clients automatically fall back from `ask` to `redact`.
+    pub secret_guard: SecretGuardMode,
+    /// Apply `secret_guard` even when talking to loopback servers (`127.0.0.1`/`localhost`).
+    pub secret_guard_local: bool,
+    /// SHA-256 fingerprints (`sha256:...`) trusted to pass without secret-guard prompts.
+    #[serde(deserialize_with = "list::de")]
+    #[schemars(with = "ListOrAppend")]
+    pub secret_allowlist: Vec<String>,
 }
 
 impl NetworkSettings {

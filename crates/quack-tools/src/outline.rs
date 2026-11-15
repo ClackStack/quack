@@ -7,6 +7,8 @@
 use std::path::Path;
 
 use crate::grammar::Grammars;
+use crate::paths;
+use crate::text::{MAX_EDIT_BYTES, TextFile, io_msg, looks_binary};
 #[cfg(feature = "lang-common")]
 pub(crate) use imp::builtin_tags;
 
@@ -181,6 +183,146 @@ fn outline_with(g: &Grammars, path: &Path, text: &str) -> Option<Outline> {
         lines: text.lines().count(),
         symbols,
     })
+}
+
+/// Extracted snippet for a symbol inside a workspace file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolSlice {
+    /// Forward-slash relative path inside the workspace.
+    pub path: String,
+    pub symbol: Symbol,
+    pub text: String,
+    pub truncated: bool,
+}
+
+/// List outlined definitions in `rel_path` matching `query` (up to `limit`).
+/// Verifies canonicalized workspace containment so symlinks cannot escape `root`.
+pub fn list_symbols(
+    root: &Path,
+    grammars: &Grammars,
+    rel_path: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<Symbol>, String> {
+    if !cfg!(feature = "lang-common") {
+        return Ok(Vec::new());
+    }
+    let (_, _, outline) = load_checked_outline(root, grammars, rel_path)?;
+    let q = query.trim().to_ascii_lowercase();
+    let mut ancestors: Vec<String> = Vec::new();
+    let mut matches: Vec<(u8, Symbol)> = outline
+        .symbols
+        .into_iter()
+        .filter_map(|mut sym| {
+            ancestors.truncate(sym.depth);
+            let qualified =
+                if !ancestors.is_empty() && !sym.name.contains("::") && !sym.name.contains('.') {
+                    let mut qname = ancestors.join("::");
+                    qname.push_str("::");
+                    qname.push_str(&sym.name);
+                    qname
+                } else {
+                    sym.name.clone()
+                };
+            let leaf = sym.name.clone();
+            ancestors.push(leaf);
+            sym.name = qualified;
+            if q.is_empty() {
+                return Some((0, sym));
+            }
+            let lower = sym.name.to_ascii_lowercase();
+            let short = lower.rsplit("::").next().unwrap_or(lower.as_str());
+            if short == q || lower == q {
+                Some((0, sym))
+            } else if short.starts_with(&q) || lower.starts_with(&q) {
+                Some((1, sym))
+            } else if lower.contains(&q) {
+                Some((2, sym))
+            } else {
+                None
+            }
+        })
+        .collect();
+    matches.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.start.cmp(&b.1.start)));
+    Ok(matches
+        .into_iter()
+        .take(limit)
+        .map(|(_, sym)| sym)
+        .collect())
+}
+
+/// Extract a single symbol's exact line range from `rel_path`, bounded at `max_bytes`.
+pub fn extract_symbol_slice(
+    root: &Path,
+    grammars: &Grammars,
+    rel_path: &str,
+    symbol_query: &str,
+    max_bytes: usize,
+) -> Result<SymbolSlice, String> {
+    if !cfg!(feature = "lang-common") {
+        return Err("syntax outlines require the lang-common feature".into());
+    }
+    let (shown, text, outline) = load_checked_outline(root, grammars, rel_path)?;
+    let symbol = outline
+        .find(symbol_query)
+        .cloned()
+        .ok_or_else(|| format!("no definition `{symbol_query}` in {shown}"))?;
+    let lines: Vec<&str> = text.lines().collect();
+    let start_idx = symbol.start.saturating_sub(1).min(lines.len());
+    let end_idx = symbol.end.min(lines.len());
+    let mut body = String::new();
+    let mut truncated = false;
+    for (offset, line) in lines[start_idx..end_idx].iter().enumerate() {
+        let lineno = start_idx + offset + 1;
+        let formatted = format!("{lineno:>5}: {line}\n");
+        if body.len() + formatted.len() > max_bytes && !body.is_empty() {
+            truncated = true;
+            break;
+        }
+        body.push_str(&formatted);
+    }
+    Ok(SymbolSlice {
+        path: shown,
+        symbol,
+        text: body,
+        truncated,
+    })
+}
+
+fn load_checked_outline(
+    root: &Path,
+    grammars: &Grammars,
+    rel_path: &str,
+) -> Result<(String, String, Outline), String> {
+    let resolved = paths::resolve(root, rel_path);
+    let shown = paths::display(root, &resolved);
+    if !paths::inside(root, &resolved) {
+        return Err(format!("{shown} is outside the workspace"));
+    }
+    let canon_root = std::fs::canonicalize(root).map_err(|e| io_msg(root, &e))?;
+    let canon_path = std::fs::canonicalize(&resolved).map_err(|e| io_msg(&resolved, &e))?;
+    if !paths::inside(&canon_root, &canon_path) {
+        return Err(format!("{shown} resolves outside the workspace"));
+    }
+    let meta = std::fs::metadata(&canon_path).map_err(|e| io_msg(&resolved, &e))?;
+    if meta.is_dir() {
+        return Err(format!("{shown} is a directory"));
+    }
+    if meta.len() > MAX_EDIT_BYTES {
+        return Err(format!(
+            "{shown} is {} bytes; too large for symbol extraction",
+            meta.len()
+        ));
+    }
+    let bytes = std::fs::read(&canon_path).map_err(|e| io_msg(&resolved, &e))?;
+    if looks_binary(&bytes) {
+        return Err(format!("{shown} is a binary file"));
+    }
+    let file = TextFile::from_bytes(&bytes).ok_or_else(|| format!("{shown} is not UTF-8 text"))?;
+    let outline = grammars
+        .outline(&resolved, &file.text)
+        .ok_or_else(|| format!("no syntax outline available for {shown}"))?;
+    Ok((shown, file.text, outline))
 }
 
 #[cfg(feature = "lang-common")]
@@ -649,5 +791,26 @@ T twice(T v) {\n\
         assert_eq!(names, ["point", "add", "name"]);
         assert_eq!(language_of(Path::new("a.HPP")), Some("cpp"));
         assert_eq!(language_of(Path::new("a.cc")), Some("cpp"));
+    }
+
+    #[test]
+    fn list_and_extract_symbol_slice_checks_containment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).expect("mkdir");
+        std::fs::write(root.join("src/s.rs"), RUST).expect("write");
+        let grammars = Grammars::builtin();
+
+        let listed = list_symbols(root, &grammars, "src/s.rs", "new", 10).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "Session::new");
+
+        let slice =
+            extract_symbol_slice(root, &grammars, "src/s.rs", "Session::new", 4096).expect("slice");
+        assert_eq!(slice.path, "src/s.rs");
+        assert!(!slice.truncated);
+        assert!(slice.text.contains("pub fn new() -> Self"));
+
+        assert!(list_symbols(root, &grammars, "../outside.rs", "", 10).is_err());
     }
 }

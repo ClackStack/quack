@@ -163,9 +163,21 @@ pub(crate) enum Cmd {
     Logout { provider: Option<String> },
     /// Run the eval task suite with the selected model and profile.
     Eval(EvalArgs),
+    /// Launch the desktop GUI (or forward folders to the running instance).
+    Gui(GuiArgs),
     /// Run as an Agent Client Protocol agent on stdio, for editors such as Zed.
     #[cfg(feature = "acp")]
     Acp,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct GuiArgs {
+    /// Workspace folders to open or focus in the desktop UI.
+    #[arg(value_name = "PATH")]
+    pub paths: Vec<PathBuf>,
+    /// Open only the requested folders instead of restoring previous tabs.
+    #[arg(long = "no-restore")]
+    pub no_restore: bool,
 }
 
 #[derive(Debug, Args)]
@@ -401,5 +413,19 @@ mod mode_tests {
     fn short_s_parses_as_resume() {
         let cli = Cli::try_parse_from(["quack", "-s", "0123456789ab"]).expect("-s flag");
         assert_eq!(cli.global.resume.as_deref(), Some("0123456789ab"));
+    }
+
+    #[test]
+    fn gui_subcommand_parses_paths_and_no_restore() {
+        let cli = Cli::try_parse_from(["quack", "-s", "abc123", "gui", "--no-restore", "/tmp/a"])
+            .expect("gui args");
+        assert_eq!(cli.global.resume.as_deref(), Some("abc123"));
+        match cli.command {
+            Some(Cmd::Gui(args)) => {
+                assert!(args.no_restore);
+                assert_eq!(args.paths, vec![PathBuf::from("/tmp/a")]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

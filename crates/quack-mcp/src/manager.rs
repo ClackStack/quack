@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use quack_config::settings::NetworkSettings;
 use quack_config::{McpServerFile, glob_match};
+use quack_protocol::EgressKind;
+use quack_providers::{EgressDraft, EgressLedger};
 use quack_shell::Tree;
 use rmcp::ClientHandler;
 use rmcp::ErrorData;
@@ -258,6 +260,8 @@ pub struct McpManager {
     /// Where elicitation and sampling requests go; `None`: servers are told quack does
     /// neither.
     asker: Mutex<Option<mpsc::Sender<ServerAsk>>>,
+    ledger: Mutex<Option<Arc<EgressLedger>>>,
+    secret_values: Mutex<Vec<String>>,
 }
 
 impl std::fmt::Debug for McpManager {
@@ -314,7 +318,34 @@ impl McpManager {
             seq: AtomicU64::new(1),
             changed: watch::Sender::new(0),
             asker: Mutex::new(None),
+            ledger: Mutex::new(None),
+            secret_values: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Attach a session egress ledger so remote MCP connections and calls are recorded.
+    pub fn set_ledger(&self, ledger: Arc<EgressLedger>) {
+        if let Ok(mut slot) = self.ledger.lock() {
+            *slot = Some(ledger);
+        }
+    }
+
+    fn ledger(&self) -> Option<Arc<EgressLedger>> {
+        self.ledger.lock().ok().and_then(|g| g.clone())
+    }
+
+    fn record_ledger(&self, draft: EgressDraft) {
+        if let Some(ledger) = self.ledger() {
+            ledger.record(draft);
+        }
+    }
+
+    /// Sensitive header values resolved for HTTP MCP servers so `secret_guard` can scrub them.
+    pub fn secret_values(&self) -> Vec<String> {
+        self.secret_values
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Answer servers' forms and sampling requests through `asker`. Call it before
@@ -557,14 +588,65 @@ impl McpManager {
         let ct = self.cancel.child_token();
         let conn = match file.transport()? {
             "http" => {
-                self.check_egress(&file.url)?;
-                let (client, headers) = http_parts(&file, &self.network).await?;
+                if let Err(why) = self.check_egress(&file.url) {
+                    self.record_ledger(EgressDraft {
+                        kind: EgressKind::BlockedEgress,
+                        url: file.url.clone(),
+                        protocol: "mcp-http".into(),
+                        bytes_sent: 0,
+                        bytes_received: 0,
+                        status: None,
+                        redactions: 0,
+                        blocked_reason: Some(why.clone()),
+                    });
+                    return Err(why);
+                }
+                let (client, headers, secrets) =
+                    http_parts(&file, &self.network, self.ledger()).await?;
+                if !secrets.is_empty()
+                    && let Ok(mut guard) = self.secret_values.lock()
+                {
+                    for secret in secrets {
+                        if !guard.contains(&secret) {
+                            guard.push(secret);
+                        }
+                    }
+                }
                 let config = StreamableHttpClientTransportConfig::with_uri(file.url.clone())
                     .custom_headers(headers);
                 let transport = StreamableHttpClientTransport::with_client(client, config);
-                let service = serve_client_with_lifecycle_and_ct(handler, transport, lifecycle, ct)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                let service =
+                    match serve_client_with_lifecycle_and_ct(handler, transport, lifecycle, ct)
+                        .await
+                    {
+                        Ok(s) => {
+                            self.record_ledger(EgressDraft {
+                                kind: EgressKind::McpHttp,
+                                url: file.url.clone(),
+                                protocol: "mcp-http".into(),
+                                bytes_sent: 0,
+                                bytes_received: 0,
+                                status: Some(200),
+                                redactions: 0,
+                                blocked_reason: None,
+                            });
+                            s
+                        }
+                        Err(e) => {
+                            let msg = e.to_string();
+                            self.record_ledger(EgressDraft {
+                                kind: EgressKind::McpHttp,
+                                url: file.url.clone(),
+                                protocol: "mcp-http".into(),
+                                bytes_sent: 0,
+                                bytes_received: 0,
+                                status: None,
+                                redactions: 0,
+                                blocked_reason: Some(msg.clone()),
+                            });
+                            return Err(msg);
+                        }
+                    };
                 Conn {
                     service: Arc::new(service),
                     tree: None,
@@ -691,6 +773,12 @@ impl McpManager {
             Ok(found) => found,
             Err(e) => return fail(e),
         };
+        let is_http = s.spec.file.transport().ok() == Some("http");
+        let bytes_sent = if is_http {
+            args.to_string().len() as u64
+        } else {
+            0
+        };
         let arguments = match args {
             Value::Object(map) => map,
             Value::Null => serde_json::Map::new(),
@@ -708,13 +796,54 @@ impl McpManager {
             Ok(Ok(r)) => {
                 let value = serde_json::to_value(&r).unwrap_or_default();
                 let (is_error, text) = crate::output::render(&value, max_chars);
+                if is_http {
+                    self.record_ledger(EgressDraft {
+                        kind: EgressKind::McpHttp,
+                        url: s.spec.file.url.clone(),
+                        protocol: "mcp-http".into(),
+                        bytes_sent,
+                        bytes_received: text.len() as u64,
+                        status: Some(200),
+                        redactions: 0,
+                        blocked_reason: is_error.then(|| "MCP tool returned error".into()),
+                    });
+                }
                 CallOutput {
                     ok: !is_error,
                     text,
                 }
             }
-            Ok(Err(e)) => fail(format!("MCP error: {e}")),
-            Err(e) => fail(e),
+            Ok(Err(e)) => {
+                let msg = format!("MCP error: {e}");
+                if is_http {
+                    self.record_ledger(EgressDraft {
+                        kind: EgressKind::McpHttp,
+                        url: s.spec.file.url.clone(),
+                        protocol: "mcp-http".into(),
+                        bytes_sent,
+                        bytes_received: 0,
+                        status: None,
+                        redactions: 0,
+                        blocked_reason: Some(msg.clone()),
+                    });
+                }
+                fail(msg)
+            }
+            Err(e) => {
+                if is_http {
+                    self.record_ledger(EgressDraft {
+                        kind: EgressKind::McpHttp,
+                        url: s.spec.file.url.clone(),
+                        protocol: "mcp-http".into(),
+                        bytes_sent,
+                        bytes_received: 0,
+                        status: None,
+                        redactions: 0,
+                        blocked_reason: Some(e.clone()),
+                    });
+                }
+                fail(e)
+            }
         }
     }
 
@@ -941,21 +1070,32 @@ type Headers = std::collections::HashMap<
     quack_providers::reqwest::header::HeaderValue,
 >;
 
-/// The HTTP client and the file's headers, with secrets resolved off the runtime.
+/// The HTTP client, file headers, and resolved secret values off the runtime.
 async fn http_parts(
     file: &McpServerFile,
     network: &NetworkSettings,
-) -> Result<(quack_providers::reqwest::Client, Headers), String> {
+    ledger: Option<Arc<EgressLedger>>,
+) -> Result<(quack_providers::reqwest::Client, Headers, Vec<String>), String> {
     use quack_providers::reqwest::header::{HeaderName, HeaderValue};
     let (file, network) = (file.clone(), network.clone());
     tokio::task::spawn_blocking(move || {
         let get = |k: &str| std::env::var_os(k);
-        let client = quack_providers::http_client(&network, &get)?;
+        let client = quack_providers::http_client_observed(&network, &get, ledger)?;
         let mut headers = Headers::new();
+        let mut secrets = Vec::new();
         for (k, secret) in &file.headers {
             let v = secret
                 .resolve(&get)
                 .map_err(|e| format!("header `{k}`: {e}"))?;
+            if v.len() >= 8 {
+                secrets.push(v.clone());
+            }
+            if let Some((_, rest)) = v.split_once(' ') {
+                let trimmed = rest.trim();
+                if trimmed.len() >= 8 {
+                    secrets.push(trimmed.to_owned());
+                }
+            }
             let name = HeaderName::from_bytes(k.as_bytes())
                 .map_err(|_| format!("invalid header name `{k}`"))?;
             let mut value = HeaderValue::from_str(&v)
@@ -963,7 +1103,7 @@ async fn http_parts(
             value.set_sensitive(true);
             headers.insert(name, value);
         }
-        Ok((client, headers))
+        Ok((client, headers, secrets))
     })
     .await
     .map_err(|e| e.to_string())?
