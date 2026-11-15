@@ -8,19 +8,26 @@ network access.
 
 ## Packages
 
-Each release has two flavours of every package. They conflict, so a machine has one:
+Each release has two flavours of every CLI (`quack` / `quack-plucked`) and desktop GUI
+(`quack-gui` / `quack-gui-plucked`) package. Standard and plucked conflict within each app
+so a machine has one flavour, while TUI and GUI share one core, config, sessions, and
+memory:
 
-| | `quack` | `quack-plucked` |
+| | Standard (`quack`, `quack-gui`) | Plucked (`quack-plucked`, `quack-gui-plucked`) |
 |---|---|---|
-| Contents | binary + defaults bundle (provider, profile, MCP and language server files) | the same, without the provider files for hosted services |
+| Contents | binary/app + defaults bundle (provider, profile, MCP and language server files) | the same, without the provider files for hosted services |
 | Use it when | people pick their own providers | you add your own provider |
 
-- **Archives**: `quack[-plucked]-<target>.tar.gz` (Linux, macOS) and `.zip` (Windows), with
-  `install.sh` / `install.ps1`. `--archive FILE` installs from a downloaded file with no
+- **Archives & desktop bundles**: `quack[-plucked]-<target>.tar.gz` (Linux, macOS) and `.zip`
+  (Windows) for the TUI, plus `quack-gui[-plucked]-<target>.dmg` (macOS), `.AppImage`
+  (glibc Linux), and `-setup.exe` (Windows) for the desktop GUI, driven by
+  `install.sh` / `install.ps1` (which install both by default; pass `--tui`/`-Tui` or
+  `--gui`/`-Gui` to install one). `--archive FILE` installs from a downloaded file with no
   network, and `--prefix` picks the folder.
 - **Linux**: `quack[-plucked]_<version>_<amd64|arm64>.deb` and `.rpm`, which install
-  `/usr/bin/quack` and `/usr/share/quack/defaults`. The binaries are static
-  (musl) and depend on nothing.
+  `/usr/bin/quack` and `/usr/share/quack/defaults` (static musl, zero dependencies), and
+  `quack-gui[-plucked]_<version>_<amd64|arm64>.deb` and `.rpm` for glibc desktops
+  (`/usr/bin/quack-gui` and `/usr/lib/quack-gui/defaults`).
 - **macOS and Linux with Homebrew**: each release carries `quack.rb` and `quack-plucked.rb`
   for a tap.
 - **SBOM**: `quack.cdx.json` (CycloneDX 1.5) lists every crate in the binary, for every

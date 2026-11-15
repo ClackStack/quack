@@ -4,13 +4,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use quack_config::hooks::HookEvent;
-use quack_config::{LayerKind, Loaded};
+use quack_config::{LayerKind, Loaded, NewMcpServer, NewMcpTransport, Secret};
 use quack_lsp::LspManager;
 use quack_mcp::{McpManager, ServerAsk};
 use quack_protocol::PermissionMode;
 use quack_protocol::{
     ApprovalPolicy, CallId, EngineError, EngineErrorKind, Event, ExportFormat, InputItem,
-    InstructionFile, Op, SessionId, SessionInfo, SessionSummary, TurnId, WorkMode, WriteScope,
+    InstructionFile, McpSecretValue, Op, SessionId, SessionInfo, SessionSummary, TurnId, WorkMode,
+    WriteScope,
 };
 use quack_providers::{Message, Provider, StreamEvent};
 use quack_tools::Permissions;
@@ -70,6 +71,17 @@ impl EngineHandle {
         let _ = self.ops.send(Op::Shutdown).await;
         let _ = self.task.await;
     }
+}
+
+#[derive(Debug)]
+struct SaveMemoryArgs {
+    scope: String,
+    name: String,
+    description: String,
+    kind: String,
+    body: String,
+    previous_scope: Option<String>,
+    previous_name: Option<String>,
 }
 
 /// Work that waits for startup or the running turn.
@@ -325,6 +337,7 @@ impl Engine {
                             self.on_reloaded(*outcome);
                             self.reloading = false;
                             self.emit(Event::StartupComplete);
+                            crate::checks::background(self.config.clone(), self.tx.clone());
                         }
                         Reload::HookSaved { request, id, result } => {
                             self.reloading = false;
@@ -538,7 +551,12 @@ impl Engine {
     fn on_started(&mut self, outcome: StartupOutcome) {
         self.problem = outcome.problem;
         let Some(setup) = outcome.setup else {
-            if self.resume != Resume::New {
+            let has_resume_target = match &self.resume {
+                Resume::New => false,
+                Resume::Latest => session::project_sessions(&self.config).latest().is_some(),
+                Resume::Id(_) => true,
+            };
+            if has_resume_target {
                 self.warn("cannot resume: no model is ready".into());
             }
             return;
@@ -547,12 +565,7 @@ impl Engine {
         self.session.profile = setup.profile.id.clone();
         let resume = std::mem::take(&mut self.resume);
         let resumed = resume != Resume::New;
-        let (history, plan) = self.open_saved(&resume, &setup).unwrap_or_else(|| {
-            if resume != Resume::New {
-                self.warn("starting a new session".into());
-            }
-            (Vec::new(), String::new())
-        });
+        let (history, plan) = self.open_saved(&resume, &setup).unwrap_or_default();
         self.configure_reasoning(&setup);
         if !plan.is_empty() {
             setup.tool_ctx.plan.restore(&plan);
@@ -1193,6 +1206,54 @@ impl Engine {
         });
     }
 
+    fn save_memory(&self, note: SaveMemoryArgs) {
+        let store = crate::env::memory_store(&self.config);
+        let result = (|| -> Result<(), String> {
+            let target = Scope::parse(&note.scope)
+                .ok_or_else(|| format!("unknown scope `{}`", note.scope))?;
+            let prev = match (&note.previous_scope, &note.previous_name) {
+                (Some(ps), Some(pn)) => Some((
+                    Scope::parse(ps).ok_or_else(|| format!("unknown scope `{ps}`"))?,
+                    pn.as_str(),
+                )),
+                (None, None) => None,
+                _ => {
+                    return Err(
+                        "previous_scope and previous_name must both be set when moving a note"
+                            .into(),
+                    );
+                }
+            };
+            if let Some((ps, pn)) = prev
+                && (ps, pn) != (target, note.name.as_str())
+                && store.exists(target, &note.name)
+            {
+                return Err(format!(
+                    "a {} note named `{}` already exists",
+                    target.label(),
+                    note.name
+                ));
+            }
+            store.write(
+                target,
+                &note.name,
+                &note.description,
+                &note.kind,
+                &note.body,
+            )?;
+            if let Some((ps, pn)) = prev
+                && (ps, pn) != (target, note.name.as_str())
+            {
+                let _ = store.delete(ps, pn);
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.list_memory(),
+            Err(e) => self.warn(format!("cannot save note: {e}")),
+        }
+    }
+
     fn list_memory(&self) {
         let store = crate::env::memory_store(&self.config);
         let mut notes = Vec::new();
@@ -1218,7 +1279,7 @@ impl Engine {
         });
     }
 
-    fn save_setting(&self, key: &str, value: &str, scope: &WriteScope) {
+    async fn save_setting(&mut self, key: &str, value: &str, scope: &WriteScope) {
         let layer = match scope {
             WriteScope::User => LayerKind::User,
             WriteScope::Project => LayerKind::Project,
@@ -1226,13 +1287,28 @@ impl Engine {
                 return self.warn("settings are saved to the user or project layer".into());
             }
         };
-        match self.config.save_setting(layer, key, value) {
-            Ok((path, note)) => self.emit(Event::SettingSaved {
-                key: key.to_owned(),
-                value: value.to_owned(),
-                path: path.display().to_string(),
-                note,
-            }),
+        let config = Arc::clone(&self.config);
+        let key_owned = key.to_owned();
+        let value_owned = value.to_owned();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let fresh = config.reload().map_err(|e| e.to_string())?;
+            let (path, note) = fresh.save_setting(layer, &key_owned, &value_owned)?;
+            let updated = fresh.reload().map_err(|e| e.to_string())?;
+            Ok::<_, String>((updated, path, note))
+        })
+        .await
+        .map_err(|e| format!("failed to save setting: {e}"))
+        .and_then(|r| r);
+        match outcome {
+            Ok((updated, path, note)) => {
+                self.config = Arc::new(updated);
+                self.emit(Event::SettingSaved {
+                    key: key.to_owned(),
+                    value: value.to_owned(),
+                    path: path.display().to_string(),
+                    note,
+                });
+            }
             Err(message) => self.emit(Event::Error {
                 error: EngineError {
                     kind: EngineErrorKind::Config,
@@ -1911,6 +1987,9 @@ impl Engine {
                     let _ = tx.send(Event::DoctorReport { checks });
                 });
             }
+            Op::CheckUpdates => {
+                crate::checks::check_updates_now(self.config.clone(), self.tx.clone());
+            }
             Op::InitInstructions => {
                 let prompt = init_prompt(&self.config);
                 return Box::pin(self.handle(
@@ -1946,11 +2025,22 @@ impl Engine {
             }
             Op::EnableMcp { id } => {
                 let target = id.clone();
-                self.apply_mcp_change(id, done, reload, move |cfg| {
-                    crate::mcp::enable_mcp_in_config(cfg, &target, &|v| {
-                        std::env::var_os(v).is_some()
-                    })
-                })
+                self.apply_config_edit(
+                    done,
+                    reload,
+                    move |cfg| {
+                        crate::mcp::enable_mcp_in_config_detail(cfg, &target, &|v| {
+                            std::env::var_os(v).is_some()
+                        })
+                    },
+                    move |engine, (path, message)| {
+                        engine.emit(Event::McpEnabled {
+                            id: id.clone(),
+                            path: path.display().to_string(),
+                        });
+                        engine.emit(Event::McpChanged { id, message });
+                    },
+                )
                 .await;
             }
             Op::DisableMcp { id } => {
@@ -1967,22 +2057,90 @@ impl Engine {
                 args,
                 bearer_env,
                 bearer_token,
+                scope,
             } => {
-                let target = id.clone();
-                self.apply_mcp_change(id, done, reload, move |cfg| {
-                    crate::mcp::add_mcp_in_config(
-                        cfg,
-                        crate::mcp::AddMcpInput {
-                            id: target,
-                            url,
-                            command,
-                            args,
-                            bearer_env,
-                            bearer_token: bearer_token.map(|s| s.0),
-                        },
-                    )
-                })
-                .await;
+                let project = match scope {
+                    None | Some(WriteScope::User) => Some(false),
+                    Some(WriteScope::Project) => Some(true),
+                    Some(WriteScope::Session) => None,
+                };
+                if let Some(project) = project {
+                    let target = id.clone();
+                    self.apply_mcp_change(id, done, reload, move |cfg| {
+                        crate::mcp::add_mcp_in_config(
+                            cfg,
+                            crate::mcp::AddMcpInput {
+                                id: target,
+                                url,
+                                command,
+                                args,
+                                bearer_env,
+                                bearer_token: bearer_token.map(|s| s.0),
+                                project,
+                            },
+                        )
+                    })
+                    .await;
+                } else {
+                    self.warn("MCP servers are saved to the user or project layer".into());
+                }
+            }
+            Op::SaveMcpServer {
+                id,
+                scope,
+                description,
+                command,
+                args,
+                cwd,
+                url,
+                sandbox,
+                env,
+                headers,
+            } => {
+                let layer = match scope {
+                    WriteScope::User => Some(LayerKind::User),
+                    WriteScope::Project => Some(LayerKind::Project),
+                    WriteScope::Session => {
+                        self.warn("MCP servers are saved to the user or project layer".into());
+                        None
+                    }
+                };
+                if let Some(layer) = layer {
+                    let saved_id = id.clone();
+                    let spec = build_saved_mcp_server(SavedMcpFields {
+                        id,
+                        description,
+                        command,
+                        args,
+                        cwd,
+                        url,
+                        sandbox,
+                        env,
+                        headers,
+                    });
+                    match spec {
+                        Ok(spec) => {
+                            self.apply_config_edit(
+                                done,
+                                reload,
+                                move |cfg| cfg.save_mcp_server(layer, spec),
+                                move |engine, path| {
+                                    engine.emit(Event::McpServerSaved {
+                                        id: saved_id,
+                                        path: path.display().to_string(),
+                                    });
+                                },
+                            )
+                            .await;
+                        }
+                        Err(message) => self.emit(Event::Error {
+                            error: EngineError {
+                                kind: EngineErrorKind::Config,
+                                message,
+                            },
+                        }),
+                    }
+                }
             }
             Op::DetectServers => {
                 let config = self.config.clone();
@@ -2076,6 +2234,23 @@ impl Engine {
                 self.queued.push_back(Queued::Accept(mode));
                 self.next_queued(done, reload);
             }
+            Op::SaveMemory {
+                scope,
+                name,
+                description,
+                kind,
+                body,
+                previous_scope,
+                previous_name,
+            } => self.save_memory(SaveMemoryArgs {
+                scope,
+                name,
+                description,
+                kind,
+                body,
+                previous_scope,
+                previous_name,
+            }),
             Op::DeleteMemory { scope, name } => {
                 let store = crate::env::memory_store(&self.config);
                 let result = Scope::parse(&scope)
@@ -2123,7 +2298,7 @@ impl Engine {
                 self.title_tasks = JoinSet::new();
                 self.save_title(title.trim().to_owned());
             }
-            Op::SaveSetting { key, value, scope } => self.save_setting(&key, &value, &scope),
+            Op::SaveSetting { key, value, scope } => self.save_setting(&key, &value, &scope).await,
             Op::ReloadConfig => {
                 self.queued.push_back(Queued::Reload(None));
                 self.next_queued(done, reload);
@@ -2329,12 +2504,12 @@ impl Engine {
         });
     }
 
-    async fn apply_mcp_change(
+    async fn apply_config_edit<T: Send + 'static>(
         &mut self,
-        id: String,
         done: &mpsc::Sender<(TurnId, Vec<Message>)>,
         reload: &mpsc::Sender<Reload>,
-        op: impl FnOnce(&Loaded) -> Result<String, String> + Send + 'static,
+        op: impl FnOnce(&Loaded) -> Result<T, String> + Send + 'static,
+        on_ok: impl FnOnce(&mut Self, T),
     ) {
         let config = self.config.clone();
         let outcome = tokio::task::spawn_blocking(move || {
@@ -2345,8 +2520,8 @@ impl Engine {
         .map_err(|e| e.to_string())
         .and_then(|r| r);
         match outcome {
-            Ok(message) => {
-                self.emit(Event::McpChanged { id, message });
+            Ok(value) => {
+                on_ok(self, value);
                 self.queued.push_back(Queued::Reload(None));
                 self.next_queued(done, reload);
             }
@@ -2357,6 +2532,19 @@ impl Engine {
                 },
             }),
         }
+    }
+
+    async fn apply_mcp_change(
+        &mut self,
+        id: String,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+        op: impl FnOnce(&Loaded) -> Result<String, String> + Send + 'static,
+    ) {
+        self.apply_config_edit(done, reload, op, move |engine, message| {
+            engine.emit(Event::McpChanged { id, message });
+        })
+        .await;
     }
 
     /// Read the config files again off the async threads.
@@ -3009,13 +3197,16 @@ fn op_name(op: &Op) -> &'static str {
         Op::GetContext => "get_context",
         Op::GetStats => "get_stats",
         Op::ListMemory => "list_memory",
+        Op::SaveMemory { .. } => "save_memory",
         Op::RunDoctor => "run_doctor",
+        Op::CheckUpdates => "check_updates",
         Op::DetectServers => "detect_servers",
         Op::ListMcp => "list_mcp",
         Op::ListLsp => "list_lsp",
         Op::InitInstructions => "init_instructions",
         Op::RestartMcp { .. } => "restart_mcp",
         Op::EnableMcp { .. } => "enable_mcp",
+        Op::SaveMcpServer { .. } => "save_mcp_server",
         Op::DisableMcp { .. } => "disable_mcp",
         Op::AddMcp { .. } => "add_mcp",
         Op::AddProvider { .. } => "add_provider",
@@ -3073,4 +3264,72 @@ fn new_session_id() -> SessionId {
         .map(|d| d.as_nanos())
         .unwrap_or_default();
     SessionId(format!("{nanos:032x}"))
+}
+
+struct SavedMcpFields {
+    id: String,
+    description: String,
+    command: String,
+    args: Vec<String>,
+    cwd: String,
+    url: String,
+    sandbox: Option<bool>,
+    env: BTreeMap<String, McpSecretValue>,
+    headers: BTreeMap<String, McpSecretValue>,
+}
+
+fn build_saved_mcp_server(fields: SavedMcpFields) -> Result<NewMcpServer, String> {
+    let command = fields.command.trim().to_owned();
+    let url = fields.url.trim().to_owned();
+    let transport = match (command.is_empty(), url.is_empty()) {
+        (false, true) => {
+            if !fields.headers.is_empty() {
+                return Err("headers only apply to remote HTTP MCP servers".into());
+            }
+            NewMcpTransport::Stdio {
+                command,
+                args: fields.args,
+                env: fields
+                    .env
+                    .into_iter()
+                    .map(|(k, v)| (k, secret_from_mcp(v)))
+                    .collect(),
+                cwd: (!fields.cwd.trim().is_empty()).then(|| fields.cwd.trim().to_owned()),
+                sandbox: fields.sandbox,
+            }
+        }
+        (true, false) => {
+            if !fields.env.is_empty() {
+                return Err("env only applies to local stdio MCP servers".into());
+            }
+            NewMcpTransport::Http {
+                url,
+                headers: fields
+                    .headers
+                    .into_iter()
+                    .map(|(k, v)| (k, secret_from_mcp(v)))
+                    .collect(),
+            }
+        }
+        (true, true) => return Err("set `command` (a local server) or `url` (a remote one)".into()),
+        (false, false) => return Err("set either `command` or `url`, not both".into()),
+    };
+    let desc = fields.description.trim();
+    Ok(NewMcpServer {
+        id: fields.id,
+        description: (!desc.is_empty()).then(|| desc.to_owned()),
+        transport,
+        auto_approve: Vec::new(),
+        startup_timeout_secs: None,
+        project: false,
+        overwrite: true,
+    })
+}
+
+fn secret_from_mcp(value: McpSecretValue) -> Secret {
+    match value {
+        McpSecretValue::Plain { value } => Secret::Plain(value.0),
+        McpSecretValue::Env { env, format } => Secret::Env { env, format },
+        McpSecretValue::Keyring { keyring } => Secret::Keyring { keyring },
+    }
 }

@@ -1,7 +1,8 @@
 //! Session persistence: what the engine records, and rebuilding history on resume.
 //!
 //! Record types: `session_start`, `resume`, `message` (one chat message, exactly as sent),
-//! `tool` (UI summary of a tool call), `usage` (with `cost` when priced), `agent_usage` (the
+//! `tool` (UI summary of a tool call, with `detail` when the tool returned one), `usage` (with
+//! `cost` when priced), `agent_usage` (the
 //! same for a sub-agent's request, for `/stats`), `prune` (tool results replaced),
 //! `compaction` (history before `cut` replaced by `message`), `rewind` (history cut back
 //! to its first `to` messages), `handoff` (a planner's messages after the first `to`
@@ -39,14 +40,25 @@ pub enum Resume {
 
 pub(crate) type SharedLog = Arc<Mutex<SessionLog>>;
 
-pub(crate) fn project_sessions(config: &Loaded) -> ProjectSessions {
+fn sessions_root_dir(config: &Loaded) -> PathBuf {
     let configured = &config.settings.sessions.path;
-    let root = if configured.is_empty() {
+    if configured.is_empty() {
         config.dirs.user_data.join("sessions")
     } else {
         expand_home(configured, &|k| std::env::var_os(k))
-    };
+    }
+}
+
+pub(crate) fn project_sessions(config: &Loaded) -> ProjectSessions {
+    let root = sessions_root_dir(config);
     ProjectSessions::new(&root, &config.dirs.workspace_root)
+}
+
+/// Resolved `(root, project)` session directories for this config and workspace.
+pub fn sessions_dirs(config: &Loaded) -> (PathBuf, PathBuf) {
+    let root = sessions_root_dir(config);
+    let project = ProjectSessions::new(&root, &config.dirs.workspace_root).dir;
+    (root, project)
 }
 
 /// Sessions of this workspace, most recent first (for `quack sessions`).
@@ -69,10 +81,8 @@ pub(crate) fn find(config: &Loaded, resume: &Resume) -> Result<Option<IndexEntry
     let ps = project_sessions(config);
     match resume {
         Resume::New => Ok(None),
-        Resume::Latest => ps
-            .latest()
-            .map(Some)
-            .ok_or_else(|| "no saved sessions in this project yet".to_owned()),
+        // Nothing saved in this project yet is normal on first open; start a new session silently.
+        Resume::Latest => Ok(ps.latest()),
         Resume::Id(id) => ps.find(id).map(Some),
     }
 }
@@ -149,10 +159,25 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
                             text: content.clone(),
                         });
                     }
-                    Message::Assistant { content, .. } if !content.trim().is_empty() => {
-                        items.push(ReplayItem::Assistant {
-                            text: content.clone(),
-                        });
+                    Message::Assistant {
+                        content, reasoning, ..
+                    } => {
+                        // Thinking streamed before the reply; the desktop client shows it
+                        // collapsed. Sealed reasoning stays in `sealed` and is not shown.
+                        if let Some(text) = reasoning
+                            .as_ref()
+                            .map(String::as_str)
+                            .filter(|text| !text.trim().is_empty())
+                        {
+                            items.push(ReplayItem::Reasoning {
+                                text: text.to_owned(),
+                            });
+                        }
+                        if !content.trim().is_empty() {
+                            items.push(ReplayItem::Assistant {
+                                text: content.clone(),
+                            });
+                        }
                     }
                     _ => {}
                 }
@@ -174,6 +199,11 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false),
                     result: s("result"),
+                    detail: r
+                        .data
+                        .get("detail")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
                 });
             }
             "prune" => {
@@ -418,6 +448,61 @@ mod tests {
                 ReplayItem::Assistant { text: "a1".into() },
                 ReplayItem::User {
                     text: "two again".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn replay_keeps_reasoning_and_tool_detail() {
+        let msg = |m: Message| rec("message", json!({ "message": m }));
+        let records = vec![
+            msg(Message::User {
+                content: "one".into(),
+                images: Vec::new(),
+            }),
+            msg(Message::Assistant {
+                content: "done".into(),
+                reasoning: Some("read the file first".into()),
+                tool_calls: Vec::new(),
+                sealed: None,
+            }),
+            rec(
+                "tool",
+                json!({
+                    "summary": "edit src/main.rs",
+                    "ok": true,
+                    "result": "patched",
+                    "detail": "@@ -1 +1 @@",
+                }),
+            ),
+            rec(
+                "tool",
+                json!({ "summary": "shell", "ok": true, "result": "ok" }),
+            ),
+        ];
+        let Replayed { items, .. } = replay(&records);
+        assert_eq!(
+            items,
+            [
+                ReplayItem::User { text: "one".into() },
+                ReplayItem::Reasoning {
+                    text: "read the file first".into()
+                },
+                ReplayItem::Assistant {
+                    text: "done".into()
+                },
+                ReplayItem::Tool {
+                    summary: "edit src/main.rs".into(),
+                    ok: true,
+                    result: "patched".into(),
+                    detail: Some("@@ -1 +1 @@".into()),
+                },
+                ReplayItem::Tool {
+                    summary: "shell".into(),
+                    ok: true,
+                    result: "ok".into(),
+                    detail: None,
                 },
             ]
         );

@@ -25,6 +25,8 @@ intelligence.
 
 ### 1. Install
 
+Installs both the desktop GUI (`quack-gui`) and the terminal UI (`quack`) by default. They are separate apps sharing one core, config, sessions, memory, and prompt history; pass `--tui` or `--gui` (`-Tui` or `-Gui` on Windows) to install only one.
+
 **Linux and macOS:**
 ```sh
 curl -fsSL https://quack.clackstack.dev/install.sh | sh
@@ -35,12 +37,13 @@ curl -fsSL https://quack.clackstack.dev/install.sh | sh
 irm https://quack.clackstack.dev/install.ps1 | iex
 ```
 
-*Prebuilt `.deb`, `.rpm`, Homebrew tap formulas, and platform archives are available on the [releases page](https://github.com/ClackStack/quack/releases).*
+*Prebuilt `.deb`, `.rpm`, `.AppImage`, `.dmg`, `-setup.exe`, Homebrew tap formulas, and platform archives (both standard and `-plucked`) are available on the [releases page](https://github.com/ClackStack/quack/releases).*
 
 ### 2. Run
 
 ```sh
-quack
+quack      # terminal UI
+quack-gui  # desktop app
 ```
 
 On first launch, the interactive `/setup` wizard helps you configure a model in seconds:
@@ -70,6 +73,7 @@ Evaluations consume plan allowance or API credit, depending on the provider.
 | `quack mcp ...` | List, add, enable, disable, or remove MCP servers (`list`, `add`, `enable`, `disable`, `remove`) |
 | `quack exec "..."` | Run a single turn headlessly for scripts or CI pipelines |
 | `quack acp` | Start an Agent Client Protocol server for Zed, JetBrains, Neovim, or VS Code |
+| `quack-gui` | Open the desktop app (Tauri): the same engine in a window, one tab per folder |
 | `quack keyring set <id>` | Store an API key securely in the OS credential store |
 
 Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` in the provider file reads a shell variable, `{ file = "path" }` a file (mode 0600 recommended), and `{ cmd = [..] }` a command. On Linux without a running Secret Service (WSL, servers, containers), `quack setup` and the TUI save keys to a file under your config folder automatically and say so.
@@ -90,6 +94,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 - **Plan with fewer prompts**: Plan + Allow reads and searches automatically, then presents proposed changes and test commands for review. Accepting the plan starts implementation with the same approval policy. A separate planner model is optional.
 - **Extensible with MCP & LSP**: Native Model Context Protocol (stdio & HTTP) support, background language servers for 10+ languages, sub-agents, generic standard Agent Skills (`SKILL.md`), and custom slash commands.
 - **Editor integration (ACP)**: Connect quack directly into your editor panel via the Agent Client Protocol.
+- **Desktop app**: `quack-gui` opens the same engine in a native window — first-run provider setup (API keys or browser subscription sign-in), project trust, a clickable **Network & Sandbox Boundary** header passport with strict-offline toggle, streamed transcript with tree-sitter fenced code highlighting and inline headings, turn rewind (`Files + conversation`, `Conversation only`, `Files only`, external-conflict overwrite) and *Try another model* session branching, collaborative approvals (`DenyWithFeedback`, scoped `AlwaysAllow`, plain-English shell risk summaries), step-limit pause recovery, unfocused OS attention notifications, header LSP diagnostics count, `@` workspace file and `/` slash-command/skill/MCP-prompt autocomplete, image paste/drop/picker, sidebar file reveal and Markdown/JSON field-note export, separate plan/edit and planner-model controls, thinking-level picker, session sidebar, a project & global memory viewer/editor (`MemoryModal`), a unified **Settings** page (resolved paths like `memory.path` and `sessions.path`, `quack setup` options, profiles, bundles, rules, Hooks & MCP server setup/toggles, and raw `config.toml` key editing), and workspace prompt input history (`history.jsonl`) shared with the TUI. Failed sends preserve drafts and pending answers; session changes wait for engine confirmation. Slow tab startup or shutdown leaves other tabs responsive, and reloading the UI shuts down its previous engines before reconnecting. Native bundles include `defaults/`; login-shell PATH recovery has bounded time and output. The desktop client is an MVP in progress: one live engine per workspace, with separate tabs for separate folders. See [desktop progress and remaining work](docs/plan/15-desktop-client.md#settings-panel-resolved-paths-hooks--mcp-servers-2026-11-14).
 
 ---
 
@@ -180,8 +185,6 @@ configuration and migration from older modes.
 
 ### MCP & Extensibility
 
-### MCP & Extensibility
-
 - **Model Context Protocol (MCP)**: Supports stdio and streamable HTTP MCP servers with bundled disabled examples (`context7`, `roost`, `github`, `fetch`, `playwright`, `filesystem`, `time`, `everything`), guided setup (`quack mcp add`, `/mcp`), one-command enabling (`quack mcp enable <id>`), deferred tools (`tool_search`), prompts as `/<server>:<prompt>`, resources, and elicitation/sampling.
 - **Deferred discovery**: Large tool surfaces are indexed and searched dynamically (`tool_search`), avoiding context bloat.
 - **Event hooks**: Run custom scripts on session events (`session_start`, `user_prompt`, `pre_tool`, `post_tool`, `turn_end`) configured in `hooks.d/`. `/hooks` configures linked Jira issues and GitHub, GitLab, Gitea/Forgejo or Bitbucket reviews, including private repositories and multiple self-hosted instances. Enter credentials in a masked field, then **Save and enable**; the next prompt uses them. [Setup and examples](defaults/hooks.d/README.md).
@@ -195,7 +198,7 @@ configuration and migration from older modes.
 - **Wide-terminal sidebar**: At 140 columns × 24 rows and above, a right sidebar shows the session title, working folder, Git branch, running sub-agents, model, profile, context usage and generation speed. It grows from 36 up to 48 columns on wider terminals and adapts as you resize; set `ui.sidebar = false` to disable it, or toggle it in `/config`.
 - **Window title**: The terminal's title shows the duck and what the session is about (`_(•)> fix the login bug`), and marks when a turn runs or quack needs you. If `[model] small` is configured, quack makes one background request to title the session from the first message. The title also appears in `/resume`. The first line serves as the fallback, and `/title` sets it manually. `ui.terminal_title = false` turns it off.
 - **Smooth scrolling and selection**: Mouse wheel scrolling, click-to-position cursor, and OSC 52 terminal copy integration.
-- **Interactive pickers**: Fast, fuzzy-filtered modals for `/models`, `/providers`, `/config`, `/context`, `/stats`, `/doctor`, and `/help`. In `/config` → Layers, inspect each layer’s status and file path, then press Enter to copy the selected path.
+- **Interactive pickers**: Fast, fuzzy-filtered modals for `/models`, `/providers`, `/config`, `/context`, `/stats`, `/doctor`, and `/help`. In `/config` → Layers, inspect each layer’s status and file path, then press Enter to copy the selected path. In `/config`, `/models`, `/profiles`, `/theme`, `/bundles`, `/hooks`, `/mcp` (including MCP add prompts), and approval prompts (`always`), press `Ctrl-L` (or `/scope [user|project]` / `--project` / `--user`) to choose whether writes go to user config or the project's `.quack/` folder.
 - **Status bar**: Separate work mode and approval indicators, context window utilization, model generation speed, and background tasks.
 
 ### Editor Integration (ACP)
@@ -223,10 +226,11 @@ Prebuilt archives for all supported targets are published on the [Releases](http
 - **Linux**: Static binaries (musl) for x64 and ARM64, `.deb` and `.rpm` packages.
 - **macOS**: Universal archives (x64 and Apple Silicon) and Homebrew tap formulas.
 - **Windows**: x64 and ARM64 zip archives and PowerShell installer.
+- **Desktop GUI (`quack-gui` & `quack-gui-plucked`)**: Separate unsigned desktop bundles (each bundling `defaults/`) for macOS (`.dmg` for x64 and Apple Silicon), Windows (`-setup.exe` NSIS installers for x64 and ARM64), and glibc Linux (`.deb`, `.rpm`, and `.AppImage` for x64 and ARM64; static musl targets ship the CLI only). Installing the GUI alone does not install `quack` (and vice versa), though they share one config, sessions, memory, and history; `install.sh` / `install.ps1` install both by default unless `--tui`/`-Tui` or `--gui`/`-Gui` is passed.
 
-### Minimal / Air-Gapped Installs (`quack-plucked`)
+### Minimal / Air-Gapped Installs (`quack-plucked` & `quack-gui-plucked`)
 
-For air-gapped environments or private clusters, `quack-plucked` provides the complete agent (profiles, sub-agents, MCP, ACP, language servers, hooks, local model support) without any hosted service configurations:
+For air-gapped environments or private clusters, `--plucked` installs the complete agent — both TUI (`quack-plucked`) and GUI (`quack-gui-plucked`), or either one via `--tui` / `--gui` — with profiles, sub-agents, MCP, ACP, language servers, hooks, and local model support, without any hosted service configurations:
 
 ```sh
 curl -fsSL https://quack.clackstack.dev/install.sh | sh -s -- --plucked
@@ -496,7 +500,7 @@ MCP servers live as individual `<id>.toml` files in your user config folder (`mc
 
 **Three ways to add or enable an MCP server:**
 
-1. **In the TUI (`/mcp`)**: Open `/mcp` to browse live servers alongside bundled disabled examples and `+ Add remote MCP server (HTTP)` / `+ Add local MCP server (stdio)`. Pressing `Enter` on an example copies, enables, and connects it right away without restarting quack; `/mcp add`, `/mcp enable <id>`, `/mcp disable <id>`, and `/mcp restart <id>` also work directly.
+1. **In the TUI (`/mcp`)**: Open `/mcp` to browse live servers alongside bundled disabled examples and `+ Add remote MCP server (HTTP)` / `+ Add local MCP server (stdio)`. Pressing `Enter` on an example copies, enables, and connects it right away without restarting quack; `/mcp add`, `/mcp enable <id>`, `/mcp disable <id>`, and `/mcp restart <id>` also work directly, and `Ctrl-L` (or `--project` / `--user`) chooses between user `mcp.d/` and project `.quack/mcp.d/`.
 2. **From the CLI (`quack mcp`)**:
    ```sh
    quack mcp list                                       # show configured servers & bundled examples

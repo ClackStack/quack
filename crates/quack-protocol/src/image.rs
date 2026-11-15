@@ -11,6 +11,7 @@ pub const MAX_RAW_BYTES: usize = 3 * 1024 * 1024;
 /// One image as it travels through the history: base64 (standard, padded), its media
 /// type, and its pixel size when the file's header reported it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Image {
     /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`.
     pub media_type: String,

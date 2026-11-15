@@ -103,15 +103,6 @@
 				<p class="mt-4 text-lg leading-relaxed text-ink max-w-[46ch]">
 					It would be worth using if it phoned home. <strong>It doesn't.</strong>
 				</p>
-
-				<div class="mt-9 max-w-xl">
-					<p class="font-display font-bold text-lg mb-3">Where to find it</p>
-					<InstallBox />
-					<p class="mt-3 text-sm text-ink-2">
-						Then run <code class="font-semibold text-ink">quack</code>; it finds model servers on this machine or walks you
-						through adding one.
-					</p>
-				</div>
 			</div>
 
 			<!-- The plate: the welcome duck with its field marks -->
@@ -134,6 +125,17 @@
 					{#each marks.slice(2) as m, i}{@render mark(m, i + 2, true)}{/each}
 				</ol>
 			</figure>
+		</div>
+
+		<div class="mt-10">
+			<p class="font-display font-bold text-lg mb-3">Where to find it</p>
+			<InstallBox />
+			<p class="mt-3 text-sm text-ink-2">
+				Installs both <code class="font-semibold text-ink">quack-gui</code> (desktop) and
+				<code class="font-semibold text-ink">quack</code> (terminal) on one shared config and session store, or
+				pick just one above. See the
+				<a href="#desktop" class="text-sky-ink font-semibold underline underline-offset-2">desktop app preview</a>.
+			</p>
 		</div>
 	</div></div>
 	<div class="water mt-14" aria-hidden="true"></div>

@@ -11,6 +11,7 @@ use crate::{KeySource, SecretText};
 /// context for the model), `allowed`, `denied`, `asked`, `updated` (it changed a tool
 /// call's arguments) or `failed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum HookOutcome {
     Ok,
@@ -43,6 +44,7 @@ impl std::fmt::Display for HookOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HookDescriptor {
     pub version: u32,
     /// Connection value containing the web base used to scope access checks.
@@ -52,6 +54,7 @@ pub struct HookDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HookField {
     pub id: String,
     pub label: String,
@@ -75,6 +78,7 @@ pub struct HookField {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HookPreset {
     pub id: String,
     pub label: String,
@@ -90,6 +94,7 @@ pub struct HookPreset {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HookConnection {
     pub id: String,
     pub preset: String,
@@ -104,12 +109,14 @@ fn yes() -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HookConnectionInfo {
     pub connection: HookConnection,
     pub credentials: BTreeMap<String, KeySource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HookSetupInfo {
     pub id: String,
     pub revision: String,
@@ -122,6 +129,7 @@ pub struct HookSetupInfo {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum HookCredentialChange {
     #[default]
@@ -138,6 +146,7 @@ pub enum HookCredentialChange {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HookConnectionDraft {
     pub connection: HookConnection,
     #[serde(default)]

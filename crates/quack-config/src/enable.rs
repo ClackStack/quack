@@ -9,12 +9,14 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
+
 use crate::diagnostic::read_text;
 use crate::edit::{remove_from_list, write_atomic};
 use crate::items::{Item, load_items_except};
 use crate::load::{LayerStatus, Loaded, Origin, ProjectStatus};
 use crate::paths::LayerKind;
-use crate::{HookFile, ItemState, TrustDecision, load_hooks};
+use crate::{HookFile, ItemState, Settings, TrustDecision, load_hooks};
 
 /// A completed enable or a payload decision required before writing any files.
 #[derive(Debug)]
@@ -75,7 +77,7 @@ impl Loaded {
                     d.one_line()
                 ));
             }
-            let off = file_off(&item.path)?;
+            let off = file_off::<HookFile>(&item.path)?;
             if !matches!(off, FileOff::Bare) {
                 break off;
             }
@@ -105,82 +107,19 @@ impl Loaded {
         }
 
         if self.settings.hooks.disabled.iter().any(|d| d == id) {
-            if self.settings.policy.locks(KEY) {
-                return Err(format!("`{KEY}` is locked by the system policy"));
-            }
-            if matches!(self.origin_of(KEY), Origin::Cli | Origin::Env(_)) {
-                return Err(format!(
-                    "hook `{id}` is disabled by {}; change that override first",
-                    self.origin_of(KEY)
-                ));
-            }
+            self.ensure_disabled_mutable(KEY, "hook", id)?;
         }
 
         let file = match off {
-            FileOff::Flag => Some(self.enable_flag(&item, &overrides, replace_payload)?),
+            FileOff::Flag => Some(self.enable_hook_flag(&item, &overrides, replace_payload)?),
             _ => None,
         };
-        for path in &overrides {
-            if file.as_ref().is_none_or(|f| f.path != *path) {
-                std::fs::remove_file(path)
-                    .map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
-            }
-        }
-        let mut unlisted = false;
+        remove_bare_overrides(&overrides, file.as_ref().map(|f| f.path.as_path()))?;
+
         let mut project_changed = item.layer == LayerKind::Project && file.is_some()
             || overrides.iter().any(|p| p.starts_with(&self.dirs.project));
-        if !self.settings.policy.locks(KEY) {
-            for layer in &self.layers {
-                if matches!(layer.kind, LayerKind::User | LayerKind::Project)
-                    && layer.status == LayerStatus::Loaded
-                    && let Some(dir) = &layer.dir
-                    && remove_from_list(&dir.join("config.toml"), KEY, id)?
-                {
-                    unlisted = true;
-                    project_changed |= layer.kind == LayerKind::Project;
-                }
-            }
-        }
-        if project_changed {
-            self.refresh_hook_project_trust()?;
-        }
-
-        // Mask an inherited entry in the user layer. If the project appends other
-        // entries, leave those in the project so subsequent changes still take effect.
-        let fresh = self.reload().map_err(|e| e.to_string())?;
-        if fresh.settings.hooks.disabled.iter().any(|d| d == id) {
-            let mut inherited = fresh.settings.hooks.disabled.as_slice();
-            if let Origin::File {
-                layer: LayerKind::Project,
-                path,
-            } = fresh.origin_of(KEY)
-            {
-                let text =
-                    read_text(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-                let table: toml::Table = toml::from_str(&text).map_err(|e| e.to_string())?;
-                let appended = table
-                    .get("hooks")
-                    .and_then(toml::Value::as_table)
-                    .and_then(|hooks| hooks.get("disabled"))
-                    .and_then(toml::Value::as_table)
-                    .and_then(|disabled| disabled.get("append"))
-                    .and_then(toml::Value::as_array)
-                    .ok_or_else(|| {
-                        format!("hook `{id}` is still disabled in {}", path.display())
-                    })?;
-                inherited = &inherited[..inherited.len().saturating_sub(appended.len())];
-            }
-            let remaining = toml::Value::Array(
-                inherited
-                    .iter()
-                    .filter(|d| *d != id)
-                    .cloned()
-                    .map(toml::Value::String)
-                    .collect(),
-            );
-            fresh.save_setting(LayerKind::User, KEY, &remaining.to_string())?;
-            unlisted = true;
-        }
+        let unlisted =
+            self.unlist_disabled(KEY, "hook", id, |s| &s.hooks.disabled, &mut project_changed)?;
         let file = file.or_else(|| {
             overrides.first().map(|path| HookEnabled {
                 path: path.clone(),
@@ -202,7 +141,93 @@ impl Loaded {
         }))
     }
 
-    fn refresh_hook_project_trust(&self) -> Result<(), String> {
+    pub(crate) fn ensure_disabled_mutable(
+        &self,
+        key: &str,
+        kind_label: &str,
+        id: &str,
+    ) -> Result<(), String> {
+        if self.settings.policy.locks(key) {
+            return Err(format!("`{key}` is locked by the system policy"));
+        }
+        if matches!(self.origin_of(key), Origin::Cli | Origin::Env(_)) {
+            return Err(format!(
+                "{kind_label} `{id}` is disabled by {}; change that override first",
+                self.origin_of(key)
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn unlist_disabled(
+        &self,
+        key: &str,
+        kind_label: &str,
+        id: &str,
+        list_of: impl Fn(&Settings) -> &[String],
+        project_changed: &mut bool,
+    ) -> Result<bool, String> {
+        let mut unlisted = false;
+        if !self.settings.policy.locks(key) {
+            for layer in &self.layers {
+                if matches!(layer.kind, LayerKind::User | LayerKind::Project)
+                    && layer.status == LayerStatus::Loaded
+                    && let Some(dir) = &layer.dir
+                    && remove_from_list(&dir.join("config.toml"), key, id)?
+                {
+                    unlisted = true;
+                    *project_changed |= layer.kind == LayerKind::Project;
+                }
+            }
+        }
+        if *project_changed {
+            self.refresh_item_project_trust()?;
+        }
+
+        // Mask an inherited entry in the user layer. If the project appends other
+        // entries, leave those in the project so subsequent changes still take effect.
+        let fresh = self.reload().map_err(|e| e.to_string())?;
+        if list_of(&fresh.settings).iter().any(|d| d == id) {
+            let mut inherited = list_of(&fresh.settings);
+            if let Origin::File {
+                layer: LayerKind::Project,
+                path,
+            } = fresh.origin_of(key)
+            {
+                let text =
+                    read_text(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                let table: toml::Table = toml::from_str(&text).map_err(|e| e.to_string())?;
+                let section = key.split('.').next().unwrap_or_default();
+                let appended = table
+                    .get(section)
+                    .and_then(toml::Value::as_table)
+                    .and_then(|s| s.get("disabled"))
+                    .and_then(toml::Value::as_table)
+                    .and_then(|disabled| disabled.get("append"))
+                    .and_then(toml::Value::as_array)
+                    .ok_or_else(|| {
+                        format!(
+                            "{kind_label} `{id}` is still disabled in {}",
+                            path.display()
+                        )
+                    })?;
+                inherited = &inherited[..inherited.len().saturating_sub(appended.len())];
+            }
+            let remaining = toml::Value::Array(
+                inherited
+                    .iter()
+                    .filter(|d| *d != id)
+                    .cloned()
+                    .map(toml::Value::String)
+                    .collect(),
+            );
+            fresh.save_setting(LayerKind::User, key, &remaining.to_string())?;
+            unlisted = true;
+        }
+        Ok(unlisted)
+    }
+
+    pub(crate) fn refresh_item_project_trust(&self) -> Result<(), String> {
         let decision = match self.project {
             ProjectStatus::Trusted => TrustDecision::Trusted,
             ProjectStatus::SettingsOnly => TrustDecision::SettingsOnly,
@@ -214,47 +239,16 @@ impl Loaded {
     /// A full hook file with `enabled = false`: copy a defaults hook into the user
     /// layer without the flag, or set `enabled = true` in the user's or project's own
     /// file.
-    fn enable_flag(
+    fn enable_hook_flag(
         &self,
         item: &Item<HookFile>,
         overrides: &[PathBuf],
         replace_payload: Option<bool>,
     ) -> Result<HookEnabled, String> {
-        let text = read_text(&item.path)
-            .map_err(|e| format!("cannot read {}: {e}", item.path.display()))?;
-        let mut doc: toml_edit::DocumentMut = text
-            .parse()
-            .map_err(|e: toml_edit::TomlError| format!("not valid TOML: {}", e.message()))?;
-        // The flag flips to `true` in place rather than being deleted, so the comments
-        // around it (decor attached to the key) survive.
-        let Some(toml_edit::Item::Value(old)) = doc.as_table_mut().get_mut("enabled") else {
-            return Err(format!(
-                "{} has no `enabled` key; it should not look disabled",
-                item.path.display()
-            ));
-        };
-        let decor = old.decor().clone();
-        *old = "true"
-            .parse()
-            .map_err(|e: toml_edit::TomlError| e.to_string())?;
-        *old.decor_mut() = decor;
-        let out = doc.to_string();
-        toml::from_str::<HookFile>(&out)
-            .map_err(|e| format!("{} does not load once enabled: {e}", item.path.display()))?;
+        let out = flip_enabled_toml::<HookFile>(&item.path)?;
         match item.layer {
             LayerKind::Defaults => {
-                let user = self.dirs.user_config.join("hooks.d");
-                let name = item
-                    .path
-                    .file_name()
-                    .ok_or_else(|| format!("{} has no file name", item.path.display()))?;
-                let dest = user.join(name);
-                if dest.exists() && !overrides.contains(&dest) {
-                    return Err(format!(
-                        "{} already exists; set `enabled = true` in it",
-                        dest.display()
-                    ));
-                }
+                let dest = defaults_dest(&self.dirs.user_config, "hooks.d", &item.path, overrides)?;
                 if let Some((from, to)) = self.payload_dirs(item)
                     && from.is_dir()
                 {
@@ -286,6 +280,62 @@ impl Loaded {
             self.dirs.user_config.join("hooks.d").join(stem),
         ))
     }
+}
+
+pub(crate) fn flip_enabled_toml<T: DeserializeOwned>(path: &Path) -> Result<String, String> {
+    let text = read_text(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| format!("not valid TOML: {}", e.message()))?;
+    // The flag flips to `true` in place rather than being deleted, so the comments
+    // around it (decor attached to the key) survive.
+    let Some(toml_edit::Item::Value(old)) = doc.as_table_mut().get_mut("enabled") else {
+        return Err(format!(
+            "{} has no `enabled` key; it should not look disabled",
+            path.display()
+        ));
+    };
+    let decor = old.decor().clone();
+    *old = "true"
+        .parse()
+        .map_err(|e: toml_edit::TomlError| e.to_string())?;
+    *old.decor_mut() = decor;
+    let out = doc.to_string();
+    toml::from_str::<T>(&out)
+        .map_err(|e| format!("{} does not load once enabled: {e}", path.display()))?;
+    Ok(out)
+}
+
+pub(crate) fn defaults_dest(
+    user_config: &Path,
+    subdir: &str,
+    src_path: &Path,
+    overrides: &[PathBuf],
+) -> Result<PathBuf, String> {
+    let name = src_path
+        .file_name()
+        .ok_or_else(|| format!("{} has no file name", src_path.display()))?;
+    let dest = user_config.join(subdir).join(name);
+    if dest.exists() && !overrides.contains(&dest) {
+        return Err(format!(
+            "{} already exists; set `enabled = true` in it",
+            dest.display()
+        ));
+    }
+    Ok(dest)
+}
+
+pub(crate) fn remove_bare_overrides(
+    overrides: &[PathBuf],
+    exclude: Option<&Path>,
+) -> Result<(), String> {
+    for path in overrides {
+        if exclude.is_none_or(|p| p != path.as_path()) {
+            std::fs::remove_file(path)
+                .map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Stage the defaults and keep the old payload available until the hook file is saved.
@@ -336,17 +386,17 @@ pub(crate) fn install_payload(
     result
 }
 
-/// The `enabled` flag of a hook's file, read fresh from disk: the item state can hide
-/// it, because `[hooks] disabled` overwrites the state of a listed hook.
-enum FileOff {
+/// The `enabled` flag of an item's file, read fresh from disk: the item state can hide
+/// it, because `[hooks|mcp] disabled` overwrites the state of a listed item.
+pub(crate) enum FileOff {
     On,
-    /// A full hook file with `enabled = false`.
+    /// A full item file with `enabled = false`.
     Flag,
-    /// A file whose only job is to switch the hook off (`enabled = false` and `id`).
+    /// A file whose only job is to switch the item off (`enabled = false` and `id`).
     Bare,
 }
 
-fn file_off(path: &Path) -> Result<FileOff, String> {
+pub(crate) fn file_off<T: DeserializeOwned>(path: &Path) -> Result<FileOff, String> {
     let text = read_text(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let table: toml::Table =
         toml::from_str(&text).map_err(|e| format!("{} is not valid TOML: {e}", path.display()))?;
@@ -356,8 +406,7 @@ fn file_off(path: &Path) -> Result<FileOff, String> {
     if table.keys().all(|k| k == "enabled" || k == "id") {
         return Ok(FileOff::Bare);
     }
-    toml::from_str::<HookFile>(&text)
-        .map_err(|e| format!("{} does not load: {e}", path.display()))?;
+    toml::from_str::<T>(&text).map_err(|e| format!("{} does not load: {e}", path.display()))?;
     Ok(FileOff::Flag)
 }
 

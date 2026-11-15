@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::diagnostic::read_text;
-use crate::edit::{add_to_list, remove_from_list, write_atomic};
-use crate::items::{Item, ItemState, load_items, url_host};
-use crate::load::{Loaded, Origin, ProjectStatus};
+use crate::edit::{add_to_list, write_atomic};
+use crate::enable::{FileOff, defaults_dest, file_off, flip_enabled_toml, remove_bare_overrides};
+use crate::items::{Item, ItemState, load_items, load_items_except, url_host};
+use crate::load::{Loaded, ProjectStatus};
 use crate::mcp::McpServerFile;
 use crate::paths::LayerKind;
 use crate::secret::Secret;
@@ -37,6 +38,10 @@ pub struct McpSummary {
 pub struct McpEnabled {
     /// File that now holds the enabled definition.
     pub file: PathBuf,
+    /// Set when the file was copied from the defaults bundle.
+    pub copied_from: Option<PathBuf>,
+    /// Set when `[mcp] disabled` in user/project config no longer lists the server.
+    pub unlisted: bool,
     /// Short human summary of what changed.
     pub action: String,
     /// Environment variable names referenced by `{ env = "..." }` in `env` or `headers`.
@@ -229,28 +234,135 @@ impl Loaded {
     }
 
     /// Enable an MCP server by id: copy a bundled `enabled = false` example into user
-    /// `mcp.d/<id>.toml` with `enabled = true`, enable a user/project file in place, and
-    /// remove `id` from `[mcp] disabled`.
+    /// `mcp.d/<id>.toml` with `enabled = true`, enable a user/project file in place,
+    /// remove bare `enabled = false` overrides, and remove `id` from `[mcp] disabled`.
     pub fn enable_mcp(&self, id: &str) -> Result<McpEnabled, String> {
+        const KEY: &str = "mcp.disabled";
         check_mcp_id(id)?;
-        let item = crate::load_mcp(self)
+        let mut item = crate::load_mcp(self)
             .into_iter()
             .find(|i| i.id == id)
             .ok_or_else(|| {
                 format!("no MCP server `{id}` found — add one with `quack mcp add {id} ...`")
             })?;
 
-        let target = enable_item_file(self, &item)?;
-        clear_mcp_disabled_flag(self, id)?;
+        let mut overrides = Vec::new();
+        let off = loop {
+            if item.layer == LayerKind::System {
+                return Err(format!(
+                    "MCP server `{id}` is enforced by the system layer and cannot be changed"
+                ));
+            }
+            if let ItemState::Failed(d) = &item.state {
+                return Err(format!(
+                    "MCP server `{id}` does not load: {}; fix its file first",
+                    d.one_line()
+                ));
+            }
+            let off = file_off::<McpServerFile>(&item.path)?;
+            if !matches!(off, FileOff::Bare) {
+                break off;
+            }
+            if !matches!(item.layer, LayerKind::User | LayerKind::Project) {
+                return Err(format!(
+                    "MCP server `{id}` is switched off by {}; edit that file to enable it",
+                    item.path.display()
+                ));
+            }
+            overrides.push(item.path);
+            item = load_items_except::<McpServerFile>(&self.item_layers(), "mcp.d", &overrides)
+                .into_iter()
+                .find(|m| m.id == id)
+                .ok_or_else(|| {
+                    format!(
+                        "no MCP server definition remains after removing the overrides for `{id}`"
+                    )
+                })?;
+        };
 
-        let text = read_text(&target.file)
-            .map_err(|e| format!("cannot read {}: {e}", target.file.display()))?;
-        let parsed: McpServerFile = toml::from_str(&text).map_err(|e| e.message().to_owned())?;
-        Ok(McpEnabled {
-            file: target.file,
-            action: target.action,
-            env_vars: collect_mcp_env_vars(&parsed),
-        })
+        let text = read_text(&item.path)
+            .map_err(|e| format!("cannot read {}: {e}", item.path.display()))?;
+        let parsed: McpServerFile = toml::from_str(&text)
+            .map_err(|e| format!("{} does not load: {e}", item.path.display()))?;
+        parsed.transport()?;
+        let url = (!parsed.url.is_empty()).then_some(parsed.url.as_str());
+        if !self.settings.policy.mcp.allows(id, url) {
+            return Err(format!("MCP server `{id}` is blocked by `[policy] mcp`"));
+        }
+
+        if self.settings.mcp.disabled.iter().any(|d| d == id) {
+            self.ensure_disabled_mutable(KEY, "MCP server", id)?;
+        }
+
+        let flag_outcome = if matches!(off, FileOff::Flag) {
+            let out = flip_enabled_toml::<McpServerFile>(&item.path)?;
+            match item.layer {
+                LayerKind::Defaults => {
+                    let dest =
+                        defaults_dest(&self.dirs.user_config, "mcp.d", &item.path, &overrides)?;
+                    write_atomic(&dest, &out)?;
+                    Some((
+                        dest,
+                        Some(item.path.clone()),
+                        format!("copied example `{id}` to user config and enabled it"),
+                    ))
+                }
+                _ => {
+                    if item.layer == LayerKind::Project {
+                        require_trusted_project(self)?;
+                    }
+                    write_atomic(&item.path, &out)?;
+                    let scope = if item.layer == LayerKind::Project {
+                        " in project config"
+                    } else {
+                        ""
+                    };
+                    Some((item.path.clone(), None, format!("enabled `{id}`{scope}")))
+                }
+            }
+        } else {
+            None
+        };
+        remove_bare_overrides(
+            &overrides,
+            flag_outcome.as_ref().map(|(path, _, _)| path.as_path()),
+        )?;
+
+        let mut project_changed = (item.layer == LayerKind::Project && flag_outcome.is_some())
+            || overrides.iter().any(|p| p.starts_with(&self.dirs.project));
+        let unlisted = self.unlist_disabled(
+            KEY,
+            "MCP server",
+            id,
+            |s| &s.mcp.disabled,
+            &mut project_changed,
+        )?;
+        let env_vars = collect_mcp_env_vars(&parsed);
+
+        match flag_outcome {
+            Some((file, copied_from, action)) => Ok(McpEnabled {
+                file,
+                copied_from,
+                unlisted,
+                action,
+                env_vars,
+            }),
+            None if !overrides.is_empty() => Ok(McpEnabled {
+                file: item.path,
+                copied_from: None,
+                unlisted,
+                action: format!("removed disabled override and enabled `{id}`"),
+                env_vars,
+            }),
+            None if unlisted => Ok(McpEnabled {
+                file: item.path,
+                copied_from: None,
+                unlisted: true,
+                action: format!("enabled `{id}`"),
+                env_vars,
+            }),
+            None => Err(format!("MCP server `{id}` is already enabled")),
+        }
     }
 
     /// Disable an MCP server by id without deleting its config: sets `enabled = false` in
@@ -312,7 +424,24 @@ impl Loaded {
     /// `.quack/mcp.d/`, validating the schema, `[policy.mcp]`, and project trust.
     pub fn add_mcp_server(&self, spec: &NewMcpServer) -> Result<PathBuf, String> {
         check_mcp_id(&spec.id)?;
+        let system_layers: Vec<_> = self
+            .item_layers()
+            .into_iter()
+            .filter(|(k, _)| *k == LayerKind::System)
+            .collect();
+        if load_items_except::<McpServerFile>(&system_layers, "mcp.d", &[])
+            .iter()
+            .any(|i| i.id == spec.id)
+        {
+            return Err(format!(
+                "MCP server `{}` is enforced by the system layer and cannot be replaced",
+                spec.id
+            ));
+        }
         validate_new_spec(self, spec)?;
+        if self.settings.mcp.disabled.iter().any(|d| d == &spec.id) {
+            self.ensure_disabled_mutable("mcp.disabled", "MCP server", &spec.id)?;
+        }
 
         let dir = if spec.project {
             match self.project {
@@ -341,12 +470,46 @@ impl Loaded {
 
         let toml_text = render_new_mcp_toml(spec)?;
         write_atomic(&path, &toml_text)?;
-        clear_mcp_disabled_flag(self, &spec.id)?;
 
         if spec.project {
             self.trust_project(TrustDecision::Trusted)?;
         }
+        let mut project_changed = false;
+        let _ = self.unlist_disabled(
+            "mcp.disabled",
+            "MCP server",
+            &spec.id,
+            |s| &s.mcp.disabled,
+            &mut project_changed,
+        )?;
         Ok(path)
+    }
+
+    /// Create or update `<layer>/mcp.d/<id>.toml` in the user or project layer,
+    /// remove `<id>` from `[mcp] disabled`, and record/refresh project trust when needed.
+    pub fn save_mcp_server(
+        &self,
+        layer: LayerKind,
+        mut spec: NewMcpServer,
+    ) -> Result<PathBuf, String> {
+        spec.id = spec.id.trim().to_owned();
+        match layer {
+            LayerKind::User => spec.project = false,
+            LayerKind::Project => {
+                if !matches!(self.project, ProjectStatus::Trusted | ProjectStatus::None) {
+                    let message = if self.project == ProjectStatus::DisabledByPolicy {
+                        "project config is disabled by the system policy"
+                    } else {
+                        "trust this project before saving project-level MCP servers"
+                    };
+                    return Err(message.into());
+                }
+                spec.project = true;
+            }
+            _ => return Err("MCP servers can only be saved to the user or project layer".into()),
+        }
+        spec.overwrite = true;
+        self.add_mcp_server(&spec)
     }
 
     /// Remove an MCP server TOML file from a writable layer (`user` or trusted `project`).
@@ -465,112 +628,6 @@ fn fill_summary_from_file(summary: &mut McpSummary, file: &McpServerFile) {
     summary.env_vars = collect_mcp_env_vars(file);
 }
 
-struct FileAction {
-    file: PathBuf,
-    action: String,
-}
-
-fn enable_item_file(loaded: &Loaded, item: &Item<McpServerFile>) -> Result<FileAction, String> {
-    let id = &item.id;
-    if let ItemState::Failed(e) = &item.state {
-        return Err(format!(
-            "MCP server `{id}` in {} is invalid TOML: {e}",
-            item.path.display()
-        ));
-    }
-    let text =
-        read_text(&item.path).map_err(|e| format!("cannot read {}: {e}", item.path.display()))?;
-    let file: McpServerFile = toml::from_str(&text).map_err(|e| {
-        format!(
-            "MCP server `{id}` in {} is invalid TOML: {}",
-            item.path.display(),
-            e.message()
-        )
-    })?;
-
-    let url_opt = if file.url.is_empty() {
-        None
-    } else {
-        Some(file.url.as_str())
-    };
-    if !loaded.settings.policy.mcp.allows(id, url_opt) {
-        return Err(format!(
-            "MCP server `{id}` is not allowed by `[policy.mcp]`"
-        ));
-    }
-
-    if file.command.is_empty()
-        && file.url.is_empty()
-        && matches!(item.layer, LayerKind::User | LayerKind::Project)
-    {
-        // A user/project stub with only `enabled = false` shadowing a lower defaults file.
-        if let Some(base) = find_lower_valid_mcp(loaded, id, item.layer) {
-            if item.layer == LayerKind::Project {
-                require_trusted_project(loaded)?;
-            }
-            let updated = set_enabled_in_toml(&base.path, true)?;
-            write_atomic(&item.path, &updated)?;
-            if item.layer == LayerKind::Project {
-                loaded.trust_project(TrustDecision::Trusted)?;
-            }
-            return Ok(FileAction {
-                file: item.path.clone(),
-                action: format!("replaced disabled stub and enabled `{id}`"),
-            });
-        }
-        file.transport()?;
-    }
-
-    match item.layer {
-        LayerKind::Defaults => {
-            let file_name = item
-                .path
-                .file_name()
-                .ok_or_else(|| format!("missing file name for {}", item.path.display()))?;
-            let dest = loaded.dirs.user_config.join("mcp.d").join(file_name);
-            let updated = set_enabled_in_toml(&item.path, true)?;
-            write_atomic(&dest, &updated)?;
-            Ok(FileAction {
-                file: dest,
-                action: format!("copied example `{id}` to user config and enabled it"),
-            })
-        }
-        LayerKind::User | LayerKind::Project => {
-            if item.layer == LayerKind::Project {
-                require_trusted_project(loaded)?;
-            }
-            if !file.enabled {
-                let updated = set_enabled_in_toml(&item.path, true)?;
-                write_atomic(&item.path, &updated)?;
-                if item.layer == LayerKind::Project {
-                    loaded.trust_project(TrustDecision::Trusted)?;
-                }
-            }
-            let scope = if item.layer == LayerKind::Project {
-                " in project config"
-            } else {
-                ""
-            };
-            Ok(FileAction {
-                file: item.path.clone(),
-                action: format!("enabled `{id}`{scope}"),
-            })
-        }
-        LayerKind::System => {
-            if !file.enabled {
-                return Err(format!(
-                    "MCP server `{id}` is disabled in the system layer ({})",
-                    item.path.display()
-                ));
-            }
-            Ok(FileAction {
-                file: item.path.clone(),
-                action: format!("`{id}` is configured in the system layer"),
-            })
-        }
-    }
-}
-
 fn find_lower_valid_mcp(
     loaded: &Loaded,
     id: &str,
@@ -602,50 +659,6 @@ fn require_trusted_project(loaded: &Loaded) -> Result<(), String> {
     Ok(())
 }
 
-fn clear_mcp_disabled_flag(loaded: &Loaded, id: &str) -> Result<(), String> {
-    if !loaded.settings.mcp.disabled.iter().any(|x| x == id) {
-        return Ok(());
-    }
-    if loaded.settings.policy.locks("mcp.disabled") {
-        return Err("`mcp.disabled` is locked by the system policy".into());
-    }
-    if let Origin::Env(var) = loaded.origin_of("mcp.disabled") {
-        return Err(format!("`{id}` is disabled by environment variable {var}"));
-    }
-    if matches!(loaded.origin_of("mcp.disabled"), Origin::Cli) {
-        return Err(format!(
-            "`{id}` is disabled by a command-line `-c mcp.disabled` flag"
-        ));
-    }
-
-    let mut cleared_writable = false;
-    if let Some(user_cfg) = loaded.layer_file(LayerKind::User)
-        && remove_from_list(&user_cfg, "mcp.disabled", id)?
-    {
-        cleared_writable = true;
-    }
-    if loaded.project == ProjectStatus::Trusted
-        && let Some(proj_cfg) = loaded.layer_file(LayerKind::Project)
-        && remove_from_list(&proj_cfg, "mcp.disabled", id)?
-    {
-        loaded.trust_project(TrustDecision::Trusted)?;
-        cleared_writable = true;
-    }
-
-    if !cleared_writable
-        && let Origin::File {
-            layer: LayerKind::System,
-            path,
-        } = loaded.origin_of("mcp.disabled")
-    {
-        return Err(format!(
-            "`{id}` is disabled by the system layer ({})",
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
 fn set_enabled_in_toml(path: &Path, enabled: bool) -> Result<String, String> {
     let text = read_text(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| {
@@ -668,14 +681,16 @@ fn validate_new_spec(loaded: &Loaded, spec: &NewMcpServer) -> Result<(), String>
             None
         }
         NewMcpTransport::Http { url, .. } => {
-            if !(url.starts_with("http://") || url.starts_with("https://"))
-                || url_host(url).is_empty()
+            let trimmed = url.trim();
+            if !(trimmed.starts_with("http://") || trimmed.starts_with("https://"))
+                || trimmed.chars().any(char::is_whitespace)
+                || url_host(trimmed).is_empty()
             {
                 return Err(format!(
-                    "`{url}` is not a valid http:// or https:// MCP endpoint URL"
+                    "`{trimmed}` is not a valid http:// or https:// MCP endpoint URL"
                 ));
             }
-            Some(url.as_str())
+            Some(trimmed)
         }
     };
     if !loaded.settings.policy.mcp.allows(&spec.id, url_opt) {
@@ -715,21 +730,13 @@ fn render_new_mcp_toml(spec: &NewMcpServer) -> Result<String, String> {
                 doc["sandbox"] = toml_edit::value(*sb);
             }
             if !env.is_empty() {
-                let mut tbl = toml_edit::InlineTable::new();
-                for (k, v) in env {
-                    tbl.insert(k, secret_to_toml_value(v));
-                }
-                doc["env"] = toml_edit::value(tbl);
+                doc["env"] = toml_edit::value(secret_inline_table(env)?);
             }
         }
         NewMcpTransport::Http { url, headers } => {
             doc["url"] = toml_edit::value(url.trim());
             if !headers.is_empty() {
-                let mut tbl = toml_edit::InlineTable::new();
-                for (k, v) in headers {
-                    tbl.insert(k, secret_to_toml_value(v));
-                }
-                doc["headers"] = toml_edit::value(tbl);
+                doc["headers"] = toml_edit::value(secret_inline_table(headers)?);
             }
         }
     }
@@ -751,6 +758,20 @@ fn render_new_mcp_toml(spec: &NewMcpServer) -> Result<String, String> {
         .map_err(|e| format!("generated invalid MCP TOML: {}", e.message()))?;
     parsed.transport()?;
     Ok(rendered)
+}
+
+fn secret_inline_table(
+    entries: &BTreeMap<String, Secret>,
+) -> Result<toml_edit::InlineTable, String> {
+    let mut tbl = toml_edit::InlineTable::new();
+    for (k, v) in entries {
+        let key = k.trim();
+        if key.is_empty() {
+            return Err("environment/header key must not be empty".into());
+        }
+        tbl.insert(key, secret_to_toml_value(v));
+    }
+    Ok(tbl)
 }
 
 fn secret_to_toml_value(secret: &Secret) -> toml_edit::Value {
@@ -985,5 +1006,209 @@ mod tests {
         let text = std::fs::read_to_string(&out.file).expect("read");
         assert!(text.contains("https://mcp.context7.com/mcp"), "{text}");
         assert!(text.contains("enabled = true"), "{text}");
+    }
+
+    #[test]
+    fn enable_mcp_copies_defaults_and_unlists_disabled() {
+        let f = Fixture::new();
+        f.write(
+            "defaults/mcp.d/github.toml",
+            "# GitHub MCP\nenabled = false\nurl = \"https://api.githubcopilot.com/mcp/\"\n",
+        );
+        f.write(
+            "user/config.toml",
+            "[mcp]\ndisabled = [\"other\", \"github\"]\n",
+        );
+        let loaded = f.load();
+
+        let done = loaded.enable_mcp("github").expect("enable");
+        assert_eq!(
+            done.copied_from,
+            Some(f.root.join("defaults/mcp.d/github.toml"))
+        );
+        assert!(done.unlisted);
+        let copy = std::fs::read_to_string(f.root.join("user/mcp.d/github.toml")).expect("copy");
+        assert!(copy.starts_with("# GitHub MCP\n"), "{copy}");
+        assert!(copy.contains("enabled = true"), "{copy}");
+
+        let reloaded = f.load();
+        assert_eq!(reloaded.settings.mcp.disabled, ["other"]);
+        let servers = crate::load_mcp(&reloaded);
+        assert_eq!(servers.len(), 1);
+        assert!(servers[0].loaded().is_some());
+    }
+
+    #[test]
+    fn enable_mcp_refuses_system_and_policy_blocked_servers() {
+        let f = Fixture::new();
+        f.write(
+            "system/mcp.d/corp.toml",
+            "enabled = false\nurl = \"https://corp.internal/mcp\"\n",
+        );
+        let err = f.load().enable_mcp("corp").expect_err("system");
+        assert!(err.contains("system layer"), "{err}");
+
+        let f2 = Fixture::new();
+        f2.write(
+            "defaults/mcp.d/github.toml",
+            "enabled = false\nurl = \"https://api.githubcopilot.com/mcp/\"\n",
+        );
+        f2.write(
+            "system/config.toml",
+            "[policy.mcp]\nallowed = [\"local-*\"]\n",
+        );
+        let err2 = f2.load().enable_mcp("github").expect_err("policy");
+        assert!(err2.contains("policy"), "{err2}");
+    }
+
+    #[test]
+    fn save_mcp_server_writes_stdio_and_http_with_project_trust() {
+        let f = Fixture::new();
+        let path = f
+            .load()
+            .save_mcp_server(
+                LayerKind::User,
+                NewMcpServer {
+                    id: "everything".into(),
+                    description: Some("Everything demo".into()),
+                    transport: NewMcpTransport::Stdio {
+                        command: "npx".into(),
+                        args: vec![
+                            "-y".into(),
+                            "@modelcontextprotocol/server-everything".into(),
+                        ],
+                        env: BTreeMap::from([("LOG_LEVEL".into(), Secret::Plain("info".into()))]),
+                        cwd: None,
+                        sandbox: Some(true),
+                    },
+                    auto_approve: Vec::new(),
+                    startup_timeout_secs: None,
+                    project: false,
+                    overwrite: false,
+                },
+            )
+            .expect("save user stdio");
+        assert_eq!(path, f.root.join("user/mcp.d/everything.toml"));
+
+        f.write("repo/.quack/config.toml", "");
+        let loaded = f.load();
+        let err = loaded
+            .save_mcp_server(
+                LayerKind::Project,
+                NewMcpServer {
+                    id: "docs".into(),
+                    description: None,
+                    transport: NewMcpTransport::Http {
+                        url: "https://docs.example.com/mcp".into(),
+                        headers: BTreeMap::new(),
+                    },
+                    auto_approve: Vec::new(),
+                    startup_timeout_secs: None,
+                    project: false,
+                    overwrite: false,
+                },
+            )
+            .expect_err("untrusted project rejected");
+        assert!(err.contains("trust"), "{err}");
+
+        loaded.trust_project(TrustDecision::Trusted).expect("trust");
+        let proj_path = f
+            .load()
+            .save_mcp_server(
+                LayerKind::Project,
+                NewMcpServer {
+                    id: "docs".into(),
+                    description: Some("Docs MCP".into()),
+                    transport: NewMcpTransport::Http {
+                        url: "https://docs.example.com/mcp".into(),
+                        headers: BTreeMap::from([(
+                            "Authorization".into(),
+                            Secret::Env {
+                                env: "DOCS_TOKEN".into(),
+                                format: Some("Bearer {}".into()),
+                            },
+                        )]),
+                    },
+                    auto_approve: Vec::new(),
+                    startup_timeout_secs: None,
+                    project: false,
+                    overwrite: false,
+                },
+            )
+            .expect("save trusted project http");
+        assert_eq!(proj_path, f.root.join("repo/.quack/mcp.d/docs.toml"));
+
+        let reloaded = f.load();
+        assert_eq!(reloaded.project, ProjectStatus::Trusted);
+        let servers = crate::load_mcp(&reloaded);
+        let docs = servers.iter().find(|s| s.id == "docs").expect("docs");
+        let doc_file = docs.loaded().expect("loaded docs");
+        assert_eq!(doc_file.url, "https://docs.example.com/mcp");
+        assert_eq!(
+            doc_file.headers.get("Authorization"),
+            Some(&Secret::Env {
+                env: "DOCS_TOKEN".into(),
+                format: Some("Bearer {}".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn save_mcp_server_allows_clean_repo_and_blocks_policy_disabled() {
+        let f = Fixture::new();
+        let clean = f.load();
+        assert_eq!(clean.project, ProjectStatus::None);
+        let proj_path = clean
+            .save_mcp_server(
+                LayerKind::Project,
+                NewMcpServer {
+                    id: "clean".into(),
+                    description: None,
+                    transport: NewMcpTransport::Stdio {
+                        command: "npx".into(),
+                        args: vec!["-y".into(), "clean-mcp".into()],
+                        cwd: None,
+                        sandbox: None,
+                        env: BTreeMap::new(),
+                    },
+                    auto_approve: Vec::new(),
+                    startup_timeout_secs: None,
+                    project: false,
+                    overwrite: false,
+                },
+            )
+            .expect("save on clean repo creates .quack and trusts");
+        assert_eq!(proj_path, f.root.join("repo/.quack/mcp.d/clean.toml"));
+        let reloaded = f.load();
+        assert_eq!(reloaded.project, ProjectStatus::Trusted);
+        assert!(
+            crate::load_mcp(&reloaded)
+                .iter()
+                .any(|s| s.id == "clean" && s.loaded().is_some())
+        );
+
+        f.write(
+            "system/config.toml",
+            "[policy]\nproject_config = \"never\"\n",
+        );
+        let err = f
+            .load()
+            .save_mcp_server(
+                LayerKind::Project,
+                NewMcpServer {
+                    id: "blocked".into(),
+                    description: None,
+                    transport: NewMcpTransport::Http {
+                        url: "https://example.com/mcp".into(),
+                        headers: BTreeMap::new(),
+                    },
+                    auto_approve: Vec::new(),
+                    startup_timeout_secs: None,
+                    project: false,
+                    overwrite: false,
+                },
+            )
+            .expect_err("blocked by policy");
+        assert!(err.contains("policy"), "{err}");
     }
 }

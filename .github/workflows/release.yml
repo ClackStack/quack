@@ -4,7 +4,13 @@ name: Release
 #   quack-<target>.{tar.gz,zip}          binary + defaults bundle (the normal install)
 #   quack-plucked-<target>.{tar.gz,zip}  the same without hosted-service providers
 #   quack[-plucked]_<version>_<arch>.deb and .rpm (Linux)
-#   quack.cdx.json                       CycloneDX SBOM of the binary's dependencies
+#   quack-gui[-plucked]-<target>.{AppImage,dmg}
+#                                        unsigned desktop GUI bundles (glibc Linux, macOS)
+#   quack-gui[-plucked]_<version>_<arch>.deb / .rpm
+#                                        desktop GUI Debian and RPM packages (glibc Linux)
+#   quack-gui[-plucked]-<target>-setup.exe
+#                                        unsigned desktop GUI NSIS installer (Windows)
+#   quack.cdx.json, quack-gui.cdx.json   CycloneDX SBOMs (CLI and desktop GUI)
 #   quack.rb, quack-plucked.rb           Homebrew formulas for a tap
 #   install.sh, install.ps1, SHA256SUMS
 on:
@@ -56,8 +62,50 @@ jobs:
           name: dist-${{ matrix.target }}
           path: dist/*
 
+  build-gui:
+    name: build-gui (${{ matrix.target }})
+    if: startsWith(github.ref, 'refs/tags/')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, linux: true }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, linux: true }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-pc-windows-msvc, os: windows-11-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.3
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf pkg-config xdg-utils file
+        if: matrix.linux
+      # rust-toolchain.toml pins the version; this installs it and the target.
+      - run: rustup target add ${{ matrix.target }}
+      - run: pnpm --dir crates/quack-gui/ui install --frozen-lockfile
+      # Stamp the tag into the workspace version so the bundle and build report
+      # the release; scripts/set-version.sh refreshes Cargo.lock for --locked.
+      - run: scripts/set-version.sh "${GITHUB_REF_NAME#v}"
+        shell: bash
+      - run: scripts/package-gui.sh ${{ matrix.target }}
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-gui-${{ matrix.target }}
+          path: dist/*
+
   publish:
-    needs: build
+    needs: [build, build-gui]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -77,6 +125,9 @@ jobs:
           cargo cyclonedx -q --manifest-path crates/quack-cli/Cargo.toml -f json \
             --spec-version 1.5 --target all --override-filename quack.cdx
           cp crates/quack-cli/quack.cdx.json dist/
+          cargo cyclonedx -q --manifest-path crates/quack-gui/Cargo.toml --features desktop -f json \
+            --spec-version 1.5 --target all --override-filename quack-gui.cdx
+          cp crates/quack-gui/quack-gui.cdx.json dist/
       - run: cd dist && sha256sum * > SHA256SUMS
       # Formulas for the tap; they name the archives' sums, so they are not in SHA256SUMS.
       - run: scripts/homebrew.sh "$GITHUB_REF_NAME" dist/SHA256SUMS dist

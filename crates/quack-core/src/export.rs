@@ -57,6 +57,7 @@ fn markdown(header: &Header<'_>, items: &[ReplayItem]) -> String {
                 summary,
                 ok,
                 result,
+                ..
             } => {
                 let mark = if *ok { "✓" } else { "✗" };
                 let summary = summary.replace('<', "&lt;");
@@ -69,6 +70,11 @@ fn markdown(header: &Header<'_>, items: &[ReplayItem]) -> String {
                         result.trim_end()
                     ));
                 }
+            }
+            ReplayItem::Reasoning { text } => {
+                out.push_str("<details><summary>thinking</summary>\n\n");
+                out.push_str(text.trim_end());
+                out.push_str("\n\n</details>\n");
             }
             ReplayItem::Compacted => {
                 out.push_str("---\n\n_Earlier history was summarized here._\n")
@@ -148,11 +154,13 @@ mod tests {
                 summary: "shell cargo test <x>".into(),
                 ok: false,
                 result: "a ``` fence\nfailed".into(),
+                detail: None,
             },
             ReplayItem::Tool {
                 summary: "edit src/a.rs".into(),
                 ok: true,
                 result: String::new(),
+                detail: Some("@@ -1 +1 @@".into()),
             },
             ReplayItem::Compacted,
             ReplayItem::Assistant {

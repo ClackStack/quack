@@ -16,10 +16,13 @@ pub use image::Image;
 pub use modes::{ApprovalPolicy, PermissionMode, WorkMode};
 pub use startup::{LoadState, Subsystem};
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// A request from a client to the engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     UserTurn {
@@ -72,6 +75,7 @@ pub enum Op {
     /// Summarize older history now. `focus` says what the summary should keep.
     Compact {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         focus: Option<String>,
     },
     /// Revert the files changed by the last edit call. `force` also overwrites files that
@@ -127,7 +131,8 @@ pub enum Op {
     RestartMcp {
         id: String,
     },
-    /// Enable a bundled example or disabled MCP server and reload MCP connections.
+    /// Enable a disabled MCP server (copying a defaults file or setting `enabled = true`
+    /// and removing `[mcp] disabled` entries) and reload MCP connections.
     EnableMcp {
         id: String,
     },
@@ -135,7 +140,7 @@ pub enum Op {
     DisableMcp {
         id: String,
     },
-    /// Write a user-layer `mcp.d/<id>.toml` server and reload MCP connections.
+    /// Write a `mcp.d/<id>.toml` server in the user or project layer and reload MCP connections.
     AddMcp {
         id: String,
         #[serde(default)]
@@ -145,9 +150,37 @@ pub enum Op {
         #[serde(default)]
         args: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         bearer_env: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         bearer_token: Option<SecretText>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        scope: Option<WriteScope>,
+    },
+    /// Create or update `<scope>/mcp.d/<id>.toml`, unlist it from `[mcp] disabled`, and
+    /// reload config.
+    SaveMcpServer {
+        id: String,
+        scope: WriteScope,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        cwd: String,
+        #[serde(default)]
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        sandbox: Option<bool>,
+        #[serde(default)]
+        env: BTreeMap<String, McpSecretValue>,
+        #[serde(default)]
+        headers: BTreeMap<String, McpSecretValue>,
     },
     /// Ask for the language servers' state; answered with `Event::LspServers`.
     ListLsp,
@@ -163,6 +196,7 @@ pub enum Op {
         id: String,
         base_url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         api: Option<String>,
         model: String,
     },
@@ -190,10 +224,29 @@ pub enum Op {
     AddServer {
         base_url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         key: Option<SecretText>,
     },
     /// Ask for the memory notes; answered with `Event::MemoryNotes`.
     ListMemory,
+    /// Create or update a memory note and reconcile `MEMORY.md`; answered with
+    /// `Event::MemoryNotes`. `scope` is `global` or `project`; `kind` is one of
+    /// `user`, `project`, `feedback`, `reference`. When `previous_scope` and
+    /// `previous_name` name a different existing note, that old note is removed after
+    /// writing the replacement so renames and scope moves keep one note.
+    SaveMemory {
+        scope: String,
+        name: String,
+        description: String,
+        kind: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        previous_scope: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        previous_name: Option<String>,
+    },
     /// Delete a memory note. `scope` is `global` or `project`.
     DeleteMemory {
         scope: String,
@@ -216,6 +269,7 @@ pub enum Op {
     Export {
         format: ExportFormat,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         path: Option<String>,
     },
     /// Ask for the messages the conversation can go back to; answered with
@@ -269,11 +323,15 @@ pub enum Op {
     CancelHookCheck {
         request: u64,
     },
+    /// Look for a newer release at the configured `updates.url` now; answered with
+    /// `Event::UpdateCheckResult`.
+    CheckUpdates,
     Shutdown,
 }
 
 /// A notification from the engine to its clients.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
     HookSetup {
@@ -310,6 +368,7 @@ pub enum Event {
     /// none for a new session.
     SessionTitle {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         title: Option<String>,
     },
     /// Every configured provider with its models (declared and discovered).
@@ -355,6 +414,7 @@ pub enum Event {
         value: String,
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         note: Option<String>,
     },
     /// Enabling this hook needs a choice about the existing payload.
@@ -368,6 +428,16 @@ pub enum Event {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+    },
+    /// An MCP server was enabled (`mcp.d/` updated or unlisted from `[mcp] disabled`).
+    McpEnabled {
+        id: String,
+        path: String,
+    },
+    /// An MCP server file (`<layer>/mcp.d/<id>.toml`) was written and queued for reload.
+    McpServerSaved {
+        id: String,
+        path: String,
     },
     ShutdownComplete,
     /// The config files were read again; startup progress follows, then `StartupComplete`.
@@ -442,10 +512,12 @@ pub enum Event {
         used: u32,
         budget: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         window: Option<u32>,
         cache_hit_tokens: Option<u32>,
         /// Above this the next request is pruned, then compacted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         threshold: Option<u32>,
     },
     ContextPruned {
@@ -456,6 +528,7 @@ pub enum Event {
         ttft_ms: u32,
         /// Output tokens per second; `None` when the reply was too short to measure.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         tokens_per_sec: Option<f32>,
     },
     /// A summary is being written; `reason` says why (e.g. `/compact`, the threshold).
@@ -510,6 +583,7 @@ pub enum Event {
     ProviderAdded {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         path: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
@@ -563,6 +637,7 @@ pub enum Event {
         ms: u64,
         /// What the hook said, or why it failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         message: Option<String>,
         /// Estimated tokens of context it added.
         #[serde(default)]
@@ -611,6 +686,14 @@ pub enum Event {
         current: String,
         latest: String,
     },
+    /// Result of an explicit [`Op::CheckUpdates`] release check.
+    UpdateCheckResult {
+        current: String,
+        latest: Option<String>,
+        update_available: bool,
+        url: Option<String>,
+        error: Option<String>,
+    },
     Warning {
         message: String,
     },
@@ -620,6 +703,7 @@ pub enum Event {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputItem {
     Text {
@@ -643,14 +727,18 @@ impl InputItem {
 
 /// Per-turn overrides of session settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TurnOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ExportFormat {
     #[default]
@@ -658,7 +746,8 @@ pub enum ExportFormat {
     Json,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum WriteScope {
     Session,
@@ -667,6 +756,7 @@ pub enum WriteScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum ApprovalDecision {
     AllowOnce,
@@ -678,6 +768,7 @@ pub enum ApprovalDecision {
 
 /// A question from the model to the user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Question {
     /// A word or two naming the topic, e.g. `Storage`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -688,18 +779,22 @@ pub struct Question {
     pub options: Vec<QuestionOption>,
     /// The option the model recommends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub recommended: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct QuestionOption {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub description: Option<String>,
 }
 
 /// The user's answer to one [`Question`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "answer", rename_all = "snake_case")]
 pub enum Answer {
     /// An option, by index.
@@ -713,6 +808,7 @@ pub enum Answer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApprovalRequest {
     Shell {
@@ -733,6 +829,7 @@ pub enum ApprovalRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ToolCallInfo {
     pub call_id: CallId,
     pub name: String,
@@ -741,16 +838,19 @@ pub struct ToolCallInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ToolResultSummary {
     pub ok: bool,
     pub summary: String,
     /// Full diff or output for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub detail: Option<String>,
 }
 
 /// A custom slash command (`commands/<name>.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CommandInfo {
     /// Without the slash, e.g. `review` or `test:flaky`.
     pub name: String,
@@ -764,6 +864,7 @@ pub struct CommandInfo {
 
 /// One instruction file the model has seen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct InstructionFile {
     /// The path as shown to the model, relative to the workspace when inside it.
     pub source: String,
@@ -777,6 +878,7 @@ pub struct InstructionFile {
 
 /// A profile as it would shape the current model's session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ProfileInfo {
     pub id: String,
     pub description: String,
@@ -792,6 +894,7 @@ pub struct ProfileInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ProviderModels {
     pub id: String,
     /// False when the provider cannot be used right now (missing key, unreachable).
@@ -805,11 +908,13 @@ pub struct ProviderModels {
     pub bundled: bool,
     /// Where its key is read from, when it takes one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub key: Option<KeySource>,
 }
 
 /// A language server from `lsp.d/` and its state (one per project folder it serves).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct LspServerInfo {
     pub id: String,
     /// The command line.
@@ -831,6 +936,7 @@ pub struct LspServerInfo {
 
 /// An MCP server from `mcp.d/` and its state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct McpServerInfo {
     pub id: String,
     /// `stdio` or `http`.
@@ -858,8 +964,28 @@ pub struct McpServerInfo {
     pub log: Vec<String>,
 }
 
+/// Credential/value binding used when saving an `mcp.d/<id>.toml` server entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum McpSecretValue {
+    Plain {
+        value: SecretText,
+    },
+    Env {
+        env: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        format: Option<String>,
+    },
+    Keyring {
+        keyring: String,
+    },
+}
+
 /// The state of a language server, as `/lsp` shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum LspServerState {
     #[serde(rename = "not installed")]
     NotInstalled,
@@ -916,6 +1042,7 @@ impl std::fmt::Display for LspServerState {
 
 /// The state of an MCP server, as `/mcp` shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum McpServerState {
     Starting,
@@ -943,6 +1070,7 @@ impl std::fmt::Display for McpServerState {
 
 /// A model server found on this machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DetectedServer {
     /// Suggested provider id, e.g. `ollama`.
     pub id: String,
@@ -950,6 +1078,7 @@ pub struct DetectedServer {
     pub name: String,
     pub base_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub api: Option<String>,
     /// What this engine needs for tool calls, e.g. a server flag. May be empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -957,11 +1086,13 @@ pub struct DetectedServer {
     pub models: Vec<ModelInfo>,
     /// The configured provider that already points here, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub configured: Option<String>,
 }
 
 /// A hosted service from `providers.d` using an API key or subscription.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ServiceInfo {
     /// Uses browser sign-in instead of an API key.
     #[serde(default)]
@@ -973,16 +1104,19 @@ pub struct ServiceInfo {
     pub base_url: String,
     /// The variable its key is read from, when it is read from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub env: Option<String>,
     /// Its key is configured, or its saved sign-in allows plan usage.
     pub ready: bool,
     /// Where its key is read from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub key: Option<KeySource>,
 }
 
 /// Where a provider's `api_key` is read from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "from", rename_all = "kebab-case")]
 pub enum KeySource {
     /// The OS credential store, under this name.
@@ -1004,6 +1138,7 @@ pub enum KeySource {
 /// Text the user typed that must not be shown: serialized as is, but `Debug` hides it, so
 /// it never reaches a log.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(transparent)]
 pub struct SecretText(pub String);
 
@@ -1014,14 +1149,18 @@ impl std::fmt::Debug for SecretText {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ModelInfo {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub alias: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub context_window: Option<u32>,
     /// For showing, e.g. `$0.30 in · $1.20 out per 1M tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub price: Option<String>,
     /// Selectable thinking levels from the provider file's `reasoning.efforts`, in picker
     /// order. Empty means the model declares none.
@@ -1030,6 +1169,7 @@ pub struct ModelInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SessionSummary {
     pub id: SessionId,
     pub title: String,
@@ -1045,6 +1185,7 @@ pub struct SessionSummary {
 
 /// A user message the conversation can go back to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RewindPoint {
     /// 1 for the last user message, 2 for the one before, and so on.
     pub back: u32,
@@ -1055,6 +1196,7 @@ pub struct RewindPoint {
 
 /// A transcript entry of a resumed session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReplayItem {
     User {
@@ -1067,33 +1209,48 @@ pub enum ReplayItem {
         summary: String,
         ok: bool,
         result: String,
+        /// The full diff or output, for a collapsible card in the desktop client.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        detail: Option<String>,
+    },
+    /// Thinking streamed before an assistant reply, replayed collapsed.
+    Reasoning {
+        text: String,
     },
     /// Earlier history was summarized here.
     Compacted,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub cached_prompt_tokens: Option<u32>,
     /// Prompt tokens written to the server's cache, for servers that bill writes apart
     /// (Anthropic). Part of `prompt_tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub cache_write_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ContextReport {
     /// `<provider>/<model>`.
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub budget: Option<u32>,
     /// Requests estimated above this get pruned, then compacted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub threshold: Option<u32>,
     /// Estimated prompt tokens of the next request.
     pub used: u32,
@@ -1102,12 +1259,14 @@ pub struct ContextReport {
     pub segments: Vec<ContextSegment>,
     /// Caveats, e.g. that the history is in use by a running turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub note: Option<String>,
 }
 
 /// Usage of one session. Token totals include earlier runs of a resumed session; timings
 /// and tool counts cover only the time since it was opened (`resumed`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct StatsReport {
     /// The current `<provider>/<model>`.
     pub model: String,
@@ -1127,15 +1286,18 @@ pub struct StatsReport {
     pub cache_reported: u32,
     /// US dollars, from the `cost` of the models used. `None` when none had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub cost: Option<f64>,
     /// Requests to models without a `cost`, left out of `cost`.
     #[serde(default)]
     pub unpriced: u32,
     /// Time to first token, median and slowest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub ttft_ms: Option<(u32, u32)>,
     /// Median generation speed, tokens per second.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub tokens_per_sec: Option<f32>,
     /// Since the session was opened: in the session, waiting for the model, running tools,
     /// and waiting for the user to approve.
@@ -1167,20 +1329,25 @@ impl StatsReport {
 
 /// One model call, for the charts in `/stats`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RequestStat {
     pub prompt: u32,
     pub cached: u32,
     pub completion: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub cost: Option<f64>,
     /// Absent for requests from before a resume, and for replies too short to time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub ttft_ms: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub tokens_per_sec: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ToolStat {
     pub name: String,
     pub calls: u32,
@@ -1189,6 +1356,7 @@ pub struct ToolStat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
@@ -1200,6 +1368,7 @@ pub struct SkillInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DoctorCheck {
     pub name: String,
     pub status: CheckStatus,
@@ -1207,6 +1376,7 @@ pub struct DoctorCheck {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     Ok,
@@ -1216,6 +1386,7 @@ pub enum CheckStatus {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MemoryNote {
     /// `global` or `project`.
     pub scope: String,
@@ -1226,6 +1397,7 @@ pub struct MemoryNote {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ContextSegment {
     pub name: String,
     pub tokens: u32,
@@ -1234,12 +1406,14 @@ pub struct ContextSegment {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PruneReport {
     pub removed_tokens: u32,
     pub items: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SessionInfo {
     pub id: SessionId,
     pub cwd: String,
@@ -1255,12 +1429,14 @@ pub struct SessionInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EngineError {
     pub kind: EngineErrorKind,
     pub message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum EngineErrorKind {
     Config,
@@ -1294,5 +1470,155 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap_or_default();
         assert_eq!(serde_json::from_str::<Event>(&json).ok(), Some(ev));
+    }
+
+    /// The wire shapes the exported TypeScript (crates/quack-gui/ui/src/lib/protocol.ts)
+    /// describes: tags as literal fields, transparent string ids, skipped fields absent.
+    #[cfg(feature = "ts")]
+    #[test]
+    fn wire_shapes_agree_with_the_typescript_types() {
+        fn wire_json<T: Serialize>(v: &T) -> String {
+            serde_json::to_string(v).expect("protocol values always serialize")
+        }
+
+        let op = Op::UserTurn {
+            items: vec![InputItem::text("hi")],
+            overrides: TurnOverrides::default(),
+        };
+        assert_eq!(
+            wire_json(&op),
+            r#"{"op":"user_turn","items":[{"type":"text","text":"hi"}],"overrides":{}}"#
+        );
+
+        let op = Op::ApprovalResponse {
+            call_id: CallId::from("c1"),
+            decision: ApprovalDecision::AllowOnce,
+        };
+        // ApprovalDecision is itself internally tagged, so it nests as an object.
+        assert_eq!(
+            wire_json(&op),
+            r#"{"op":"approval_response","call_id":"c1","decision":{"decision":"allow_once"}}"#
+        );
+
+        let op = Op::ApprovalResponse {
+            call_id: CallId::from("c1"),
+            decision: ApprovalDecision::DenyWithFeedback {
+                feedback: "not yet".into(),
+            },
+        };
+        assert_eq!(
+            wire_json(&op),
+            r#"{"op":"approval_response","call_id":"c1","decision":{"decision":"deny_with_feedback","feedback":"not yet"}}"#
+        );
+
+        let ev = Event::ApprovalRequest {
+            call_id: CallId::from("c1"),
+            request: ApprovalRequest::Shell {
+                command: "cargo test".into(),
+                cwd: ".".into(),
+                outside_sandbox: false,
+            },
+            always: vec!["shell:cargo test".into()],
+        };
+        assert_eq!(
+            wire_json(&ev),
+            r#"{"event":"approval_request","call_id":"c1","request":{"kind":"shell","command":"cargo test","cwd":"."},"always":["shell:cargo test"]}"#
+        );
+
+        assert_eq!(
+            wire_json(&ToolCallInfo {
+                call_id: CallId::from("c1"),
+                name: "edit".into(),
+                summary: "edit src/main.rs".into(),
+            }),
+            r#"{"call_id":"c1","name":"edit","summary":"edit src/main.rs"}"#
+        );
+
+        // Transparent ids and SecretText serialize as plain JSON strings.
+        assert_eq!(wire_json(&SecretText("hunter2".into())), r#""hunter2""#);
+        assert_eq!(wire_json(&SessionId::from("0197abcd")), r#""0197abcd""#);
+
+        assert_eq!(
+            wire_json(&ToolResultSummary {
+                ok: true,
+                summary: "patched".into(),
+                detail: Some("@@ -1 +1 @@".into()),
+            }),
+            r#"{"ok":true,"summary":"patched","detail":"@@ -1 +1 @@"}"#
+        );
+        assert_eq!(
+            wire_json(&ToolResultSummary {
+                ok: true,
+                summary: "patched".into(),
+                detail: None,
+            }),
+            r#"{"ok":true,"summary":"patched"}"#
+        );
+
+        assert_eq!(
+            wire_json(&ReplayItem::Tool {
+                summary: "edit src/main.rs".into(),
+                ok: true,
+                result: "patched".into(),
+                detail: None,
+            }),
+            r#"{"kind":"tool","summary":"edit src/main.rs","ok":true,"result":"patched"}"#
+        );
+        assert_eq!(
+            wire_json(&ReplayItem::Reasoning {
+                text: "thinking".into(),
+            }),
+            r#"{"kind":"reasoning","text":"thinking"}"#
+        );
+
+        assert_eq!(
+            wire_json(&Op::SaveMemory {
+                scope: "project".into(),
+                name: "rust-conventions".into(),
+                description: "Workspace style notes".into(),
+                kind: "project".into(),
+                body: "Prefer Result over unwrap.".into(),
+                previous_scope: None,
+                previous_name: None,
+            }),
+            r#"{"op":"save_memory","scope":"project","name":"rust-conventions","description":"Workspace style notes","kind":"project","body":"Prefer Result over unwrap."}"#
+        );
+        assert_eq!(
+            wire_json(&Op::SaveMemory {
+                scope: "global".into(),
+                name: "rust-conventions".into(),
+                description: "Workspace style notes".into(),
+                kind: "reference".into(),
+                body: "Body".into(),
+                previous_scope: Some("project".into()),
+                previous_name: Some("old-name".into()),
+            }),
+            r#"{"op":"save_memory","scope":"global","name":"rust-conventions","description":"Workspace style notes","kind":"reference","body":"Body","previous_scope":"project","previous_name":"old-name"}"#
+        );
+
+        assert_eq!(
+            wire_json(&Op::AddMcp {
+                id: "docs".into(),
+                url: "https://example.com/mcp".into(),
+                command: String::new(),
+                args: vec![],
+                bearer_env: None,
+                bearer_token: None,
+                scope: None,
+            }),
+            r#"{"op":"add_mcp","id":"docs","url":"https://example.com/mcp","command":"","args":[]}"#
+        );
+        assert_eq!(
+            wire_json(&Op::AddMcp {
+                id: "docs".into(),
+                url: String::new(),
+                command: "npx".into(),
+                args: vec!["server".into()],
+                bearer_env: None,
+                bearer_token: None,
+                scope: Some(WriteScope::Project),
+            }),
+            r#"{"op":"add_mcp","id":"docs","url":"","command":"npx","args":["server"],"scope":"project"}"#
+        );
     }
 }

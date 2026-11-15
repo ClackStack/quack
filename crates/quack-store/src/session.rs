@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -142,6 +143,7 @@ impl ProjectSessions {
 }
 
 const MAX_HISTORY: usize = 100;
+static HISTORY_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Load prompt history from a `history.jsonl` file, oldest first.
 pub fn load_history_file(path: &Path) -> Vec<String> {
@@ -161,7 +163,8 @@ pub fn load_history_file(path: &Path) -> Vec<String> {
 }
 
 /// Append a prompt to a `history.jsonl` file, keeping at most [`MAX_HISTORY`] entries
-/// and skipping consecutive duplicates.
+/// and skipping consecutive duplicates. Written via a sibling temp file and rename so
+/// concurrent readers (e.g. TUI and GUI) never observe a half-written file.
 pub fn append_history_file(path: &Path, text: &str) -> std::io::Result<()> {
     if text.trim().is_empty() {
         return Ok(());
@@ -177,13 +180,20 @@ pub fn append_history_file(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut f = File::create(path)?;
+    let mut buf = String::new();
     for entry in &all {
         let line = serde_json::to_string(entry)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        writeln!(f, "{line}")?;
+        buf.push_str(&line);
+        buf.push('\n');
     }
-    Ok(())
+    let seq = HISTORY_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("jsonl.{}.{seq}.tmp", std::process::id()));
+    std::fs::write(&tmp, buf)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
 }
 
 /// A parsed log line.
@@ -420,5 +430,32 @@ mod tests {
         ps.append_history("   ").expect("skip blank");
         ps.append_history("third").expect("append");
         assert_eq!(ps.load_history(), vec!["first\nsecond line", "third"]);
+    }
+
+    #[test]
+    fn append_history_file_writes_atomically_without_leaving_temp_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("proj").join("history.jsonl");
+        let handles: Vec<_> = (0..4)
+            .map(|t| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for i in 0..10 {
+                        append_history_file(&path, &format!("worker-{t}-prompt-{i}"))
+                            .expect("append");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread join");
+        }
+        let entries: Vec<_> = std::fs::read_dir(path.parent().expect("parent"))
+            .expect("readdir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["history.jsonl"]);
+        assert!(!load_history_file(&path).is_empty());
     }
 }

@@ -120,6 +120,13 @@ pub fn load_hooks(loaded: &Loaded) -> Vec<Item<HookFile>> {
     items
 }
 
+/// Parse a drop-in TOML item file on disk, used by UI snapshots to inspect metadata of
+/// disabled items without bypassing their disabled state.
+pub fn read_item_file<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Option<T> {
+    let text = std::fs::read_to_string(path).ok()?;
+    toml::from_str(&text).ok()
+}
+
 /// Load `lsp.d/*.toml` from every active layer, merged by id. A project's files load
 /// only when the project is trusted.
 pub fn load_lsp(loaded: &Loaded) -> Vec<Item<LspServerFile>> {

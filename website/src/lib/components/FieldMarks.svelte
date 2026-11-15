@@ -73,7 +73,8 @@
 				['Starts at once', 'The first frame draws in about <10 ms on Linux.'],
 				['Headless', '`quack exec "…"` runs one turn for scripts and CI.'],
 				['Sees itself', '`/context` and `/stats` chart tokens, cache hits, cost and time.'],
-				['Over SSH', 'Mouse selection and `/copy` go through the terminal (OSC 52).']
+				['Over SSH', 'Mouse selection and `/copy` go through the terminal (OSC 52).'],
+				['Desktop window', '`quack-gui` wraps the same engine in a Tauri window for approvals, diffs and parallel repo jobs.']
 			]
 		}
 	];

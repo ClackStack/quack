@@ -142,8 +142,15 @@ pub(crate) const COMMANDS: &[Command] = &[
     c(
         "config",
         &["settings"],
-        "[set <key> <value>]",
-        "Settings with their origins; saves changes to the user config.toml",
+        "[set [--project|--user] <key> <value>]",
+        "Settings with their origins; ^l toggles user config or .quack/",
+        None,
+    ),
+    c(
+        "scope",
+        &[],
+        "[user|project]",
+        "Choose where settings and new MCP servers save (user config or .quack/)",
         None,
     ),
     c(
@@ -331,5 +338,9 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     (
         "Ctrl-S (in modal)",
         "Secondary action, e.g. save as default in /models",
+    ),
+    (
+        "Ctrl-L (modal / approval)",
+        "Toggle save scope between user config and project .quack/",
     ),
 ];

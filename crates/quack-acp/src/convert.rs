@@ -214,6 +214,7 @@ pub(crate) fn replay(items: Vec<ReplayItem>) -> Vec<Value> {
                 summary,
                 ok,
                 result,
+                ..
             } => {
                 let status = if ok { "completed" } else { "failed" };
                 let name = summary.split_whitespace().next().unwrap_or_default();
@@ -223,6 +224,7 @@ pub(crate) fn replay(items: Vec<ReplayItem>) -> Vec<Value> {
                 }
                 call
             }
+            ReplayItem::Reasoning { text } => chunk("agent_thought_chunk", &text),
             ReplayItem::Compacted => {
                 chunk("agent_thought_chunk", "(earlier conversation summarized)")
             }

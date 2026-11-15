@@ -1,0 +1,529 @@
+/*
+ * quack-gui design tokens (crates/quack-gui/ui).
+ *
+ * The field guide, evolved: the project is a pond quack surveys. Cream paper
+ * grounds the work; deep pond water binds the rail, so the duck works on its
+ * own element; double rules and hairlines frame every edge the way a guide
+ * book frames its plates. Bitter carries prose and names, Archivo carries
+ * chrome, Spline Sans Mono carries the machine voice. Chroma does one job at
+ * a time: duck yellow marks the live thing, pond blue holds the water it all
+ * sits on, vermilion what is struck out of it. Dark mode is the night survey:
+ * the same pond after dark, paper gone dark, inks kept in rank.
+ */
+
+@font-face {
+	font-family: 'Bitter';
+	src: url('/fonts/bitter-var.ttf') format('truetype-variations');
+	font-weight: 100 900;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Bitter';
+	src: url('/fonts/bitter-italic-var.ttf') format('truetype-variations');
+	font-weight: 100 900;
+	font-style: italic;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Archivo';
+	src: url('/fonts/archivo-var.ttf') format('truetype-variations');
+	font-weight: 100 900;
+	font-stretch: 62% 125%;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Spline Sans Mono';
+	src: url('/fonts/spline-mono-var.ttf') format('truetype-variations');
+	font-weight: 300 700;
+	font-style: normal;
+	font-display: swap;
+}
+
+:root {
+	color-scheme: light;
+	--select-caret: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4 6l4 4 4-4' stroke='%2357503f' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+	--bg: #f7f3e8;
+	--bg-soft: #f0ead9;
+	--bg-panel: #fbf7ec;
+	--bg-raised: #fffdf4;
+	--ink: #2f2a20;
+	--ink-2: #57503f;
+	--ink-3: #6b6353;
+	--rule: #b3a98e;
+	--rule-soft: #d9d0ba;
+
+	/* The pond water binding the rail. */
+	--cloth: #264457;
+	--cloth-deep: #182e3d;
+	--cloth-card: #1d3646;
+	--cloth-job: #162a38;
+	--cloth-ink: #ebf1f5;
+	--cloth-dim: #c8d7e0;
+	--cloth-mut: #a7becb;
+	--cloth-ok: #a9d186;
+	--cloth-fail: #f09c75;
+
+	/* Chroma with jobs. */
+	--duck: #e8b21a;
+	--duck-line: #b98a06;
+	--duck-soft: #f6ecd0;
+	--duck-ink: #6b5410;
+	--sky: #5e8ba3;
+	--sky-soft: #e7eef1;
+	--sky-ink: #35586b;
+	--beak: #d07c24;
+	--beak-ink: #8a4a08;
+	--beak-soft: #f7ecdd;
+
+	--ok: #4a7031;
+	--ok-soft: #eaf0dd;
+	--fail: #b6401f;
+	--fail-soft: #f7e8e0;
+	--warn: #8a6a00;
+
+	--ver: #b6401f;
+	--grn: #4a7031;
+
+	/* Specimen plates: the dark frame and the inner ring. */
+	--plate-line: #3c3526;
+	--plate-ring: #e2d8bd;
+
+	--selection: rgba(53, 88, 107, 0.24);
+	--user-row: #f0ead9;
+
+	--term: #1b2431;
+	--term-text: #d8d3c0;
+	--term-dim: #8f8a76;
+
+	--focus: #35586b;
+
+	--font-ui: 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--font-serif: 'Bitter', Georgia, 'Times New Roman', serif;
+	--font-mono: 'Spline Sans Mono', ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+
+	--text-scale: 1;
+	--text-ui: 0.84375rem;
+	--text-prose: 0.9375rem;
+	--text-mono: 0.8125rem;
+	--leading-prose: 1.6;
+	--leading-ui: 1.45;
+
+	--r-sm: 4px;
+	--r-md: 6px;
+	--r-lg: 9px;
+	--r-xl: 12px;
+
+	--sp-xs: 4px;
+	--sp-sm: 8px;
+	--sp-md: 16px;
+	--sp-lg: 24px;
+	--sp-xl: 32px;
+
+	--header-h: 3.25rem;
+	--sidebar-w: 336px;
+
+	--shadow-pop: 0 16px 34px -14px rgba(23, 42, 55, 0.45), 0 3px 9px rgba(23, 42, 55, 0.14);
+	--shadow-card: 0 1px 2px rgba(23, 42, 55, 0.1);
+	--scrim: rgba(18, 32, 42, 0.42);
+}
+
+:root[data-theme='dark'] {
+	color-scheme: dark;
+	--select-caret: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4 6l4 4 4-4' stroke='%23b8b29c' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+	--bg: #151b23;
+	--bg-soft: #10151d;
+	--bg-panel: #1a212b;
+	--bg-raised: #222b36;
+	--ink: #e8e3d0;
+	--ink-2: #b8b29c;
+	--ink-3: #948f7a;
+	--rule: #3d4959;
+	--rule-soft: #2b3542;
+
+	--cloth: #0d1722;
+	--cloth-deep: #070e16;
+	--cloth-card: #132130;
+	--cloth-job: #0e1926;
+	--cloth-ink: #e2ebf0;
+	--cloth-dim: #b8cad4;
+	--cloth-mut: #91a8b5;
+	--cloth-ok: #a3c47e;
+	--cloth-fail: #e08356;
+
+	--duck: #e8b21a;
+	--duck-line: #8a6a10;
+	--duck-soft: #2e2812;
+	--duck-ink: #edc65a;
+	--sky: #7fb3c9;
+	--sky-soft: #1d2f38;
+	--sky-ink: #9cc4d6;
+	--beak: #d99a52;
+	--beak-ink: #e3b283;
+	--beak-soft: #33270f;
+
+	--ok: #a3c47e;
+	--ok-soft: #25301a;
+	--fail: #e08356;
+	--fail-soft: #3a2118;
+	--warn: #d3ab3e;
+
+	--ver: #e08356;
+	--grn: #a3c47e;
+
+	--plate-line: #4a5a6c;
+	--plate-ring: #2d3a49;
+
+	--selection: rgba(127, 179, 201, 0.3);
+	--user-row: #1c242e;
+
+	--term: #10161f;
+	--term-text: #d8d3c0;
+	--term-dim: #8f8a76;
+
+	--focus: #9cc4d6;
+
+	--shadow-pop: 0 16px 34px -14px rgba(0, 0, 0, 0.6), 0 3px 9px rgba(0, 0, 0, 0.4);
+	--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
+	--scrim: rgba(4, 9, 14, 0.62);
+}
+
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme='light']) {
+		color-scheme: dark;
+		--select-caret: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4 6l4 4 4-4' stroke='%23b8b29c' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+		--bg: #151b23;
+		--bg-soft: #10151d;
+		--bg-panel: #1a212b;
+		--bg-raised: #222b36;
+		--ink: #e8e3d0;
+		--ink-2: #b8b29c;
+		--ink-3: #948f7a;
+		--rule: #3d4959;
+		--rule-soft: #2b3542;
+
+		--cloth: #0d1722;
+		--cloth-deep: #070e16;
+		--cloth-card: #132130;
+		--cloth-job: #0e1926;
+		--cloth-ink: #e2ebf0;
+		--cloth-dim: #b8cad4;
+		--cloth-mut: #91a8b5;
+		--cloth-ok: #a3c47e;
+		--cloth-fail: #e08356;
+
+		--duck-line: #8a6a10;
+		--duck-soft: #2e2812;
+		--duck-ink: #edc65a;
+		--sky: #7fb3c9;
+		--sky-soft: #1d2f38;
+		--sky-ink: #9cc4d6;
+		--beak: #d99a52;
+		--beak-ink: #e3b283;
+		--beak-soft: #33270f;
+
+		--ok: #a3c47e;
+		--ok-soft: #25301a;
+		--fail: #e08356;
+		--fail-soft: #3a2118;
+		--warn: #d3ab3e;
+
+		--ver: #e08356;
+		--grn: #a3c47e;
+
+		--plate-line: #4a5a6c;
+		--plate-ring: #2d3a49;
+
+		--selection: rgba(127, 179, 201, 0.3);
+		--user-row: #1c242e;
+
+		--term: #10161f;
+		--term-text: #d8d3c0;
+		--term-dim: #8f8a76;
+
+		--focus: #9cc4d6;
+
+		--shadow-pop: 0 16px 34px -14px rgba(0, 0, 0, 0.6), 0 3px 9px rgba(0, 0, 0, 0.4);
+		--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
+		--scrim: rgba(4, 9, 14, 0.62);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		transition-duration: 0.01ms !important;
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html {
+	font-size: calc(100% * var(--text-scale, 1));
+}
+
+html,
+body {
+	height: 100%;
+}
+
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--ink);
+	font-family: var(--font-ui);
+	font-size: var(--text-ui);
+	line-height: var(--leading-ui);
+	-webkit-font-smoothing: antialiased;
+}
+
+::selection {
+	background: var(--selection);
+}
+
+:focus-visible {
+	outline: 2px solid var(--focus);
+	outline-offset: 1px;
+	border-radius: var(--r-sm);
+}
+
+button {
+	font: inherit;
+	color: inherit;
+	background: none;
+	border: none;
+	padding: 0;
+	cursor: pointer;
+}
+
+button:disabled {
+	cursor: default;
+	opacity: 0.55;
+}
+
+input,
+textarea,
+select {
+	font: inherit;
+	color: inherit;
+}
+
+/* Native GTK / Aqua select chrome ignores CSS background and height unless appearance is reset. */
+:where(select:not([multiple]):not([size])) {
+	appearance: none;
+	-webkit-appearance: none;
+	line-height: 1.4;
+	background-color: var(--bg-raised);
+	background-image: var(--select-caret);
+	background-repeat: no-repeat;
+	background-position: right 10px center;
+	background-size: 12px 12px;
+	padding-right: 30px;
+	text-overflow: ellipsis;
+	cursor: pointer;
+	transition:
+		border-color 120ms ease-out,
+		background-color 120ms ease-out;
+}
+
+:where(select:not([multiple]):not([size]):hover:not(:disabled)) {
+	border-color: var(--ink-3);
+}
+
+:where(select:disabled) {
+	cursor: default;
+	opacity: 0.55;
+}
+
+:where(select option, select optgroup) {
+	background-color: var(--bg-raised);
+	color: var(--ink);
+}
+
+:where(select option:disabled) {
+	color: var(--ink-3);
+}
+
+@media (forced-colors: active) {
+	:where(select:not([multiple]):not([size])) {
+		appearance: auto;
+		-webkit-appearance: auto;
+		background-image: none;
+		padding-right: 8px;
+	}
+}
+
+code,
+pre,
+kbd {
+	font-family: var(--font-mono);
+	font-size: var(--text-mono);
+}
+
+/* The browser chrome quack did not draw still carries the design. */
+::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+::-webkit-scrollbar-thumb {
+	background: var(--rule);
+	border-radius: 5px;
+	border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover {
+	background: var(--ink-3);
+}
+::-webkit-scrollbar-corner {
+	background: transparent;
+}
+
+/* Shared control styles (global because the components are many and small).
+ * The primary action is the guide's one bright mark: duck yellow, dark ink. */
+.btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 12px;
+	border-radius: var(--r-lg);
+	border: 1px solid var(--rule);
+	background: var(--bg-raised);
+	color: var(--ink);
+	font-weight: 600;
+	transition:
+		background-color 120ms ease-out,
+		border-color 120ms ease-out,
+		color 120ms ease-out;
+}
+
+.btn:hover:not(:disabled) {
+	background: var(--bg-soft);
+	border-color: var(--ink-3);
+}
+
+.btn-primary {
+	background: var(--duck);
+	border-color: var(--duck-line);
+	color: #2b240f;
+	box-shadow: var(--shadow-card);
+}
+
+.btn-primary:hover:not(:disabled) {
+	background: #f0c23a;
+	border-color: var(--duck-line);
+	color: #2b240f;
+}
+
+.btn-danger {
+	color: var(--fail);
+	border-color: var(--fail);
+}
+
+.btn-danger:hover:not(:disabled) {
+	background: var(--fail-soft);
+}
+
+.pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	min-height: 1.75rem;
+	padding: 0 12px;
+	border-radius: 999px;
+	border: 1px solid var(--rule);
+	background: var(--bg-panel);
+	color: var(--ink-2);
+	font-size: 0.75rem;
+	font-weight: 500;
+	white-space: nowrap;
+}
+
+.pill-live {
+	border-color: var(--duck-line);
+	background: var(--duck-soft);
+	color: var(--duck-ink);
+}
+
+.kbd {
+	font-family: var(--font-mono);
+	font-size: 0.6875rem;
+	color: var(--ink-3);
+	border: 1px solid var(--rule);
+	border-bottom-width: 2px;
+	border-radius: var(--r-sm);
+	padding: 1px 5px;
+	background: var(--bg-soft);
+}
+
+/* Field marks: the circled numerals that number a plate's evidence. */
+.mark {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.0625rem;
+	height: 1.0625rem;
+	border-radius: 50%;
+	border: 1.5px solid currentColor;
+	font-family: var(--font-ui);
+	font-size: 0.65625rem;
+	font-weight: 700;
+	line-height: 1;
+	flex: none;
+}
+
+/* The pond surface of the rail, as two passing ripples. */
+.cloth {
+	background-color: var(--cloth);
+	background-image:
+		repeating-linear-gradient(0deg, rgba(240, 248, 252, 0.03) 0 1px, transparent 1px 4px),
+		repeating-linear-gradient(90deg, rgba(6, 16, 24, 0.08) 0 1px, transparent 1px 4px);
+}
+
+/* Tree-sitter syntax highlight tokens inside dark `.code` plates. */
+.tok-keyword,
+.tok-tag {
+	color: #edc65a;
+}
+.tok-operator {
+	color: #d99a52;
+}
+.tok-function,
+.tok-function-builtin,
+.tok-function-macro,
+.tok-constructor {
+	color: #9cc4d6;
+}
+.tok-string,
+.tok-string-special,
+.tok-escape {
+	color: #a9d186;
+}
+.tok-comment {
+	color: #8f8a76;
+	font-style: italic;
+}
+.tok-number,
+.tok-constant,
+.tok-constant-builtin,
+.tok-label {
+	color: #e3b283;
+}
+.tok-type,
+.tok-type-builtin,
+.tok-module,
+.tok-attribute {
+	color: #c8d7e0;
+}
+.tok-property,
+.tok-variable-builtin,
+.tok-variable-parameter,
+.tok-embedded {
+	color: #e8e3d0;
+}
+.tok-punctuation {
+	color: #a8a28d;
+}

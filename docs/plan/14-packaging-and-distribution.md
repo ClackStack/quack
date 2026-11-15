@@ -161,15 +161,22 @@ short URL the README and the site show is always the current script; the release
 stays pinned to its tag.
 
 The install scripts (`scripts/install.sh` for Linux and macOS, `scripts/install.ps1` for
-Windows) download the archive for this machine, check it against `SHA256SUMS`, and install
-the binary and the defaults:
+Windows) install **both** the TUI (`quack`) and desktop GUI (`quack-gui`) by default (since
+installing one does not install the other, while both share one core, config, sessions,
+memory and history), check them against `SHA256SUMS`, and verify defaults:
 
-- `--plucked` (`-Plucked`): the plucked archive, whose bundle has no hosted-service
-  providers. With `--from-source`, the checkout's bundle is filtered the same way.
-- `--binary-only` (`-BinaryOnly`): the binary only. An existing defaults folder is left
-  alone; a fresh install this way has none, and runs on the compiled-in core.
-- `--prefix`, `--version`, `--archive FILE` (offline installs), `--from-source [DIR]` (build
-  a checkout with cargo), `--uninstall` (keeps config, sessions and memory).
+- `--tui` (`-Tui`, alias `--cli` / `-Cli`): install or uninstall only the TUI (`quack`) and its
+  defaults bundle.
+- `--gui` (`-Gui`): install or uninstall only the desktop GUI (`quack-gui` AppImage on glibc
+  Linux with a `.desktop` entry, `quack.app` + CLI wrapper on macOS, or silent NSIS `-setup.exe`
+  on Windows).
+- `--plucked` (`-Plucked`): install the plucked TUI (`quack-plucked`) and/or plucked GUI
+  (`quack-gui-plucked`), whose bundle has no hosted-service providers. With `--from-source`,
+  the checkout's bundle is filtered the same way.
+- `--binary-only` (`-BinaryOnly`): update binaries only. Existing external defaults are left
+  alone; a fresh TUI install this way runs on the compiled-in core.
+- `--prefix`, `--version`, `--archive FILE` (offline installs of `.tar.gz`/`.zip`/`.AppImage`/`.dmg`/`-setup.exe`),
+  `--from-source [DIR]` (build a checkout with cargo + desktop UI), `--uninstall` (keeps config, sessions and memory).
 - The binary is replaced by renaming, so a running quack is never left with a half-written
   file (Windows renames the running exe out of the way).
 - A full install replaces the defaults folder as a whole, so files removed upstream go away
@@ -184,6 +191,12 @@ the binary and the defaults:
 - The publish job runs `cargo cyclonedx` (0.5.9, pinned) on `quack-cli` for all targets and attaches `quack.cdx.json` (CycloneDX 1.5; 430 components on 2026-10-25).
 - `docs/enterprise.md` is written: packages, the system policy with a checked example, a company defaults bundle, the air-gapped build (run with vendored sources, an empty `CARGO_HOME` and `--offline`), and checking egress.
 
+### Desktop GUI bundles (2026-11-14)
+
+- `.github/workflows/release.yml` adds a tag-only `build-gui` job backed by `scripts/package-gui.sh <target>` for the six non-musl desktop targets: `x86_64-unknown-linux-gnu` (`ubuntu-22.04`) and `aarch64-unknown-linux-gnu` (`ubuntu-24.04-arm`) producing `.deb`, `.rpm`, and `.AppImage`; `x86_64-apple-darwin` and `aarch64-apple-darwin` producing `.dmg`; `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` producing NSIS installers (`-setup.exe`). `package-gui.sh` builds both standard (`quack-gui-*`) and plucked (`quack-gui-plucked-*`, without hosted-service providers or default `config.toml`) flavours. Bundles ship unsigned and include `defaults/`.
+- `crates/quack-gui/tauri.linux.conf.json` sets `"productName": "quack-gui"` on Linux so `.deb` and `.rpm` packages install `/usr/bin/quack-gui` and `/usr/lib/quack-gui/defaults` under `quack-gui` without colliding with CLI `.deb`/`.rpm` (`Package: quack`, `/usr/bin/quack`).
+- The `publish` job also generates `quack-gui.cdx.json` via `cargo cyclonedx` on `crates/quack-gui/Cargo.toml --features desktop` and attaches all `quack-gui*` and `quack-gui-plucked*` assets and sums to `SHA256SUMS`.
+
 ### Still to do
 
 | Platform | Artifacts |
@@ -197,7 +210,7 @@ the binary and the defaults:
 ### Version checks (2026-11-04)
 
 - `quack update` asks `updates.url` for the latest version, then prints the command for this install, going by where the binary lives: `brew upgrade <formula>` under a `Cellar`, the package manager under `/usr/bin`, "build again" for `target/` and `.cargo/`, otherwise the install script. It changes nothing. Replacing the binary waits for signatures and notarization: `SHA256SUMS` comes from the same place as the binary, package-managed installs shouldn't be overwritten, Windows can't overwrite a running exe, and the bundle must move with the binary.
-- `updates.check = true` does the same check at most once a day in the background and sends `Event::UpdateAvailable`, which only the TUI shows. The last answer is kept in `checks.json` in the cache directory, so the notice returns on each start without another request. A failed check counts as a check and stays quiet.
+- `updates.check = true` does the same check at most once a day in the background and sends `Event::UpdateAvailable`, which the TUI and desktop GUI show (never on by default; the GUI also offers an on-demand **Check for updates** button via `Op::CheckUpdates` / `Event::UpdateCheckResult`). The last answer is kept in `checks.json` in the cache directory, so the notice returns on each start without another request. A failed check counts as a check and stays quiet.
 - The default `updates.url` is GitHub's `releases/latest`. quack reads the redirect's last path segment and doesn't follow it, so only `github.com` is contacted, with no API rate limit. A mirror can answer with the version as text instead. The URL is in `defaults/config.toml`, which `quack-plucked` leaves out, so plucked names no outside host: `quack update` there says to set `updates.url`.
 - `quack setup` asks once, naming the hosts, whether to turn on both checks (default no; the answer is saved, so it isn't asked again). `/setup` has a Checks tab, unless there are no URLs or `network.offline` is on, and `/config` and TOML work too. `network.offline` and policy hosts block the checks ([11](11-security.md#network-egress-policy)); an administrator can also lock `updates` or `catalog`.
 
