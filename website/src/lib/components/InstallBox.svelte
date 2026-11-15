@@ -73,8 +73,6 @@
 	let timer: ReturnType<typeof setTimeout> | undefined;
 
 	const cmd = $derived(command(way, target, plucked, os));
-	const tuiPkg = $derived(plucked ? 'quack-plucked' : 'quack');
-	const guiPkg = $derived(plucked ? 'quack-gui-plucked' : 'quack-gui');
 
 	const archives = $derived.by(() => {
 		if (!os || way === 'src') return [];
@@ -84,7 +82,7 @@
 		if (target === 'both' || target === 'gui') {
 			const gp = guiPlatforms[os];
 			for (const a of arches) {
-				const file = `${guiPkg}-${a}-${gp.triple}${gp.suffix}`;
+				const file = `quack-gui-${a}-${gp.triple}${gp.suffix}`;
 				items.push({
 					kind: 'GUI',
 					file,
@@ -97,7 +95,7 @@
 		if (target === 'both' || target === 'tui') {
 			const tp = tuiPlatforms[os];
 			for (const a of arches) {
-				const file = `${tuiPkg}-${a}-${tp.triple}.${tp.ext}`;
+				const file = `quack-${a}-${tp.triple}.${tp.ext}`;
 				items.push({
 					kind: 'TUI',
 					file,
@@ -170,7 +168,7 @@
 				</span>
 			</span>
 			<span class="text-xs leading-tight {target === 'both' ? 'text-paper/80' : 'text-ink-2'}">
-				{plucked ? 'GUI + TUI plucked' : 'GUI + TUI together'}
+				{plucked ? 'GUI + TUI · plucked defaults' : 'GUI + TUI together'}
 			</span>
 		</button>
 
@@ -184,10 +182,10 @@
 		>
 			<span class="inline-flex items-center gap-1.5 font-display font-bold text-sm">
 				<Terminal class="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-				{plucked ? 'TUI plucked' : 'TUI only'}
+				TUI only
 			</span>
 			<span class="font-mono text-[11px] leading-tight {target === 'tui' ? 'text-paper/80' : 'text-ink-2'}">
-				{tuiPkg}
+				{plucked ? 'quack · plucked defaults' : 'quack'}
 			</span>
 		</button>
 
@@ -201,10 +199,10 @@
 		>
 			<span class="inline-flex items-center gap-1.5 font-display font-bold text-sm">
 				<AppWindow class="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-				{plucked ? 'GUI plucked' : 'GUI only'}
+				GUI only
 			</span>
 			<span class="font-mono text-[11px] leading-tight {target === 'gui' ? 'text-paper/80' : 'text-ink-2'}">
-				{guiPkg}
+				{plucked ? 'quack-gui · plucked defaults' : 'quack-gui'}
 			</span>
 		</button>
 	</div>
@@ -212,16 +210,20 @@
 	<!-- Context note: separate binaries, one shared core -->
 	<p class="mb-3 text-xs sm:text-[13px] text-ink-2 leading-snug">
 		{#if target === 'both'}
-			Installs both <code class="font-semibold text-ink">{guiPkg}</code> (desktop) and
-			<code class="font-semibold text-ink">{tuiPkg}</code> (terminal) — separate apps sharing one core,
-			config, sessions, memory, and prompt history.
+			Installs both <code class="font-semibold text-ink">quack-gui</code> (desktop) and
+			<code class="font-semibold text-ink">quack</code> (terminal) — separate apps sharing one core,
+			<code class="font-semibold text-ink">defaults/</code>, config, sessions, memory, and prompt
+			history{plucked ? ' (with hosted providers omitted via --plucked)' : ''}.
 		{:else if target === 'tui'}
-			Installs only the <code class="font-semibold text-ink">{tuiPkg}</code> terminal binary (no desktop GUI).
-			They share one core and config, so pick <strong class="text-ink">Both</strong> anytime to add the GUI.
+			Installs only the <code class="font-semibold text-ink">quack</code> terminal binary (no desktop
+			GUI){plucked ? ' with hosted providers omitted via --plucked' : ''}. They share one core and
+			config, so pick <strong class="text-ink">Both</strong> anytime to add the GUI.
 		{:else}
-			Installs only the <code class="font-semibold text-ink">{guiPkg}</code> desktop app (no
-			<code class="font-semibold text-ink">quack</code> CLI command). They share one core and config, so pick
-			<strong class="text-ink">Both</strong> anytime to add the TUI.
+			Installs only the <code class="font-semibold text-ink">quack-gui</code> desktop app (no
+			<code class="font-semibold text-ink">quack</code> CLI command){plucked
+				? ' with hosted providers omitted via --plucked'
+				: ''}. They share one core and config, so pick <strong class="text-ink">Both</strong> anytime to
+			add the TUI.
 		{/if}
 	</p>
 
@@ -286,7 +288,7 @@
 	<!-- 4. Direct downloads -->
 	{#if archives.length}
 		<p class="mt-2.5 flex flex-wrap items-center gap-x-3.5 gap-y-1 text-sm text-ink-2">
-			<span>Direct downloads ({plucked ? 'plucked' : 'standard'}):</span>
+			<span>Direct downloads{plucked ? ' (same binaries; installer applies --plucked)' : ''}:</span>
 			{#each archives as a (a.file)}
 				<a href={a.href} class="inline-flex items-center gap-1 font-semibold text-sky-ink hover:underline underline-offset-2" title={a.file}>
 					<Download class="w-3.5 h-3.5" aria-hidden="true" />{a.label}

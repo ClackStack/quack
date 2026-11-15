@@ -14,8 +14,8 @@ It is laid out as plates in a field guide, with the TUI's own ASCII duck (`_(o)>
 4. **Desktop app**: eight interactive screenshots of `quack-gui` (diff-preview & secret-shield approvals, multi-project Jobs queue & `Cmd/Ctrl-K` palette, KV-zoned context & cache telemetry, model/planner/probe picker, 42-provider setup, two-tab Shield & Session Egress Ledger boundary passport, shared Memory notes, and layered Settings + guided hooks/MCP) with Light/Dark theme switching, full-size zoom, `quack gui` / `/gui` handoff, and persistent workspace tab restore.
 5. **Field marks**: the Plan/Edit × Ask/Allow matrix, then every other README feature, one line each, grouped. Mode descriptions follow [`docs/modes.md`](../docs/modes.md); keep the matrix, terminal example and configuration reference in step.
 6. **Measured**: how `quack eval` measures harnesses, and the FrontierHarness Eval chart (quack has not been run on it).
-7. **For teams**: what administrators need: nothing built in, host & redirect policy, Session Egress Ledger, locked settings & Secret Shield (`secret_guard`), enforced hooks, `quack-plucked`.
-8. **Config**: the administrator's path (`quack-plucked`, a provider file, a locked policy, `quack doctor`), what is guaranteed, where each layer lives, and every option, folded by file. Its content is in `src/lib/config.ts` and follows the repo README's Configuration section; keep the two in step.
+7. **For teams**: what administrators need: nothing built in, host & redirect policy, Session Egress Ledger, locked settings & Secret Shield (`secret_guard`), enforced hooks, `--plucked`.
+8. **Config**: the administrator's path (`--plucked`, a provider file, a locked policy, `quack doctor`), what is guaranteed, where each layer lives, and every option, folded by file. Its content is in `src/lib/config.ts` and follows the repo README's Configuration section; keep the two in step.
 9. **Install** and the footer.
 
 Every claim should trace to the repo README, the roadmap or a test. Don't add figures that aren't there.

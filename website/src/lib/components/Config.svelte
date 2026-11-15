@@ -1,5 +1,5 @@
 <script lang="ts">
-	// The administrator's path: the plucked binary, two TOML files, a check. Then where each
+	// The administrator's path: a --plucked install, two TOML files, a check. Then where each
 	// file lives and every option, grouped and folded. Content is in config.ts.
 	import { ChevronRight } from '@lucide/svelte';
 	import Plate from '#lib/components/Plate.svelte';
@@ -37,7 +37,7 @@
 
 	const steps = [
 		{
-			title: 'Install quack-plucked',
+			title: 'Install with --plucked',
 			text: 'The complete agent (prompts, sub-agents, MCP, ACP, language servers) without preinstalled hosted-service providers, so nothing points outside your network. For offline installs, pass `--archive`, or use the `.deb` and `.rpm` packages.',
 			file: 'shell',
 			code: installCmd,
@@ -69,7 +69,7 @@
 
 <Plate id="config" color="var(--color-sky)">
 	<PlateHeading title="Your server. Nothing else.">
-		Install <code class="text-ink">quack-plucked</code>, write two TOML files for
+		Install with <code class="text-ink">--plucked</code>, write two TOML files for
 		<code class="text-ink">https://&lt;internal-server&gt;:8000/v1</code>, and you have the whole harness, with that
 		server as the only host it will ever contact.
 	</PlateHeading>

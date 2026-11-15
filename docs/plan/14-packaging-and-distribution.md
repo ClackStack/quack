@@ -2,22 +2,25 @@
 
 ## Principle
 
-The **binary** and the **defaults** stay separate on disk (nothing is compiled in), but the
-normal install ships both. Most people install `quack` and get everything; organisations
-that run their own model server install `quack-plucked`, the same bundle without the
-provider files for hosted services (2026-10-26). The core prompt (`generic`) and the
-`explore` and `general` sub-agents are compiled into the binary from the bundle's own
-files, so the binary alone is a complete agent.
+The **binary** and the **defaults** stay separate on disk (nothing is compiled in), and each
+release publishes a **single** CLI binary/package (`quack`) and a **single** desktop GUI
+binary/package (`quack-gui`) per target — never separate `-plucked` builds (simplified
+2026-11-15 from the earlier two-flavour split). Both apps share one on-disk `defaults/`
+directory; `install.sh --plucked` / `install.ps1 -Plucked` (and `scripts/copy-defaults.sh
+--plucked`) handle filtering out hosted-service providers and `defaults/config.toml` at
+install time. The core prompt (`generic`) and the `explore` and `general` sub-agents are
+compiled into the binary from the bundle's own files, so the binary alone is a complete
+agent.
 
 | Part | Contains | Who removes what |
 |---|---|---|
 | binary | Engine, adapters (per features), grammars (per features), two themes, the `generic` profile and `explore`/`general` agents (from the bundle's files, `include_str!`), empty fallback profile, minimal deny-list floor | Recompile with fewer features; `enabled = false` files turn the compiled-in items off |
-| defaults bundle | `providers.d/`, `profiles.d/`, `agents.d/`, `mcp.d/` (examples, disabled), `lsp.d/`, `hooks.d/` (example, disabled), `themes/`, `grammars/` queries, `schemas/`, `compat.toml` (other-harness detection list) | Delete files; `--plucked` leaves out the hosted-service providers |
+| defaults bundle | `providers.d/`, `profiles.d/`, `agents.d/`, `mcp.d/` (examples, disabled), `lsp.d/`, `hooks.d/` (example, disabled), `themes/`, `grammars/` queries, `schemas/`, `compat.toml` (other-harness detection list), `catalog.json`, `config.toml` | Delete files; `--plucked` (`-Plucked`) leaves out hosted-service providers and `config.toml` |
 
-| Release flavour | Contains |
+| Install mode | Result |
 |---|---|
-| `quack` (default) | binary + defaults bundle |
-| `quack-plucked` (`--plucked`) | binary + defaults bundle without the provider files whose `base_url` is off the machine (`scripts/copy-defaults.sh`) |
+| Default (`install.sh` / `install.ps1`) | `quack` + `quack-gui` + full shared `defaults/` bundle |
+| `--plucked` (`-Plucked`) | same `quack` / `quack-gui` binaries + shared `defaults/` without `config.toml` or off-machine `providers.d/*.toml` (`scripts/copy-defaults.sh`, `install.sh`, `install.ps1`) |
 
 ## Where defaults live after install
 
@@ -51,8 +54,8 @@ are the one item kind whose fields merge across layers
 the fields it sets, and every field it leaves out — the model list above all, where churn
 is constant — still comes from the bundled file beneath. Setup relies on this: keying a
 bundled service writes a minimal override (`base_url` and the `api_key` line), so a new
-bundle's models reach existing installs with no migration at all. The plucked flavour is
-the same mechanism with a smaller bundle.
+bundle's models reach existing installs with no migration at all. A `--plucked` install uses
+the same mechanism with hosted providers left out of the installed bundle.
 
 As a backstop for overrides written before this (full copies, which pin the model list)
 and for hand-made ones, drift detection compares any provider file above the bundle that
@@ -89,7 +92,7 @@ When no provider is configured:
 
 ### Setup in the TUI (2026-10-20)
 
-Someone who installs `quack-plucked` and runs `quack` should not have to know about `quack setup`. So the TUI now covers all three of the wizard's choices:
+Someone who installs with `--plucked` and runs `quack` should not have to know about `quack setup`. So the TUI now covers all three of the wizard's choices:
 - **It opens on its own.** When startup ends with no model ready and no `[model] default` configured, `/setup` opens once, unless a trust prompt is waiting. That offer does not probe anything: "find servers on this machine" waits for Enter, so detection still runs only when asked. Typing `/setup` yourself probes at once, as before.
 - **Three tabs:** *This machine* (detection, as before), *Hosted services* (the configured services with API keys or subscription sign-in, from `Op::ListServices`; with no defaults bundle this tab says so and points to the next one), and *Any server* (by URL, plus how to write a provider file by hand).
 - **Keys are typed into a prompt box** that shows them as dots. Entering a key was earlier left to `quack setup` so that keys never went through the TUI. It is allowed now with these limits: the key never enters the input, its history or the transcript. It travels in `Op::SetProviderKey` / `Op::AddServer` as a `SecretText`, whose `Debug` output is redacted. The engine stores it in the OS credential store under the provider id (on `spawn_blocking`, because Linux shells out to `secret-tool`) and writes only `api_key = { keyring = "<id>" }`. Where there is no Secret Service (headless Linux: a server, WSL, a container), the engine saves the key to `keys/<id>.key` in the user layer (mode 0600) instead, points the provider file at it with `api_key = { file = ... }`, and says so in the note of `Event::ProviderAdded`; the prompt's help text says the same up front, so the user always knows how to use `env`, `file` or `cmd` instead.
@@ -145,9 +148,9 @@ back.
 
 | Target | Archives |
 |---|---|
-| `x86_64`/`aarch64-unknown-linux-musl` (static) | `quack-<target>.tar.gz`, `quack-plucked-<target>.tar.gz` |
-| `x86_64`/`aarch64-apple-darwin` | same |
-| `x86_64`/`aarch64-pc-windows-msvc` | `quack-<target>.zip`, `quack-plucked-<target>.zip` |
+| `x86_64`/`aarch64-unknown-linux-musl` (static) | `quack-<target>.tar.gz` |
+| `x86_64`/`aarch64-apple-darwin` | `quack-<target>.tar.gz` |
+| `x86_64`/`aarch64-pc-windows-msvc` | `quack-<target>.zip` |
 | All | `install.sh`, `install.ps1`, `SHA256SUMS` |
 
 Asset names carry no version, so `releases/latest/download/<name>` always works; the
@@ -162,19 +165,21 @@ stays pinned to its tag.
 
 The install scripts (`scripts/install.sh` for Linux and macOS, `scripts/install.ps1` for
 Windows) install **both** the TUI (`quack`) and desktop GUI (`quack-gui`) by default (since
-installing one does not install the other, while both share one core, config, sessions,
-memory and history), check them against `SHA256SUMS`, and verify defaults:
+installing one does not install the other, while both share one core, shared `defaults/`
+directory, config, sessions, memory and history), check them against `SHA256SUMS`, and
+install/verify defaults:
 
 - `--tui` (`-Tui`, alias `--cli` / `-Cli`): install or uninstall only the TUI (`quack`) and its
   defaults bundle.
 - `--gui` (`-Gui`): install or uninstall only the desktop GUI (`quack-gui` AppImage on glibc
   Linux with a `.desktop` entry, `quack.app` + CLI wrapper on macOS, or silent NSIS `-setup.exe`
-  on Windows).
-- `--plucked` (`-Plucked`): install the plucked TUI (`quack-plucked`) and/or plucked GUI
-  (`quack-gui-plucked`), whose bundle has no hosted-service providers. With `--from-source`,
-  the checkout's bundle is filtered the same way.
-- `--binary-only` (`-BinaryOnly`): update binaries only. Existing external defaults are left
-  alone; a fresh TUI install this way runs on the compiled-in core.
+  on Windows). Without `--binary-only` or `--archive`, the installer downloads the matching `quack`
+  archive to extract shared `defaults/` without installing the `quack` binary.
+- `--plucked` (`-Plucked`): install the same `quack` and/or `quack-gui` binaries while filtering
+  `config.toml` and non-loopback `providers.d/*.toml` out of the installed `defaults/` folder
+  (works across release downloads, `--from-source`, and `.tar.gz`/`.zip` `--archive` installs).
+- `--binary-only` (`-BinaryOnly`): update binaries only. Existing defaults are left alone; a
+  fresh install this way runs on the compiled-in core.
 - `--prefix`, `--version`, `--archive FILE` (offline installs of `.tar.gz`/`.zip`/`.AppImage`/`.dmg`/`-setup.exe`),
   `--from-source [DIR]` (build a checkout with cargo + desktop UI), `--uninstall` (keeps config, sessions and memory).
 - The binary is replaced by renaming, so a running quack is never left with a half-written
@@ -184,18 +189,24 @@ memory and history), check them against `SHA256SUMS`, and verify defaults:
   layer (`enabled = false`), or by updating with `--binary-only`.
 - Windows adds the install folder to the user `PATH`; Unix prints a hint if `bin` is not on it.
 
-### Packages, formulas and SBOM (2026-10-25)
+### Packages, formulas and SBOM (2026-10-25; simplified 2026-11-15)
 
-- `scripts/package-linux.sh <target> <version>` builds `quack_<v>_<arch>.deb` and `quack-plucked_<v>_<arch>.deb`. They conflict with and replace each other, install `/usr/bin/quack` and `/usr/share/quack/defaults` (the plucked bundle for `quack-plucked`), and depend on nothing, since the binaries are static. It uses `dpkg-deb` alone, with no cargo plugin. Where `rpmbuild` is installed, the same layout also becomes `.rpm`s. The release's musl jobs install `rpm` and run it on tags. The `.deb` was checked locally (`dpkg-deb --info/--contents`, and an unpacked binary found its bundle). The `.rpm` path runs first in CI.
-- `scripts/homebrew.sh <version> SHA256SUMS` writes `quack.rb` and `quack-plucked.rb` (macOS and Linux, ARM and Intel, `conflicts_with` each other) into the release for a tap repository. Publishing the tap is left to the maintainer.
+- `scripts/package-linux.sh <target> <version>` builds `quack_<v>_<arch>.deb` (and `.rpm` where `rpmbuild` is installed), installing `/usr/bin/quack` and `/usr/share/quack/defaults`, and depending on nothing, since the binaries are static. It uses `dpkg-deb` alone, with no cargo plugin. The release's musl jobs install `rpm` and run it on tags.
+- `scripts/homebrew.sh <version> SHA256SUMS` writes `quack.rb` (macOS and Linux, ARM and Intel) into the release for a tap repository. Publishing the tap is left to the maintainer.
 - The publish job runs `cargo cyclonedx` (0.5.9, pinned) on `quack-cli` for all targets and attaches `quack.cdx.json` (CycloneDX 1.5; 430 components on 2026-10-25).
 - `docs/enterprise.md` is written: packages, the system policy with a checked example, a company defaults bundle, the air-gapped build (run with vendored sources, an empty `CARGO_HOME` and `--offline`), and checking egress.
 
-### Desktop GUI bundles (2026-11-14)
+### Desktop GUI bundles (2026-11-14; unbundled 2026-11-15)
 
-- `.github/workflows/release.yml` adds a tag-only `build-gui` job backed by `scripts/package-gui.sh <target>` for the six non-musl desktop targets: `x86_64-unknown-linux-gnu` (`ubuntu-22.04`) and `aarch64-unknown-linux-gnu` (`ubuntu-24.04-arm`) producing `.deb`, `.rpm`, and `.AppImage`; `x86_64-apple-darwin` and `aarch64-apple-darwin` producing `.dmg`; `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` producing NSIS installers (`-setup.exe`). `package-gui.sh` builds both standard (`quack-gui-*`) and plucked (`quack-gui-plucked-*`, without hosted-service providers or default `config.toml`) flavours. Bundles ship unsigned and include `defaults/`.
-- `crates/quack-gui/tauri.linux.conf.json` sets `"productName": "quack-gui"` on Linux so `.deb` and `.rpm` packages install `/usr/bin/quack-gui` and `/usr/lib/quack-gui/defaults` under `quack-gui` without colliding with CLI `.deb`/`.rpm` (`Package: quack`, `/usr/bin/quack`).
-- The `publish` job also generates `quack-gui.cdx.json` via `cargo cyclonedx` on `crates/quack-gui/Cargo.toml --features desktop` and attaches all `quack-gui*` and `quack-gui-plucked*` assets and sums to `SHA256SUMS`.
+- `.github/workflows/release.yml` adds a tag-only `build-gui` job backed by `scripts/package-gui.sh <target>` for the six non-musl desktop targets: `x86_64-unknown-linux-gnu` (`ubuntu-22.04`) and `aarch64-unknown-linux-gnu` (`ubuntu-24.04-arm`) producing `.deb`, `.rpm`, and `.AppImage`; `x86_64-apple-darwin` and `aarch64-apple-darwin` producing `.dmg`; `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` producing NSIS installers (`-setup.exe`).
+- `crates/quack-gui/tauri.linux.conf.json` sets `"productName": "quack-gui"` on Linux so `.deb` and `.rpm` packages install `/usr/bin/quack-gui` without colliding with CLI `.deb`/`.rpm` (`Package: quack`, `/usr/bin/quack`).
+- The `publish` job also generates `quack-gui.cdx.json` via `cargo cyclonedx` on `crates/quack-gui/Cargo.toml --features desktop` and attaches all `quack-gui-*` / `quack-gui_*` assets and sums to `SHA256SUMS`.
+
+### Single binary per app, installer handles `--plucked` (2026-11-15)
+
+- Removed all `-plucked` binary builds/archives/packages/formulas (`quack-plucked*`, `quack-gui-plucked*`, `quack-plucked.rb`) from `scripts/package.sh`, `scripts/package-linux.sh`, `scripts/package-gui.sh`, and `scripts/homebrew.sh`. Each release now publishes one `quack` and one `quack-gui` build per target.
+- Removed `"resources": { "../../defaults/": "defaults/" }` from `crates/quack-gui/tauri.conf.json` so `quack-gui` never embeds hosted provider files inside the app bundle. Both apps now share one transparent on-disk `defaults/` folder, with `quack-config`'s discovery (`default_bundle_candidates`) extended for `$APPIMAGE` (Linux), `/opt/homebrew/share/quack/defaults` (macOS Apple Silicon Homebrew), `~/.local/share/quack/defaults` (macOS Finder/Dock & Linux), and `%LOCALAPPDATA%\Programs\quack\defaults` (Windows).
+- `scripts/install.sh` and `scripts/install.ps1` apply `--plucked` / `-Plucked` directly when writing the shared `defaults/` folder (stripping `config.toml` and non-loopback `providers.d/*.toml`), and fetch `quack-<target>.{tar.gz,zip}` solely for shared `defaults/` when `--gui` / `-Gui` runs without `--binary-only` or `--archive`.
 
 ### Still to do
 
@@ -211,7 +222,7 @@ memory and history), check them against `SHA256SUMS`, and verify defaults:
 
 - `quack update` asks `updates.url` for the latest version, then prints the command for this install, going by where the binary lives: `brew upgrade <formula>` under a `Cellar`, the package manager under `/usr/bin`, "build again" for `target/` and `.cargo/`, otherwise the install script. It changes nothing. Replacing the binary waits for signatures and notarization: `SHA256SUMS` comes from the same place as the binary, package-managed installs shouldn't be overwritten, Windows can't overwrite a running exe, and the bundle must move with the binary.
 - `updates.check = true` does the same check at most once a day in the background and sends `Event::UpdateAvailable`, which the TUI and desktop GUI show (never on by default; the GUI also offers an on-demand **Check for updates** button via `Op::CheckUpdates` / `Event::UpdateCheckResult`). The last answer is kept in `checks.json` in the cache directory, so the notice returns on each start without another request. A failed check counts as a check and stays quiet.
-- The default `updates.url` is GitHub's `releases/latest`. quack reads the redirect's last path segment and doesn't follow it, so only `github.com` is contacted, with no API rate limit. A mirror can answer with the version as text instead. The URL is in `defaults/config.toml`, which `quack-plucked` leaves out, so plucked names no outside host: `quack update` there says to set `updates.url`.
+- The default `updates.url` is GitHub's `releases/latest`. quack reads the redirect's last path segment and doesn't follow it, so only `github.com` is contacted, with no API rate limit. A mirror can answer with the version as text instead. The URL is in `defaults/config.toml`, which `--plucked` leaves out, so plucked installs name no outside host: `quack update` there says to set `updates.url`.
 - `quack setup` asks once, naming the hosts, whether to turn on both checks (default no; the answer is saved, so it isn't asked again). `/setup` has a Checks tab, unless there are no URLs or `network.offline` is on, and `/config` and TOML work too. `network.offline` and policy hosts block the checks ([11](11-security.md#network-egress-policy)); an administrator can also lock `updates` or `catalog`.
 
 ## Enterprise builds
@@ -241,6 +252,6 @@ cargo build --release --locked --offline \
 
 ## Open questions
 
-- Should we publish to crates.io (`cargo install quack`)? That gives a plucked binary. Defaults
-  would then come from `install.sh` or `quack setup --download-defaults` (opt-in, blocked
-  offline).
+- Should we publish to crates.io (`cargo install quack`)? That gives a binary without a
+  defaults bundle. Defaults would then come from `install.sh` or `quack setup --download-defaults`
+  (opt-in, blocked offline).

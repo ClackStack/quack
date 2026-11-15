@@ -3328,7 +3328,7 @@ pub(crate) fn setup(view: &SetupView, theme: &Theme) -> Modal {
         Some([]) => vec![placeholder(
             "no hosted services configured",
             "providers.d has no hosted services with a subscription or API key. The defaults bundle ships \
-             a list of them; an install without it (quack-plucked) has none. Add a service \
+             a list of them; an install without them (e.g. `--plucked`) has none. Add a service \
              under Any server with its OpenAI-compatible URL instead.",
             theme,
         )],
@@ -3487,7 +3487,7 @@ pub(crate) fn setup(view: &SetupView, theme: &Theme) -> Modal {
 }
 
 /// The opt-in background checks that have somewhere to go. An install without those URLs
-/// (quack-plucked) has none, and the tab stays away.
+/// (e.g. `--plucked`) has none, and the tab stays away.
 fn setup_checks(settings: &[quack_config::SettingRow], theme: &Theme) -> Vec<ModalItem> {
     const CHECKS: [(&str, &str, &str, &str); 2] = [
         (

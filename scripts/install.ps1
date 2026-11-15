@@ -83,7 +83,7 @@ if ($Uninstall) {
         Set-UserPath $nsisDir $false
         Say "removed desktop GUI"
     }
-    if (-not (Test-Path $exe) -and -not (Test-Path $srcGuiExe)) {
+    if (-not (Test-Path $exe) -and -not (Test-Path $srcGuiExe) -and -not (Test-Path $nsisGuiExe)) {
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $defaults
         Set-UserPath $Prefix $false
         if ((Test-Path $Prefix) -and -not (Get-ChildItem $Prefix)) { Remove-Item $Prefix }
@@ -129,6 +129,7 @@ try {
     $newGuiBin = $null
     $newDefaults = $null
     $guiSetup = $null
+    $tuiArchive = $null
 
     if ($FromSource) {
         if (-not (Test-Path (Join-Path $FromSource 'Cargo.toml'))) { throw "$FromSource is not a quack checkout" }
@@ -174,10 +175,6 @@ try {
 
         if ($wantTui -or $wantGui) {
             $newDefaults = Join-Path $FromSource 'defaults'
-            if ($Plucked) {
-                Copy-PluckedDefaults $newDefaults (Join-Path $tmp 'defaults')
-                $newDefaults = Join-Path $tmp 'defaults'
-            }
         }
     } else {
         if ($Archive) {
@@ -191,6 +188,7 @@ try {
                 if ($explicitGui) { throw "$Archive is a TUI archive; pass -Tui or use a -setup.exe for -Gui" }
                 $wantTui = $true
                 $wantGui = $false
+                $tuiArchive = $Archive
             }
         } else {
             $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
@@ -203,18 +201,17 @@ try {
             $sumsPath = Join-Path $tmp 'SHA256SUMS'
             Invoke-WebRequest -UseBasicParsing "$base/SHA256SUMS" -OutFile $sumsPath
 
-            if ($wantTui) {
-                $tuiFlavour = if ($Plucked) { 'quack-plucked' } else { 'quack' }
-                $tuiName = "$tuiFlavour-$arch-pc-windows-msvc.zip"
+            if ($wantTui -or -not $BinaryOnly) {
+                $tuiName = "quack-$arch-pc-windows-msvc.zip"
                 $tuiPath = Join-Path $tmp $tuiName
-                Say "downloading $tuiName ($Version)"
+                if ($wantTui) { Say "downloading $tuiName ($Version)" }
+                else { Say "downloading $tuiName ($Version, for shared defaults)" }
                 Invoke-WebRequest -UseBasicParsing "$base/$tuiName" -OutFile $tuiPath
                 Verify-Checksum $sumsPath $tuiPath $tuiName
-                $Archive = $tuiPath
+                $tuiArchive = $tuiPath
             }
             if ($wantGui) {
-                $guiFlavour = if ($Plucked) { 'quack-gui-plucked' } else { 'quack-gui' }
-                $guiName = "$guiFlavour-$arch-pc-windows-msvc-setup.exe"
+                $guiName = "quack-gui-$arch-pc-windows-msvc-setup.exe"
                 $guiPath = Join-Path $tmp $guiName
                 Say "downloading $guiName ($Version)"
                 Invoke-WebRequest -UseBasicParsing "$base/$guiName" -OutFile $guiPath
@@ -223,12 +220,12 @@ try {
             }
         }
 
-        if ($wantTui) {
+        if ($tuiArchive) {
             $x = Join-Path $tmp 'x'
-            Expand-Archive -Path $Archive -DestinationPath $x
+            Expand-Archive -Path $tuiArchive -DestinationPath $x
             $top = Get-ChildItem -Directory $x | Select-Object -First 1
-            if (-not $top -or -not (Test-Path (Join-Path $top.FullName 'quack.exe'))) { throw "$Archive does not look like a quack archive" }
-            $newTuiBin = Join-Path $top.FullName 'quack.exe'
+            if (-not $top -or -not (Test-Path (Join-Path $top.FullName 'quack.exe'))) { throw "$tuiArchive does not look like a quack archive" }
+            if ($wantTui) { $newTuiBin = Join-Path $top.FullName 'quack.exe' }
             $d = Join-Path $top.FullName 'defaults'
             if (Test-Path $d) { $newDefaults = $d }
         }
@@ -241,21 +238,44 @@ try {
         Install-ExeSafe $newTuiBin $exe
     }
 
-    if ($wantTui -or $newGuiBin) {
+    if ($wantTui -or $wantGui) {
+        $defaultPrefix = Join-Path $env:LOCALAPPDATA 'Programs\quack'
+        if (-not $wantTui -and $guiSetup -and ($Prefix.TrimEnd('\') -ne $defaultPrefix.TrimEnd('\'))) {
+            $defaults = Join-Path $nsisDir 'defaults'
+        }
         # The defaults: replaced as a whole, so files removed upstream disappear too.
         if ($BinaryOnly) {
             if (Test-Path $defaults) { Say "left the defaults in $defaults as they are (-BinaryOnly)" }
             else { Say 'no defaults installed (-BinaryOnly): add providers with `quack setup` or your own files' }
         } elseif (-not $newDefaults) {
-            Say "this archive has no defaults bundle; left $defaults as it is"
+            if ($Plucked) {
+                Say "warning: this archive has no defaults bundle, so -Plucked had nothing to filter; left $defaults as it is"
+            } else {
+                Say "this archive has no defaults bundle; left $defaults as it is"
+            }
         } else {
+            New-Item -ItemType Directory -Force (Split-Path -Parent $defaults) | Out-Null
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$defaults.new"
-            Copy-Item -Recurse $newDefaults "$defaults.new"
+            if ($Plucked) {
+                Copy-PluckedDefaults $newDefaults "$defaults.new"
+            } else {
+                Copy-Item -Recurse $newDefaults "$defaults.new"
+            }
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $defaults
             Move-Item "$defaults.new" $defaults
-            Say "installed the defaults in $defaults"
+            $legacyNsisDefaults = Join-Path $nsisDir 'defaults'
+            if ($defaults.TrimEnd('\') -ne $legacyNsisDefaults.TrimEnd('\')) {
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $legacyNsisDefaults
+            }
+            if ($Plucked) {
+                Say "installed plucked defaults in $defaults (hosted providers left out)"
+            } else {
+                Say "installed the defaults in $defaults"
+            }
         }
+    }
 
+    if ($wantTui -or $newGuiBin) {
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         if (-not (($userPath -split ';') | Where-Object { $_.TrimEnd('\') -eq $Prefix.TrimEnd('\') })) {
             Set-UserPath $Prefix $true

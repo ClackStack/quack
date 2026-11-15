@@ -374,10 +374,10 @@
 		tab forwarding and persistent tab restore) or type <code>/gui</code> inside the TUI to hand off.
 		The default installer in
 		<a href="#install" class="text-sky-ink underline underline-offset-2 font-semibold">Install</a> sets up
-		both, or install the GUI alone with <code>--gui</code> (and <code>--plucked</code> for
-		<code>quack-gui-plucked</code>). Tagged GitHub releases also publish unsigned <code>.dmg</code>,
-		<code>-setup.exe</code>, <code>.deb</code>, <code>.rpm</code>, and <code>.AppImage</code> bundles for
-		both standard and plucked flavours.
+		both, or install the GUI alone with <code>--gui</code> (add <code>--plucked</code> to leave out
+		hosted-service providers). Tagged GitHub releases also publish unsigned <code>.dmg</code>,
+		<code>-setup.exe</code>, <code>.deb</code>, <code>.rpm</code>, and <code>.AppImage</code> packages
+		sharing the same on-disk <code>defaults/</code> folder.
 	</p>
 </Plate>
 

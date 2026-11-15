@@ -214,8 +214,9 @@ impl Registry {
         Self::with_loader(load)
     }
 
-    /// Load defaults shipped in the native resource directory. An explicit
-    /// QUACK_DEFAULTS_DIR (including `none`) still takes precedence.
+    /// Load defaults from an optional native resource directory when present, falling back
+    /// to the shared on-disk defaults locations otherwise. An explicit `QUACK_DEFAULTS_DIR`
+    /// (including `none`) still takes precedence.
     pub fn with_resource_dir(resource_dir: PathBuf) -> Self {
         let load: Loader = Arc::new(move |opts| {
             load_from_resources(&opts, &resource_dir, &|key| std::env::var_os(key))

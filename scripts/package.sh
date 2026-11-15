@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Build the release archives for one target from an already built binary.
+# Build the release archive for one target from an already built binary.
 #
 #   scripts/package.sh <target-triple> [path/to/quack[.exe]] [out-dir]
 #
-# Writes two archives to out-dir (default dist/):
-#   quack-<target>.tar.gz          the binary and the defaults bundle (what most people want)
-#   quack-plucked-<target>.tar.gz  the same without the provider files for outside services,
-#                                  for setups that add their own provider
+# Writes one archive to out-dir (default dist/):
+#   quack-<target>.tar.gz  the binary and the defaults bundle (install.sh --plucked filters
+#                          out hosted-service providers when installing)
 # Windows targets get .zip instead.
 #
 # Unix layout is a prefix (bin/quack, share/quack/defaults/) so it can be unpacked
@@ -29,38 +28,27 @@ out=$(cd "$out" && pwd)
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
-# The defaults bundle for one flavour (scripts/copy-defaults.sh says what plucked leaves out).
-copy_defaults() {
-  if [ "$flavour" = quack ]; then
-    "$root/scripts/copy-defaults.sh" "$1"
-  else
-    "$root/scripts/copy-defaults.sh" "$1" --plucked
-  fi
-}
-
-for flavour in quack quack-plucked; do
-  dir=$stage/$flavour-$target
-  mkdir -p "$dir"
-  cp "$root/LICENSE" "$root/NOTICE" "$dir/"
-  case $target in
-    *windows*)
-      cp "$bin" "$dir/$exe"
-      copy_defaults "$dir/defaults"
-      rm -f "$out/$flavour-$target.zip"
-      if command -v 7z >/dev/null; then
-        (cd "$stage" && 7z a -tzip -bso0 "$out/$flavour-$target.zip" "$flavour-$target")
-      else
-        (cd "$stage" && zip -qr "$out/$flavour-$target.zip" "$flavour-$target")
-      fi
-      ;;
-    *)
-      mkdir -p "$dir/bin"
-      cp "$bin" "$dir/bin/$exe"
-      chmod 755 "$dir/bin/$exe"
-      copy_defaults "$dir/share/quack/defaults"
-      tar -C "$stage" -czf "$out/$flavour-$target.tar.gz" "$flavour-$target"
-      ;;
-  esac
-done
+dir=$stage/quack-$target
+mkdir -p "$dir"
+cp "$root/LICENSE" "$root/NOTICE" "$dir/"
+case $target in
+  *windows*)
+    cp "$bin" "$dir/$exe"
+    "$root/scripts/copy-defaults.sh" "$dir/defaults"
+    rm -f "$out/quack-$target.zip"
+    if command -v 7z >/dev/null; then
+      (cd "$stage" && 7z a -tzip -bso0 "$out/quack-$target.zip" "quack-$target")
+    else
+      (cd "$stage" && zip -qr "$out/quack-$target.zip" "quack-$target")
+    fi
+    ;;
+  *)
+    mkdir -p "$dir/bin"
+    cp "$bin" "$dir/bin/$exe"
+    chmod 755 "$dir/bin/$exe"
+    "$root/scripts/copy-defaults.sh" "$dir/share/quack/defaults"
+    tar -C "$stage" -czf "$out/quack-$target.tar.gz" "quack-$target"
+    ;;
+esac
 
 ls -1 "$out" | grep -- "-$target\." | sed "s|^|$out/|"

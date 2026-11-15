@@ -374,7 +374,7 @@ export const SETTING_FIELDS: readonly SettingFieldDef[] = [
 		kind: 'text',
 		defaultValue: '""',
 		placeholder: 'https://...',
-		emptyMeaning: 'Empty (disabled, e.g. plucked bundle)',
+		emptyMeaning: 'Empty (disabled, e.g. --plucked install)',
 		fallbackDescription: 'Endpoint fetched when catalog.refresh is enabled.'
 	},
 	{

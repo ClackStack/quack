@@ -71,8 +71,8 @@ mod tests {
 
     #[test]
     fn goes_by_where_the_binary_lives() {
-        let brew = "/opt/homebrew/Cellar/quack-plucked/0.1.0/bin/quack";
-        assert_eq!(how(brew), "  brew upgrade quack-plucked");
+        let brew = "/opt/homebrew/Cellar/quack/0.1.0/bin/quack";
+        assert_eq!(how(brew), "  brew upgrade quack");
         assert!(how("/usr/bin/quack").contains("package manager"));
         assert!(how("/home/a/src/quack/target/release/quack").contains("source"));
         assert!(how("/home/a/.cargo/bin/quack").contains("source"));

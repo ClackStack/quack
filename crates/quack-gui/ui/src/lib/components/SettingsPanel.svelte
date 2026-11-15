@@ -577,7 +577,7 @@
 								{#if !catalogUrlVal && !updatesUrlVal}
 									<p class="callout">
 										Both <code>catalog.url</code> and <code>updates.url</code> are empty (typical for a
-										plucked build with hosted endpoints stripped). Configure custom URLs above if needed.
+										<code>--plucked</code> install with hosted endpoints stripped). Configure custom URLs above if needed.
 									</p>
 								{:else}
 									<p class="callout">

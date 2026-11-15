@@ -1,8 +1,8 @@
 # Defaults bundle
 
-Default data files that are installed next to the binary by the normal `quack` release.
-`quack-plucked` installs them too, without the provider files for hosted services
-(`scripts/copy-defaults.sh`; docs/plan/14-packaging-and-distribution.md). Only the core is
+Default data files installed into the shared `defaults/` folder alongside `quack` and `quack-gui`.
+Passing `--plucked` (`-Plucked`) to the installer (or `scripts/copy-defaults.sh --plucked`) leaves
+out hosted-service provider files and `config.toml` (`docs/plan/14-packaging-and-distribution.md`). Only the core is
 compiled in, from these same files: `profiles.d/generic/` and `agents.d/explore.toml` and
 `general.toml`. Delete any file, or the whole bundle, and the binary still starts cleanly.
 
@@ -25,7 +25,7 @@ QUACK_DEFAULTS_DIR=defaults cargo run
 | `themes/` | Extra themes (dark and light are compiled in) | M3 |
 | `schemas/` | JSON Schema for editor completion; regenerate with `quack config schema --dir defaults/schemas` | — |
 | `compat.toml` | Other harnesses' files to detect and offer | M2 |
-| `config.toml` | Where the opt-in catalog and version checks look; both are off until turned on. `quack-plucked` leaves it out | — |
+| `config.toml` | Where the opt-in catalog and version checks look; both are off until turned on. `--plucked` leaves it out | — |
 | `catalog.json` | Prices and context windows for the bundle's providers, from [models.dev](https://models.dev) (MIT); names no hosts. Regenerate with `scripts/update-catalog.sh` | — |
 
 Every file must name its source if derived from another project, and only permissively

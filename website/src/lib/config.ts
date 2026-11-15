@@ -61,7 +61,7 @@ export const guarantees: [string, string][] = [
 ];
 
 export const layers: [string, string, string][] = [
-	['Defaults bundle', '`share/quack/defaults/` beside the binary, or `QUACK_DEFAULTS_DIR`', '`quack-plucked` leaves out hosted services'],
+	['Defaults bundle', '`share/quack/defaults/` beside the binary, or `QUACK_DEFAULTS_DIR`', '`--plucked` leaves out hosted services'],
 	['System', '`/etc/quack/` · `/Library/Application Support/quack/` · `%ProgramData%\\quack\\`', 'The only layer whose `[policy]` counts'],
 	['User', '`~/.config/quack/` · `%APPDATA%\\quack\\`', 'Your own files'],
 	['Project', '`.quack/` at the repository root', 'Loads only once you trust the repo'],
@@ -188,9 +188,9 @@ export const reference: Group[] = [
 		file: 'config.toml [catalog] / [updates]',
 		rows: [
 			['catalog.refresh', 'false', 'Opt-in daily background refresh of the model catalog snapshot from `catalog.url` (`quack catalog refresh` runs on demand)'],
-			['catalog.url', '""', 'models.dev snapshot URL (defaults bundle sets it; `quack-plucked` leaves it empty)'],
+			['catalog.url', '""', 'models.dev snapshot URL (defaults bundle sets it; `--plucked` leaves it empty)'],
 			['updates.check', 'false', 'Opt-in daily check against `updates.url` for new versions (`quack update` checks on demand)'],
-			['updates.url', '""', 'Release redirect URL (defaults bundle sets GitHub releases; `quack-plucked` leaves it empty)']
+			['updates.url', '""', 'Release redirect URL (defaults bundle sets GitHub releases; `--plucked` leaves it empty)']
 		]
 	},
 	{

@@ -18,10 +18,7 @@
       "icons/icon.icns",
       "icons/icon.ico",
       "icons/icon.png"
-    ],
-    "resources": {
-      "../../defaults/": "defaults/"
-    }
+    ]
   },
   "build": {
     "beforeDevCommand": "pnpm run dev",

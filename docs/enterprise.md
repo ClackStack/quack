@@ -8,44 +8,44 @@ network access.
 
 ## Packages
 
-Each release has two flavours of every CLI (`quack` / `quack-plucked`) and desktop GUI
-(`quack-gui` / `quack-gui-plucked`) package. Standard and plucked conflict within each app
-so a machine has one flavour, while TUI and GUI share one core, config, sessions, and
-memory:
+Each release ships a single CLI package (`quack`) and a single desktop GUI package (`quack-gui`)
+for every supported target. TUI and GUI are separate apps sharing one core, shared
+`defaults/` directory, config, sessions, and memory. Filtering out hosted-service providers
+and `defaults/config.toml` (`--plucked`) happens during installation rather than building
+separate `-plucked` binaries or packages:
 
-| | Standard (`quack`, `quack-gui`) | Plucked (`quack-plucked`, `quack-gui-plucked`) |
-|---|---|---|
-| Contents | binary/app + defaults bundle (provider, profile, MCP and language server files) | the same, without the provider files for hosted services |
-| Use it when | people pick their own providers | you add your own provider |
+- **Installer flags (`install.sh --plucked` / `install.ps1 -Plucked`)**: installs the same
+  `quack` and/or `quack-gui` binaries, then strips `defaults/config.toml` and every
+  `providers.d/*.toml` whose `base_url` is not loopback (`127.*`, `localhost`, `[::1]`)
+  before writing `defaults/` to disk. Profiles, `explore` and `general` sub-agents,
+  language servers, hooks, MCP examples (off until enabled), and local server configs stay.
+- **Archives & desktop installers**: `quack-<target>.tar.gz` (Linux, macOS) and `.zip`
+  (Windows) carry the CLI binary and the `defaults/` folder. `quack-gui-<target>.dmg`
+  (macOS), `.AppImage` (glibc Linux), and `-setup.exe` (Windows) carry the desktop app
+  without embedding `defaults/` inside the app bundle. When `--gui` is run without
+  `--binary-only`, `install.sh` / `install.ps1` pull the shared `defaults/` folder from the
+  matching `quack` archive (without installing `quack`), applying `--plucked` if requested.
+  `--archive FILE` installs from a local file without network access, `--binary-only`
+  (`-BinaryOnly`) leaves an existing `defaults/` folder untouched, and `--prefix` picks the
+  folder.
+- **Linux**: `quack_<version>_<amd64|arm64>.deb` and `.rpm` install `/usr/bin/quack` and
+  `/usr/share/quack/defaults` (static musl, zero runtime dependencies), and
+  `quack-gui_<version>_<amd64|arm64>.deb` and `.rpm` install `/usr/bin/quack-gui` for
+  glibc desktops. Administrators deploying `.deb`/`.rpm` without hosted providers can remove
+  or replace `/usr/share/quack/defaults` or override it via the system policy/bundle below.
+- **macOS and Linux with Homebrew**: each release carries `quack.rb` for a tap.
+- **SBOMs**: `quack.cdx.json` and `quack-gui.cdx.json` (CycloneDX 1.5) list every crate in
+  the CLI and GUI binaries.
+- `SHA256SUMS` covers every release asset.
 
-- **Archives & desktop bundles**: `quack[-plucked]-<target>.tar.gz` (Linux, macOS) and `.zip`
-  (Windows) for the TUI, plus `quack-gui[-plucked]-<target>.dmg` (macOS), `.AppImage`
-  (glibc Linux), and `-setup.exe` (Windows) for the desktop GUI, driven by
-  `install.sh` / `install.ps1` (which install both by default; pass `--tui`/`-Tui` or
-  `--gui`/`-Gui` to install one). `--archive FILE` installs from a downloaded file with no
-  network, and `--prefix` picks the folder.
-- **Linux**: `quack[-plucked]_<version>_<amd64|arm64>.deb` and `.rpm`, which install
-  `/usr/bin/quack` and `/usr/share/quack/defaults` (static musl, zero dependencies), and
-  `quack-gui[-plucked]_<version>_<amd64|arm64>.deb` and `.rpm` for glibc desktops
-  (`/usr/bin/quack-gui` and `/usr/lib/quack-gui/defaults`).
-- **macOS and Linux with Homebrew**: each release carries `quack.rb` and `quack-plucked.rb`
-  for a tap.
-- **SBOM**: `quack.cdx.json` (CycloneDX 1.5) lists every crate in the binary, for every
-  target.
-- `SHA256SUMS` covers every file.
+An MSI for Windows is not built yet; use the zip/setup exe with `install.ps1`, or your own
+packaging.
 
-An MSI for Windows is not built yet; use the zip and `install.ps1`, or your own packaging.
-
-`quack-plucked` is the full agent: the same binary (MCP, ACP, the keyring, every protocol),
-the model profiles, the `explore` and `general` sub-agents, language servers, hooks and
-MCP examples (off until enabled). It leaves out every provider file whose `base_url` is
-not on the machine (`scripts/copy-defaults.sh` decides), keeping the local server files
-for Ollama, vLLM and the others on 127.0.0.1. `install.sh --binary-only` (`-BinaryOnly`)
-updates only the binary and leaves an installed bundle alone.
-
-The binary finds its defaults bundle next to itself (`<exe>/../share/quack/defaults`,
-`<exe dir>/defaults`), in the system share folders, or where `QUACK_DEFAULTS_DIR` points.
-`quack doctor` shows which bundle it found.
+The binary finds its shared defaults bundle relative to itself (`<exe>/../share/quack/defaults`,
+`<exe dir>/defaults`), beside `$APPIMAGE` on Linux, in Homebrew/user share folders
+(`/opt/homebrew/share/quack/defaults`, `~/.local/share/quack/defaults`,
+`%LOCALAPPDATA%\Programs\quack\defaults`), in system share folders, or where `QUACK_DEFAULTS_DIR`
+points. `quack doctor` shows which bundle it found.
 
 ## The system policy
 
@@ -159,7 +159,7 @@ model catalog (`catalog.refresh`, `quack catalog refresh`) and the version check
 (`updates.check`, `quack update`), are off by default and blocked by `[network] offline`
 and by `[policy.providers] hosts` or `[policy.mcp] hosts`. To rule them out everywhere,
 lock them: `locked = ["catalog", "updates"]`, with both URLs empty in the system layer. Or
-point both URLs at an internal mirror. `quack-plucked` ships neither URL.
+point both URLs at an internal mirror. Installs with `--plucked` omit `defaults/config.toml`, so neither URL is shipped.
 
 The test suite checks this
 with a recording proxy (`no_egress_beyond_the_configured_provider`), and on Linux

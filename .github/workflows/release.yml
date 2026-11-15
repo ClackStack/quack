@@ -1,17 +1,14 @@
 name: Release
 
 # Push a tag such as v0.2.0 to build every target and publish a GitHub release with:
-#   quack-<target>.{tar.gz,zip}          binary + defaults bundle (the normal install)
-#   quack-plucked-<target>.{tar.gz,zip}  the same without hosted-service providers
-#   quack[-plucked]_<version>_<arch>.deb and .rpm (Linux)
-#   quack-gui[-plucked]-<target>.{AppImage,dmg}
-#                                        unsigned desktop GUI bundles (glibc Linux, macOS)
-#   quack-gui[-plucked]_<version>_<arch>.deb / .rpm
+#   quack-<target>.{tar.gz,zip}          CLI binary + defaults bundle
+#   quack_<version>_<arch>.deb and .rpm  CLI Debian and RPM packages (Linux)
+#   quack-gui-<target>.{AppImage,dmg}    unsigned desktop GUI bundles (glibc Linux, macOS)
+#   quack-gui_<version>_<arch>.deb / .rpm
 #                                        desktop GUI Debian and RPM packages (glibc Linux)
-#   quack-gui[-plucked]-<target>-setup.exe
-#                                        unsigned desktop GUI NSIS installer (Windows)
+#   quack-gui-<target>-setup.exe         unsigned desktop GUI NSIS installer (Windows)
 #   quack.cdx.json, quack-gui.cdx.json   CycloneDX SBOMs (CLI and desktop GUI)
-#   quack.rb, quack-plucked.rb           Homebrew formulas for a tap
+#   quack.rb                             Homebrew formula for a tap
 #   install.sh, install.ps1, SHA256SUMS
 on:
   push:

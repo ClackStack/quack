@@ -7,7 +7,7 @@
 		['Hosts, redirects & egress ledger', 'Beyond contacting only what you configure, `[policy.providers] hosts` and `[policy.mcp] hosts` restrict allowed endpoints, cross-host HTTP redirects must pass the same policy, `quack doctor` lists reachable hosts, and the Session Egress Ledger logs every hop and block.'],
 		['Settings & secret guards you can lock', 'Config layers merge from system to user, `.quack/`, env, and CLI. Admin locks hold against `/config` and `Ctrl-L` / `/scope` project writes — including locking `[network] secret_guard` so Pre-Egress Secret Shield masks keys before sending.'],
 		['Hooks users can’t remove', 'Hooks in the system config directory are enforced across seven events (including guided `forge-review` and `jira` hooks with masked credentials and live draft checks) in any language.'],
-		['Internal-only bundles (quack-plucked)', '`quack-plucked` ships the complete agent without any preinstalled hosted-service providers, ready for teams running internal model servers. See the Config section below for setup.'],
+		['Plucked installs (--plucked)', 'Pass `--plucked` (`-Plucked`) to install the full agent without any preinstalled hosted-service providers or `defaults/config.toml`, ready for teams running internal model servers. See the Config section below for setup.'],
 		['Apache-2.0 with minimal dependencies', 'Every dependency is audited per OS before being added. TLS uses `ring`, and Linux keyring support calls `secret-tool` directly instead of pulling in a D-Bus stack.']
 	];
 	const parts = (t: string) => t.split(/(`[^`]+`)/).filter(Boolean);

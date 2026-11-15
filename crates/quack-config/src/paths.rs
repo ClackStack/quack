@@ -74,7 +74,7 @@ impl Dirs {
         let defaults = match var("DEFAULTS_DIR") {
             Some(v) if v == "none" => None,
             Some(v) => Some(PathBuf::from(v)),
-            None => default_bundle_candidates(&user_data)
+            None => default_bundle_candidates(env, &home, &user_data)
                 .into_iter()
                 .find(|p| p.is_dir()),
         };
@@ -202,18 +202,27 @@ fn platform_dirs(env: Env<'_>, home: &Path) -> PlatformDirs {
 }
 
 /// Where an installed defaults bundle may live, most specific first.
-fn default_bundle_candidates(user_data: &Path) -> Vec<PathBuf> {
+fn default_bundle_candidates(env: Env<'_>, home: &Path, user_data: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(exe_dir) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-    {
+    let push_exe_dir = |out: &mut Vec<PathBuf>, exe_dir: &Path| {
         // Homebrew / tarball: <prefix>/bin/../share/quack/defaults
         if let Some(prefix) = exe_dir.parent() {
             out.push(prefix.join("share").join(APP_NAME).join("defaults"));
         }
         // MSI / zip: next to the executable
         out.push(exe_dir.join("defaults"));
+    };
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+    {
+        push_exe_dir(&mut out, &exe_dir);
+    }
+    #[cfg(unix)]
+    if let Some(appimage) = env("APPIMAGE").filter(|v| !v.is_empty())
+        && let Some(appimage_dir) = Path::new(&appimage).parent()
+    {
+        push_exe_dir(&mut out, appimage_dir);
     }
     if cfg!(unix) {
         out.push(PathBuf::from("/usr/share").join(APP_NAME).join("defaults"));
@@ -223,7 +232,39 @@ fn default_bundle_candidates(user_data: &Path) -> Vec<PathBuf> {
                 .join("defaults"),
         );
     }
+    #[cfg(target_os = "macos")]
+    {
+        out.push(
+            PathBuf::from("/opt/homebrew/share")
+                .join(APP_NAME)
+                .join("defaults"),
+        );
+    }
+    #[cfg(windows)]
+    {
+        let local = env("LOCALAPPDATA")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                home.is_absolute()
+                    .then(|| home.join("AppData").join("Local"))
+            });
+        if let Some(local) = local {
+            out.push(local.join("Programs").join(APP_NAME).join("defaults"));
+        }
+    }
     out.push(user_data.join("defaults"));
+    #[cfg(unix)]
+    if home.is_absolute() {
+        out.push(
+            home.join(".local")
+                .join("share")
+                .join(APP_NAME)
+                .join("defaults"),
+        );
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = (env, home);
     out
 }
 
@@ -316,5 +357,54 @@ mod tests {
         let env = env_of(&[("HOME", "/home/u"), ("XDG_CONFIG_HOME", "relative")]);
         let dirs = Dirs::discover_with(&env, Path::new("/"));
         assert_eq!(dirs.user_config, Path::new("/home/u/.config/quack"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn appimage_and_home_local_candidates_resolve_shared_defaults() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let appimage_bin = tmp.path().join("opt").join("bin").join("quack-gui");
+        let appimage_defaults = tmp
+            .path()
+            .join("opt")
+            .join("share")
+            .join(APP_NAME)
+            .join("defaults");
+        std::fs::create_dir_all(appimage_bin.parent().expect("parent")).expect("mkdir bin");
+        std::fs::create_dir_all(&appimage_defaults).expect("mkdir appimage defaults");
+
+        let home = tmp.path().join("home");
+        let home_defaults = home
+            .join(".local")
+            .join("share")
+            .join(APP_NAME)
+            .join("defaults");
+        std::fs::create_dir_all(&home_defaults).expect("mkdir home defaults");
+
+        let user_data = tmp.path().join("data");
+        let env_with_appimage = env_of(&[("APPIMAGE", appimage_bin.to_str().unwrap_or_default())]);
+        let with_appimage = default_bundle_candidates(&env_with_appimage, &home, &user_data);
+        assert!(with_appimage.contains(&appimage_defaults));
+        assert!(with_appimage.contains(&home_defaults));
+        let app_pos = with_appimage
+            .iter()
+            .position(|p| p == &appimage_defaults)
+            .expect("appimage defaults");
+        let user_pos = with_appimage
+            .iter()
+            .position(|p| p == &user_data.join("defaults"))
+            .expect("user_data defaults");
+        assert!(app_pos < user_pos);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_default_prefix_candidates_include_programs_quack() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let local = tmp.path().join("Local");
+        let programs_defaults = local.join("Programs").join(APP_NAME).join("defaults");
+        let env = env_of(&[("LOCALAPPDATA", local.to_str().unwrap_or_default())]);
+        let candidates = default_bundle_candidates(&env, tmp.path(), &local.join(APP_NAME));
+        assert!(candidates.contains(&programs_defaults));
     }
 }

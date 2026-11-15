@@ -47,7 +47,7 @@ task check | test | clippy | fmt | gui:check  # verification tasks
 - quack does not read `.env` files. If a `.env` holds a provider key (for example `CHARM_API_KEY`, which `defaults/providers.d/charm-hyper.toml` reads with `api_key = { env = ... }`), export it in the shell with `set -a; . ./.env; set +a`. Never print, log or commit its values.
 - **Live model calls can cost the user money** (pay-as-you-go keys). Prove behaviour against the wiremock mock server in tests. Make a live call only when only a real model can answer the question, and say so when you do.
 - `QUACK_DEFAULTS_DIR=defaults target/debug/quack doctor` shows the config layers, the defaults bundle, providers (ready or why not) and reachable hosts, without calling a model.
-- `scripts/install.sh --from-source` builds a release binary and installs it, with the bundle, into `~/.local`. `--plucked` installs the bundle without the hosted-service providers (`scripts/copy-defaults.sh`), `--binary-only` the binary alone. `scripts/package.sh <target>` builds the release archives that `.github/workflows/release.yml` publishes.
+- `scripts/install.sh --from-source` builds a release binary and installs it, with the bundle, into `~/.local`. `--plucked` (`-Plucked`) filters out hosted-service providers and `config.toml` when installing defaults (`scripts/copy-defaults.sh`, `install.sh`, `install.ps1`), `--binary-only` leaves installed defaults alone. `scripts/package.sh <target>`, `package-linux.sh`, and `package-gui.sh <target>` build single `quack` / `quack-gui` release artifacts without `-plucked` variants. `scripts/package.sh <target>` builds the CLI archives that `.github/workflows/release.yml` publishes.
 - Other scripts:
   - `scripts/no-egress.sh` runs in a loopback-only network namespace with `strace -e connect` (Linux).
   - `scripts/first-frame.sh <ms>` checks the startup budget.
@@ -161,7 +161,7 @@ These are the project's core promises; tests and CI enforce them:
 ## Conventions and gotchas
 
 - **User-facing TOML stays minimal.** Provider and model files should work with two lines (`base_url`, `models`). Every new field must be optional with a sensible default, and an unset field should mean the obvious thing (for example, an unset `cost.cached_input` means the `input` price). After changing a config struct, regenerate `defaults/schemas/`.
-- **Defaults are data.** Ship more defaults as files under `defaults/`, never as code. The packaged `quack` archives include the bundle; `quack-plucked` archives include it without the provider files for hosted services.
+- **Defaults are data.** Ship more defaults as files under `defaults/`, never as code. The packaged `quack` archives include the shared `defaults/` bundle (used on disk by both `quack` and `quack-gui`); installer `--plucked` (`-Plucked`) leaves out hosted-service provider files and `config.toml`.
 - **Dependencies must earn their place.** Before adding a crate, count what it pulls in on each OS (`cargo tree -e normal --target <triple>`). Use `default-features = false` where possible.
 - **Platform-gated tests must gate their imports too.** CI compiles `--all-targets` with `-D warnings` on Windows, so a `#[cfg(unix)]` test leaves its imports and helpers as unused-import or dead-code errors there. Gate them with the same `#[cfg(...)]`, as `crates/quack-core/tests/trust.rs` does.
 - **Lints:**

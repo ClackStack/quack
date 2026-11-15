@@ -38,7 +38,7 @@ Usage: install.sh [options]
   --plucked            Leave out the provider files for hosted services (OpenRouter,
                        Claude, OpenAI, ...) for both TUI and GUI. Profiles, sub-agents,
                        MCP, language servers and local server files are all installed.
-  --binary-only        Install or update only the binaries. Existing external defaults
+  --binary-only        Install or update only the binaries. Existing defaults
                        are left as they are; none are installed if there were none.
   --prefix DIR         Install into DIR/bin and DIR/share/quack (default: ~/.local,
                        or $QUACK_INSTALL_PREFIX).
@@ -207,14 +207,33 @@ install_defaults_dir() {
       say "no defaults installed (--binary-only): add providers with \`quack setup\` or your own files"
     fi
   elif [ -z "$_src_defaults" ]; then
-    say "this archive has no defaults bundle; left $defaults as it is"
+    if [ "$plucked" = 1 ]; then
+      say "warning: this archive has no defaults bundle, so --plucked had nothing to filter; left $defaults as it is"
+    else
+      say "this archive has no defaults bundle; left $defaults as it is"
+    fi
   else
     mkdir -p "$prefix/share/quack"
     rm -rf "$defaults.new"
     cp -R "$_src_defaults" "$defaults.new"
+    if [ "$plucked" = 1 ]; then
+      rm -f "$defaults.new/config.toml"
+      for _f in "$defaults.new"/providers.d/*.toml; do
+        [ -f "$_f" ] || continue
+        _host=$(sed -n 's|^base_url *= *"[a-z]*://\([^/:"]*\).*|\1|p' "$_f" | head -n 1)
+        case $_host in
+          127.* | localhost | "[::1]") ;;
+          *) rm -f "$_f" ;;
+        esac
+      done
+    fi
     rm -rf "$defaults"
     mv "$defaults.new" "$defaults"
-    say "installed the defaults in $defaults"
+    if [ "$plucked" = 1 ]; then
+      say "installed plucked defaults in $defaults (hosted providers left out)"
+    else
+      say "installed the defaults in $defaults"
+    fi
   fi
 }
 
@@ -250,6 +269,9 @@ install_macos_dmg() {
   mkdir -p "$bindir"
   {
     printf '#!/bin/sh\n'
+    if [ "$prefix" != "$HOME/.local" ]; then
+      printf 'export QUACK_DEFAULTS_DIR="${QUACK_DEFAULTS_DIR:-%s}"\n' "$defaults"
+    fi
     printf 'exec "%s" "$@"\n' "$_gui_exec"
   } > "$bindir/.quack-gui.new"
   chmod 755 "$bindir/.quack-gui.new"
@@ -343,6 +365,7 @@ if [ -n "$source_dir" ]; then
     fi
   fi
 else
+  tui_archive=
   if [ -n "$archive" ]; then
     [ -f "$archive" ] || die "no such archive: $archive"
     case $archive in
@@ -350,6 +373,7 @@ else
         [ "$explicit_gui" = 0 ] || die "$archive is a TUI archive; pass --tui or use a .AppImage / .dmg for --gui"
         want_tui=1
         want_gui=0
+        tui_archive=$archive
         ;;
       *.AppImage | *.appimage)
         [ "$explicit_tui" = 0 ] || die "$archive is a GUI AppImage; pass --gui or use a .tar.gz for --tui"
@@ -425,27 +449,27 @@ else
       [ "$_want" = "$_got" ] || die "checksum mismatch for $_fname"
     }
 
-    if [ "$want_tui" = 1 ]; then
-      tui_flavour=quack
-      [ "$plucked" = 1 ] && tui_flavour=quack-plucked
-      tui_name=$tui_flavour-$arch-$tui_os.tar.gz
-      say "downloading $tui_name ($version)"
+    if [ "$want_tui" = 1 ] || [ "$binary_only" = 0 ]; then
+      tui_name=quack-$arch-$tui_os.tar.gz
+      if [ "$want_tui" = 1 ]; then
+        say "downloading $tui_name ($version)"
+      else
+        say "downloading $tui_name ($version, for shared defaults)"
+      fi
       fetch "$base/$tui_name" "$tmp/$tui_name" || die "download failed: $base/$tui_name"
       verify_sum "$tmp/$tui_name" "$tui_name"
-      archive=$tmp/$tui_name
+      tui_archive=$tmp/$tui_name
     fi
 
     if [ "$want_gui" = 1 ]; then
-      gui_flavour=quack-gui
-      [ "$plucked" = 1 ] && gui_flavour=quack-gui-plucked
       if [ "$host_os" = Linux ]; then
-        gui_name=$gui_flavour-$arch-$gui_os.AppImage
+        gui_name=quack-gui-$arch-$gui_os.AppImage
         say "downloading $gui_name ($version)"
         fetch "$base/$gui_name" "$tmp/$gui_name" || die "download failed: $base/$gui_name"
         verify_sum "$tmp/$gui_name" "$gui_name"
         gui_appimage=$tmp/$gui_name
       else
-        gui_name=$gui_flavour-$arch-$gui_os.dmg
+        gui_name=quack-gui-$arch-$gui_os.dmg
         say "downloading $gui_name ($version)"
         fetch "$base/$gui_name" "$tmp/$gui_name" || die "download failed: $base/$gui_name"
         verify_sum "$tmp/$gui_name" "$gui_name"
@@ -454,18 +478,21 @@ else
     fi
   fi
 
-  if [ "$want_tui" = 1 ]; then
+  if [ -n "$tui_archive" ]; then
     mkdir "$tmp/x"
-    tar -xzf "$archive" -C "$tmp/x" 2>/dev/null || die "$archive is not a quack .tar.gz archive"
+    tar -xzf "$tui_archive" -C "$tmp/x" 2>/dev/null || die "$tui_archive is not a quack .tar.gz archive"
     top=$(find "$tmp/x" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-    [ -n "$top" ] && [ -f "$top/bin/quack" ] || die "$archive does not look like a quack archive"
-    new_tui_bin=$top/bin/quack
+    [ -n "$top" ] && [ -f "$top/bin/quack" ] || die "$tui_archive does not look like a quack archive"
+    [ "$want_tui" = 1 ] && new_tui_bin=$top/bin/quack
     [ -d "$top/share/quack/defaults" ] && new_defaults=$top/share/quack/defaults
   fi
 fi
 
 if [ "$want_tui" = 1 ]; then
   install_bin "$new_tui_bin" quack
+fi
+
+if [ "$want_tui" = 1 ] || [ "$want_gui" = 1 ]; then
   install_defaults_dir "$new_defaults"
 fi
 
@@ -477,11 +504,6 @@ if [ "$want_gui" = 1 ]; then
     [ "$host_os" = Linux ] && install_linux_desktop ""
   else
     install_bin "$new_gui_bin" quack-gui
-    # Source builds of quack-gui are bare binaries (outside an AppImage/.app bundle)
-    # and read defaults from <exe>/../share/quack/defaults.
-    if [ "$want_tui" = 0 ]; then
-      install_defaults_dir "$new_defaults"
-    fi
     [ "$host_os" = Linux ] && install_linux_desktop "$source_dir/crates/quack-gui/icons/128x128.png"
   fi
 fi
