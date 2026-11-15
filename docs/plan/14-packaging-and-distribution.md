@@ -161,15 +161,22 @@ short URL the README and the site show is always the current script; the release
 stays pinned to its tag.
 
 The install scripts (`scripts/install.sh` for Linux and macOS, `scripts/install.ps1` for
-Windows) download the archive for this machine, check it against `SHA256SUMS`, and install
-the binary and the defaults:
+Windows) install **both** the TUI (`quack`) and desktop GUI (`quack-gui`) by default (since
+installing one does not install the other, while both share one core, config, sessions,
+memory and history), check them against `SHA256SUMS`, and verify defaults:
 
-- `--plucked` (`-Plucked`): the plucked archive, whose bundle has no hosted-service
-  providers. With `--from-source`, the checkout's bundle is filtered the same way.
-- `--binary-only` (`-BinaryOnly`): the binary only. An existing defaults folder is left
-  alone; a fresh install this way has none, and runs on the compiled-in core.
-- `--prefix`, `--version`, `--archive FILE` (offline installs), `--from-source [DIR]` (build
-  a checkout with cargo), `--uninstall` (keeps config, sessions and memory).
+- `--tui` (`-Tui`, alias `--cli` / `-Cli`): install or uninstall only the TUI (`quack`) and its
+  defaults bundle.
+- `--gui` (`-Gui`): install or uninstall only the desktop GUI (`quack-gui` AppImage on glibc
+  Linux with a `.desktop` entry, `quack.app` + CLI wrapper on macOS, or silent NSIS `-setup.exe`
+  on Windows).
+- `--plucked` (`-Plucked`): install the plucked TUI (`quack-plucked`) and/or plucked GUI
+  (`quack-gui-plucked`), whose bundle has no hosted-service providers. With `--from-source`,
+  the checkout's bundle is filtered the same way.
+- `--binary-only` (`-BinaryOnly`): update binaries only. Existing external defaults are left
+  alone; a fresh TUI install this way runs on the compiled-in core.
+- `--prefix`, `--version`, `--archive FILE` (offline installs of `.tar.gz`/`.zip`/`.AppImage`/`.dmg`/`-setup.exe`),
+  `--from-source [DIR]` (build a checkout with cargo + desktop UI), `--uninstall` (keeps config, sessions and memory).
 - The binary is replaced by renaming, so a running quack is never left with a half-written
   file (Windows renames the running exe out of the way).
 - A full install replaces the defaults folder as a whole, so files removed upstream go away
@@ -186,9 +193,9 @@ the binary and the defaults:
 
 ### Desktop GUI bundles (2026-11-14)
 
-- `.github/workflows/release.yml` adds a `build-gui` job backed by `scripts/package-gui.sh <target>` for the six non-musl desktop targets: `x86_64-unknown-linux-gnu` (`ubuntu-22.04`) and `aarch64-unknown-linux-gnu` (`ubuntu-24.04-arm`) producing `.deb` (`quack-gui_<v>_<arch>.deb`), `.rpm` (`quack-gui-<v>-1.<arch>.rpm`), and `.AppImage` (`quack-gui-<target>.AppImage`); `x86_64-apple-darwin` and `aarch64-apple-darwin` producing `.dmg`; `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` producing NSIS installers (`quack-gui-<target>-setup.exe`). Bundles ship unsigned and include `defaults/`.
+- `.github/workflows/release.yml` adds a tag-only `build-gui` job backed by `scripts/package-gui.sh <target>` for the six non-musl desktop targets: `x86_64-unknown-linux-gnu` (`ubuntu-22.04`) and `aarch64-unknown-linux-gnu` (`ubuntu-24.04-arm`) producing `.deb`, `.rpm`, and `.AppImage`; `x86_64-apple-darwin` and `aarch64-apple-darwin` producing `.dmg`; `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` producing NSIS installers (`-setup.exe`). `package-gui.sh` builds both standard (`quack-gui-*`) and plucked (`quack-gui-plucked-*`, without hosted-service providers or default `config.toml`) flavours. Bundles ship unsigned and include `defaults/`.
 - `crates/quack-gui/tauri.linux.conf.json` sets `"productName": "quack-gui"` on Linux so `.deb` and `.rpm` packages install `/usr/bin/quack-gui` and `/usr/lib/quack-gui/defaults` under `quack-gui` without colliding with CLI `.deb`/`.rpm` (`Package: quack`, `/usr/bin/quack`).
-- The `publish` job also generates `quack-gui.cdx.json` via `cargo cyclonedx` on `crates/quack-gui/Cargo.toml --features desktop` and attaches all `quack-gui-*` assets and sums to `SHA256SUMS`.
+- The `publish` job also generates `quack-gui.cdx.json` via `cargo cyclonedx` on `crates/quack-gui/Cargo.toml --features desktop` and attaches all `quack-gui*` and `quack-gui-plucked*` assets and sums to `SHA256SUMS`.
 
 ### Still to do
 

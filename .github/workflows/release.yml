@@ -4,9 +4,12 @@ name: Release
 #   quack-<target>.{tar.gz,zip}          binary + defaults bundle (the normal install)
 #   quack-plucked-<target>.{tar.gz,zip}  the same without hosted-service providers
 #   quack[-plucked]_<version>_<arch>.deb and .rpm (Linux)
-#   quack-gui-<target>.{AppImage,dmg}    unsigned desktop GUI bundles (glibc Linux, macOS)
-#   quack-gui_<version>_<arch>.deb / .rpm desktop GUI Debian and RPM packages (glibc Linux)
-#   quack-gui-<target>-setup.exe         unsigned desktop GUI NSIS installer (Windows)
+#   quack-gui[-plucked]-<target>.{AppImage,dmg}
+#                                        unsigned desktop GUI bundles (glibc Linux, macOS)
+#   quack-gui[-plucked]_<version>_<arch>.deb / .rpm
+#                                        desktop GUI Debian and RPM packages (glibc Linux)
+#   quack-gui[-plucked]-<target>-setup.exe
+#                                        unsigned desktop GUI NSIS installer (Windows)
 #   quack.cdx.json, quack-gui.cdx.json   CycloneDX SBOMs (CLI and desktop GUI)
 #   quack.rb, quack-plucked.rb           Homebrew formulas for a tap
 #   install.sh, install.ps1, SHA256SUMS
@@ -61,6 +64,7 @@ jobs:
 
   build-gui:
     name: build-gui (${{ matrix.target }})
+    if: startsWith(github.ref, 'refs/tags/')
     strategy:
       fail-fast: false
       matrix:
@@ -92,7 +96,6 @@ jobs:
       # Stamp the tag into the workspace version so the bundle and build report
       # the release; scripts/set-version.sh refreshes Cargo.lock for --locked.
       - run: scripts/set-version.sh "${GITHUB_REF_NAME#v}"
-        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
       - run: scripts/package-gui.sh ${{ matrix.target }}
         shell: bash

@@ -366,12 +366,15 @@
 	</div>
 
 	<p class="mt-6 rounded-xl border border-rule bg-wash px-4 py-3 text-sm text-ink-2 leading-relaxed">
-		<strong class="font-semibold text-ink">Separate desktop bundles:</strong> tagged GitHub
-		releases publish unsigned <code>quack-gui</code> packages (<code>.dmg</code>,
-		<code>-setup.exe</code>, <code>.deb</code>, <code>.rpm</code>, and <code>.AppImage</code>) separately from the CLI
-		archives in <a href="#install" class="text-sky-ink underline underline-offset-2 font-semibold">Install</a>.
-		To build from source, bundle the UI in <code>crates/quack-gui/ui</code> and run
-		<code>cargo build -p quack-gui --features desktop</code>.
+		<strong class="font-semibold text-ink">Two apps sharing one core:</strong> installing
+		<code>quack-gui</code> does not install the <code>quack</code> terminal command (and installing the
+		TUI does not install the GUI), though both share one config, sessions, memory notes, and prompt
+		history. The default installer in
+		<a href="#install" class="text-sky-ink underline underline-offset-2 font-semibold">Install</a> sets up
+		both, or install the GUI alone with <code>--gui</code> (and <code>--plucked</code> for
+		<code>quack-gui-plucked</code>). Tagged GitHub releases also publish unsigned <code>.dmg</code>,
+		<code>-setup.exe</code>, <code>.deb</code>, <code>.rpm</code>, and <code>.AppImage</code> bundles for
+		both standard and plucked flavours.
 	</p>
 </Plate>
 

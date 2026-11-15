@@ -25,6 +25,8 @@ intelligence.
 
 ### 1. Install
 
+Installs both the desktop GUI (`quack-gui`) and the terminal UI (`quack`) by default. They are separate apps sharing one core, config, sessions, memory, and prompt history; pass `--tui` or `--gui` (`-Tui` or `-Gui` on Windows) to install only one.
+
 **Linux and macOS:**
 ```sh
 curl -fsSL https://quack.clackstack.dev/install.sh | sh
@@ -35,12 +37,13 @@ curl -fsSL https://quack.clackstack.dev/install.sh | sh
 irm https://quack.clackstack.dev/install.ps1 | iex
 ```
 
-*Prebuilt `.deb`, `.rpm`, Homebrew tap formulas, and platform archives are available on the [releases page](https://github.com/ClackStack/quack/releases).*
+*Prebuilt `.deb`, `.rpm`, `.AppImage`, `.dmg`, `-setup.exe`, Homebrew tap formulas, and platform archives (both standard and `-plucked`) are available on the [releases page](https://github.com/ClackStack/quack/releases).*
 
 ### 2. Run
 
 ```sh
-quack
+quack      # terminal UI
+quack-gui  # desktop app
 ```
 
 On first launch, the interactive `/setup` wizard helps you configure a model in seconds:
@@ -223,11 +226,11 @@ Prebuilt archives for all supported targets are published on the [Releases](http
 - **Linux**: Static binaries (musl) for x64 and ARM64, `.deb` and `.rpm` packages.
 - **macOS**: Universal archives (x64 and Apple Silicon) and Homebrew tap formulas.
 - **Windows**: x64 and ARM64 zip archives and PowerShell installer.
-- **Desktop GUI (`quack-gui`)**: Separate unsigned desktop bundles (each bundling `defaults/`) for macOS (`.dmg` for x64 and Apple Silicon), Windows (`-setup.exe` NSIS installers for x64 and ARM64), and glibc Linux (`.deb`, `.rpm`, and `.AppImage` for x64 and ARM64; static musl targets ship the CLI only).
+- **Desktop GUI (`quack-gui` & `quack-gui-plucked`)**: Separate unsigned desktop bundles (each bundling `defaults/`) for macOS (`.dmg` for x64 and Apple Silicon), Windows (`-setup.exe` NSIS installers for x64 and ARM64), and glibc Linux (`.deb`, `.rpm`, and `.AppImage` for x64 and ARM64; static musl targets ship the CLI only). Installing the GUI alone does not install `quack` (and vice versa), though they share one config, sessions, memory, and history; `install.sh` / `install.ps1` install both by default unless `--tui`/`-Tui` or `--gui`/`-Gui` is passed.
 
-### Minimal / Air-Gapped Installs (`quack-plucked`)
+### Minimal / Air-Gapped Installs (`quack-plucked` & `quack-gui-plucked`)
 
-For air-gapped environments or private clusters, `quack-plucked` provides the complete agent (profiles, sub-agents, MCP, ACP, language servers, hooks, local model support) without any hosted service configurations:
+For air-gapped environments or private clusters, `--plucked` installs the complete agent — both TUI (`quack-plucked`) and GUI (`quack-gui-plucked`), or either one via `--tui` / `--gui` — with profiles, sub-agents, MCP, ACP, language servers, hooks, and local model support, without any hosted service configurations:
 
 ```sh
 curl -fsSL https://quack.clackstack.dev/install.sh | sh -s -- --plucked
