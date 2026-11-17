@@ -179,7 +179,7 @@ pub(crate) fn sessions(loaded: &Loaded) -> i32 {
             e.model
         );
     }
-    println!("\nresume with: quack --resume <id>   (or --continue for the latest)");
+    println!("\nresume with: quack -s <id>   (or --continue for the latest)");
     exit::OK
 }
 

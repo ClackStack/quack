@@ -244,6 +244,10 @@ const INFO: AppInfo = {
 	cwd: '~/Development/demo-pond',
 	branch: 'main',
 	model: 'dev-local/tiny',
+	default_model: 'dev-local/tiny',
+	default_locked: false,
+	small_model: null,
+	small_locked: false,
 	planner_model: 'dev-local/thinker',
 	planner_locked: false,
 	permission_mode: 'ask',
@@ -754,11 +758,18 @@ export function devTransport(): Transport {
 		const updatesCheck = devSetting(state, 'updates.check') === 'true';
 		const writable = parseTomlStringArray(devSetting(state, 'sandbox.writable'));
 
+		const defaultModel = parseTomlString(devSetting(state, 'model.default')) || null;
+		const smallModel = parseTomlString(devSetting(state, 'model.small')) || null;
+
 		return {
 			...INFO,
 			cwd: state.cwd,
 			branch: state.branch,
-			model: parseTomlString(devSetting(state, 'model.default')) || INFO.model,
+			model: defaultModel || INFO.model,
+			default_model: defaultModel,
+			default_locked: false,
+			small_model: smallModel,
+			small_locked: false,
 			planner_model: state.plannerModel,
 			permission_mode: parseTomlString(devSetting(state, 'permissions.mode')) || 'ask',
 			work_mode: parseTomlString(devSetting(state, 'permissions.work_mode')) || 'edit',
@@ -1048,6 +1059,7 @@ export function devTransport(): Transport {
 						if (op.key === 'model.planner') {
 							state.plannerModel = op.value === '""' ? null : parseTomlString(op.value) || null;
 						}
+						fan({ tab, info: buildDevInfo(state) });
 					}
 					send(tab, {
 						event: 'setting_saved',

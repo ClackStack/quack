@@ -2248,7 +2248,10 @@ mod tests {
         }];
         app.modal = Some(crate::modal::models(
             Some(&catalog),
-            Some("charm/glm-5.3"),
+            crate::modal::ModelRoles {
+                current: Some("charm/glm-5.3"),
+                ..app.model_roles()
+            },
             false,
             WriteScope::User,
             &app.theme,

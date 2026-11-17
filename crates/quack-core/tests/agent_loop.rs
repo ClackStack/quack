@@ -407,10 +407,17 @@ async fn new_list_resume_title_and_save_setting() {
     assert_eq!(sessions.len(), 2, "{sessions:?}");
     assert!(sessions[0].current && sessions[0].title == "second question");
     assert_eq!(sessions[1].title, "alpha");
+    let id_0 = sessions[0].id.0.clone();
+    let id_1 = sessions[1].id.0.clone();
+    assert_eq!(id_0.len(), 12);
+    assert_eq!(id_1.len(), 12);
+    assert_ne!(id_0, id_1);
+    assert!(!id_0.starts_with('0'), "{id_0}");
+    assert!(!id_1.starts_with('0'), "{id_1}");
 
     engine
         .submit(Op::ResumeSession {
-            id: sessions[1].id.clone(),
+            id: quack_core::protocol::SessionId(id_1),
         })
         .await;
     let items = loop {
@@ -450,6 +457,27 @@ async fn new_list_resume_title_and_save_setting() {
     let text = std::fs::read_to_string(&user_config).expect("config written");
     assert!(text.contains("default = \"mock/tiny\""), "{text}");
     engine.shutdown().await;
+
+    // Also verify `Engine::spawn_with(..., Resume::Id(id))` (the CLI `-s` path).
+    let mut resumed = Engine::spawn_with(
+        Arc::new(workspace(tmp.path(), &server.uri())),
+        Resume::Id(id_0),
+    );
+    let items = loop {
+        match next(&mut resumed.events).await {
+            Event::SessionResumed { items, .. } => break items,
+            Event::Warning { message } if message.starts_with("cannot re") => {
+                panic!("unexpected resume warning: {message}")
+            }
+            Event::StartupComplete => panic!("startup completed without resuming session"),
+            _ => {}
+        }
+    };
+    assert!(
+        matches!(items.first(), Some(ReplayItem::User { text }) if text == "second question"),
+        "{items:?}"
+    );
+    resumed.shutdown().await;
 }
 
 #[tokio::test]

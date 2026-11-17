@@ -322,6 +322,7 @@ export const SETTING_FIELDS: readonly SettingFieldDef[] = [
 		defaultValue: '""',
 		placeholder: 'Optional provider/model',
 		emptyMeaning: 'Uses the main session model',
+		hint: 'Can also be set as Small or Both directly in the model selector.',
 		fallbackDescription: 'Faster/cheaper model used for lightweight tasks like session titles.'
 	},
 	{
@@ -1166,9 +1167,19 @@ export function prepareFieldTomlValue(
 			}
 			return { ok: true, value: String(parsed) };
 		}
+		case 'model': {
+			const clean = trimmed.replace(/^"(.*)"$/, '$1').trim();
+			if (!clean) {
+				return { ok: true, value: formatTomlString('') };
+			}
+			const slash = clean.indexOf('/');
+			if (slash < 1 || slash === clean.length - 1 || /\s/.test(clean)) {
+				return { ok: false, error: 'Use <provider>/<model> (for example ollama/qwen3.5:35b).' };
+			}
+			return { ok: true, value: formatTomlString(clean) };
+		}
 		case 'path':
 		case 'text':
-		case 'model':
 		case 'profile':
 		case 'select':
 		case 'theme':

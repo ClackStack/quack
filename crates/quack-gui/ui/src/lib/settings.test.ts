@@ -357,6 +357,19 @@ describe('settings metadata and TOML helpers', () => {
 			ok: true,
 			value: '"/tmp/mem"'
 		});
+
+		const smallModel = SETTING_FIELD_MAP.get('model.small')!;
+		expect(prepareFieldTomlValue(smallModel, '')).toEqual({ ok: true, value: '""' });
+		expect(prepareFieldTomlValue(smallModel, '""')).toEqual({ ok: true, value: '""' });
+		expect(prepareFieldTomlValue(smallModel, 'ollama/qwen3.5:35b')).toEqual({
+			ok: true,
+			value: '"ollama/qwen3.5:35b"'
+		});
+		expect(prepareFieldTomlValue(smallModel, '"ollama/qwen3.5:35b"')).toEqual({
+			ok: true,
+			value: '"ollama/qwen3.5:35b"'
+		});
+		expect(prepareFieldTomlValue(smallModel, 'qwen3.5:35b').ok).toBe(false);
 	});
 });
 

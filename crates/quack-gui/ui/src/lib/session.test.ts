@@ -1208,4 +1208,56 @@ describe('update checks', () => {
 		await session.pruneContext([4]);
 		expect(send).toHaveBeenCalledWith(3, { op: 'prune_context', indices: [4] });
 	});
+
+	it('saves large, small, or both default models and updates info live', async () => {
+		const { session, send } = fixture();
+		session.onEvent({ event: 'startup_complete' });
+
+		expect(await session.setModelDefaults('small', 'charm/qwen-flash', 'user')).toBe(true);
+		expect(send).toHaveBeenCalledWith(3, {
+			op: 'save_setting',
+			key: 'model.small',
+			value: '"charm/qwen-flash"',
+			scope: 'user'
+		});
+		session.onEvent({
+			event: 'setting_saved',
+			key: 'model.small',
+			value: '"charm/qwen-flash"',
+			path: '~/.config/quack/config.toml'
+		});
+		expect(session.settingSaving).toBe(false);
+		expect(session.info?.small_model).toBe('charm/qwen-flash');
+
+		expect(await session.setModelDefaults('both', 'charm/glm-5.3', 'project')).toBe(true);
+		expect(send).toHaveBeenCalledWith(3, {
+			op: 'save_setting',
+			key: 'model.default',
+			value: '"charm/glm-5.3"',
+			scope: 'project'
+		});
+		expect(send).toHaveBeenCalledWith(3, {
+			op: 'save_setting',
+			key: 'model.small',
+			value: '"charm/glm-5.3"',
+			scope: 'project'
+		});
+		expect(session.settingSaving).toBe(true);
+		session.onEvent({
+			event: 'setting_saved',
+			key: 'model.default',
+			value: '"charm/glm-5.3"',
+			path: '.quack/config.toml'
+		});
+		expect(session.settingSaving).toBe(true);
+		session.onEvent({
+			event: 'setting_saved',
+			key: 'model.small',
+			value: '"charm/glm-5.3"',
+			path: '.quack/config.toml'
+		});
+		expect(session.settingSaving).toBe(false);
+		expect(session.info?.default_model).toBe('charm/glm-5.3');
+		expect(session.info?.small_model).toBe('charm/glm-5.3');
+	});
 });

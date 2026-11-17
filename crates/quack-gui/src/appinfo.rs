@@ -21,6 +21,14 @@ pub struct AppInfo {
     pub branch: Option<String>,
     /// `<provider>/<model>` the session starts on.
     pub model: Option<String>,
+    /// `<provider>/<model>` configured as `model.default`, if any.
+    pub default_model: Option<String>,
+    /// Whether `model.default` is locked by system policy.
+    pub default_locked: bool,
+    /// `<provider>/<model>` configured as `model.small`, if any.
+    pub small_model: Option<String>,
+    /// Whether `model.small` is locked by system policy.
+    pub small_locked: bool,
     /// `<provider>/<model>` used in Plan mode, if configured.
     pub planner_model: Option<String>,
     /// Whether `model.planner` is locked by system policy.
@@ -224,6 +232,10 @@ impl AppInfo {
             branch: git_branch(&config.dirs.workspace_root),
             cwd,
             model: Some(config.settings.model.default.clone()).filter(|m| !m.is_empty()),
+            default_model: Some(config.settings.model.default.clone()).filter(|m| !m.is_empty()),
+            default_locked: config.settings.policy.locks("model.default"),
+            small_model: Some(config.settings.model.small.clone()).filter(|m| !m.is_empty()),
+            small_locked: config.settings.policy.locks("model.small"),
             planner_model: Some(config.settings.model.planner.clone()).filter(|m| !m.is_empty()),
             planner_locked: config.settings.policy.locks("model.planner"),
             permission_mode: permissions.mode.label().to_owned(),

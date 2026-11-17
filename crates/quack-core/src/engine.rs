@@ -1337,6 +1337,7 @@ impl Engine {
         match outcome {
             Ok((updated, path, note)) => {
                 self.config = Arc::new(updated);
+                self.config_tx.send_replace(self.config.clone());
                 self.emit(Event::SettingSaved {
                     key: key.to_owned(),
                     value: value.to_owned(),
@@ -1650,14 +1651,22 @@ impl Engine {
                 c.setup = Arc::new(setup);
             }
             None => {
+                let resume = std::mem::take(&mut self.resume);
+                let (history, plan) = self.open_saved(&resume, &setup).unwrap_or_default();
+                self.configure_reasoning(&setup);
+                if !plan.is_empty() {
+                    setup.tool_ctx.plan.restore(&plan);
+                    self.emit(Event::Plan { checklist: plan });
+                }
                 self.convo = Some(Conversation {
                     perms: Arc::new(Mutex::new(setup.permissions.clone())),
-                    nested: nested(&self.config, &setup, &[]),
+                    nested: nested(&self.config, &setup, &history),
                     setup: Arc::new(setup),
-                    history: Some(Vec::new()),
+                    history: Some(history),
                     editor: None,
                     plan_start: None,
                 });
+                self.restore_modes();
                 self.problem = None;
             }
         }
@@ -3463,13 +3472,8 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()>
     Ok(())
 }
 
-/// Time-ordered id. Replaced by UUID v7 when `quack-store` lands.
 fn new_session_id() -> SessionId {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    SessionId(format!("{nanos:032x}"))
+    SessionId(quack_store::session::new_session_id())
 }
 
 struct SavedMcpFields {

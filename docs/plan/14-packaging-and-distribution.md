@@ -19,7 +19,9 @@ agent.
 
 | Install mode | Result |
 |---|---|
-| Default (`install.sh` / `install.ps1`) | `quack` + `quack-gui` + full shared `defaults/` bundle |
+| Default (`install.sh`, asks; `install.ps1`) | `quack` + `quack-gui` + full shared `defaults/` bundle |
+| Linux system package (default when apt/dpkg or dnf/yum/zypper tooling and root/sudo exist) | `quack` and/or `quack-gui` as `.deb`/`.rpm`: binaries in `/usr/bin`, shared `defaults/` in `/usr/share/quack/defaults`, desktop entry registered by the package |
+| `--pkg deb\|rpm\|archive` (`install.sh`) | force the Linux install format; `--plucked`, `--binary-only`, `--prefix`, `--archive` and `--from-source` always use the archive |
 | `--plucked` (`-Plucked`) | same `quack` / `quack-gui` binaries + shared `defaults/` without `config.toml` or off-machine `providers.d/*.toml` (`scripts/copy-defaults.sh`, `install.sh`, `install.ps1`) |
 
 ## Where defaults live after install
@@ -167,7 +169,21 @@ The install scripts (`scripts/install.sh` for Linux and macOS, `scripts/install.
 Windows) install **both** the TUI (`quack`) and desktop GUI (`quack-gui`) by default (since
 installing one does not install the other, while both share one core, shared `defaults/`
 directory, config, sessions, memory and history), check them against `SHA256SUMS`, and
-install/verify defaults:
+install/verify defaults. `install.sh` with no `--tui`/`--gui` **asks** what to install —
+both (the default on a fresh install), or only one — and when quack is already installed
+anywhere (`$bindir`, on `PATH`, or as a deb/rpm package) the prompt defaults to what is
+there, so re-running the script updates in place instead of adding the other app; with no
+terminal to ask (CI, scripts) the default is taken silently. `--uninstall` likewise removes
+what is installed, through `apt`/`dpkg` or `rpm` when a package owns it.
+
+On Linux the script prefers a **system package**: `quack_<v>_<arch>.deb` via `apt-get`/`dpkg`
+when apt/dpkg tooling and root or sudo exist, else `quack-<v>-<arch>.rpm` via `dnf`/`yum`/
+`zypper`/`rpm`, else the self-contained archive under `--prefix`. Package names carry the
+version, so "latest" is resolved to a concrete tag through the GitHub API first (pinning the
+whole run to one immutable release; a failure falls back to the archive path). A GUI-only
+package install still fetches the TUI archive for the shared `defaults/`, which are laid out
+under `/usr/share/quack/defaults`; an earlier non-package copy in `$bindir` is dropped so the
+two cannot shadow each other on `PATH`. `--pkg deb|rpm|archive` forces a format.
 
 - `--tui` (`-Tui`, alias `--cli` / `-Cli`): install or uninstall only the TUI (`quack`) and its
   defaults bundle.
@@ -180,6 +196,9 @@ install/verify defaults:
   (works across release downloads, `--from-source`, and `.tar.gz`/`.zip` `--archive` installs).
 - `--binary-only` (`-BinaryOnly`): update binaries only. Existing defaults are left alone; a
   fresh install this way runs on the compiled-in core.
+- `--pkg deb|rpm|archive` (`install.sh`, Linux only): force the install format instead of the
+  default deb-then-rpm-then-archive capability check. Not combinable with `--plucked`,
+  `--binary-only`, `--prefix`, `--archive` or `--from-source`, which always use the archive.
 - `--prefix`, `--version`, `--archive FILE` (offline installs of `.tar.gz`/`.zip`/`.AppImage`/`.dmg`/`-setup.exe`),
   `--from-source [DIR]` (build a checkout with cargo + desktop UI), `--uninstall` (keeps config, sessions and memory).
 - The binary is replaced by renaming, so a running quack is never left with a half-written
@@ -207,6 +226,30 @@ install/verify defaults:
 - Removed all `-plucked` binary builds/archives/packages/formulas (`quack-plucked*`, `quack-gui-plucked*`, `quack-plucked.rb`) from `scripts/package.sh`, `scripts/package-linux.sh`, `scripts/package-gui.sh`, and `scripts/homebrew.sh`. Each release now publishes one `quack` and one `quack-gui` build per target.
 - Removed `"resources": { "../../defaults/": "defaults/" }` from `crates/quack-gui/tauri.conf.json` so `quack-gui` never embeds hosted provider files inside the app bundle. Both apps now share one transparent on-disk `defaults/` folder, with `quack-config`'s discovery (`default_bundle_candidates`) extended for `$APPIMAGE` (Linux), `/opt/homebrew/share/quack/defaults` (macOS Apple Silicon Homebrew), `~/.local/share/quack/defaults` (macOS Finder/Dock & Linux), and `%LOCALAPPDATA%\Programs\quack\defaults` (Windows).
 - `scripts/install.sh` and `scripts/install.ps1` apply `--plucked` / `-Plucked` directly when writing the shared `defaults/` folder (stripping `config.toml` and non-loopback `providers.d/*.toml`), and fetch `quack-<target>.{tar.gz,zip}` solely for shared `defaults/` when `--gui` / `-Gui` runs without `--binary-only` or `--archive`.
+
+### Installer asks what to install; Linux prefers system packages (2026-11-16)
+
+- `scripts/install.sh` now asks what to install when no `--tui`/`--gui` is given: both TUI and
+  GUI (the default on a fresh install) or just one. The prompt reads the terminal directly when
+  stdin is not one (`curl | sh`), and falls back to the default silently when there is no
+  terminal (CI). When quack is already installed — in `$bindir`, on `PATH`, or as the `quack`/
+  `quack-gui` deb/rpm package — the default is what is installed, so rerunning the script
+  updates in place; `--uninstall` also defaults to what is installed and removes packages via
+  `apt-get`/`dpkg` or `rpm` when they own the files (plus `/usr/share/quack` when everything is
+  gone).
+- On Linux the installer prefers the system packages over the self-contained archive: `.deb`
+  through `apt-get install ./file` (falling back to `dpkg -i`) when apt/dpkg and root/sudo are
+  there, then `.rpm` through `dnf`/`microdnf`/`yum`/`zypper`/`rpm -U`, then the `~/.local`
+  archive. "latest" is resolved to a concrete tag via the GitHub API (`releases/latest`
+  `tag_name`) because the package filenames carry the version; API failure or a release without
+  package assets falls back to the archive path. A GUI-only package install copies the shared
+  `defaults/` from the TUI archive to `/usr/share/quack/defaults`, and a stale non-package copy
+  in `$bindir` (and its `.desktop` entry) is removed so one cannot shadow the other.
+- Verified with an offline harness: a local HTTP "release" with fake deb/rpm/archive assets and
+  stub `apt-get`/`dpkg`/`dnf`/`sudo` that only log, covering fresh/updates/both/TUI/GUI defaults,
+  package selection and fallbacks, `--pkg` validation, `--uninstall` via package manager,
+  `--plucked`/`--binary-only`/`--prefix`/`--archive`, macOS via a `uname` stub, and the
+  interactive prompt through a pty.
 
 ### Still to do
 

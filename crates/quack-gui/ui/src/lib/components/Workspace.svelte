@@ -231,7 +231,7 @@
 			{#if session.trust}
 				<TrustPanel {session} />
 			{:else if session.settingsOpen}
-				{#key session.tab}<SettingsPanel {session} />{/key}
+				{#key session.tab}<SettingsPanel {session} onOpenModels={() => (activeModal = 'model')} />{/key}
 			{:else if session.setupOpen}
 				{#key session.tab}<SetupPanel {session} />{/key}
 			{:else}

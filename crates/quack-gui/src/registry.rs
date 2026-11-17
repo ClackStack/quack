@@ -839,7 +839,7 @@ async fn run_tab(
                         | Event::SessionResumed { session: info, .. } = &event {
                         rt.session.send_replace(Some(info.id.clone()));
                     }
-                    if matches!(event, Event::StartupComplete) {
+                    if matches!(event, Event::StartupComplete | Event::SettingSaved { .. }) {
                         let cfg = engine.config();
                         *rt.history_path
                             .write()

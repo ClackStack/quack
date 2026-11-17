@@ -22,7 +22,7 @@ expression: s
 "     ││                                      ││ ⏎ switch to this model for the session       ││     "
 "   ~~││                                      ││ quack then asks for a thinking level (speed  ││     "
 "     ││                                      ││ vs cost)                                     ││     "
-"     ││                                      ││ ^s save as the default model (user           ││     "
+"     ││                                      ││ ^s set default: large, small, or both (user  ││     "
 "     ││                                      ││ config.toml)                                 ││     "
 "     ││                                      ││                                              ││     "
 "     ││                                      ││                                              ││     "

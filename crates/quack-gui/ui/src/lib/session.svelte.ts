@@ -373,6 +373,7 @@ export class Session {
 	#transport: Transport;
 	#progressSinceWarning = false;
 	#pendingForkOpenPicker = false;
+	#pendingSettingSaves = 0;
 	#reloadAfterSettingSaved = false;
 	#nextHookSetupRequest = 1;
 	#activeHookInspectRequest: number | null = null;
@@ -740,8 +741,9 @@ export class Session {
 				});
 				void this.refreshContext();
 				break;
-			case 'setting_saved':
-				this.settingSaving = false;
+			case 'setting_saved': {
+				this.#pendingSettingSaves = Math.max(0, this.#pendingSettingSaves - 1);
+				this.settingSaving = this.#pendingSettingSaves > 0;
 				this.settingError = null;
 				this.settingFeedback = {
 					key: ev.key,
@@ -749,11 +751,33 @@ export class Session {
 					path: ev.path,
 					...(ev.note ? { note: ev.note } : {})
 				};
-				if (this.#reloadAfterSettingSaved) {
+				if (this.info) {
+					const raw = ev.value.trim();
+					const unquoted =
+						raw === 'null' || raw === '""' ? null : raw.replace(/^"(.*)"$/, '$1') || null;
+					const nextSettings = this.info.settings.some((r) => r.key === ev.key)
+						? this.info.settings.map((r) =>
+								r.key === ev.key
+									? { ...r, value: raw === 'null' ? '""' : ev.value, origin: `saved: ${ev.path}` }
+									: r
+							)
+						: this.info.settings;
+					this.info = {
+						...this.info,
+						...(ev.key === 'model.default'
+							? { default_model: unquoted, model: unquoted ?? this.info.model }
+							: {}),
+						...(ev.key === 'model.small' ? { small_model: unquoted } : {}),
+						...(ev.key === 'model.planner' ? { planner_model: unquoted } : {}),
+						settings: nextSettings
+					};
+				}
+				if (!this.settingSaving && this.#reloadAfterSettingSaved) {
 					this.#reloadAfterSettingSaved = false;
 					void this.#send({ op: 'reload_config' });
 				}
 				break;
+			}
 			case 'profiles':
 				this.profiles = {
 					active: ev.active,
@@ -994,6 +1018,7 @@ export class Session {
 			case 'warning':
 				this.#sealStreams();
 				this.turnPending = false;
+				this.#pendingSettingSaves = 0;
 				this.settingSaving = false;
 				this.hookSaving = false;
 				this.mcpSaving = false;
@@ -1025,6 +1050,7 @@ export class Session {
 				}
 				if (wasMcpSaving) this.mcpError = ev.error.message;
 				if (wasHookSaving) this.hookError = ev.error.message;
+				this.#pendingSettingSaves = 0;
 				this.settingSaving = false;
 				this.hookSaving = false;
 				this.mcpSaving = false;
@@ -1512,16 +1538,75 @@ export class Session {
 		reload = true
 	) {
 		if (this.settingSaving || this.streaming || this.turnPending) return false;
+		this.#pendingSettingSaves = 1;
 		this.settingSaving = true;
 		this.settingError = null;
 		this.settingFeedback = null;
 		this.#reloadAfterSettingSaved = reload;
 		const sent = await this.#send({ op: 'save_setting', key, value, scope });
 		if (!sent) {
+			this.#pendingSettingSaves = 0;
 			this.settingSaving = false;
 			this.#reloadAfterSettingSaved = false;
 		}
 		return sent;
+	}
+
+	async setDefaultModel(providerModel: string | null, scope: WriteScope = 'user') {
+		return this.saveSetting(
+			'model.default',
+			providerModel ? JSON.stringify(providerModel) : '""',
+			scope,
+			false
+		);
+	}
+
+	async setSmallModel(providerModel: string | null, scope: WriteScope = 'user') {
+		return this.saveSetting(
+			'model.small',
+			providerModel ? JSON.stringify(providerModel) : '""',
+			scope,
+			false
+		);
+	}
+
+	async setModelDefaults(
+		target: 'large' | 'small' | 'both',
+		providerModel: string | null,
+		scope: WriteScope = 'user'
+	) {
+		if (target === 'large') return this.setDefaultModel(providerModel, scope);
+		if (target === 'small') return this.setSmallModel(providerModel, scope);
+		if (this.settingSaving || this.streaming || this.turnPending) return false;
+		const value = providerModel ? JSON.stringify(providerModel) : '""';
+		this.#pendingSettingSaves = 2;
+		this.settingSaving = true;
+		this.settingError = null;
+		this.settingFeedback = null;
+		this.#reloadAfterSettingSaved = false;
+		const first = await this.#send({
+			op: 'save_setting',
+			key: 'model.default',
+			value,
+			scope
+		});
+		if (!first) {
+			this.#pendingSettingSaves = 0;
+			this.settingSaving = false;
+			return false;
+		}
+		const second = await this.#send({
+			op: 'save_setting',
+			key: 'model.small',
+			value,
+			scope
+		});
+		if (!second) {
+			this.#pendingSettingSaves = Math.max(0, this.#pendingSettingSaves - 1);
+			this.settingSaving = this.#pendingSettingSaves > 0;
+			return false;
+		}
+		return true;
 	}
 
 	async setPlannerModel(providerModel: string | null, scope: WriteScope = 'user') {
@@ -1649,6 +1734,7 @@ export class Session {
 		this.settingsOpen = true;
 		this.settingError = null;
 		if (!this.profiles) void this.listProfiles();
+		if (this.providers.length === 0) void this.listModels();
 		if (this.settingsTab === 'extensions') void this.refreshMcp();
 	}
 

@@ -19,6 +19,33 @@ use crate::time;
 
 pub const FORMAT_VERSION: u64 = 1;
 
+static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a 12-character lowercase hex session id (48 bits) from OS-seeded randomness.
+pub fn new_session_id() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+
+    let seq = SESSION_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let mut h = RandomState::new().build_hasher();
+    h.write_u128(nanos);
+    h.write_u64(seq);
+    h.write_u32(std::process::id());
+    let mut z = h.finish() ^ 0x9e37_79b9_7f4a_7c15;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    let mut id = z & 0xffff_ffff_ffff;
+    if id >> 44 == 0 {
+        id |= 1 << 44;
+    }
+    format!("{id:012x}")
+}
+
 /// One line of `index.jsonl`. Later lines for the same id update earlier ones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -72,6 +99,10 @@ impl ProjectSessions {
 
     /// Find by exact id or unique prefix.
     pub fn find(&self, id: &str) -> Result<IndexEntry, String> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err("session id cannot be empty".into());
+        }
         let all = self.list();
         if let Some(e) = all.iter().find(|e| e.id == id) {
             return Ok(e.clone());
@@ -477,5 +508,25 @@ mod tests {
             .collect();
         assert_eq!(entries, vec!["history.jsonl"]);
         assert!(!load_history_file(&path).is_empty());
+    }
+
+    #[test]
+    fn new_session_ids_are_compact_random_and_findable_by_prefix() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ps = ProjectSessions::new(tmp.path(), Path::new("/home/u/src/proj"));
+
+        let id1 = new_session_id();
+        let id2 = new_session_id();
+        assert_eq!(id1.len(), 12);
+        assert_eq!(id2.len(), 12);
+        assert_ne!(id1, id2);
+        assert!(!id1.starts_with('0'), "{id1}");
+        assert!(!id2.starts_with('0'), "{id2}");
+
+        ps.create(&id1, "p/m").expect("create 1");
+        ps.create(&id2, "p/m").expect("create 2");
+        assert_eq!(ps.find(&id1).expect("find 1").id, id1);
+        assert_eq!(ps.find(&id2).expect("find 2").id, id2);
+        assert!(ps.find("").is_err());
     }
 }

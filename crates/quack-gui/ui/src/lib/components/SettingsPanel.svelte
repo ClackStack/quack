@@ -24,9 +24,10 @@
 
 	interface Props {
 		session: Session;
+		onOpenModels?: () => void;
 	}
 
-	let { session }: Props = $props();
+	let { session, onOpenModels }: Props = $props();
 
 	let writeScope = $state<WriteScope>('user');
 	let searchQuery = $state('');
@@ -351,6 +352,7 @@
 								onSave={saveSetting}
 								onBrowseFolder={() => session.pickDirectory()}
 								onApplyProfileSession={(id) => session.setProfile(id)}
+								{onOpenModels}
 							/>
 						{/each}
 						{#if searchResults.extra.length > 0}
@@ -415,6 +417,7 @@
 											onSave={saveSetting}
 											onBrowseFolder={() => session.pickDirectory()}
 											onApplyProfileSession={(id) => session.setProfile(id)}
+											{onOpenModels}
 										/>
 									{/if}
 								{/each}

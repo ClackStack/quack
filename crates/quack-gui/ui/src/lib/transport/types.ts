@@ -144,6 +144,10 @@ export interface AppInfo {
 	cwd: string;
 	branch: string | null;
 	model: string | null;
+	default_model?: string | null;
+	default_locked?: boolean;
+	small_model?: string | null;
+	small_locked?: boolean;
 	planner_model: string | null;
 	planner_locked: boolean;
 	/** The approval policy label: `read-only`, `ask`, `auto-edit`, `allow` or `yolo`. */

@@ -2,6 +2,17 @@
 
 Milestones are ordered by dependency and value. Each has **exit criteria** that must pass on **Linux, macOS and Windows** in CI before moving on. Dates are left out on purpose; scope is what's fixed.
 
+## Installer asks what to install; Linux prefers .deb/.rpm — 2026-11-16
+
+`scripts/install.sh` with no `--tui`/`--gui` now asks what to install — both TUI and GUI (the default on a fresh install) or just one — reading the terminal directly when stdin is a pipe (`curl | sh`) and taking the default silently in CI. When quack is already installed (in `~/.local/bin`, on `PATH`, or as the `quack`/`quack-gui` deb/rpm package) the prompt defaults to what is there, so reruns update in place instead of adding the other app; `--uninstall` likewise targets what is installed and removes packages via `apt-get`/`dpkg` or `rpm`. On Linux the installer now prefers the release's system packages — `.deb` via `apt-get` (then `dpkg`) when apt/dpkg tooling and root/sudo exist, else `.rpm` via `dnf`/`yum`/`zypper`/`rpm -U`, else the self-contained `~/.local` archive — resolving "latest" to a concrete tag via the GitHub API because package filenames carry the version, laying a GUI-only install's shared `defaults/` under `/usr/share/quack/defaults`, and dropping any stale non-package copy so the two cannot shadow each other. `--pkg deb|rpm|archive` forces a format. Verified offline against a local HTTP "release" with stub package managers (51 checks). [Details](14-packaging-and-distribution.md#installer-asks-what-to-install-linux-prefers-system-packages-2026-11-16)
+
+## Large, small, and combined default roles in the model selector — 2026-11-16
+
+Choosing `[model] default` (large), `[model] small` (helper for session titles and `explore` sub-agents), or **Both** now lives directly in the main model selector in both the TUI (`/models`) and the desktop GUI (`ModelModal.svelte`):
+- **TUI (`/models`):** Models configured as `model.default` or `model.small` show `large`, `small`, or `both` role tags in the list and details pane. Pressing `Ctrl-S` opens the **Default role** picker for the highlighted model (**Large**, **Small**, **Both**, plus **Clear large default** / **Clear small default** when set, with `Ctrl-L` user/project scope toggle and `Esc` returning to `/models`). `/models default [large|small|both] [--user|--project] <provider>/<model>` and `/models small [--user|--project] <provider>/<model>` also save directly, and `/config` no longer pre-fills trailing `""` on empty string settings when pressing `Enter`.
+- **Desktop GUI (`quack-gui`):** `ModelModal.svelte` adds **Large**, **Small**, and **Both** buttons (plus `Large` / `Small` / `Large & Small` badges, header status with quick clear actions, and a `User` / `Project` scope toggle) alongside **Planner**. `Composer.svelte` shows a `small` pill when `model.small` is configured, and `SettingsFieldRow.svelte` validates `<provider>/<model>` input, supports datalist auto-commit, and links to `Models…`.
+- **Live engine & bridge updates:** `Engine::save_setting` now broadcasts the updated `Arc<Loaded>` on `config_tx` so `engine.config()` stays current without triggering a false file-watcher reload notice, and `quack-gui`'s tab runtime pushes a fresh `AppInfo` snapshot on `Event::SettingSaved`.
+
 ## Provider defaults propagate beneath user overrides — 2026-11-11
 
 Model lists churn constantly, and until now keying a bundled service copied its whole

@@ -213,7 +213,9 @@
 			Installs both <code class="font-semibold text-ink">quack-gui</code> (desktop) and
 			<code class="font-semibold text-ink">quack</code> (terminal) — separate apps sharing one core,
 			<code class="font-semibold text-ink">defaults/</code>, config, sessions, memory, and prompt
-			history{plucked ? ' (with hosted providers omitted via --plucked)' : ''}.
+			history{plucked ? ' (with hosted providers omitted via --plucked)' : ''}. The installer asks
+			what to install; on Linux it uses a <code class="font-semibold text-ink">.deb</code> or
+			<code class="font-semibold text-ink">.rpm</code> package when the system supports one.
 		{:else if target === 'tui'}
 			Installs only the <code class="font-semibold text-ink">quack</code> terminal binary (no desktop
 			GUI){plucked ? ' with hosted providers omitted via --plucked' : ''}. They share one core and

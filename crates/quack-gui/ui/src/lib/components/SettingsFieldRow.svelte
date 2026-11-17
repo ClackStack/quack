@@ -23,6 +23,7 @@
 		onSave: (key: string, tomlValue: string) => Promise<boolean>;
 		onBrowseFolder?: () => Promise<string | null>;
 		onApplyProfileSession?: (id: string) => Promise<boolean>;
+		onOpenModels?: () => void;
 	}
 
 	let {
@@ -34,7 +35,8 @@
 		showSectionBadge,
 		onSave,
 		onBrowseFolder,
-		onApplyProfileSession
+		onApplyProfileSession,
+		onOpenModels
 	}: Props = $props();
 
 	function toDisplayValue(f: SettingFieldDef, rawToml: string): string {
@@ -420,6 +422,15 @@
 							draft = { base: committedValue, text: e.currentTarget.value };
 							localError = null;
 						}}
+						onchange={(e) => {
+							if (
+								field.kind === 'model' &&
+								e.currentTarget.value !== committedValue &&
+								modelSuggestions.includes(e.currentTarget.value)
+							) {
+								void commitRawText(e.currentTarget.value);
+							}
+						}}
 						onkeydown={handleTextKeydown}
 					/>
 					{#if field.kind === 'model' && modelSuggestions.length > 0}
@@ -428,6 +439,16 @@
 								<option value={modelRef}></option>
 							{/each}
 						</datalist>
+					{/if}
+					{#if field.kind === 'model' && onOpenModels}
+						<button
+							type="button"
+							class="btn btn-sm"
+							{disabled}
+							onclick={() => onOpenModels()}
+						>
+							Models…
+						</button>
 					{/if}
 					{#if field.kind === 'path' && onBrowseFolder}
 						<button
@@ -458,6 +479,15 @@
 							}}
 						>
 							Cancel
+						</button>
+					{:else if field.kind === 'model' && committedValue !== ''}
+						<button
+							type="button"
+							class="btn btn-sm"
+							{disabled}
+							onclick={() => void commitRawText('')}
+						>
+							Clear
 						</button>
 					{:else if field.supportsNullReset && committedValue !== ''}
 						<button

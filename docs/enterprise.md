@@ -31,7 +31,10 @@ separate `-plucked` binaries or packages:
 - **Linux**: `quack_<version>_<amd64|arm64>.deb` and `.rpm` install `/usr/bin/quack` and
   `/usr/share/quack/defaults` (static musl, zero runtime dependencies), and
   `quack-gui_<version>_<amd64|arm64>.deb` and `.rpm` install `/usr/bin/quack-gui` for
-  glibc desktops. Administrators deploying `.deb`/`.rpm` without hosted providers can remove
+  glibc desktops. `install.sh` uses these packages by default when the machine has
+  apt/dpkg or dnf/yum/zypper tooling plus root or sudo (`--pkg archive` keeps the
+  self-contained `~/.local` install instead). Administrators deploying `.deb`/`.rpm` without
+  hosted providers can remove
   or replace `/usr/share/quack/defaults` or override it via the system policy/bundle below.
 - **macOS and Linux with Homebrew**: each release carries `quack.rb` for a tap.
 - **SBOMs**: `quack.cdx.json` and `quack-gui.cdx.json` (CycloneDX 1.5) list every crate in

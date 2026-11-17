@@ -1,14 +1,39 @@
 <script lang="ts">
 	import { getModelSpeed, isLocalProvider } from '#lib/modelStats';
+	import type { WriteScope } from '#lib/protocol';
 	import type { Session } from '#lib/session.svelte';
+	import { parseTomlString } from '#lib/settings';
 
 	let { session, onClose }: { session: Session; onClose: () => void } = $props();
 
 	let query = $state('');
+	let writeScope = $state<WriteScope>('user');
 	let dialogEl: HTMLElement | undefined = $state();
 	let filterEl: HTMLInputElement | undefined = $state();
 
+	function settingString(key: string): string | null {
+		const row = session.info?.settings.find((r) => r.key === key);
+		if (!row) return null;
+		return parseTomlString(row.value) || null;
+	}
+
+	function settingLocked(key: string): boolean {
+		return session.info?.settings.find((r) => r.key === key)?.locked ?? false;
+	}
+
 	const egress = $derived(session.info?.egress);
+	const defaultModel = $derived(
+		session.info?.default_model !== undefined
+			? session.info.default_model
+			: settingString('model.default')
+	);
+	const defaultLocked = $derived(session.info?.default_locked ?? settingLocked('model.default'));
+	const smallModel = $derived(
+		session.info?.small_model !== undefined
+			? session.info.small_model
+			: settingString('model.small')
+	);
+	const smallLocked = $derived(session.info?.small_locked ?? settingLocked('model.small'));
 	const plannerModel = $derived(session.info?.planner_model ?? null);
 	const plannerLocked = $derived(session.info?.planner_locked ?? false);
 
@@ -31,12 +56,22 @@
 		return providers
 			.map((p) => ({
 				...p,
-				models: p.models.filter((m) =>
-					`${p.id}/${m.id}`.toLowerCase().includes(needle)
-				)
+				models: p.models.filter((m) => {
+					const ref = `${p.id}/${m.alias ?? m.id}`.toLowerCase();
+					const raw = `${p.id}/${m.id}`.toLowerCase();
+					return ref.includes(needle) || raw.includes(needle);
+				})
 			}))
 			.filter((p) => p.models.length > 0);
 	});
+
+	function matchesModel(
+		configured: string | null | undefined,
+		ref: string,
+		rawId: string
+	): boolean {
+		return Boolean(configured && (configured === ref || configured === rawId));
+	}
 
 	function fmtWindow(tokens: number | undefined): string | null {
 		if (!tokens) return null;
@@ -74,13 +109,51 @@
 		bind:this={dialogEl}
 	>
 		<div class="modal-head">
-			<div>
+			<div class="head-main">
 				<h2 id="model-modal-title">Choose a model</h2>
 				<p class="sub">
 					{#if session.currentModel}
-						Active: <span class="mono">{session.currentModel}</span>
+						Active session: <span class="mono">{session.currentModel}</span>
 					{:else}
 						No model selected yet
+					{/if}
+				</p>
+				<p class="sub">
+					Large default:
+					{#if defaultModel}
+						<span class="mono">{defaultModel}</span>
+						{#if !defaultLocked}
+							<button
+								type="button"
+								class="inline-link"
+								disabled={disabled || session.settingSaving}
+								onclick={() => void session.setDefaultModel(null, writeScope)}
+							>
+								Clear
+							</button>
+						{:else}
+							<span class="locked-note">(locked)</span>
+						{/if}
+					{:else}
+						<span>last used</span>
+					{/if}
+					· Small helper:
+					{#if smallModel}
+						<span class="mono">{smallModel}</span>
+						{#if !smallLocked}
+							<button
+								type="button"
+								class="inline-link"
+								disabled={disabled || session.settingSaving}
+								onclick={() => void session.setSmallModel(null, writeScope)}
+							>
+								Use active model
+							</button>
+						{:else}
+							<span class="locked-note">(locked)</span>
+						{/if}
+					{:else}
+						<span>uses active model</span>
 					{/if}
 				</p>
 				<p class="sub">
@@ -91,7 +164,7 @@
 								type="button"
 								class="inline-link"
 								disabled={disabled || session.settingSaving}
-								onclick={() => void session.setPlannerModel(null)}
+								onclick={() => void session.setPlannerModel(null, writeScope)}
 							>
 								Use active model
 							</button>
@@ -103,7 +176,31 @@
 					{/if}
 				</p>
 			</div>
-			<button class="close-btn" aria-label="Close model picker" onclick={onClose}>×</button>
+			<div class="head-right">
+				<div class="scope-switch" role="group" aria-label="Default save scope">
+					<button
+						type="button"
+						class="scope-pill"
+						class:active={writeScope === 'user'}
+						aria-pressed={writeScope === 'user'}
+						title="Save default roles to user config.toml"
+						onclick={() => (writeScope = 'user')}
+					>
+						User
+					</button>
+					<button
+						type="button"
+						class="scope-pill"
+						class:active={writeScope === 'project'}
+						aria-pressed={writeScope === 'project'}
+						title="Save default roles to project .quack/config.toml"
+						onclick={() => (writeScope = 'project')}
+					>
+						Project
+					</button>
+				</div>
+				<button class="close-btn" aria-label="Close model picker" onclick={onClose}>×</button>
+			</div>
 		</div>
 
 		{#if totalModels > 5}
@@ -134,10 +231,14 @@
 					</div>
 					<div class="list">
 						{#each provider.models as model (model.id)}
-							{@const fullId = `${provider.id}/${model.id}`}
-							{@const active = session.currentModel === fullId}
-							{@const isPlanner = plannerModel === fullId}
-							{@const speed = getModelSpeed(fullId)}
+							{@const rawId = `${provider.id}/${model.id}`}
+							{@const fullId = `${provider.id}/${model.alias ?? model.id}`}
+							{@const active = matchesModel(session.currentModel, fullId, rawId)}
+							{@const isLarge = matchesModel(defaultModel, fullId, rawId)}
+							{@const isSmall = matchesModel(smallModel, fullId, rawId)}
+							{@const isBoth = isLarge && isSmall}
+							{@const isPlanner = matchesModel(plannerModel, fullId, rawId)}
+							{@const speed = getModelSpeed(fullId) ?? getModelSpeed(rawId)}
 							{@const speedText = speed?.tokensPerSec
 								? `~${speed.tokensPerSec.toFixed(0)} tok/s`
 								: speed?.ttftMs
@@ -167,25 +268,101 @@
 										<span class="model-id">{fullId}</span>
 										<span class="row-badges">
 											{#if active}<span class="badge">Current</span>{/if}
+											{#if isBoth}
+												<span class="badge role">Large &amp; Small</span>
+											{:else if isLarge}
+												<span class="badge role">Large</span>
+											{:else if isSmall}
+												<span class="badge role">Small</span>
+											{/if}
 											{#if isPlanner}<span class="badge planner">Planner</span>{/if}
 										</span>
 									</span>
 									<span class="note">{meta || 'Select model'}</span>
 								</button>
-								<button
-									type="button"
-									class="planner-btn"
-									class:selected={isPlanner}
-									disabled={!provider.available || disabled || session.settingSaving || plannerLocked}
-									title={plannerLocked
-										? 'model.planner is locked by system policy'
-										: isPlanner
-											? 'Clear dedicated Plan-mode architect model'
-											: 'Use this model in Plan mode (saved to user config)'}
-									onclick={() => void session.setPlannerModel(isPlanner ? null : fullId)}
-								>
-									{isPlanner ? 'Planner ✓' : 'Planner'}
-								</button>
+								<div class="role-actions" role="group" aria-label={`Defaults for ${fullId}`}>
+									<button
+										type="button"
+										class="planner-btn"
+										class:selected={isLarge && !isSmall}
+										disabled={!provider.available ||
+											disabled ||
+											session.settingSaving ||
+											defaultLocked}
+										title={defaultLocked
+											? 'model.default is locked by system policy'
+											: isLarge && !isSmall
+												? 'Clear large default model'
+												: `Set as large default model (${writeScope} config)`}
+										onclick={() =>
+											void session.setModelDefaults(
+												'large',
+												isLarge && !isSmall ? null : fullId,
+												writeScope
+											)}
+									>
+										{isLarge && !isSmall ? 'Large ✓' : 'Large'}
+									</button>
+									<button
+										type="button"
+										class="planner-btn"
+										class:selected={isSmall && !isLarge}
+										disabled={!provider.available ||
+											disabled ||
+											session.settingSaving ||
+											smallLocked}
+										title={smallLocked
+											? 'model.small is locked by system policy'
+											: isSmall && !isLarge
+												? 'Clear small helper model'
+												: `Set as small helper model for titles & sub-agents (${writeScope} config)`}
+										onclick={() =>
+											void session.setModelDefaults(
+												'small',
+												isSmall && !isLarge ? null : fullId,
+												writeScope
+											)}
+									>
+										{isSmall && !isLarge ? 'Small ✓' : 'Small'}
+									</button>
+									<button
+										type="button"
+										class="planner-btn"
+										class:selected={isBoth}
+										disabled={!provider.available ||
+											disabled ||
+											session.settingSaving ||
+											defaultLocked ||
+											smallLocked}
+										title={defaultLocked || smallLocked
+											? 'model.default or model.small is locked by system policy'
+											: isBoth
+												? 'Clear both large and small defaults'
+												: `Set as both large default and small helper model (${writeScope} config)`}
+										onclick={() =>
+											void session.setModelDefaults('both', isBoth ? null : fullId, writeScope)}
+									>
+										{isBoth ? 'Both ✓' : 'Both'}
+									</button>
+									<button
+										type="button"
+										class="planner-btn"
+										class:selected={isPlanner}
+										disabled={!provider.available ||
+											disabled ||
+											session.settingSaving ||
+											plannerLocked}
+										title={plannerLocked
+											? 'model.planner is locked by system policy'
+											: isPlanner
+												? 'Clear dedicated Plan-mode architect model'
+												: `Use this model in Plan mode (${writeScope} config)`}
+										onclick={() =>
+											void session.setPlannerModel(isPlanner ? null : fullId, writeScope)}
+									>
+										{isPlanner ? 'Planner ✓' : 'Planner'}
+									</button>
+								</div>
 							</div>
 						{/each}
 					</div>
@@ -278,8 +455,8 @@
 	}
 
 	.modal {
-		width: min(540px, 100%);
-		max-height: min(600px, calc(100vh - 32px));
+		width: min(660px, 100%);
+		max-height: min(620px, calc(100vh - 32px));
 		display: flex;
 		flex-direction: column;
 		background: var(--bg-raised);
@@ -298,6 +475,40 @@
 		padding: var(--sp-md) var(--sp-md) 12px;
 		border-bottom: 1px solid var(--rule-soft);
 		background: var(--bg-panel);
+	}
+
+	.head-main {
+		min-width: 0;
+		flex: 1;
+	}
+
+	.head-right {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		flex: none;
+	}
+
+	.scope-switch {
+		display: inline-flex;
+		padding: 2px;
+		border-radius: var(--r-md);
+		border: 1px solid var(--rule);
+		background: var(--bg-raised);
+	}
+
+	.scope-pill {
+		padding: 3px 8px;
+		border-radius: calc(var(--r-md) - 2px);
+		font-size: 0.6875rem;
+		font-weight: 500;
+		color: var(--ink-3);
+	}
+
+	.scope-pill.active {
+		background: var(--sky-soft);
+		color: var(--sky-ink);
+		font-weight: 600;
 	}
 
 	.modal-head h2 {
@@ -474,9 +685,15 @@
 		padding: 8px 10px;
 	}
 
+	.role-actions {
+		display: inline-flex;
+		align-items: stretch;
+		flex: none;
+	}
+
 	.planner-btn {
 		flex: none;
-		padding: 0 10px;
+		padding: 0 8px;
 		border-left: 1px solid var(--rule-soft);
 		font-size: 0.6875rem;
 		font-family: var(--font-mono);
@@ -498,6 +715,12 @@
 		display: inline-flex;
 		gap: 5px;
 		flex: none;
+	}
+
+	.badge.role {
+		color: var(--ok);
+		border-color: color-mix(in srgb, var(--ok) 45%, var(--rule));
+		background: var(--ok-soft);
 	}
 
 	.badge.planner {

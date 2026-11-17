@@ -41,6 +41,10 @@ pub struct AppInfo {
     /// The checked-out git branch, or a short commit when detached.
     pub branch: Option<String>,
     pub model: Option<String>,
+    pub default_model: Option<String>,
+    pub small_model: Option<String>,
+    pub default_locked: bool,
+    pub small_locked: bool,
     pub profile: String,
     pub permission_mode: String,
     pub work_mode: WorkMode,
@@ -90,6 +94,10 @@ impl AppInfo {
             branch: git_branch(&config.dirs.workspace_root),
             cwd,
             model: Some(config.settings.model.default.clone()).filter(|m| !m.is_empty()),
+            default_model: Some(config.settings.model.default.clone()).filter(|m| !m.is_empty()),
+            small_model: Some(config.settings.model.small.clone()).filter(|m| !m.is_empty()),
+            default_locked: config.settings.policy.locks("model.default"),
+            small_locked: config.settings.policy.locks("model.small"),
             profile: "empty".into(),
             permission_mode: config.settings.permissions.mode.label().to_owned(),
             work_mode: config.settings.permissions.work_mode,
@@ -849,11 +857,15 @@ pub struct App {
     mcp_servers_cache: Option<Vec<quack_protocol::McpServerInfo>>,
     /// Active target layer when saving settings/MCP in the TUI (`^l` / `/scope` toggles).
     pub(crate) write_scope: WriteScope,
+    /// Model selected for `^s` in `/models`, so `^l` and `esc` in the role picker know it.
+    default_picker_model: Option<String>,
     /// A `/models <provider>/<model>` selection whose thinking-level picker is still owed
     /// once the engine confirms the switch.
     pick_thinking: Option<String>,
     /// `/setup` opened on its own once this run, because no model was ready.
     setup_offered: bool,
+    /// The plan-mode explanation note has already been shown once this run.
+    plan_note_shown: bool,
     /// A `.quack/` waiting for a trust decision.
     trust: Option<modal::TrustPrompt>,
     frame: u64,
@@ -968,8 +980,10 @@ impl App {
             profiles_cache: None,
             mcp_servers_cache: None,
             write_scope: WriteScope::User,
+            default_picker_model: None,
             pick_thinking: None,
             setup_offered: false,
+            plan_note_shown: false,
             trust: None,
             frame: 0,
             dirty: true,
@@ -1433,10 +1447,12 @@ impl App {
             Event::ModelCatalog { providers, current } => {
                 // Only refresh a /models modal that is still open.
                 if self.modal.as_ref().is_some_and(|m| m.title == "Models") {
+                    let mut roles = self.model_roles();
+                    roles.current = current.as_deref();
                     self.modal = Some(
                         modal::models(
                             Some(&providers),
-                            current.as_deref(),
+                            roles,
                             self.info.ui.ascii,
                             self.write_scope,
                             &self.theme,
@@ -1616,7 +1632,7 @@ impl App {
                 self.prompt = None;
                 self.modal = Some(modal::models(
                     None,
-                    self.info.model.as_deref(),
+                    self.model_roles(),
                     self.info.ui.ascii,
                     self.write_scope,
                     &self.theme,
@@ -1770,7 +1786,9 @@ impl App {
                 }
             }
             Event::TurnStarted { .. } => {
-                self.session_saved = true;
+                if self.info.model.is_some() {
+                    self.session_saved = true;
+                }
                 self.queued = false;
                 self.turn_running = true;
                 self.turn_started = Some(Instant::now());
@@ -1962,7 +1980,11 @@ impl App {
                 }
             }
             Event::ModeChanged { work_mode, approvals } => {
-                if work_mode == WorkMode::Plan && self.info.work_mode != WorkMode::Plan {
+                if work_mode == WorkMode::Plan
+                    && self.info.work_mode != WorkMode::Plan
+                    && !self.plan_note_shown
+                {
+                    self.plan_note_shown = true;
                     self.note("plan mode: read and search only; the model will propose changes and list tests for your review before running them · /edit leaves".into());
                 }
                 let mode = approvals.label();
@@ -2369,8 +2391,20 @@ impl App {
         match modal.on_key(key) {
             ModalOutcome::None => {}
             ModalOutcome::Close => {
+                let was_default_role = self
+                    .modal
+                    .as_ref()
+                    .is_some_and(|m| m.title == "Default role");
                 self.modal = None;
-                if self.signing_in.take().is_some() {
+                if was_default_role && self.default_picker_model.take().is_some() {
+                    self.modal = Some(modal::models(
+                        self.catalog_loaded.then_some(self.catalog.as_slice()),
+                        self.model_roles(),
+                        self.info.ui.ascii,
+                        self.write_scope,
+                        &self.theme,
+                    ));
+                } else if self.signing_in.take().is_some() {
                     self.browser = None;
                     self.ops.push(Op::SignIn { id: None });
                     self.open_hosted_setup();
@@ -3253,21 +3287,44 @@ impl App {
     fn run_command(&mut self, cmd: &Command, args: &str) {
         self.popup_selected = 0;
         match cmd.name {
+            "models" if args.starts_with("default-menu ") => {
+                let reference = args["default-menu ".len()..].trim();
+                if !reference.is_empty() {
+                    self.default_picker_model = Some(reference.to_owned());
+                    self.modal = Some(modal::model_defaults(
+                        reference,
+                        self.model_roles(),
+                        self.write_scope,
+                        &self.theme,
+                    ));
+                }
+            }
             "models"
-                if take_scope_flag(args, self.write_scope)
-                    .1
-                    .starts_with("default ") =>
+                if {
+                    let rest = take_scope_flag(args, self.write_scope).1;
+                    rest == "default" || rest.starts_with("default ")
+                } =>
             {
                 let (scope, rest) = take_scope_flag(args, self.write_scope);
-                let after = rest["default ".len()..].trim();
+                let after = rest.strip_prefix("default").unwrap_or_default().trim();
+                let (scope, after) = split_scope_flag(after, scope);
+                let (role, reference) = match after.split_once(char::is_whitespace) {
+                    Some((r @ ("large" | "small" | "both"), target)) => (r, target.trim()),
+                    _ => ("large", after),
+                };
+                let (scope, reference) = split_scope_flag(reference, scope);
+                self.save_model_default(role, reference, scope);
+            }
+            "models"
+                if {
+                    let rest = take_scope_flag(args, self.write_scope).1;
+                    rest == "small" || rest.starts_with("small ")
+                } =>
+            {
+                let (scope, rest) = take_scope_flag(args, self.write_scope);
+                let after = rest.strip_prefix("small").unwrap_or_default().trim();
                 let (scope, reference) = split_scope_flag(after, scope);
-                if reference.is_empty() {
-                    self.note(
-                        "usage: /models default [--project|--user] <provider>/<model>".into(),
-                    );
-                } else {
-                    self.save_setting("model.default", &toml_string(reference), scope);
-                }
+                self.save_model_default("small", reference, scope);
             }
             "models" if !args.is_empty() => match args.split_once('/') {
                 Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
@@ -3322,7 +3379,7 @@ impl App {
             "models" => {
                 self.modal = Some(modal::models(
                     None,
-                    self.info.model.as_deref(),
+                    self.model_roles(),
                     self.info.ui.ascii,
                     self.write_scope,
                     &self.theme,
@@ -3561,7 +3618,7 @@ impl App {
                 self.modal = Some(
                     modal::models(
                         None,
-                        self.info.model.as_deref(),
+                        self.model_roles(),
                         self.info.ui.ascii,
                         self.write_scope,
                         &self.theme,
@@ -3949,6 +4006,69 @@ impl App {
         }
     }
 
+    pub(crate) fn model_roles(&self) -> modal::ModelRoles<'_> {
+        modal::ModelRoles {
+            current: self.info.model.as_deref(),
+            default: self.info.default_model.as_deref(),
+            small: self.info.small_model.as_deref(),
+            default_locked: self.info.default_locked,
+            small_locked: self.info.small_locked,
+            project_status: self.info.project_status,
+        }
+    }
+
+    fn save_model_default(&mut self, role: &str, reference: &str, scope: WriteScope) {
+        let Some((provider, model)) = reference.split_once('/') else {
+            self.note(
+                "usage: /models default [large|small|both] [--user|--project] <provider>/<model>"
+                    .into(),
+            );
+            return;
+        };
+        if provider.is_empty() || model.is_empty() {
+            self.note(
+                "usage: /models default [large|small|both] [--user|--project] <provider>/<model>"
+                    .into(),
+            );
+            return;
+        }
+        let value = format!("\"{provider}/{model}\"");
+        match role {
+            "large" => {
+                self.ops.push(Op::SaveSetting {
+                    key: "model.default".into(),
+                    value,
+                    scope,
+                });
+            }
+            "small" => {
+                self.ops.push(Op::SaveSetting {
+                    key: "model.small".into(),
+                    value,
+                    scope,
+                });
+            }
+            "both" => {
+                self.ops.push(Op::SaveSetting {
+                    key: "model.default".into(),
+                    value: value.clone(),
+                    scope,
+                });
+                self.ops.push(Op::SaveSetting {
+                    key: "model.small".into(),
+                    value,
+                    scope,
+                });
+            }
+            _ => {
+                self.note(
+                    "usage: /models default [large|small|both] [--user|--project] <provider>/<model>"
+                        .into(),
+                );
+            }
+        }
+    }
+
     fn refresh_scoped_modal(&mut self, old: &Modal) {
         let next = match old.title.as_str() {
             "Config" => Some(modal::config(
@@ -3960,11 +4080,14 @@ impl App {
             )),
             "Models" => Some(modal::models(
                 self.catalog_loaded.then_some(self.catalog.as_slice()),
-                self.info.model.as_deref(),
+                self.model_roles(),
                 self.info.ui.ascii,
                 self.write_scope,
                 &self.theme,
             )),
+            "Default role" => self.default_picker_model.as_deref().map(|reference| {
+                modal::model_defaults(reference, self.model_roles(), self.write_scope, &self.theme)
+            }),
             "Profiles" => Some(modal::profiles(
                 self.profiles_cache
                     .as_ref()
@@ -4003,6 +4126,9 @@ impl App {
 
     fn on_setting_saved(&mut self, key: &str, value: &str, path: &str, note: Option<String>) {
         // Settings the UI owns apply now; the rest on the next start.
+        let parsed_model = (value.trim() != "null")
+            .then(|| value.trim().trim_matches('"').to_owned())
+            .filter(|s| !s.is_empty());
         let live = match key {
             "ui.ascii" => {
                 self.info.ui.ascii = value == "true";
@@ -4025,6 +4151,14 @@ impl App {
             "ui.theme" => {
                 self.info.ui.theme = value.trim_matches('"').to_owned();
                 self.theme = Theme::resolve(&self.info.ui.theme, self.info.no_color);
+                true
+            }
+            "model.default" => {
+                self.info.default_model = parsed_model;
+                false
+            }
+            "model.small" => {
+                self.info.small_model = parsed_model;
                 true
             }
             _ => false,
@@ -4222,6 +4356,10 @@ mod tests {
             cwd: "~/src/project".into(),
             branch: Some("main".into()),
             model: None,
+            default_model: None,
+            small_model: None,
+            default_locked: false,
+            small_locked: false,
             profile: "empty".into(),
             permission_mode: "ask".into(),
             work_mode: WorkMode::Edit,
@@ -4440,6 +4578,59 @@ mod tests {
                 mode: WorkMode::Edit
             }]
         );
+    }
+
+    #[test]
+    fn plan_mode_note_is_shown_only_once_when_cycling_modes() {
+        let mut app = App::new(info());
+        let plan_notes = |app: &App| {
+            app.transcript
+                .iter()
+                .filter(|e| matches!(e, Entry::System(s) if s.starts_with("plan mode:")))
+                .count()
+        };
+
+        // First switch to plan mode explains what it does.
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SetWorkMode {
+                mode: WorkMode::Plan
+            }]
+        );
+        app.on_engine(Event::ModeChanged {
+            work_mode: WorkMode::Plan,
+            approvals: quack_protocol::ApprovalPolicy::Ask,
+        });
+        assert_eq!(plan_notes(&app), 1);
+
+        // Cycle back to edit, then back to plan: the explanation is not repeated.
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SetWorkMode {
+                mode: WorkMode::Edit
+            }]
+        );
+        app.on_engine(Event::ModeChanged {
+            work_mode: WorkMode::Edit,
+            approvals: quack_protocol::ApprovalPolicy::Ask,
+        });
+        assert_eq!(plan_notes(&app), 1);
+
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SetWorkMode {
+                mode: WorkMode::Plan
+            }]
+        );
+        app.on_engine(Event::ModeChanged {
+            work_mode: WorkMode::Plan,
+            approvals: quack_protocol::ApprovalPolicy::Ask,
+        });
+        assert_eq!(app.info.work_mode, WorkMode::Plan);
+        assert_eq!(plan_notes(&app), 1);
     }
 
     fn plan_turn_ends(app: &mut App) {
@@ -4910,20 +5101,35 @@ mod tests {
                 id: "charm".into(),
                 available: true,
                 note: String::new(),
-                models: vec![ModelInfo {
-                    id: "true".into(),
-                    alias: None,
-                    context_window: None,
-                    price: None,
-                    reasoning_efforts: Vec::new(),
-                }],
+                models: vec![
+                    ModelInfo {
+                        id: "true".into(),
+                        alias: None,
+                        context_window: None,
+                        price: None,
+                        reasoning_efforts: Vec::new(),
+                    },
+                    ModelInfo {
+                        id: "flash".into(),
+                        alias: None,
+                        context_window: None,
+                        price: None,
+                        reasoning_efforts: Vec::new(),
+                    },
+                ],
             }],
             current: None,
         });
+        // Ctrl-S opens the default role picker; Enter on the first item saves Large.
         app.on_terminal(TermEvent::Key(KeyEvent::new(
             KeyCode::Char('s'),
             KeyModifiers::CONTROL,
         )));
+        assert_eq!(
+            app.modal.as_ref().map(|m| m.title.as_str()),
+            Some("Default role")
+        );
+        press(&mut app, KeyCode::Enter);
         assert!(app.modal.is_none());
         assert_eq!(
             app.take_ops(),
@@ -4939,8 +5145,84 @@ mod tests {
             path: "/u/config.toml".into(),
             note: None,
         });
+        assert_eq!(app.info.default_model.as_deref(), Some("charm/true"));
         assert!(
             matches!(app.transcript.last(), Some(Entry::System(t)) if t.contains("next start"))
+        );
+
+        // Selecting Small (second item) saves model.small and applies immediately.
+        type_str(&mut app, "/models");
+        press(&mut app, KeyCode::Enter);
+        app.take_ops();
+        app.on_engine(Event::ModelCatalog {
+            providers: vec![ProviderModels {
+                bundled: false,
+                key: None,
+                id: "charm".into(),
+                available: true,
+                note: String::new(),
+                models: vec![
+                    ModelInfo {
+                        id: "true".into(),
+                        alias: None,
+                        context_window: None,
+                        price: None,
+                        reasoning_efforts: Vec::new(),
+                    },
+                    ModelInfo {
+                        id: "flash".into(),
+                        alias: None,
+                        context_window: None,
+                        price: None,
+                        reasoning_efforts: Vec::new(),
+                    },
+                ],
+            }],
+            current: None,
+        });
+        press(&mut app, KeyCode::Down);
+        app.on_terminal(TermEvent::Key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        )));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SaveSetting {
+                key: "model.small".into(),
+                value: "\"charm/flash\"".into(),
+                scope: WriteScope::User,
+            }]
+        );
+        app.on_engine(Event::SettingSaved {
+            key: "model.small".into(),
+            value: "\"charm/flash\"".into(),
+            path: "/u/config.toml".into(),
+            note: None,
+        });
+        assert_eq!(app.info.small_model.as_deref(), Some("charm/flash"));
+        assert!(
+            matches!(app.transcript.last(), Some(Entry::System(t)) if !t.contains("next start"))
+        );
+
+        // Selecting Both saves both model.default and model.small.
+        type_str(&mut app, "/models default both charm/flash");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![
+                Op::SaveSetting {
+                    key: "model.default".into(),
+                    value: "\"charm/flash\"".into(),
+                    scope: WriteScope::User,
+                },
+                Op::SaveSetting {
+                    key: "model.small".into(),
+                    value: "\"charm/flash\"".into(),
+                    scope: WriteScope::User,
+                },
+            ]
         );
     }
 
@@ -5369,7 +5651,7 @@ mod tests {
 
         let mut app = App::new(info());
         app.on_engine(Event::SessionConfigured {
-            session: session("0123456789abcdef0123456789abcdef"),
+            session: session("0123456789ab"),
         });
         // No turn yet -> not saved on disk.
         assert_eq!(app.resume_id(), None);
@@ -5384,7 +5666,7 @@ mod tests {
 
         // `/fork` replaces the session id while staying saved.
         app.on_engine(Event::SessionConfigured {
-            session: session("fedcba9876543210fedcba9876543210"),
+            session: session("fedcba987654"),
         });
         assert_eq!(app.resume_id().as_deref(), Some("fedcba987654"));
 
@@ -5392,16 +5674,31 @@ mod tests {
         type_str(&mut app, "/new ");
         press(&mut app, KeyCode::Enter);
         app.on_engine(Event::SessionConfigured {
-            session: session("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            session: session("aaaaaaaaaaaa"),
         });
         assert_eq!(app.resume_id(), None);
 
         // Resuming a saved session marks it saved immediately.
         app.on_engine(Event::SessionResumed {
-            session: session("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            session: session("bbbbbbbbbbbb"),
             items: vec![],
         });
         assert_eq!(app.resume_id().as_deref(), Some("bbbbbbbbbbbb"));
+
+        // A turn that aborts because no model is ready creates no session log on disk.
+        let mut unconfigured = App::new(info());
+        unconfigured.on_engine(Event::SessionConfigured {
+            session: quack_protocol::SessionInfo {
+                model: None,
+                ..session("cccccccccccc")
+            },
+        });
+        unconfigured.on_engine(Event::TurnStarted { turn: TurnId(1) });
+        unconfigured.on_engine(Event::TurnAborted {
+            turn: TurnId(1),
+            reason: "no model".into(),
+        });
+        assert_eq!(unconfigured.resume_id(), None);
     }
 
     #[test]
@@ -5552,6 +5849,7 @@ mod tests {
         });
         app.on_terminal(TermEvent::Key(ctrl_l));
         app.on_terminal(TermEvent::Key(ctrl_s));
+        press(&mut app, KeyCode::Enter);
         assert_eq!(
             app.take_ops(),
             vec![Op::SaveSetting {

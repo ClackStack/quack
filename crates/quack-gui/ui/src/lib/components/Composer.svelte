@@ -851,6 +851,22 @@
 			{#if session.streaming}<span class="live-dot" aria-label="streaming"></span>{/if}
 		</button>
 
+		{#if session.info?.small_model}
+			<button
+				type="button"
+				class="ctrl model-ctrl"
+				aria-haspopup="dialog"
+				title={`Small helper model: ${session.info.small_model}`}
+				onclick={() => {
+					closeAllPopups();
+					onOpenModels();
+				}}
+			>
+				<span class="ctrl-k">small</span>
+				<span class="model-name">{session.info.small_model}</span>
+			</button>
+		{/if}
+
 		{#if session.info?.planner_model}
 			<button
 				type="button"

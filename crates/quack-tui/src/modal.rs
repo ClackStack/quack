@@ -590,16 +590,25 @@ pub(crate) fn thinking(
     modal
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ModelRoles<'a> {
+    pub current: Option<&'a str>,
+    pub default: Option<&'a str>,
+    pub small: Option<&'a str>,
+    pub default_locked: bool,
+    pub small_locked: bool,
+    pub project_status: ProjectStatus,
+}
+
 /// The `/models` modal. `catalog` is `None` while the engine is still listing models.
 pub(crate) fn models(
     catalog: Option<&[quack_protocol::ProviderModels]>,
-    current: Option<&str>,
+    roles: ModelRoles<'_>,
     ascii: bool,
     scope: WriteScope,
     theme: &Theme,
 ) -> Modal {
     let target = scope_file(scope);
-    let flag = scope_flag(scope);
     let field = |k: &str, v: String| {
         Line::from(vec![
             Span::styled(format!("{k:<10}"), theme.dim),
@@ -649,10 +658,27 @@ pub(crate) fn models(
                 for m in &p.models {
                     let name = m.alias.clone().unwrap_or_else(|| m.id.clone());
                     let reference = format!("{}/{}", p.id, name);
-                    let is_current = current == Some(reference.as_str());
+                    let raw_ref = format!("{}/{}", p.id, m.id);
+                    let matches_ref = |target: Option<&str>| {
+                        target == Some(reference.as_str()) || target == Some(raw_ref.as_str())
+                    };
+                    let is_current = matches_ref(roles.current);
+                    let is_default = matches_ref(roles.default);
+                    let is_small = matches_ref(roles.small);
+                    let role_tag = match (is_default, is_small) {
+                        (true, true) => "both",
+                        (true, false) => "large",
+                        (false, true) => "small",
+                        (false, false) => "",
+                    };
                     let ctx = m
                         .context_window
                         .map_or_else(String::new, crate::theme::tokens);
+                    let hint = match (role_tag.is_empty(), ctx.is_empty()) {
+                        (true, _) => ctx,
+                        (false, true) => role_tag.into(),
+                        (false, false) => format!("{role_tag} · {ctx}"),
+                    };
                     let mut detail = vec![
                         Line::styled(reference.clone(), theme.accent),
                         Line::raw(""),
@@ -669,6 +695,17 @@ pub(crate) fn models(
                     }
                     if !m.reasoning_efforts.is_empty() {
                         detail.push(field("thinking", m.reasoning_efforts.join(" · ")));
+                    }
+                    if is_default || is_small {
+                        detail.push(field(
+                            "default",
+                            match (is_default, is_small) {
+                                (true, true) => "large + small".into(),
+                                (true, false) => "large (model.default)".into(),
+                                (false, true) => "small (model.small)".into(),
+                                (false, false) => String::new(),
+                            },
+                        ));
                     }
                     detail.push(Line::raw(""));
                     let mut charts = Vec::new();
@@ -708,7 +745,7 @@ pub(crate) fn models(
                         ));
                     }
                     detail.push(Line::styled(
-                        format!("^s save as the default model ({target})"),
+                        format!("^s set default: large, small, or both ({target})"),
                         theme.dim,
                     ));
                     items.push(ModalItem {
@@ -717,11 +754,11 @@ pub(crate) fn models(
                         } else {
                             reference.clone()
                         },
-                        hint: ctx,
+                        hint,
                         detail,
                         action: Some(format!("/models {reference}")),
                         run: true,
-                        alt: Some(format!("/models default{flag} {reference}")),
+                        alt: Some(format!("/models default-menu {reference}")),
                         charts,
                     });
                 }
@@ -745,6 +782,145 @@ pub(crate) fn models(
     )
     .with_alt("save as default")
     .with_scope(scope)
+}
+
+/// Picker opened by `^s` in `/models`: save the model as large (`model.default`), small
+/// (`model.small`), or both.
+pub(crate) fn model_defaults(
+    reference: &str,
+    roles: ModelRoles<'_>,
+    scope: WriteScope,
+    theme: &Theme,
+) -> Modal {
+    let target = scope_file(scope);
+    let flag = scope_flag(scope);
+    let status_note = (scope == WriteScope::Project)
+        .then(|| project_status_note(roles.project_status))
+        .flatten();
+    let is_default = roles.default == Some(reference);
+    let is_small = roles.small == Some(reference);
+    let both_locked = roles.default_locked || roles.small_locked;
+
+    let build_choice = |label: &str,
+                        role: &str,
+                        current: bool,
+                        locked: bool,
+                        current_value: Option<&str>,
+                        summary: &str,
+                        usage: &str| {
+        let mut detail = vec![
+            Line::styled(reference.to_owned(), theme.accent),
+            Line::raw(""),
+            Line::raw(summary.to_owned()),
+            Line::raw(usage.to_owned()),
+            Line::raw(""),
+        ];
+        if let Some(cur) = current_value.filter(|c| !c.is_empty()) {
+            detail.push(field(theme, "current", cur.to_owned()));
+            detail.push(Line::raw(""));
+        }
+        let action = if locked {
+            detail.push(Line::styled("locked by the system policy", theme.warn));
+            None
+        } else {
+            detail.push(Line::styled(format!("⏎ save to {target}"), theme.dim));
+            if let Some(msg) = status_note {
+                detail.push(Line::styled(msg, theme.warn));
+            }
+            Some(format!("/models default{flag} {role} {reference}"))
+        };
+        ModalItem {
+            label: label.to_owned(),
+            hint: if locked {
+                "locked".into()
+            } else if current {
+                "current".into()
+            } else {
+                String::new()
+            },
+            detail,
+            run: action.is_some(),
+            action,
+            alt: None,
+            charts: Vec::new(),
+        }
+    };
+
+    let mut items = vec![
+        build_choice(
+            "Large (default model)",
+            "large",
+            is_default,
+            roles.default_locked,
+            roles.default,
+            &format!("Save as the main default model (`model.default`) in {target}."),
+            "Used when starting new sessions.",
+        ),
+        build_choice(
+            "Small (helper model)",
+            "small",
+            is_small,
+            roles.small_locked,
+            roles.small,
+            &format!("Save as the small helper model (`model.small`) in {target}."),
+            "Used immediately for session titles, the explore sub-agent, and cheap subtasks.",
+        ),
+        build_choice(
+            "Both (large & small)",
+            "both",
+            is_default && is_small,
+            both_locked,
+            None,
+            &format!(
+                "Save as both the large default (`model.default`) and small helper (`model.small`) in {target}."
+            ),
+            "Uses this model for both main turns and helper subtasks.",
+        ),
+    ];
+
+    if is_default && !roles.default_locked {
+        items.push(ModalItem {
+            label: "Clear large default".into(),
+            hint: "unset".into(),
+            detail: vec![
+                Line::styled(reference.to_owned(), theme.accent),
+                Line::raw(""),
+                Line::raw(format!("Clear `model.default` in {target}.")),
+            ],
+            action: Some(format!("/models default{flag} large clear")),
+            run: true,
+            alt: None,
+            charts: Vec::new(),
+        });
+    }
+    if is_small && !roles.small_locked {
+        items.push(ModalItem {
+            label: "Clear small default".into(),
+            hint: "unset".into(),
+            detail: vec![
+                Line::styled(reference.to_owned(), theme.accent),
+                Line::raw(""),
+                Line::raw(format!(
+                    "Clear `model.small` in {target} so helper tasks use the active model."
+                )),
+            ],
+            action: Some(format!("/models default{flag} small clear")),
+            run: true,
+            alt: None,
+            charts: Vec::new(),
+        });
+    }
+
+    let mut modal = Modal::new(
+        "Default role",
+        vec![ModalTab {
+            title: "Role".into(),
+            items,
+        }],
+    )
+    .with_scope(scope);
+    modal.footer.retain(|(key, _)| *key != "tab");
+    modal
 }
 
 fn scope_file(scope: WriteScope) -> &'static str {
@@ -978,10 +1154,12 @@ pub(crate) fn config(
                     format!("⏎ edit the value, then press ⏎ to save it to {target}"),
                     theme.dim,
                 ));
-                (
-                    Some(format!("/config set{flag} {} {}", r.key, r.value)),
-                    false,
-                )
+                let prefill = if r.value == "\"\"" {
+                    format!("/config set{flag} {} ", r.key)
+                } else {
+                    format!("/config set{flag} {} {}", r.key, r.value)
+                };
+                (Some(prefill), false)
             };
             if !r.locked
                 && let Some(msg) = status_note
