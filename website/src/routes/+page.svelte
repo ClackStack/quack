@@ -24,6 +24,8 @@
 		content="A terminal coding agent for open-weight models and any provider. Contacts only what you configure."
 	/>
 	<meta property="og:type" content="website" />
+	<link rel="canonical" href="https://quack.clackstack.dev/" />
+	<meta property="og:url" content="https://quack.clackstack.dev/" />
 </svelte:head>
 
 <a
