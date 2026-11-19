@@ -17,6 +17,8 @@ import type {
 	MemoryNote,
 	Op,
 	ProfileInfo,
+	ProviderConnection,
+	ProviderHttpVersion,
 	ServiceInfo,
 	ProviderModels,
 	Question,
@@ -282,6 +284,10 @@ export class Session {
 	setupOpen = $state(false);
 	setupWorking = $state(false);
 	setupNotice = $state('');
+	providerConnections = $state.raw<ProviderConnection[] | null>(null);
+	providerConnectionSaving = $state(false);
+	providerConnectionNotice = $state('');
+	providerConnectionError = $state('');
 	services = $state<ServiceInfo[]>([]);
 	detectedServers = $state<DetectedServer[] | null>(null);
 	detecting = $state(false);
@@ -471,6 +477,7 @@ export class Session {
 				this.startupDetail = null;
 				this.issue = null;
 				void this.listMemory();
+				if (this.setupOpen) void this.#send({ op: 'list_provider_connections' });
 				break;
 			case 'project_trust':
 				this.trust = { path: ev.path, summary: ev.summary, changed: ev.changed };
@@ -790,6 +797,18 @@ export class Session {
 				break;
 			case 'provider_added':
 				this.setupNotice = ev.note ?? 'Provider saved. Choose a model to continue.';
+				if (this.setupOpen) void this.#send({ op: 'list_provider_connections' });
+				break;
+			case 'provider_connections':
+				this.providerConnections = ev.connections;
+				break;
+			case 'provider_connection_saved':
+				this.providerConnectionSaving = false;
+				this.providerConnectionNotice = `Saved connection settings for ${ev.connection.id}.`;
+				this.providerConnections = this.providerConnections?.map((item) =>
+					item.id === ev.connection.id ? ev.connection : item
+				) ?? [ev.connection];
+				void this.listModels();
 				break;
 			case 'session_list':
 				this.sessions = ev.sessions;
@@ -1043,6 +1062,10 @@ export class Session {
 			case 'error': {
 				const wasMcpSaving = this.mcpSaving;
 				const wasHookSaving = this.hookSaving;
+				if (this.providerConnectionSaving) {
+					this.providerConnectionSaving = false;
+					this.providerConnectionError = ev.error.message;
+				}
 				this.#sealStreams();
 				this.turnPending = false;
 				if (this.settingSaving || ev.error.kind === 'config') {
@@ -1725,7 +1748,31 @@ export class Session {
 		this.settingsOpen = false;
 		this.setupOpen = true;
 		this.setupNotice = '';
-		await this.#send({ op: 'list_services' });
+		await Promise.all([
+			this.#send({ op: 'list_services' }),
+			this.#send({ op: 'list_provider_connections' })
+		]);
+	}
+
+	async saveProviderConnection(
+		connection: ProviderConnection,
+		version: ProviderHttpVersion,
+		direct: boolean
+	) {
+		if (this.closed || this.starting || this.providerConnectionSaving) return;
+		this.providerConnectionNotice = '';
+		this.providerConnectionError = '';
+		this.providerConnectionSaving = true;
+		const sent = await this.#send({
+			op: 'save_provider_connection',
+			id: connection.id,
+			...(version !== connection.http_version ? { http_version: version } : {}),
+			...(direct !== connection.no_proxy ? { no_proxy: direct } : {})
+		});
+		if (!sent) {
+			this.providerConnectionSaving = false;
+			this.providerConnectionError = this.actionError ?? 'Could not save connection settings.';
+		}
 	}
 
 	openSettings(tab?: SettingsSectionId) {

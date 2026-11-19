@@ -389,7 +389,7 @@ async fn stats(engine: &mut EngineHandle) -> quack_core::protocol::StatsReport {
             .expect("event within 10s")
             .expect("channel open");
         if let Event::Stats { report } = e {
-            return report;
+            return *report;
         }
     }
 }

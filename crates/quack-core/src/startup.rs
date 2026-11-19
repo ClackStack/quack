@@ -649,7 +649,8 @@ async fn try_provider(
             format!("model `{mid}` is not in {pid}'s model list; trying it anyway"),
         );
     }
-    if model.cost.is_none() || model.context_window.is_none() {
+    if model.cost.is_none() || model.context_window.is_none() || model.reasoning.efforts.is_empty()
+    {
         let dirs = config.dirs.clone();
         let catalogs = tokio::task::spawn_blocking(move || Catalogs::load(&dirs))
             .await
@@ -657,6 +658,9 @@ async fn try_provider(
         let facts = catalogs.facts(pid, &provider.file, &model.id);
         model.context_window = model.context_window.or(facts.context_window);
         model.cost = model.cost.take().or(facts.cost);
+        if model.reasoning.efforts.is_empty() {
+            model.reasoning.efforts = facts.efforts;
+        }
     }
     if let Some(cap) = config.settings.context.window {
         model.context_window = Some(model.context_window.map_or(cap, |w| w.min(cap)));
@@ -737,8 +741,7 @@ async fn build_setup(
         spawn: None,
         edit_format: EditFormat::StrReplace,
         vision: false,
-        // About 3.5 bytes per token.
-        outline_above: config.settings.tools.read_outline_tokens as usize * 7 / 2,
+        outline_above: crate::turn::tokens_to_bytes(config.settings.tools.read_outline_tokens as usize),
         grammars: Arc::new(quack_tools::grammar::Grammars::from_layers(
             config.item_layers().iter().map(|(_, d)| d.as_path()),
         )),

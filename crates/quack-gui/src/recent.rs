@@ -72,7 +72,7 @@ impl RecentFolders {
             0,
             RecentFolder {
                 path: path_str,
-                opened: now(),
+                opened: quack_store::time::unix_now(),
             },
         );
         self.entries.truncate(MAX);
@@ -175,13 +175,6 @@ fn write_entries(file: &Path, entries: &[RecentFolder]) {
         }
         Err(e) => tracing::warn!(%e, "could not serialize the recent folders"),
     }
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

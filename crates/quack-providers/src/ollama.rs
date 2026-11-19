@@ -48,6 +48,7 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
         .iter()
         .map(|m| match m {
             Message::System { content } => json!({ "role": "system", "content": content }),
+            Message::Compaction { content, .. } => json!({ "role": "user", "content": content }),
             Message::User { content, images } => {
                 let mut v = json!({ "role": "user", "content": content });
                 if !images.is_empty() {

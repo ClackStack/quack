@@ -307,9 +307,7 @@ impl Server {
         let mut startup = Startup::default();
         let loaded = session::wait_for(&mut engine, &mut startup, |e| match e {
             Event::SessionResumed { items, .. } => Some(Ok(items.clone())),
-            Event::Warning { message } if message.starts_with("cannot re") => {
-                Some(Err(SessionError::Rpc(message.clone())))
-            }
+            Event::SessionResumeFailed { reason } => Some(Err(SessionError::Rpc(reason.clone()))),
             _ => None,
         })
         .await;
@@ -320,7 +318,7 @@ impl Server {
                 return Err(RpcError::internal(e.to_string()));
             }
         };
-        for update in convert::replay(items) {
+        for update in convert::replay(items.into_vec()) {
             self.peer
                 .notify("session/update", json!({"sessionId": id, "update": update}));
         }

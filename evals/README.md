@@ -13,19 +13,21 @@ There are two suites. `tasks/` is quick (2–6 steps a task) and every model tes
 passes it, so it catches regressions and compares cost. `hard/` is meant to take 10–30
 steps a task and to be failed by some models, so it can tell setups apart.
 
-Each run gets a fresh copy of the task's `repo/` and its own data directory, so sessions
-and memory stay out of yours. Runs are unattended: the permission mode is `full-auto`, and
-anything that still asks is denied. Your providers, settings and AGENTS.md apply, since
-they are the setup being measured. **Every task calls the model, so a run costs what that
-model costs.**
+Each run gets a fresh copy of the task's `repo/` as its workspace root and its own data
+directory. It does not inherit the enclosing checkout's Git root, even when the cache
+is inside that checkout. Runs are unattended: the approval policy is `allow`, and
+anything that still asks is denied. System and user settings still apply. **Every task
+calls the model, so a run costs what that model costs.**
 
 The table goes to stdout and the JSON to `evals/results/<date>/<model>-<profile>.json`
 (`--out` to change); a rerun writes `<model>-<profile>-2.json` and so on rather than
 overwriting, and another suite's results start with its name
-(`hard-<model>-<profile>.json`). It records the sampling settings the requests carried
-(empty: the server's defaults) and, for each task, pass/fail, model requests, tool errors, argument parse
-failures, failed edits, tokens (prompt, cached, completion), time, the files the model
-changed, and for a failed run a `failure` label that says why:
+(`hard-<model>-<profile>.json`). The JSON is replaced atomically after every recorded trial.
+Compare `results.length` with `planned_trials` to spot a partial report. Pass `--revision`
+to record the source revision of the binary and defaults being tested. Each result includes
+the resolved model, profile, reasoning effort (when set), edit format, request and tool
+counts, tokens, and changed files. Execution errors also get an `error_kind` (for example,
+`provider` or `timeout`), separate from the failed trial's `failure` label:
 
 | label | meaning |
 |---|---|
@@ -39,6 +41,11 @@ changed, and for a failed run a `failure` label that says why:
 | `wrong-fix` | the right files changed and the result is still wrong |
 
 `--keep` keeps each run's workspace and session log (`data/sessions/`) and prints where.
+`--stop-on-incomplete` saves the result and exits nonzero on a skip, execution error,
+step limit, unknown setup, or missing trial cost; an ordinary verifier miss is still a
+valid result. Estimated costs with incomplete accounting are shown separately as
+`observed_cost`, not used as full trial costs. The stop flag is **not a dollar cap** and
+does not stop a trial already in progress.
 
 ## Comparing two setups
 
@@ -50,7 +57,28 @@ python3 scripts/eval-compare.py A.json,A-2.json B.json # two setups, task by tas
 `eval-compare.py` counts each task once however many runs it had, and gives each
 difference (pass rate, steps, cost, prompt tokens) a 95% interval from resampling the
 tasks. Only a difference whose interval leaves out zero is "clear"; one run of 14 tasks
-rarely gets there, which is why `--repeat 3` matters.
+rarely gets there, which is why `--repeat 3` matters. Cost uses only common tasks with
+all recorded, non-skipped attempts priced on both sides. Check the trial and price
+coverage before interpreting a difference.
+
+## Before a paid profile pilot
+
+1. Run the adapter and reporting unit tests and the loopback preflight. Verify that
+   `generic`, explicit `zcode`, and auto selection send the expected schemas with the
+   `quack-exec` mock eval tests. The suite tests must reject every starting fixture and
+   accept its reference solution.
+2. Pin the binary, defaults, and task revision. For Fireworks GLM-5.3 Flash, use the
+   exact model ID `accounts/fireworks/models/glm-5p3-flash`. Pin the same effort, edit
+   format and context window in both arms. Use isolated config and cache directories,
+   explicit output files, `--keep` and `--stop-on-incomplete`. Review provider prices
+   and billing controls, and set a call limit and per-request output limit before
+   asking for approval. Allow for retries and any child requests; the step limit is
+   not a provider-side request or billing cap.
+3. After explicit approval, run one task per profile serially on Fireworks. Check
+   report metadata, verifier outcomes, and provider usage before expanding. Do not
+   rank a Fireworks pilot against the published Baseten results or use it to change
+   defaults. A later Harbor comparison needs a profile-aware adapter and a control
+   on the same route.
 
 ## A task
 

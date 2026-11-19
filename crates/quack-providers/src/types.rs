@@ -40,6 +40,11 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<Image>,
     },
+    /// A Responses checkpoint with a portable text summary for other setups.
+    Compaction {
+        content: String,
+        sealed: Sealed,
+    },
     Assistant {
         #[serde(default)]
         content: String,
@@ -94,6 +99,10 @@ pub struct Sealed {
 
 /// A short stable hash of a request's system prompt and tools (FNV-1a, hex).
 pub fn fingerprint(req: &ChatRequest) -> String {
+    fingerprint_with(req, &[])
+}
+
+pub(crate) fn fingerprint_with(req: &ChatRequest, binding: &[&str]) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut feed = |bytes: &[u8]| {
         for b in bytes {
@@ -109,6 +118,10 @@ pub fn fingerprint(req: &ChatRequest) -> String {
         feed(t.name.as_bytes());
         feed(t.description.as_bytes());
         feed(t.parameters.to_string().as_bytes());
+    }
+    for value in binding {
+        feed(&[0]);
+        feed(value.as_bytes());
     }
     format!("{h:016x}")
 }

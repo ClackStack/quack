@@ -60,41 +60,11 @@ impl Loaded {
         replace_payload: Option<bool>,
     ) -> Result<HookEnableOutcome, String> {
         const KEY: &str = "hooks.disabled";
-        let mut item = load_hooks(self)
+        let item = load_hooks(self)
             .into_iter()
             .find(|h| h.id == id)
             .ok_or_else(|| format!("no hook `{id}` is configured; add it to hooks.d first"))?;
-        let mut overrides = Vec::new();
-        let off = loop {
-            if item.layer == LayerKind::System {
-                return Err(format!(
-                    "hook `{id}` is enforced by the system layer and cannot be changed"
-                ));
-            }
-            if let ItemState::Failed(d) = &item.state {
-                return Err(format!(
-                    "hook `{id}` does not load: {}; fix its file first",
-                    d.one_line()
-                ));
-            }
-            let off = file_off::<HookFile>(&item.path)?;
-            if !matches!(off, FileOff::Bare) {
-                break off;
-            }
-            if !matches!(item.layer, LayerKind::User | LayerKind::Project) {
-                return Err(format!(
-                    "hook `{id}` is switched off by {}; edit that file to enable it",
-                    item.path.display()
-                ));
-            }
-            overrides.push(item.path);
-            item = load_items_except::<HookFile>(&self.item_layers(), "hooks.d", &overrides)
-                .into_iter()
-                .find(|h| h.id == id)
-                .ok_or_else(|| {
-                    format!("no hook definition remains after removing the overrides for `{id}`")
-                })?;
-        };
+        let (item, off, overrides) = strip_bare_overrides(self, "hooks.d", "hook", id, item)?;
 
         if matches!(off, FileOff::Flag)
             && item.layer == LayerKind::Defaults
@@ -338,6 +308,52 @@ pub(crate) fn remove_bare_overrides(
     Ok(())
 }
 
+/// Walk an item down past bare `enabled = false` override files to the file that defines
+/// it, collecting the overrides on the way: each is a user or project file whose only
+/// job is to switch the item off, and once the enable succeeds they are removed again
+/// ([`remove_bare_overrides`]). Returns the defining item and how its own file is
+/// switched off.
+pub(crate) fn strip_bare_overrides<T: DeserializeOwned>(
+    loaded: &Loaded,
+    subdir: &str,
+    kind: &str,
+    id: &str,
+    mut item: Item<T>,
+) -> Result<(Item<T>, FileOff, Vec<PathBuf>), String> {
+    let mut overrides = Vec::new();
+    let off = loop {
+        if item.layer == LayerKind::System {
+            return Err(format!(
+                "{kind} `{id}` is enforced by the system layer and cannot be changed"
+            ));
+        }
+        if let ItemState::Failed(d) = &item.state {
+            return Err(format!(
+                "{kind} `{id}` does not load: {}; fix its file first",
+                d.one_line()
+            ));
+        }
+        let off = file_off::<T>(&item.path)?;
+        if !matches!(off, FileOff::Bare) {
+            break off;
+        }
+        if !matches!(item.layer, LayerKind::User | LayerKind::Project) {
+            return Err(format!(
+                "{kind} `{id}` is switched off by {}; edit that file to enable it",
+                item.path.display()
+            ));
+        }
+        overrides.push(item.path);
+        item = load_items_except::<T>(&loaded.item_layers(), subdir, &overrides)
+            .into_iter()
+            .find(|i| i.id == id)
+            .ok_or_else(|| {
+                format!("no {kind} definition remains after removing the overrides for `{id}`")
+            })?;
+    };
+    Ok((item, off, overrides))
+}
+
 /// Stage the defaults and keep the old payload available until the hook file is saved.
 pub(crate) fn install_payload(
     from: &Path,
@@ -432,67 +448,15 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::ffi::OsString;
-    use std::path::PathBuf;
-
-    use crate::LoadOptions;
-    use crate::{ItemState, LayerKind, load_hooks, load_with};
-
-    struct Fixture {
-        _tmp: tempfile::TempDir,
-        root: PathBuf,
-        vars: HashMap<String, OsString>,
-    }
-
-    impl Fixture {
-        fn new() -> Self {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let root = tmp.path().to_path_buf();
-            let mut vars = HashMap::new();
-            for (k, sub) in [
-                ("QUACK_SYSTEM_DIR", "system"),
-                ("QUACK_CONFIG_DIR", "user"),
-                ("QUACK_DATA_DIR", "data"),
-                ("QUACK_CACHE_DIR", "cache"),
-            ] {
-                vars.insert(k.to_owned(), root.join(sub).into_os_string());
-            }
-            vars.insert(
-                "QUACK_DEFAULTS_DIR".into(),
-                root.join("defaults").into_os_string(),
-            );
-            std::fs::create_dir_all(root.join("repo").join(".git")).expect("mkdir");
-            Self {
-                _tmp: tmp,
-                root,
-                vars,
-            }
-        }
-
-        fn path(&self, rel: &str) -> PathBuf {
-            rel.split('/').fold(self.root.clone(), |p, seg| p.join(seg))
-        }
-
-        fn write(&self, rel: &str, text: &str) {
-            let path = self.path(rel);
-            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-            std::fs::write(path, text).expect("write");
-        }
-
-        fn load(&self) -> crate::Loaded {
-            let o = LoadOptions::new(self.root.join("repo"));
-            let vars = self.vars.clone();
-            load_with(&move |k| vars.get(k).cloned(), &o).expect("load")
-        }
-    }
+    use crate::testing::Fixture;
+    use crate::{ItemState, LayerKind, load_hooks};
 
     const HOOK: &str = "event = \"user_prompt\"\ndescription = \"test hook\"\n\
         command = [\"python3\", \"{dir}/jira/run.py\"]\n";
 
     #[test]
     fn a_defaults_hook_is_copied_with_its_payload_and_enabled() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write(
             "defaults/hooks.d/jira.toml",
             &format!("# shipped\nenabled = false\n{HOOK}"),
@@ -531,7 +495,7 @@ mod tests {
     #[test]
     fn an_existing_payload_requires_a_choice() {
         for replace in [false, true] {
-            let f = Fixture::new();
+            let f = Fixture::with_defaults();
             f.write(
                 "defaults/hooks.d/jira.toml",
                 &format!("enabled = false\n{HOOK}"),
@@ -573,7 +537,7 @@ mod tests {
 
     #[test]
     fn enabling_clears_the_active_lists_and_preserves_other_entries() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write(
             "defaults/hooks.d/jira.toml",
             &format!("enabled = false\n{HOOK}"),
@@ -620,7 +584,7 @@ mod tests {
 
     #[test]
     fn a_listed_and_file_disabled_hook_is_fixed_twice_over() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write(
             "defaults/hooks.d/jira.toml",
             &format!("enabled = false\n{HOOK}"),
@@ -642,7 +606,7 @@ mod tests {
 
     #[test]
     fn a_user_hook_is_enabled_in_its_own_file() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write(
             "user/hooks.d/watch.toml",
             &format!("enabled = false # off for now\n{HOOK}"),
@@ -658,7 +622,7 @@ mod tests {
 
     #[test]
     fn an_existing_user_copy_is_not_clobbered() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write(
             "defaults/hooks.d/jira.toml",
             &format!("enabled = false\n{HOOK}"),
@@ -679,7 +643,7 @@ mod tests {
 
     #[test]
     fn a_bare_override_in_the_user_layer_is_removed() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write("defaults/hooks.d/jira.toml", HOOK);
         f.write("user/hooks.d/jira.toml", "enabled = false\n");
         let loaded = f.load();
@@ -691,7 +655,7 @@ mod tests {
 
     #[test]
     fn a_bare_override_in_the_defaults_bundle_is_named_not_touched() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write("defaults/hooks.d/jira.toml", "enabled = false\n");
         let loaded = f.load();
         let err = loaded.enable_hook("jira").expect_err("refused");
@@ -700,7 +664,7 @@ mod tests {
 
     #[test]
     fn a_system_hook_is_refused() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write("system/hooks.d/jira.toml", HOOK);
         let loaded = f.load();
         let err = loaded.enable_hook("jira").expect_err("refused");
@@ -709,7 +673,7 @@ mod tests {
 
     #[test]
     fn an_unknown_hook_is_refused() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         let loaded = f.load();
         let err = loaded.enable_hook("jira").expect_err("refused");
         assert!(err.contains("no hook"), "{err}");
@@ -717,7 +681,7 @@ mod tests {
 
     #[test]
     fn an_enabled_hook_says_so() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write("user/hooks.d/jira.toml", HOOK);
         let loaded = f.load();
         let err = loaded.enable_hook("jira").expect_err("refused");

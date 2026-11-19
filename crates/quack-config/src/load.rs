@@ -208,6 +208,16 @@ pub fn load_with(env: Env<'_>, opts: &LoadOptions) -> Result<Loaded, ConfigError
     load_in(Dirs::discover_with(env, &opts.cwd), env, opts)
 }
 
+/// Load an isolated workspace rooted at `opts.cwd`, without inheriting the enclosing Git root.
+/// System policy and user configuration still apply.
+pub fn load_workspace_with(env: Env<'_>, opts: &LoadOptions) -> Result<Loaded, ConfigError> {
+    load_in(
+        Dirs::discover_in(env, &opts.cwd, opts.cwd.clone()),
+        env,
+        opts,
+    )
+}
+
 fn load_in(found: Dirs, env: Env<'_>, opts: &LoadOptions) -> Result<Loaded, ConfigError> {
     let mut dirs = found.clone();
     let mut warnings = Vec::new();
@@ -391,25 +401,32 @@ fn read_layer(kind: LayerKind, dir: Option<&Path>, diags: &mut Vec<FileDiagnosti
             return layer;
         }
     };
-    // Validate against the typed schema first so errors carry spans.
-    if let Err(e) = toml::from_str::<Settings>(&text) {
+    // One parse: the table drives the merge, and validating it against the typed schema
+    // is a walk over the parsed values. Only a file that fails validation is parsed
+    // again, and only then, for a diagnostic that carries a span; startup never pays
+    // for the second parse.
+    let table = match toml::from_str::<Table>(&text) {
+        Ok(table) => table,
+        Err(e) => {
+            diags.push(
+                FileDiagnostic::from_toml(&path, &text, &e)
+                    .with_help("this file is ignored until fixed; other layers still load"),
+            );
+            layer.status = LayerStatus::Failed;
+            return layer;
+        }
+    };
+    if let Err(e) = Settings::deserialize(table.clone()) {
+        let err = toml::from_str::<Settings>(&text).err().unwrap_or(e);
         diags.push(
-            FileDiagnostic::from_toml(&path, &text, &e)
+            FileDiagnostic::from_toml(&path, &text, &err)
                 .with_help("this file is ignored until fixed; other layers still load"),
         );
         layer.status = LayerStatus::Failed;
         return layer;
     }
-    match toml::from_str::<Table>(&text) {
-        Ok(table) => {
-            layer.table = Some((path, table));
-            layer.status = LayerStatus::Loaded;
-        }
-        Err(e) => {
-            diags.push(FileDiagnostic::from_toml(&path, &text, &e));
-            layer.status = LayerStatus::Failed;
-        }
-    }
+    layer.table = Some((path, table));
+    layer.status = LayerStatus::Loaded;
     layer
 }
 
@@ -532,74 +549,27 @@ fn overridden_by(origins: &Origins, base_origins: &Origins, lock: &str) -> Strin
 mod tests {
     use super::*;
     use crate::settings::PermissionMode;
-    use std::collections::HashMap;
-    use std::ffi::OsString;
-
-    struct Fixture {
-        _tmp: tempfile::TempDir,
-        root: PathBuf,
-        vars: HashMap<String, OsString>,
-    }
-
-    impl Fixture {
-        fn new() -> Self {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let root = tmp.path().to_path_buf();
-            let mut vars = HashMap::new();
-            for (k, sub) in [
-                ("QUACK_SYSTEM_DIR", "system"),
-                ("QUACK_CONFIG_DIR", "user"),
-                ("QUACK_DATA_DIR", "data"),
-                ("QUACK_CACHE_DIR", "cache"),
-            ] {
-                vars.insert(k.to_owned(), root.join(sub).into_os_string());
-            }
-            vars.insert("QUACK_DEFAULTS_DIR".into(), "none".into());
-            std::fs::create_dir_all(root.join("repo").join(".git")).expect("mkdir");
-            Self {
-                _tmp: tmp,
-                root,
-                vars,
-            }
-        }
-
-        fn path(&self, rel: &str) -> PathBuf {
-            rel.split('/').fold(self.root.clone(), |p, seg| p.join(seg))
-        }
-
-        fn write(&self, rel: &str, text: &str) {
-            let path = self.path(rel);
-            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-            std::fs::write(path, text).expect("write");
-        }
-
-        fn load(&self, opts: impl FnOnce(&mut LoadOptions)) -> Loaded {
-            let mut o = LoadOptions::new(self.root.join("repo"));
-            opts(&mut o);
-            let vars = self.vars.clone();
-            load_with(&move |k| vars.get(k).cloned(), &o).expect("load")
-        }
-    }
+    use crate::testing::Fixture;
 
     #[test]
     fn last_used_model_replaces_only_a_personal_default() {
         let f = Fixture::new();
         f.write("user/config.toml", "[model]\ndefault = \"a/default\"");
-        let none = f.load(|_| {});
+        let none = f.load();
         assert_eq!(none.remembered_model(), None, "nothing remembered yet");
         crate::save_last_model(&f.root.join("data"), "b/last").expect("save");
 
-        let l = f.load(|_| {});
+        let l = f.load();
         assert_eq!(l.remembered_model().as_deref(), Some("b/last"));
         assert_eq!(l.settings.model.default, "a/default", "config is untouched");
 
         // `-m` and QUACK_MODEL are explicit for this run.
-        let cli = f.load(|o| o.model = Some("c/cli".into()));
+        let cli = f.load_opts(|o| o.model = Some("c/cli".into()));
         assert_eq!(cli.remembered_model(), None);
         let mut env = Fixture::new();
         env.vars.insert("QUACK_MODEL".into(), "d/env".into());
         crate::save_last_model(&env.root.join("data"), "b/last").expect("save");
-        assert_eq!(env.load(|_| {}).remembered_model(), None);
+        assert_eq!(env.load().remembered_model(), None);
 
         // So is a trusted project's choice.
         let repo = f.root.join("repo").canonicalize().expect("canonical");
@@ -614,7 +584,7 @@ mod tests {
             "repo/.quack/config.toml",
             "[model]\ndefault = \"p/project\"",
         );
-        assert_eq!(f.load(|_| {}).remembered_model(), None);
+        assert_eq!(f.load().remembered_model(), None);
         std::fs::remove_file(f.path("repo/.quack/config.toml")).expect("rm");
 
         // Turned off, or locked by policy.
@@ -622,19 +592,19 @@ mod tests {
             "user/config.toml",
             "[model]\ndefault = \"a/default\"\nremember_last = false",
         );
-        assert_eq!(f.load(|_| {}).remembered_model(), None);
+        assert_eq!(f.load().remembered_model(), None);
         f.write("user/config.toml", "[model]\ndefault = \"a/default\"");
         f.write(
             "system/config.toml",
             "[model]\ndefault = \"s/locked\"\n[policy]\nlocked = [\"model.default\"]",
         );
-        assert_eq!(f.load(|_| {}).remembered_model(), None);
+        assert_eq!(f.load().remembered_model(), None);
     }
 
     #[test]
     fn empty_environment_yields_compiled_defaults() {
         let f = Fixture::new();
-        let l = f.load(|_| {});
+        let l = f.load();
         assert_eq!(l.settings, Settings::default());
         assert_eq!(l.project, ProjectStatus::None);
         assert!(l.diagnostics.is_empty());
@@ -651,7 +621,7 @@ mod tests {
             "user/config.toml",
             "[model]\ndefault = \"a/b\"\n[permissions]\nallow.append = [\"shell:cargo test*\"]",
         );
-        let l = f.load(|o| o.overrides.push("ui.ascii=true".into()));
+        let l = f.load_opts(|o| o.overrides.push("ui.ascii=true".into()));
         assert_eq!(l.settings.model.default, "a/b");
         assert_eq!(
             l.settings.permissions.allow,
@@ -679,7 +649,7 @@ mod tests {
             "user/config.toml",
             "[network]\noffline = false\n[permissions]\nmode = \"full-auto\"\n[policy]\nlocked = []",
         );
-        let l = f.load(|o| o.overrides.push("network.offline=false".into()));
+        let l = f.load_opts(|o| o.overrides.push("network.offline=false".into()));
         assert!(l.settings.network.offline);
         assert_eq!(l.settings.permissions.mode, PermissionMode::AutoEdit);
         assert_eq!(l.settings.policy.locked, ["network.offline"]);
@@ -697,7 +667,7 @@ mod tests {
             "user/config.toml",
             "[network]\noffline = false\nproxy = \"http://p:3128\"",
         );
-        let l = f.load(|_| {});
+        let l = f.load();
         assert!(l.settings.network.offline);
         assert!(l.settings.network.proxy.is_empty());
         assert!(matches!(
@@ -736,7 +706,7 @@ mod tests {
         );
         let mut f = f;
         f.vars.insert("QUACK_MODEL".into(), "env/m".into());
-        let l = f.load(|o| {
+        let l = f.load_opts(|o| {
             o.model = Some("cli/m".into());
             o.overrides.push("permissions.mode=\"yolo\"".into());
         });
@@ -780,7 +750,7 @@ mod tests {
         let f = Fixture::new();
         f.write("system/config.toml", "[ui]\nascii = true");
         f.write("user/config.toml", "[ui]\nbogus = 1");
-        let l = f.load(|_| {});
+        let l = f.load();
         assert!(l.settings.ui.ascii, "other layers still apply");
         assert_eq!(l.diagnostics.len(), 1);
         let line = l.diagnostics[0].one_line();
@@ -792,7 +762,7 @@ mod tests {
     fn untrusted_project_is_skipped_until_trusted() {
         let f = Fixture::new();
         f.write("repo/.quack/config.toml", "[model]\ndefault = \"proj/m\"");
-        let l = f.load(|_| {});
+        let l = f.load();
         assert_eq!(l.project, ProjectStatus::Untrusted);
         assert_eq!(l.settings.model.default, "");
 
@@ -804,7 +774,7 @@ mod tests {
                 repo.display().to_string()
             ),
         );
-        let l = f.load(|_| {});
+        let l = f.load();
         assert_eq!(l.project, ProjectStatus::Trusted);
         assert_eq!(l.settings.model.default, "proj/m");
     }
@@ -813,6 +783,6 @@ mod tests {
     fn bom_is_accepted() {
         let f = Fixture::new();
         f.write("user/config.toml", "\u{feff}[ui]\nascii = true");
-        assert!(f.load(|_| {}).settings.ui.ascii);
+        assert!(f.load().settings.ui.ascii);
     }
 }

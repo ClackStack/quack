@@ -89,14 +89,7 @@ pub async fn run(shell: &ShellKind, script: &str, opts: RunOptions) -> std::io::
     loop {
         tokio::select! {
             chunk = rx.recv(), if output_open => match chunk {
-                Some(bytes) => {
-                    if let Some(live) = &opts.on_output {
-                        let _ = live.send(String::from_utf8_lossy(&bytes).into_owned());
-                    }
-                    let room = MAX_CAPTURE.saturating_sub(captured.len());
-                    captured.extend_from_slice(&bytes[..bytes.len().min(room)]);
-                    dropped += bytes.len().saturating_sub(room);
-                }
+                Some(bytes) => stash(opts.on_output.as_ref(), &mut captured, &mut dropped, &bytes),
                 None => output_open = false,
             },
             s = child.wait(), if status.is_none() => {
@@ -118,9 +111,7 @@ pub async fn run(shell: &ShellKind, script: &str, opts: RunOptions) -> std::io::
         if status.is_some() && output_open {
             match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
                 Ok(Some(bytes)) => {
-                    let room = MAX_CAPTURE.saturating_sub(captured.len());
-                    captured.extend_from_slice(&bytes[..bytes.len().min(room)]);
-                    dropped += bytes.len().saturating_sub(room);
+                    stash(opts.on_output.as_ref(), &mut captured, &mut dropped, &bytes);
                     continue;
                 }
                 Ok(None) | Err(_) => break,
@@ -141,6 +132,22 @@ pub async fn run(shell: &ShellKind, script: &str, opts: RunOptions) -> std::io::
         timed_out,
         cancelled,
     })
+}
+
+/// Handle one chunk the same way on the live and the post-exit drain paths: forward it
+/// to the live callback, keep what fits in memory, count the rest as dropped.
+fn stash(
+    live: Option<&mpsc::UnboundedSender<String>>,
+    captured: &mut Vec<u8>,
+    dropped: &mut usize,
+    bytes: &[u8],
+) {
+    if let Some(live) = live {
+        let _ = live.send(String::from_utf8_lossy(bytes).into_owned());
+    }
+    let room = MAX_CAPTURE.saturating_sub(captured.len());
+    captured.extend_from_slice(&bytes[..bytes.len().min(room)]);
+    *dropped += bytes.len().saturating_sub(room);
 }
 
 async fn pump(mut r: impl AsyncRead + Unpin, tx: mpsc::UnboundedSender<Vec<u8>>) {
@@ -246,6 +253,29 @@ mod tests {
         assert!(
             r.output.contains("out") && r.output.contains("err"),
             "{r:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_after_exit_reaches_the_live_callback() {
+        let sh = ShellKind::detect("sh", None);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut o = opts(20_000);
+        o.on_output = Some(tx);
+        // A grandchild holds the pipe open and writes only after the shell has exited.
+        let r = run(&sh, "(sleep 0.05; echo tail) & exit 0", o)
+            .await
+            .expect("runs");
+        assert_eq!(r.exit_code, Some(0));
+        assert!(r.output.contains("tail"), "{r:?}");
+        let mut live = String::new();
+        while let Some(chunk) = rx.recv().await {
+            live.push_str(&chunk);
+        }
+        assert!(
+            live.contains("tail"),
+            "the post-exit drain reached the live callback: {live:?}"
         );
     }
 

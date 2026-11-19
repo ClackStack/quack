@@ -8,24 +8,39 @@ name = "ChatGPT plan"
 group = "Proprietary models"
 note = "sign in with `quack login chatgpt`"
 api = "openai-responses"
+native_compaction = true
 base_url = "https://api.openai.com/v1"
 auth = { type = "chatgpt", issuer = "https://auth.openai.com" }
 extra_body = { reasoning = { summary = "auto", context = "all_turns" } }
 
 # The models the account offers are also listed in /models.
-# Default context budgets (272k, Terra 500k) and image input follow the Codex catalog
-# reviewed 2026-11-11; larger account/route-specific windows require an explicit override.
+# Default context budgets (Astra/Luna 272k, Sol and Terra 500k) and image input follow the
+# Codex catalog reviewed 2026-11-17; larger account/route-specific windows require an
+# explicit override. The catalog's `ultra` picker level is Codex-side multi-agent
+# delegation, not a wire effort, so it is not offered here.
 # Supported reasoning efforts: https://developers.openai.com/api/docs/guides/reasoning
 [[models]]
-id = "gpt-6.1-sol"
+id = "gpt-6.2-sol"
 alias = "sol"
+context_window = 500000
+vision = true
+reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
+
+[[models]]
+id = "gpt-6.2-astra"
+alias = "astra"
 context_window = 272000
 vision = true
 reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
 
 [[models]]
+id = "gpt-6.1-sol"
+context_window = 500000
+vision = true
+reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
+
+[[models]]
 id = "gpt-6-astra"
-alias = "astra"
 context_window = 272000
 vision = true
 reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }

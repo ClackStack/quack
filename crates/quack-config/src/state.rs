@@ -27,10 +27,7 @@ fn open_doc(user_data: &Path) -> Result<toml_edit::DocumentMut, String> {
 fn write_doc(user_data: &Path, doc: &toml_edit::DocumentMut) -> Result<PathBuf, String> {
     let file = user_data.join(FILE);
     std::fs::create_dir_all(user_data).map_err(|e| format!("{}: {e}", user_data.display()))?;
-    let tmp = file.with_extension("toml.new");
-    std::fs::write(&tmp, doc.to_string())
-        .and_then(|()| std::fs::rename(&tmp, &file))
-        .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+    crate::atomic::write_via_tmp(&file, &doc.to_string(), "toml.new", false)?;
     Ok(file)
 }
 

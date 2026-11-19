@@ -79,18 +79,22 @@ pub(crate) fn io_msg(path: &Path, e: &std::io::Error) -> String {
     }
 }
 
-/// Unified diff with three lines of context.
-pub(crate) fn unified_diff(name: &str, before: &str, after: &str) -> String {
-    similar::TextDiff::from_lines(before, after)
-        .unified_diff()
+/// Unified diff with three lines of context, computed from an existing line diff so
+/// callers that need both stats and the detail share one walk over the changes.
+pub(crate) fn unified_from(diff: &similar::TextDiff<'_, '_, str>, name: &str) -> String {
+    diff.unified_diff()
         .context_radius(3)
         .header(&format!("a/{name}"), &format!("b/{name}"))
         .to_string()
 }
 
-/// `(+added, -removed)` line counts.
-pub(crate) fn diff_stats(before: &str, after: &str) -> (usize, usize) {
-    let diff = similar::TextDiff::from_lines(before, after);
+/// Unified diff with three lines of context.
+pub(crate) fn unified_diff(name: &str, before: &str, after: &str) -> String {
+    unified_from(&similar::TextDiff::from_lines(before, after), name)
+}
+
+/// `(+added, -removed)` line counts, computed from an existing line diff.
+pub(crate) fn stats_of(diff: &similar::TextDiff<'_, '_, str>) -> (usize, usize) {
     let mut add = 0;
     let mut del = 0;
     for change in diff.iter_all_changes() {
@@ -101,6 +105,11 @@ pub(crate) fn diff_stats(before: &str, after: &str) -> (usize, usize) {
         }
     }
     (add, del)
+}
+
+/// `(+added, -removed)` line counts.
+pub(crate) fn diff_stats(before: &str, after: &str) -> (usize, usize) {
+    stats_of(&similar::TextDiff::from_lines(before, after))
 }
 
 /// What an edit tool needs after writing a file: diff stats, the detail diff, and the
@@ -117,8 +126,8 @@ pub(crate) struct Commit {
 /// The tail every edit tool shares after writing a file: record the read, compute the
 /// diff stats and the detail diff, and check tree-sitter for a newly broken parse.
 /// `before` is `None` for a created file (no parse check); `action` is the word after
-/// "after this" in the warning; `name_file` prefixes the file name when one call can
-/// change several files and the warning must say which one.
+/// "after this" in the warning; `files` says whether the warning must name the file
+/// (one call can change several files only through `apply_patch`).
 pub(crate) fn commit(
     ctx: &crate::registry::ToolCtx,
     path: &Path,
@@ -126,13 +135,17 @@ pub(crate) fn commit(
     before: Option<&str>,
     after: &str,
     action: &str,
-    name_file: bool,
+    files: NamedFile,
 ) -> Commit {
     ctx.reads.record(path);
-    let (add, del) = diff_stats(before.unwrap_or(""), after);
+    let before_text = before.unwrap_or("");
+    // One diff walk: the stats and the detail share the change list.
+    let diff = similar::TextDiff::from_lines(before_text, after);
+    let (add, del) = stats_of(&diff);
     let warning = before.and_then(|before| {
+        // New files (`before: None`) skip the parse check entirely.
         crate::outline::new_syntax_error(path, before, after).map(|line| {
-            let file = if name_file {
+            let file = if files == NamedFile::Yes {
                 format!(" in {shown}")
             } else {
                 String::new()
@@ -147,9 +160,16 @@ pub(crate) fn commit(
     Commit {
         add,
         del,
-        detail: unified_diff(shown, before.unwrap_or(""), after),
+        detail: unified_from(&diff, shown),
         warning,
     }
+}
+
+/// Whether an edit's parse warning names the file it happened in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NamedFile {
+    Yes,
+    No,
 }
 
 /// Keep the head and tail of long output, marking what was cut.

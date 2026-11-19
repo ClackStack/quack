@@ -25,6 +25,53 @@ pub struct EgressDraft {
     pub blocked_reason: Option<String>,
 }
 
+impl EgressDraft {
+    /// A request about to start: nothing sent or received yet, no outcome. The builder
+    /// methods fill in what happened before the draft is recorded.
+    pub fn new(kind: EgressKind, url: impl Into<String>, protocol: impl Into<String>) -> Self {
+        Self {
+            kind,
+            url: url.into(),
+            protocol: protocol.into(),
+            bytes_sent: 0,
+            bytes_received: 0,
+            status: None,
+            redactions: 0,
+            blocked_reason: None,
+        }
+    }
+
+    /// Bytes sent on the wire, in total.
+    pub fn sent(mut self, bytes: u64) -> Self {
+        self.bytes_sent = bytes;
+        self
+    }
+
+    /// Bytes received from the wire, in total.
+    pub fn received(mut self, bytes: u64) -> Self {
+        self.bytes_received = bytes;
+        self
+    }
+
+    /// The HTTP status the request ended with, when it got that far.
+    pub fn status(mut self, status: Option<u16>) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// Redactions to attribute to this request.
+    pub fn redactions(mut self, count: u32) -> Self {
+        self.redactions = count;
+        self
+    }
+
+    /// The request failed or was refused, with the reason.
+    pub fn blocked(mut self, reason: impl Into<String>) -> Self {
+        self.blocked_reason = Some(reason.into());
+        self
+    }
+}
+
 #[derive(Default)]
 struct LedgerInner {
     entries: Vec<EgressEntry>,
@@ -226,30 +273,29 @@ mod tests {
             fired_c.fetch_add(1, Ordering::Relaxed);
         }));
 
-        let first = ledger.record(EgressDraft {
-            kind: EgressKind::Inference,
-            url: "http://127.0.0.1:11434/v1/chat/completions".into(),
-            protocol: "openai-chat".into(),
-            bytes_sent: 400,
-            bytes_received: 120,
-            status: Some(200),
-            redactions: 2,
-            blocked_reason: None,
-        });
+        let first = ledger.record(
+            EgressDraft::new(
+                EgressKind::Inference,
+                "http://127.0.0.1:11434/v1/chat/completions",
+                "openai-chat",
+            )
+            .sent(400)
+            .received(120)
+            .status(Some(200))
+            .redactions(2),
+        );
         assert!(first.local);
         assert_eq!(first.host, "127.0.0.1:11434");
         assert_eq!(first.path, "/v1/chat/completions");
 
-        let blocked = ledger.record(EgressDraft {
-            kind: EgressKind::BlockedEgress,
-            url: "https://example.com/secret".into(),
-            protocol: "fetch".into(),
-            bytes_sent: 0,
-            bytes_received: 0,
-            status: None,
-            redactions: 0,
-            blocked_reason: Some("blocked by network.allow".into()),
-        });
+        let blocked = ledger.record(
+            EgressDraft::new(
+                EgressKind::BlockedEgress,
+                "https://example.com/secret",
+                "fetch",
+            )
+            .blocked("blocked by network.allow"),
+        );
         assert!(!blocked.local);
         assert_eq!(blocked.host, "example.com");
 

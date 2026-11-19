@@ -264,6 +264,7 @@ fn message_json(m: &Message, shape: &Shape<'_>) -> Value {
     };
     match m {
         Message::System { content } => json!({ "role": "system", "content": content }),
+        Message::Compaction { content, .. } => json!({ "role": "user", "content": content }),
         Message::User { content, images } => {
             if images.is_empty() {
                 json!({ "role": "user", "content": content })

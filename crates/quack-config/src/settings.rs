@@ -374,12 +374,12 @@ pub struct NetworkSettings {
     #[serde(deserialize_with = "list::de")]
     #[schemars(with = "ListOrAppend")]
     pub egress_allow: Vec<String>,
-    /// Empty: `HTTPS_PROXY` / system. Hosts in `NO_PROXY` always go direct.
+    /// Empty uses scheme-specific environment proxies, `ALL_PROXY`, or system settings.
+    /// Hosts in `NO_PROXY` go direct.
     pub proxy: String,
     /// Extra PEM roots, in addition to the OS store.
     pub ca_bundle: String,
-    /// Speak HTTP/1.1 only, one connection per request, instead of sharing one HTTP/2
-    /// connection. Try it when a VPN or proxy leaves connections stale.
+    /// Force HTTP/1.1. Try it when a VPN or proxy leaves HTTP/2 connections stale.
     pub http1_only: bool,
     /// Pre-egress secret scanning policy (`ask`, `redact`, or `off`). Non-interactive
     /// clients automatically fall back from `ask` to `redact`.

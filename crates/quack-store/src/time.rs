@@ -2,6 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Current Unix time in seconds, or 0 when the system clock is before the epoch.
 pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -22,7 +23,7 @@ fn civil(days: i64) -> (i64, i64, i64) {
     (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
-/// `2026-10-17T21:14:03Z`.
+/// ISO-8601 UTC timestamp: `2026-10-17T21:14:03Z`. Pre-1970 times collapse to `1970`.
 pub fn rfc3339(unix: u64) -> String {
     let secs = i64::try_from(unix).unwrap_or(0);
     let (y, m, d) = civil(secs.div_euclid(86_400));
@@ -35,12 +36,13 @@ pub fn rfc3339(unix: u64) -> String {
     )
 }
 
-/// `2026-10-17`.
+/// Calendar date for `unix`: `2026-10-17`. The first ten characters of [`rfc3339`].
 pub fn date(unix: u64) -> String {
     rfc3339(unix)[..10].to_owned()
 }
 
-/// Short relative age for pickers: `5m`, `3h`, `2d`.
+/// Short relative age for pickers: `5s` under a minute, `5m` under an hour, `5h` under
+/// a day, `5d` otherwise. `now < unix` reads 0.
 pub fn age(unix: u64, now: u64) -> String {
     let s = now.saturating_sub(unix);
     match s {

@@ -243,13 +243,7 @@ fn read_lines(dir: &Path) -> Vec<Line> {
 /// FNV-1a over the file's bytes; `None` when it does not exist. Only used to notice that a
 /// file changed, not for security.
 fn hash_file(path: &Path) -> Option<u64> {
-    let bytes = std::fs::read(path).ok()?;
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    Some(h)
+    Some(crate::fnv1a(&std::fs::read(path).ok()?))
 }
 
 #[cfg(test)]

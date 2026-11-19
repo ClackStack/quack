@@ -140,8 +140,18 @@ fn ruleset(policy: &Policy) -> Result<OwnedFd, String> {
         .map(|p| p.as_path())
         .chain(DEVICES.iter().map(Path::new));
     for path in paths {
-        // Missing paths are fine: nothing can be written there anyway.
-        let _ = add_rule(&ruleset, path, rights);
+        if let Err(e) = add_rule(&ruleset, path, rights)
+            // Missing paths are fine: nothing can be written there anyway.
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            // Any other failure leaves the path denied although the policy allowed it;
+            // keep the rest of the ruleset, but leave a trace of the lost rule.
+            tracing::warn!(
+                "could not add the Landlock rule for {}: {e} · writes beneath it stay \
+                 denied; check that the path can be opened",
+                path.display()
+            );
+        }
     }
     Ok(ruleset)
 }

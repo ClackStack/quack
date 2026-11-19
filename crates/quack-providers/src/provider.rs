@@ -23,7 +23,9 @@ use crate::openai_chat::{self, ChunkParser};
 #[cfg(feature = "proto-openai-responses")]
 use crate::responses;
 use crate::sse::SseDecoder;
-use crate::types::{ChatRequest, DiscoveredModel, Message, StreamEvent, fingerprint, merge};
+use crate::types::{
+    ChatRequest, DiscoveredModel, Message, StreamEvent, fingerprint, fingerprint_with, merge,
+};
 
 /// Longest wait we honour from a `Retry-After` header.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
@@ -429,6 +431,94 @@ impl Provider {
         s.provider == self.id && s.fingerprint == fp && model_ok
     }
 
+    /// Whether new compactions use the provider's native Responses endpoint.
+    pub fn native_compaction(&self) -> bool {
+        cfg!(feature = "proto-openai-responses")
+            && self.file.api == "openai-responses"
+            && self.file.native_compaction
+    }
+
+    fn compaction_fingerprint(&self, req: &ChatRequest) -> String {
+        let route = if self.has_login() { "signed-in" } else { "api" };
+        fingerprint_with(req, &[self.base_url(), &self.file.api, route])
+    }
+
+    fn prepare_history(&self, req: &mut ChatRequest) {
+        let fp = fingerprint(req);
+        let native_fp = req
+            .messages
+            .iter()
+            .any(|m| matches!(m, Message::Compaction { .. }))
+            .then(|| self.compaction_fingerprint(req));
+        let mut prefix_matches = true;
+        for message in &mut req.messages {
+            match message {
+                Message::Compaction { content, sealed }
+                    if !self.native_compaction()
+                        || native_fp.as_ref() != Some(&sealed.fingerprint)
+                        || sealed.provider != self.id
+                        || sealed.model != req.model =>
+                {
+                    *message = Message::User {
+                        content: std::mem::take(content),
+                        images: Vec::new(),
+                    };
+                    prefix_matches = false;
+                }
+                Message::Assistant { sealed, .. }
+                    if !prefix_matches
+                        || sealed
+                            .as_ref()
+                            .is_some_and(|s| !self.keeps(s, &req.model, &fp)) =>
+                {
+                    *sealed = None;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Request an encrypted checkpoint using the same Responses stream as a normal turn.
+    pub async fn compact(
+        &self,
+        req: ChatRequest,
+        cancel: CancellationToken,
+    ) -> Result<(crate::Sealed, Option<quack_protocol::Usage>), ProviderError> {
+        if !self.native_compaction() {
+            return Err(ProviderError::new(
+                ErrorKind::Config,
+                "native Responses compaction is disabled",
+            ));
+        }
+        let fingerprint = self.compaction_fingerprint(&req);
+        let model = req.model.clone();
+        let mut stream = self.start_stream(req, ReasoningFormat::Auto, cancel, true);
+        let mut items = None;
+        let mut usage = None;
+        while let Some(event) = stream.recv().await {
+            match event? {
+                StreamEvent::Sealed(window) => items = Some(window),
+                StreamEvent::Usage(value) => usage = Some(value),
+                _ => {}
+            }
+        }
+        let items = items.ok_or_else(|| {
+            ProviderError::new(
+                ErrorKind::Protocol,
+                "the stream ended without an encrypted compaction item",
+            )
+        })?;
+        Ok((
+            crate::Sealed {
+                provider: self.id.clone(),
+                model,
+                fingerprint,
+                items,
+            },
+            usage,
+        ))
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}/{path}", self.base_url)
     }
@@ -470,16 +560,10 @@ impl Provider {
             Err(e) => {
                 let pe = ProviderError::from_reqwest(&e);
                 self.renew_client(generation, &pe);
-                self.record_ledger(EgressDraft {
-                    kind: EgressKind::Models,
-                    url: req_url,
-                    protocol: self.file.api.clone(),
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    status: None,
-                    redactions: 0,
-                    blocked_reason: Some(pe.message.clone()),
-                });
+                self.record_ledger(
+                    EgressDraft::new(EgressKind::Models, req_url, self.file.api.clone())
+                        .blocked(pe.message.clone()),
+                );
                 return Err(pe);
             }
         };
@@ -487,16 +571,11 @@ impl Provider {
         let resp = match check_status(resp).await {
             Ok(r) => r,
             Err(e) => {
-                self.record_ledger(EgressDraft {
-                    kind: EgressKind::Models,
-                    url: req_url,
-                    protocol: self.file.api.clone(),
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    status,
-                    redactions: 0,
-                    blocked_reason: Some(e.message.clone()),
-                });
+                self.record_ledger(
+                    EgressDraft::new(EgressKind::Models, req_url, self.file.api.clone())
+                        .status(status)
+                        .blocked(e.message.clone()),
+                );
                 return Err(e);
             }
         };
@@ -504,16 +583,11 @@ impl Provider {
             .bytes()
             .await
             .map_err(|e| ProviderError::from_reqwest(&e))?;
-        self.record_ledger(EgressDraft {
-            kind: EgressKind::Models,
-            url: req_url,
-            protocol: self.file.api.clone(),
-            bytes_sent: 0,
-            bytes_received: bytes.len() as u64,
-            status,
-            redactions: 0,
-            blocked_reason: None,
-        });
+        self.record_ledger(
+            EgressDraft::new(EgressKind::Models, req_url, self.file.api.clone())
+                .received(bytes.len() as u64)
+                .status(status),
+        );
         serde_json::from_slice(&bytes).map_err(|e| {
             ProviderError::new(
                 ErrorKind::Protocol,
@@ -570,6 +644,8 @@ impl Provider {
         }
     }
 
+    /// The model's trained context window, if the server says it. A miss only means the
+    /// listing goes out without a window, but each failure is logged so it can be seen.
     #[cfg(feature = "proto-ollama")]
     async fn ollama_show(&self, model: &str) -> Option<u32> {
         let req_url = self.url(ollama::SHOW_PATH);
@@ -580,27 +656,70 @@ impl Provider {
         let resp = self
             .request_headers()
             .await
+            .map_err(|e| {
+                tracing::warn!(
+                    provider = %self.id,
+                    model,
+                    error = %e,
+                    "could not prepare the show request; the model's context window stays unknown"
+                )
+            })
             .ok()?
             .apply(self.client().1.post(&req_url))
             .timeout(self.discovery_timeout())
             .json(&payload)
             .send()
             .await
+            .map_err(|e| {
+                tracing::warn!(
+                    provider = %self.id,
+                    model,
+                    error = %e,
+                    "the show request failed; the model's context window stays unknown"
+                )
+            })
             .ok()?;
         let status = Some(resp.status().as_u16());
-        let resp = check_status(resp).await.ok()?;
-        let raw = resp.bytes().await.ok()?;
-        self.record_ledger(EgressDraft {
-            kind: EgressKind::Models,
-            url: req_url,
-            protocol: self.file.api.clone(),
-            bytes_sent,
-            bytes_received: raw.len() as u64,
-            status,
-            redactions: 0,
-            blocked_reason: None,
-        });
-        let body: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+        let resp = check_status(resp)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    provider = %self.id,
+                    model,
+                    error = %e,
+                    "the server refused the show request; the model's context window stays unknown"
+                )
+            })
+            .ok()?;
+        let raw = resp
+            .bytes()
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    provider = %self.id,
+                    model,
+                    error = %e,
+                    "the show answer was cut off; the model's context window stays unknown"
+                )
+            })
+            .ok()?;
+        self.record_ledger(
+            EgressDraft::new(EgressKind::Models, req_url, self.file.api.clone())
+                .sent(bytes_sent)
+                .received(raw.len() as u64)
+                .status(status),
+        );
+        let body: serde_json::Value = serde_json::from_slice(&raw)
+            .map_err(|e| {
+                tracing::warn!(
+                    provider = %self.id,
+                    model,
+                    error = %e,
+                    "the show answer was not valid JSON; the model's context window stays unknown"
+                )
+            })
+            .ok()?;
+        // No window in the answer is an expected miss for models without parameter info.
         ollama::parse_show(&body)
     }
 
@@ -612,12 +731,22 @@ impl Provider {
         reasoning: ReasoningFormat,
         cancel: CancellationToken,
     ) -> mpsc::Receiver<Result<StreamEvent, ProviderError>> {
+        self.start_stream(req, reasoning, cancel, false)
+    }
+
+    fn start_stream(
+        &self,
+        req: ChatRequest,
+        reasoning: ReasoningFormat,
+        cancel: CancellationToken,
+        compacting: bool,
+    ) -> mpsc::Receiver<Result<StreamEvent, ProviderError>> {
         let (tx, rx) = mpsc::channel(256);
         let this = self.clone();
         tokio::spawn(async move {
             tokio::select! {
                 () = cancel.cancelled() => {}
-                () = this.run_stream(req, reasoning, &tx) => {}
+                () = this.run_stream(req, reasoning, compacting, &tx) => {}
             }
         });
         rx
@@ -627,17 +756,12 @@ impl Provider {
         &self,
         mut req: ChatRequest,
         reasoning: ReasoningFormat,
+        compacting: bool,
         tx: &mpsc::Sender<Result<StreamEvent, ProviderError>>,
     ) {
-        let fp = fingerprint(&req);
-        let model = req.model.clone();
-        for m in &mut req.messages {
-            if let Message::Assistant { sealed, .. } = m
-                && sealed.as_ref().is_some_and(|s| !self.keeps(s, &model, &fp))
-            {
-                *sealed = None;
-            }
-        }
+        #[cfg(not(feature = "proto-openai-responses"))]
+        let _ = compacting;
+        self.prepare_history(&mut req);
         if !self.extra.is_empty() {
             let mut extra = serde_json::Value::Object(self.extra.clone());
             merge(&mut extra, &req.extra_body);
@@ -666,7 +790,17 @@ impl Provider {
             #[cfg(feature = "proto-openai-responses")]
             Api::Responses => (
                 responses::RESPONSES_PATH.to_owned(),
-                responses::build_body(&req, self.route),
+                if compacting {
+                    match responses::compact_body(&req, self.route) {
+                        Ok(body) => body,
+                        Err(e) => {
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+                    }
+                } else {
+                    responses::build_body(&req, self.route)
+                },
                 "text/event-stream",
             ),
         };
@@ -697,16 +831,16 @@ impl Provider {
                     let h = match self.request_headers().await {
                         Ok(h) => h,
                         Err(e) => {
-                            self.record_ledger(EgressDraft {
-                                kind: EgressKind::Inference,
-                                url: req_url.clone(),
-                                protocol: self.file.api.clone(),
-                                bytes_sent,
-                                bytes_received: 0,
-                                status: None,
-                                redactions,
-                                blocked_reason: Some(e.message.clone()),
-                            });
+                            self.record_ledger(
+                                EgressDraft::new(
+                                    EgressKind::Inference,
+                                    req_url.clone(),
+                                    self.file.api.clone(),
+                                )
+                                .sent(bytes_sent)
+                                .redactions(redactions)
+                                .blocked(e.message.clone()),
+                            );
                             let _ = tx.send(Err(e)).await;
                             return;
                         }
@@ -753,16 +887,13 @@ impl Provider {
                     tokio::time::sleep(wait).await;
                 }
                 Err(e) => {
-                    self.record_ledger(EgressDraft {
-                        kind: EgressKind::Inference,
-                        url: req_url,
-                        protocol: self.file.api.clone(),
-                        bytes_sent,
-                        bytes_received: 0,
-                        status,
-                        redactions,
-                        blocked_reason: Some(e.message.clone()),
-                    });
+                    self.record_ledger(
+                        EgressDraft::new(EgressKind::Inference, req_url, self.file.api.clone())
+                            .sent(bytes_sent)
+                            .status(status)
+                            .redactions(redactions)
+                            .blocked(e.message.clone()),
+                    );
                     let _ = tx.send(Err(e)).await;
                     return;
                 }
@@ -772,16 +903,12 @@ impl Provider {
         let status = Some(resp.status().as_u16());
         let mut ledger_guard = StreamLedgerGuard {
             provider: self,
-            draft: Some(EgressDraft {
-                kind: EgressKind::Inference,
-                url: req_url,
-                protocol: self.file.api.clone(),
-                bytes_sent,
-                bytes_received: 0,
-                status,
-                redactions,
-                blocked_reason: None,
-            }),
+            draft: Some(
+                EgressDraft::new(EgressKind::Inference, req_url, self.file.api.clone())
+                    .sent(bytes_sent)
+                    .status(status)
+                    .redactions(redactions),
+            ),
         };
 
         // Once bytes flow we never retry: the user has already seen part of the answer.
@@ -798,7 +925,9 @@ impl Provider {
             #[cfg(feature = "proto-openai-responses")]
             Api::Responses => Wire::Sse(
                 SseDecoder::default(),
-                SseParser::Responses(responses::EventParser::default()),
+                SseParser::Responses(responses::EventParser::new(
+                    compacting.then_some(self.route),
+                )),
             ),
             #[cfg(feature = "proto-ollama")]
             Api::Ollama => Wire::Lines(
@@ -1138,7 +1267,8 @@ struct Pooled {
 struct ClientSpec {
     connect: Duration,
     idle: Duration,
-    proxy: Option<reqwest::Proxy>,
+    proxies: Vec<reqwest::Proxy>,
+    no_proxy: bool,
     roots: Vec<reqwest::Certificate>,
     identity: Option<reqwest::Identity>,
     insecure: bool,
@@ -1169,37 +1299,42 @@ impl ClientSpec {
                 .filter(|s| !s.is_empty())
         };
 
-        let proxy = Some(http.proxy.as_str())
-            .filter(|p| !p.is_empty())
-            .map(str::to_owned)
-            .or_else(|| Some(network.proxy.clone()).filter(|p| !p.is_empty()))
-            .or_else(|| {
-                [
-                    "HTTPS_PROXY",
-                    "https_proxy",
-                    "HTTP_PROXY",
-                    "http_proxy",
-                    "ALL_PROXY",
-                    "all_proxy",
-                ]
-                .into_iter()
-                .find_map(env_str)
-            });
-        // A proxy set here replaces reqwest's own lookup, which would have read NO_PROXY:
-        // read it ourselves, or hosts meant to go direct (a VPN's internal ones) go through
-        // the proxy.
+        // Adding a proxy disables reqwest's automatic lookup, including NO_PROXY.
         let no_proxy = ["NO_PROXY", "no_proxy"]
             .into_iter()
             .find_map(env_str)
             .and_then(|s| reqwest::NoProxy::from_string(&s));
-        let proxy = match proxy {
-            Some(p) => Some(
-                reqwest::Proxy::all(&p)
-                    .map_err(|e| config(format!("proxy `{p}`: {e}")))?
-                    .no_proxy(no_proxy),
-            ),
-            None => None,
-        };
+        let mut proxies = Vec::new();
+        if !http.no_proxy {
+            let mut add_proxy = |source: &str,
+                                 proxy: reqwest::Result<reqwest::Proxy>|
+             -> Result<(), ProviderError> {
+                proxies.push(
+                    proxy
+                        .map_err(|_| config(format!("invalid proxy URL in {source}")))?
+                        .no_proxy(no_proxy.clone()),
+                );
+                Ok(())
+            };
+            if !http.proxy.is_empty() {
+                add_proxy("http.proxy", reqwest::Proxy::all(http.proxy.as_str()))?;
+            } else if !network.proxy.is_empty() {
+                add_proxy("network.proxy", reqwest::Proxy::all(network.proxy.as_str()))?;
+            } else if env("REQUEST_METHOD")
+                .or_else(|| std::env::var_os("REQUEST_METHOD"))
+                .is_none()
+            {
+                if let Some(p) = env_str("HTTP_PROXY").or_else(|| env_str("http_proxy")) {
+                    add_proxy("HTTP_PROXY", reqwest::Proxy::http(p))?;
+                }
+                if let Some(p) = env_str("HTTPS_PROXY").or_else(|| env_str("https_proxy")) {
+                    add_proxy("HTTPS_PROXY", reqwest::Proxy::https(p))?;
+                }
+                if let Some(p) = env_str("ALL_PROXY").or_else(|| env_str("all_proxy")) {
+                    add_proxy("ALL_PROXY", reqwest::Proxy::all(p))?;
+                }
+            }
+        }
 
         let mut roots = Vec::new();
         let mut ca_files = Vec::new();
@@ -1246,11 +1381,12 @@ impl ClientSpec {
         Ok(Self {
             connect: Duration::from_secs(http.timeout_connect_secs.max(1)),
             idle: Duration::from_secs(http.timeout_idle_secs.max(1)),
-            proxy,
+            proxies,
+            no_proxy: http.no_proxy,
             roots,
             identity,
             insecure: file.tls.insecure_skip_verify,
-            http1_only: network.http1_only,
+            http1_only: http.http1_only.unwrap_or(network.http1_only),
             network: network.clone(),
             ledger: Arc::new(RwLock::new(None)),
             #[cfg(test)]
@@ -1274,7 +1410,10 @@ impl ClientSpec {
         if self.h2c {
             b = b.http2_prior_knowledge();
         }
-        if let Some(p) = &self.proxy {
+        if self.no_proxy {
+            b = b.no_proxy();
+        }
+        for p in &self.proxies {
             b = b.proxy(p.clone());
         }
         if !self.roots.is_empty() {
@@ -1314,16 +1453,11 @@ fn gate_redirect_observed(
     let url = attempt.url().as_str().to_owned();
     let record_block = |reason: &str| {
         if let Some(ledger) = ledger {
-            ledger.record(EgressDraft {
-                kind: EgressKind::BlockedRedirect,
-                url: url.clone(),
-                protocol: "http".into(),
-                bytes_sent: 0,
-                bytes_received: 0,
-                status: Some(302),
-                redactions: 0,
-                blocked_reason: Some(reason.to_owned()),
-            });
+            ledger.record(
+                EgressDraft::new(EgressKind::BlockedRedirect, url.clone(), "http")
+                    .status(Some(302))
+                    .blocked(reason.to_owned()),
+            );
         }
     };
     if attempt.previous().len() > MAX_HOPS {
@@ -1384,7 +1518,10 @@ mod tests {
         bad_proxy_env.insert("HTTPS_PROXY".into(), "not a valid uri".into());
         let err = build_client(&file, &network, &|k| bad_proxy_env.get(k).cloned())
             .expect_err("invalid proxy must fail");
-        assert!(err.message.contains("proxy `not a valid uri`"), "{err:?}");
+        assert!(
+            err.message.contains("invalid proxy URL in HTTPS_PROXY"),
+            "{err:?}"
+        );
 
         // CA bundle in environment pointing to non-existent file errors clearly.
         let mut ca_env: HashMap<String, OsString> = HashMap::new();
@@ -1553,7 +1690,8 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
     }
 
-    /// A proxy from the environment skips the hosts in `NO_PROXY`.
+    /// Environment proxies respect the destination scheme and NO_PROXY. A provider
+    /// can also force a direct connection even when a proxy matches.
     #[tokio::test]
     async fn no_proxy_hosts_go_direct() {
         let server = sse_server().await;
@@ -1564,22 +1702,52 @@ mod tests {
         .expect("provider toml");
         // Nothing listens on port 1, so a request through the proxy fails at once. An empty
         // value hides the variable from the real environment.
-        let build = |no_proxy: &str| {
+        let build = |http_proxy: &str, all_proxy: &str, no_proxy: &str, direct: bool| {
             let vars: HashMap<&str, OsString> = [
                 ("HTTPS_PROXY", "http://127.0.0.1:1"),
+                ("HTTP_PROXY", http_proxy),
+                ("http_proxy", ""),
+                ("ALL_PROXY", all_proxy),
+                ("all_proxy", ""),
                 ("NO_PROXY", no_proxy),
                 ("no_proxy", ""),
             ]
             .into_iter()
             .map(|(k, v)| (k, OsString::from(v)))
             .collect();
-            Provider::new("mock", file.clone(), &NetworkSettings::default(), &|k| {
+            let mut file = file.clone();
+            file.http.no_proxy = direct;
+            Provider::new("mock", file, &NetworkSettings::default(), &|k| {
                 vars.get(k).cloned()
             })
             .expect("provider")
         };
-        assert!(reply(&build("")).await.is_err(), "the proxy is used");
-        let direct = build("localhost,127.0.0.1");
-        assert_eq!(reply(&direct).await.expect("goes direct"), "Hello");
+        let proxy = "http://127.0.0.1:1";
+        assert_eq!(
+            reply(&build("", "", "", false))
+                .await
+                .expect("HTTPS_PROXY applies only to HTTPS"),
+            "Hello"
+        );
+        assert!(
+            reply(&build(proxy, "", "", false)).await.is_err(),
+            "HTTP_PROXY is used"
+        );
+        assert!(
+            reply(&build("", proxy, "", false)).await.is_err(),
+            "ALL_PROXY is used"
+        );
+        assert_eq!(
+            reply(&build(proxy, "", "localhost,127.0.0.1", false))
+                .await
+                .expect("NO_PROXY goes direct"),
+            "Hello"
+        );
+        assert_eq!(
+            reply(&build(proxy, "", "", true))
+                .await
+                .expect("provider override goes direct"),
+            "Hello"
+        );
     }
 }

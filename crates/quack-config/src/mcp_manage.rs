@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::diagnostic::read_text;
 use crate::edit::{add_to_list, write_atomic};
-use crate::enable::{FileOff, defaults_dest, file_off, flip_enabled_toml, remove_bare_overrides};
+use crate::enable::{
+    FileOff, defaults_dest, flip_enabled_toml, remove_bare_overrides, strip_bare_overrides,
+};
 use crate::items::{Item, ItemState, load_items, load_items_except, url_host};
 use crate::load::{Loaded, ProjectStatus};
 use crate::mcp::McpServerFile;
@@ -239,46 +241,13 @@ impl Loaded {
     pub fn enable_mcp(&self, id: &str) -> Result<McpEnabled, String> {
         const KEY: &str = "mcp.disabled";
         check_mcp_id(id)?;
-        let mut item = crate::load_mcp(self)
+        let item = crate::load_mcp(self)
             .into_iter()
             .find(|i| i.id == id)
             .ok_or_else(|| {
                 format!("no MCP server `{id}` found — add one with `quack mcp add {id} ...`")
             })?;
-
-        let mut overrides = Vec::new();
-        let off = loop {
-            if item.layer == LayerKind::System {
-                return Err(format!(
-                    "MCP server `{id}` is enforced by the system layer and cannot be changed"
-                ));
-            }
-            if let ItemState::Failed(d) = &item.state {
-                return Err(format!(
-                    "MCP server `{id}` does not load: {}; fix its file first",
-                    d.one_line()
-                ));
-            }
-            let off = file_off::<McpServerFile>(&item.path)?;
-            if !matches!(off, FileOff::Bare) {
-                break off;
-            }
-            if !matches!(item.layer, LayerKind::User | LayerKind::Project) {
-                return Err(format!(
-                    "MCP server `{id}` is switched off by {}; edit that file to enable it",
-                    item.path.display()
-                ));
-            }
-            overrides.push(item.path);
-            item = load_items_except::<McpServerFile>(&self.item_layers(), "mcp.d", &overrides)
-                .into_iter()
-                .find(|m| m.id == id)
-                .ok_or_else(|| {
-                    format!(
-                        "no MCP server definition remains after removing the overrides for `{id}`"
-                    )
-                })?;
-        };
+        let (item, off, overrides) = strip_bare_overrides(self, "mcp.d", "MCP server", id, item)?;
 
         let text = read_text(&item.path)
             .map_err(|e| format!("cannot read {}: {e}", item.path.display()))?;
@@ -810,58 +779,11 @@ fn secret_to_toml_value(secret: &Secret) -> toml_edit::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::load::{LoadOptions, load_with};
-    use std::collections::HashMap;
-    use std::ffi::OsString;
-
-    struct Fixture {
-        _tmp: tempfile::TempDir,
-        root: PathBuf,
-        vars: HashMap<String, OsString>,
-    }
-
-    impl Fixture {
-        fn new() -> Self {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let root = tmp.path().to_path_buf();
-            std::fs::create_dir_all(root.join("repo")).expect("repo");
-            let mut vars = HashMap::new();
-            vars.insert(
-                "QUACK_DEFAULTS_DIR".into(),
-                root.join("defaults").into_os_string(),
-            );
-            vars.insert(
-                "QUACK_SYSTEM_DIR".into(),
-                root.join("system").into_os_string(),
-            );
-            vars.insert(
-                "QUACK_CONFIG_DIR".into(),
-                root.join("user").into_os_string(),
-            );
-            vars.insert("QUACK_DATA_DIR".into(), root.join("data").into_os_string());
-            Self {
-                _tmp: tmp,
-                root,
-                vars,
-            }
-        }
-
-        fn write(&self, rel: &str, text: &str) {
-            let path = self.root.join(rel);
-            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-            std::fs::write(path, text).expect("write");
-        }
-
-        fn load(&self) -> Loaded {
-            let opts = LoadOptions::new(self.root.join("repo"));
-            let vars = self.vars.clone();
-            load_with(&move |k| vars.get(k).cloned(), &opts).expect("load")
-        }
-    }
+    use crate::testing::Fixture;
 
     #[test]
     fn enable_defaults_copies_preserving_comments_and_reports_env_vars() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write(
             "defaults/mcp.d/roost.toml",
             "# Roost search server\n\
@@ -887,7 +809,7 @@ mod tests {
 
     #[test]
     fn disable_and_re_enable_user_server_round_trips() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         let spec = NewMcpServer {
             id: "context7".into(),
             description: Some("Docs".into()),
@@ -917,7 +839,7 @@ mod tests {
 
     #[test]
     fn add_project_server_trusts_clean_repo_and_refuses_untrusted_repo() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         let spec = NewMcpServer {
             id: "local".into(),
             description: None,
@@ -958,7 +880,7 @@ mod tests {
         assert!(!path.exists());
 
         // Existing untrusted .quack/ must NOT be auto-trusted by add --project.
-        let f2 = Fixture::new();
+        let f2 = Fixture::with_defaults();
         f2.write(
             "repo/.quack/config.toml",
             "[permissions]\nallow = [\"Bash(*)\"]\n",
@@ -972,7 +894,7 @@ mod tests {
 
     #[test]
     fn policy_blocks_disallowed_mcp_servers() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write(
             "system/config.toml",
             "[policy.mcp]\nallowed = [\"roost\"]\nhosts = [\"roost.internal\"]\n",
@@ -995,7 +917,7 @@ mod tests {
 
     #[test]
     fn enabling_clears_bare_disabled_stub_over_defaults() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write(
             "defaults/mcp.d/context7.toml",
             "enabled = false\nurl = \"https://mcp.context7.com/mcp\"\n",
@@ -1010,7 +932,7 @@ mod tests {
 
     #[test]
     fn enable_mcp_copies_defaults_and_unlists_disabled() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write(
             "defaults/mcp.d/github.toml",
             "# GitHub MCP\nenabled = false\nurl = \"https://api.githubcopilot.com/mcp/\"\n",
@@ -1040,7 +962,7 @@ mod tests {
 
     #[test]
     fn enable_mcp_refuses_system_and_policy_blocked_servers() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write(
             "system/mcp.d/corp.toml",
             "enabled = false\nurl = \"https://corp.internal/mcp\"\n",
@@ -1048,7 +970,7 @@ mod tests {
         let err = f.load().enable_mcp("corp").expect_err("system");
         assert!(err.contains("system layer"), "{err}");
 
-        let f2 = Fixture::new();
+        let f2 = Fixture::with_defaults();
         f2.write(
             "defaults/mcp.d/github.toml",
             "enabled = false\nurl = \"https://api.githubcopilot.com/mcp/\"\n",
@@ -1063,7 +985,7 @@ mod tests {
 
     #[test]
     fn save_mcp_server_writes_stdio_and_http_with_project_trust() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         let path = f
             .load()
             .save_mcp_server(
@@ -1155,7 +1077,7 @@ mod tests {
 
     #[test]
     fn save_mcp_server_allows_clean_repo_and_blocks_policy_disabled() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         let clean = f.load();
         assert_eq!(clean.project, ProjectStatus::None);
         let proj_path = clean

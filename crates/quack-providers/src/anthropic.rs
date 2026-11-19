@@ -74,7 +74,9 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
     for (i, m) in req.messages.iter().enumerate() {
         match m {
             Message::System { content } if i == 0 => system.push(content.clone()),
-            Message::System { content } | Message::User { content, .. } => {
+            Message::System { content }
+            | Message::User { content, .. }
+            | Message::Compaction { content, .. } => {
                 for block in m_images(m) {
                     push(&mut turns, "user", block);
                 }
@@ -298,55 +300,60 @@ impl EventParser {
             }
             "content_block_start" => {
                 let b = &v["content_block"];
-                let block = match b["type"].as_str() {
+                // One match per block type: the piece kept for a sealed reply, and the
+                // live events the block already carries.
+                let (block, events) = match b["type"].as_str() {
                     Some("tool_use" | "server_tool_use") => {
                         self.calls += 1;
-                        Some(Piece::ToolUse(self.calls - 1))
-                    }
-                    Some("text") => Some(Piece::Text(
-                        b["text"].as_str().unwrap_or_default().to_owned(),
-                    )),
-                    Some("thinking") => Some(Piece::Thinking {
-                        text: b["thinking"].as_str().unwrap_or_default().to_owned(),
-                        signature: b["signature"].as_str().unwrap_or_default().to_owned(),
-                    }),
-                    Some("redacted_thinking") => Some(Piece::Redacted(b.clone())),
-                    _ => None,
-                };
-                if let Some(block) = block {
-                    self.at.insert(index(), self.blocks.len());
-                    self.blocks.push(block);
-                }
-                match b["type"].as_str() {
-                    Some("tool_use" | "server_tool_use") => {
-                        out.push(StreamEvent::ToolCallStart {
+                        let mut events = vec![StreamEvent::ToolCallStart {
                             index: index(),
                             id: b["id"].as_str().map(str::to_owned),
                             name: b["name"].as_str().unwrap_or_default().to_owned(),
-                        });
+                        }];
                         // Some servers send the whole input here instead of as deltas.
                         if let Some(input) = b
                             .get("input")
                             .filter(|i| i.as_object().is_some_and(|o| !o.is_empty()))
                         {
-                            out.push(StreamEvent::ToolCallArgsDelta {
+                            events.push(StreamEvent::ToolCallArgsDelta {
                                 index: index(),
                                 fragment: input.to_string(),
                             });
                         }
+                        (Some(Piece::ToolUse(self.calls - 1)), events)
                     }
-                    Some("text") => {
-                        if let Some(t) = b["text"].as_str().filter(|t| !t.is_empty()) {
-                            out.push(StreamEvent::TextDelta(t.to_owned()));
-                        }
-                    }
+                    Some("text") => (
+                        Some(Piece::Text(
+                            b["text"].as_str().unwrap_or_default().to_owned(),
+                        )),
+                        b["text"]
+                            .as_str()
+                            .filter(|t| !t.is_empty())
+                            .map(|t| vec![StreamEvent::TextDelta(t.to_owned())])
+                            .unwrap_or_default(),
+                    ),
                     Some("thinking") => {
-                        if let Some(t) = b["thinking"].as_str().filter(|t| !t.is_empty()) {
-                            out.push(StreamEvent::ReasoningDelta(t.to_owned()));
-                        }
+                        let kept = b["thinking"].as_str().unwrap_or_default();
+                        (
+                            Some(Piece::Thinking {
+                                text: kept.to_owned(),
+                                signature: b["signature"].as_str().unwrap_or_default().to_owned(),
+                            }),
+                            if kept.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![StreamEvent::ReasoningDelta(kept.to_owned())]
+                            },
+                        )
                     }
-                    _ => {}
+                    Some("redacted_thinking") => (Some(Piece::Redacted(b.clone())), Vec::new()),
+                    _ => (None, Vec::new()),
+                };
+                if let Some(block) = block {
+                    self.at.insert(index(), self.blocks.len());
+                    self.blocks.push(block);
                 }
+                out.extend(events);
             }
             "content_block_delta" => {
                 let d = &v["delta"];

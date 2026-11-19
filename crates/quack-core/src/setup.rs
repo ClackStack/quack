@@ -16,7 +16,9 @@ use std::time::Duration;
 use quack_config::{
     Item, ItemState, LayerKind, Loaded, ProviderFile, Secret, is_loopback, load_providers,
 };
-use quack_protocol::{DetectedServer, KeySource, ModelInfo, ProviderModels};
+use quack_protocol::{
+    DetectedServer, KeySource, ModelInfo, ProviderConnection, ProviderHttpVersion, ProviderModels,
+};
 use quack_providers::Provider;
 use tokio::task::JoinSet;
 
@@ -328,18 +330,14 @@ fn point_at_keyring(
     id: &str,
     item: &Item<ProviderFile>,
 ) -> Result<PathBuf, String> {
-    let text = match item.layer {
-        LayerKind::Defaults => {
-            let file = item.loaded().expect("the caller checked the item loads");
-            let quoted = serde_json::Value::from(id).to_string();
-            override_text(id, file, &format!("api_key = {{ keyring = {quoted} }}\n"))
-        }
-        _ => {
-            let text = read_provider(&item.path)?;
-            quack_config::provider::with_keyring_key(&text, id)?
-        }
-    };
-    write_pointed(config, id, &item.path, &text)
+    let quoted = serde_json::Value::from(id).to_string();
+    point_at(
+        config,
+        id,
+        item,
+        &format!("api_key = {{ keyring = {quoted} }}\n"),
+        |text| quack_config::provider::with_keyring_key(text, id),
+    )
 }
 
 fn point_at_file(
@@ -348,18 +346,33 @@ fn point_at_file(
     item: &Item<ProviderFile>,
     key: &Path,
 ) -> Result<PathBuf, String> {
+    let shown = key.display().to_string();
+    let quoted = serde_json::Value::from(shown.as_str()).to_string();
+    point_at(
+        config,
+        id,
+        item,
+        &format!("api_key = {{ file = {quoted} }}\n"),
+        |text| quack_config::provider::with_file_key(text, &shown),
+    )
+}
+
+/// Point a provider at where its key lives: the defaults bundle gets a minimal override
+/// with `line` (`api_key = { ... }`); a file in another layer keeps everything else and
+/// is rewritten by `rewrite`.
+fn point_at(
+    config: &Loaded,
+    id: &str,
+    item: &Item<ProviderFile>,
+    line: &str,
+    rewrite: impl Fn(&str) -> Result<String, String>,
+) -> Result<PathBuf, String> {
     let text = match item.layer {
         LayerKind::Defaults => {
             let file = item.loaded().expect("the caller checked the item loads");
-            let shown = key.display().to_string();
-            let quoted = serde_json::Value::from(shown.as_str()).to_string();
-            override_text(id, file, &format!("api_key = {{ file = {quoted} }}\n"))
+            override_text(id, file, line)
         }
-        _ => {
-            let text = read_provider(&item.path)?;
-            let shown = key.display().to_string();
-            quack_config::provider::with_file_key(&text, &shown)?
-        }
+        _ => rewrite(&read_provider(&item.path)?)?,
     };
     write_pointed(config, id, &item.path, &text)
 }
@@ -377,6 +390,48 @@ fn write_pointed(config: &Loaded, id: &str, path: &Path, text: &str) -> Result<P
         write_new(&target, text)?;
     }
     Ok(target)
+}
+
+fn connection(config: &Loaded, item: &Item<ProviderFile>) -> Option<ProviderConnection> {
+    let http = &item.loaded()?.http;
+    Some(ProviderConnection {
+        id: item.id.clone(),
+        http_version: match http.http1_only {
+            None => ProviderHttpVersion::Inherit,
+            Some(true) => ProviderHttpVersion::Http1Only,
+            Some(false) => ProviderHttpVersion::Negotiate,
+        },
+        no_proxy: http.no_proxy,
+        inherited_http1_only: config.settings.network.http1_only,
+    })
+}
+
+/// List connection overrides even when a provider's server cannot be reached.
+pub(crate) fn provider_connections(config: &Loaded) -> Vec<ProviderConnection> {
+    load_providers(config)
+        .iter()
+        .filter_map(|item| connection(config, item))
+        .collect()
+}
+
+/// Edit just the connection overrides, keeping the provider file's other fields and comments.
+pub(crate) fn save_provider_connection(
+    config: &Loaded,
+    id: &str,
+    http_version: Option<ProviderHttpVersion>,
+    no_proxy: Option<bool>,
+) -> Result<(ProviderConnection, PathBuf), String> {
+    let path = quack_config::provider::save_connection(config, id, http_version, no_proxy)?;
+    let saved = provider_connections(config)
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| {
+            format!(
+                "provider `{id}` did not load after saving · check {}",
+                path.display()
+            )
+        })?;
+    Ok((saved, path))
 }
 
 /// Probe the configured servers on this machine. Those that answer with a model list are
@@ -566,22 +621,38 @@ pub fn add_provider(
 }
 
 fn add_file(config: &Loaded, id: &str, base_url: &str, text: &str) -> Result<Added, String> {
-    check_id(id)?;
-    check_policy(config, id, base_url)?;
-    if let Some(id) = configured_at(config, base_url) {
-        return Ok(Added {
+    match claim_file(config, id, base_url)? {
+        Claim::Exists(id) => Ok(Added {
             id,
             path: None,
             note: None,
-        });
+        }),
+        Claim::Free(id, path) => {
+            write_new(&path, text)?;
+            Ok(Added {
+                id,
+                path: Some(path),
+                note: None,
+            })
+        }
+    }
+}
+
+/// A provider file to write: either the server is already configured (under an id the
+/// caller should report), or a free `<id>.toml` in the user layer is claimed.
+enum Claim {
+    Exists(String),
+    Free(String, PathBuf),
+}
+
+fn claim_file(config: &Loaded, id: &str, base_url: &str) -> Result<Claim, String> {
+    check_id(id)?;
+    check_policy(config, id, base_url)?;
+    if let Some(id) = configured_at(config, base_url) {
+        return Ok(Claim::Exists(id));
     }
     let (id, path) = free_file(config, id)?;
-    write_new(&path, text)?;
-    Ok(Added {
-        id,
-        path: Some(path),
-        note: None,
-    })
+    Ok(Claim::Free(id, path))
 }
 
 /// `id`, or `id-2`, `id-3`, … when it is taken, and its file in the user layer.
@@ -613,45 +684,43 @@ pub fn add_server(config: &Loaded, base_url: &str, key: Option<&str>) -> Result<
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
         return Err("the URL must start with http:// or https://".into());
     }
-    let id = id_from_url(base_url);
-    check_id(&id)?;
-    check_policy(config, &id, base_url)?;
-    if let Some(id) = configured_at(config, base_url) {
-        return Ok(Added {
+    match claim_file(config, &id_from_url(base_url), base_url)? {
+        Claim::Exists(id) => Ok(Added {
             id,
             path: None,
             note: None,
-        });
-    }
-    let (id, path) = free_file(config, &id)?;
-    let mut text = provider_text("Added by setup.", base_url, None);
-    let mut note = None;
-    if let Some(key) = key.filter(|k| !k.is_empty()) {
-        match quack_config::keyring_available() {
-            Ok(()) => {
-                quack_config::keyring_set(&id, key).map_err(|e| e.to_string())?;
-                let quoted = serde_json::Value::from(id.as_str()).to_string();
-                text.push_str(&format!("api_key = {{ keyring = {quoted} }}\n"));
+        }),
+        Claim::Free(id, path) => {
+            let mut text = provider_text("Added by setup.", base_url, None);
+            let mut note = None;
+            if let Some(key) = key.filter(|k| !k.is_empty()) {
+                match quack_config::keyring_available() {
+                    Ok(()) => {
+                        quack_config::keyring_set(&id, key).map_err(|e| e.to_string())?;
+                        let quoted = serde_json::Value::from(id.as_str()).to_string();
+                        text.push_str(&format!("api_key = {{ keyring = {quoted} }}\n"));
+                    }
+                    Err(reason) => {
+                        let file = key_file(config, &id)?;
+                        write_key_file(&file, key)?;
+                        let shown = file.display().to_string();
+                        let quoted = serde_json::Value::from(shown.as_str()).to_string();
+                        text.push_str(&format!("api_key = {{ file = {quoted} }}\n"));
+                        note = Some(format!(
+                            "{reason}; the key is stored in {shown} instead of the OS credential \
+                             store"
+                        ));
+                    }
+                }
             }
-            Err(reason) => {
-                let file = key_file(config, &id)?;
-                write_key_file(&file, key)?;
-                let shown = file.display().to_string();
-                let quoted = serde_json::Value::from(shown.as_str()).to_string();
-                text.push_str(&format!("api_key = {{ file = {quoted} }}\n"));
-                note = Some(format!(
-                    "{reason}; the key is stored in {shown} instead of the OS credential \
-                     store"
-                ));
-            }
+            write_new(&path, &text)?;
+            Ok(Added {
+                id,
+                path: Some(path),
+                note,
+            })
         }
     }
-    write_new(&path, &text)?;
-    Ok(Added {
-        id,
-        path: Some(path),
-        note,
-    })
 }
 
 /// Store a provider's key: in the OS credential store when it is reachable, otherwise in

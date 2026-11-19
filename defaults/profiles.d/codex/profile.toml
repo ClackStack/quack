@@ -7,7 +7,7 @@ exclusive = true
 
 # Exact current OpenAI model ids only; gpt-oss remains opt-in with profile = "codex".
 [match]
-model = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna", "gpt-6.1-terra"]
+model = ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna", "gpt-6.1-terra"]
 priority = 50
 
 [defaults]

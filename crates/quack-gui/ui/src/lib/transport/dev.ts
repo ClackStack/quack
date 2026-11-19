@@ -1,4 +1,4 @@
-import type { Event, HookSetupInfo, McpServerInfo, MemoryNote } from '#lib/protocol';
+import type { Event, HookSetupInfo, McpServerInfo, MemoryNote, ProviderConnection } from '#lib/protocol';
 import {
 	SETTING_FIELDS,
 	extractUrlHost,
@@ -360,6 +360,7 @@ export function devTransport(): Transport {
 		hooks: HookRow[];
 		mcp: McpRow[];
 		jiraSetup: HookSetupInfo;
+		providerConnection: ProviderConnection;
 	};
 	const tabs = new Map<number, TabState>();
 
@@ -882,7 +883,13 @@ export function devTransport(): Transport {
 					env_keys: [...m.env_keys],
 					header_keys: [...m.header_keys]
 				})),
-				jiraSetup: createJiraSetupInfo(false)
+				jiraSetup: createJiraSetupInfo(false),
+				providerConnection: {
+					id: 'dev-local',
+					http_version: 'inherit',
+					no_proxy: false,
+					inherited_http1_only: false
+				}
 			};
 			tabs.set(tab, tabState);
 			const info = buildDevInfo(tabState);
@@ -1434,6 +1441,28 @@ export function devTransport(): Transport {
 					break;
 				case 'detect_servers':
 					send(tab, { event: 'servers_detected', servers: [] });
+					break;
+				case 'list_provider_connections':
+					send(tab, {
+						event: 'provider_connections',
+						connections: state ? [{
+							...state.providerConnection,
+							inherited_http1_only: devSetting(state, 'network.http1_only') === 'true'
+						}] : []
+					});
+					break;
+				case 'save_provider_connection':
+					if (state && op.id === state.providerConnection.id) {
+						const connection = state.providerConnection;
+						connection.http_version = op.http_version ?? connection.http_version;
+						connection.no_proxy = op.no_proxy ?? connection.no_proxy;
+						connection.inherited_http1_only = devSetting(state, 'network.http1_only') === 'true';
+						send(tab, {
+							event: 'provider_connection_saved',
+							connection: { ...connection },
+							path: 'providers.d/dev-local.toml'
+						});
+					}
 					break;
 				case 'add_server':
 				case 'set_provider_key':

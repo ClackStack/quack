@@ -107,6 +107,59 @@ async fn write_read_edit_search() {
     assert!(l.model.contains("  src/\n    lib.rs"), "{}", l.model);
 }
 
+#[tokio::test]
+async fn edit_batch_rejections_leave_the_file_unchanged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = Registry::builtin();
+    let c = ctx(dir.path());
+    let path = dir.path().join("a.txt");
+    let before = "first\nsecond\n";
+    std::fs::write(&path, before).expect("write fixture");
+
+    let valid = json!({"path": "a.txt", "edits": [
+        {"old_string": "first", "new_string": "FIRST"},
+        {"old_string": "second", "new_string": "SECOND"}
+    ]});
+    let unread = call(&reg, &c, "edit", valid.clone()).await;
+    assert!(
+        !unread.ok && unread.model.contains("has not been read"),
+        "{unread:?}"
+    );
+    assert!(call(&reg, &c, "read", json!({"path": "a.txt"})).await.ok);
+
+    let mut mixed = valid.clone();
+    mixed["old_string"] = json!("first");
+    let mut unmatched = valid.clone();
+    unmatched["edits"][1]["old_string"] = json!("missing");
+    let mut missing_new = valid.clone();
+    missing_new["edits"][1] = json!({"old_string": "second"});
+    for (args, reason) in [
+        (mixed, "not both"),
+        (json!({"path": "a.txt", "edits": []}), "non-empty array"),
+        (missing_new, "missing required string argument `new_string`"),
+        (unmatched, "Edit 2: `old_string` was not found"),
+    ] {
+        let out = call(&reg, &c, "edit", args).await;
+        assert!(!out.ok && out.model.contains(reason), "{out:?}");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("unchanged file"),
+            before
+        );
+    }
+
+    let external = "first\nsecond\nexternal change\n";
+    std::fs::write(&path, external).expect("external write");
+    let stale = call(&reg, &c, "edit", valid).await;
+    assert!(
+        !stale.ok && stale.model.contains("changed on disk"),
+        "{stale:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("external file"),
+        external
+    );
+}
+
 #[cfg(feature = "lang-common")]
 #[tokio::test]
 async fn edit_syntax_warning() {

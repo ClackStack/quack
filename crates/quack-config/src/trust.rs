@@ -135,13 +135,7 @@ pub(crate) fn record(
     records.push(t);
     std::fs::create_dir_all(user_data)
         .map_err(|e| format!("cannot create {}: {e}", user_data.display()))?;
-    let tmp = file.with_extension("toml.tmp");
-    std::fs::write(&tmp, doc.to_string())
-        .and_then(|()| std::fs::rename(&tmp, &file))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("cannot write {}: {e}", file.display())
-        })?;
+    crate::atomic::write_via_tmp(&file, &doc.to_string(), "toml.tmp", true)?;
     Ok(file)
 }
 

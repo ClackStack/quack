@@ -137,7 +137,6 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App, area: Rect) {
             } else {
                 t.accent
             };
-            #[allow(clippy::cast_precision_loss)]
             let fraction = used as f32 / max as f32;
             rows.push(Line::styled(meter(fraction, width, ascii), style));
             if let Some(at) = app.compact_at {

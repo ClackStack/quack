@@ -15,6 +15,7 @@ quack-core.workspace = true
 quack-protocol.workspace = true
 quack-providers.workspace = true
 quack-sandbox.workspace = true
+quack-store.workspace = true
 quack-context.workspace = true
 quack-tools.workspace = true
 serde.workspace = true

@@ -76,6 +76,23 @@ fn call_item(c: &crate::ToolCall, route: Route) -> Value {
     item
 }
 
+pub(crate) fn compact_body(req: &ChatRequest, route: Route) -> Result<Value, ProviderError> {
+    let mut body = build_body(req, route);
+    if route == Route::ChatgptPlan {
+        body["context_management"] = json!([{ "type": "compaction", "compact_threshold": 1000 }]);
+        body["tool_choice"] = json!("none");
+        return Ok(body);
+    }
+    let input = body["input"].as_array_mut().ok_or_else(|| {
+        ProviderError::new(
+            ErrorKind::Config,
+            "native compaction needs an input item array",
+        )
+    })?;
+    input.push(json!({ "type": "compaction_trigger" }));
+    Ok(body)
+}
+
 pub(crate) fn build_body(req: &ChatRequest, route: Route) -> Value {
     let mut instructions = None;
     let mut input = Vec::new();
@@ -85,6 +102,7 @@ pub(crate) fn build_body(req: &ChatRequest, route: Route) -> Value {
             Message::System { content } => {
                 input.push(json!({ "role": "developer", "content": content }));
             }
+            Message::Compaction { sealed, .. } => input.extend_from_slice(&sealed.items),
             Message::User { content, images } => {
                 if images.is_empty() {
                     input.push(json!({ "role": "user", "content": content }))
@@ -164,6 +182,8 @@ pub(crate) fn build_body(req: &ChatRequest, route: Route) -> Value {
                     "name": t.name,
                     "description": t.description,
                     "parameters": t.parameters,
+                    // Responses may otherwise turn optional properties into required ones.
+                    "strict": false,
                 })
             })
             .collect();
@@ -214,6 +234,7 @@ pub(crate) struct EventParser {
     items: std::collections::BTreeMap<u32, Value>,
     numbers: std::collections::HashMap<u32, u64>,
     keep: bool,
+    compaction_route: Option<Route>,
 }
 
 fn usage(u: &Value) -> Usage {
@@ -231,6 +252,13 @@ fn usage(u: &Value) -> Usage {
 }
 
 impl EventParser {
+    pub(crate) fn new(compaction_route: Option<Route>) -> Self {
+        Self {
+            compaction_route,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn parse(&mut self, data: &str) -> Result<Vec<StreamEvent>, ProviderError> {
         let data = data.trim();
         if data.is_empty() || data == "[DONE]" {
@@ -243,136 +271,212 @@ impl EventParser {
             .as_u64()
             .and_then(|n| u32::try_from(n).ok())
             .unwrap_or(0);
-        let text = |k: &str| v[k].as_str().filter(|t| !t.is_empty()).map(str::to_owned);
         let mut out = Vec::new();
         match v["type"].as_str().unwrap_or_default() {
             "response.output_text.delta" | "response.refusal.delta" => {
-                out.extend(text("delta").map(StreamEvent::TextDelta));
+                out.extend(str_field(&v, "delta").map(StreamEvent::TextDelta));
             }
             "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
-                out.extend(text("delta").map(StreamEvent::ReasoningDelta));
+                out.extend(str_field(&v, "delta").map(StreamEvent::ReasoningDelta));
             }
-            "response.output_item.added" => {
-                let item = &v["item"];
-                if item["type"] == "function_call" {
-                    self.numbers.insert(index, self.numbers.len() as u64);
-                    self.calls.insert(index);
-                    out.push(StreamEvent::ToolCallStart {
-                        index,
-                        id: item["call_id"].as_str().map(str::to_owned),
-                        name: item["name"].as_str().unwrap_or_default().to_owned(),
-                    });
-                }
-            }
-            "response.function_call_arguments.delta" => {
-                if let Some(f) = text("delta") {
-                    self.streamed.insert(index);
-                    out.push(StreamEvent::ToolCallArgsDelta { index, fragment: f });
-                }
-            }
+            "response.output_item.added" => self.item_added(&v, index, &mut out),
+            "response.function_call_arguments.delta" => self.args_delta(&v, index, &mut out),
             // Servers that don't stream arguments send them whole at the end.
-            "response.function_call_arguments.done" => {
-                if !self.streamed.contains(&index)
-                    && let Some(f) = text("arguments")
-                {
-                    self.streamed.insert(index);
-                    out.push(StreamEvent::ToolCallArgsDelta { index, fragment: f });
-                }
-            }
-            "response.output_item.done" => {
-                let item = &v["item"];
-                let kept = match item["type"].as_str() {
-                    Some("reasoning") => {
-                        self.keep = true;
-                        // Ids refer to stored items; this adapter stores nothing.
-                        let mut r = item.clone();
-                        if let Some(o) = r.as_object_mut() {
-                            o.remove("id");
-                            o.remove("status");
-                        }
-                        Some(r)
-                    }
-                    Some("message") => {
-                        let text: String = item["content"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|c| c["text"].as_str())
-                            .collect();
-                        let mut m = json!({ "type": "message", "text": text });
-                        if let Some(phase) = item.get("phase").filter(|p| p.is_string()) {
-                            self.keep = true;
-                            m["phase"] = phase.clone();
-                        }
-                        Some(m)
-                    }
-                    Some("function_call") => self
-                        .numbers
-                        .get(&index)
-                        .map(|n| json!({ "type": "function_call", "ref": n })),
-                    _ => None,
-                };
-                if let Some(k) = kept {
-                    self.items.insert(index, k);
-                }
-            }
+            "response.function_call_arguments.done" => self.args_done(&v, index, &mut out),
+            "response.output_item.done" => self.item_done(&v, index),
             kind @ ("response.completed" | "response.incomplete") => {
-                let r = &v["response"];
-                let finish = if kind == "response.incomplete" {
-                    match r["incomplete_details"]["reason"].as_str() {
-                        Some("max_output_tokens") => FinishReason::Length,
-                        Some("content_filter") => FinishReason::ContentFilter,
-                        Some(other) => FinishReason::Other(other.to_owned()),
-                        None => FinishReason::Other("incomplete".into()),
-                    }
-                } else if self.calls.is_empty() {
-                    FinishReason::Stop
-                } else {
-                    FinishReason::ToolCalls
-                };
-                if self.keep {
-                    self.keep = false;
-                    let items = std::mem::take(&mut self.items).into_values().collect();
-                    out.push(StreamEvent::Sealed(items));
-                }
-                out.push(StreamEvent::Finish(finish));
-                if r["usage"].is_object() {
-                    out.push(StreamEvent::Usage(usage(&r["usage"])));
-                }
+                self.completed(&v, kind, &mut out)?;
             }
-            "response.failed" | "error" => {
-                let msg = body_message(data);
-                let code = v
-                    .pointer("/response/error/code")
-                    .or_else(|| v.get("code"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let kind = if code.contains("context") || msg.contains("context") {
-                    ErrorKind::ContextLengthExceeded
-                } else if code == "subscription_sharing_usage_limit_exceeded" {
-                    // The plan's own limit: retrying soon will not help.
-                    return Err(ProviderError::new(
-                        ErrorKind::BadRequest,
-                        format!(
-                            "{msg} · the ChatGPT plan's usage limit is reached; see Usage in \
-                             ChatGPT settings, or use an API key"
-                        ),
-                    ));
-                } else if code.contains("rate_limit") {
-                    ErrorKind::RateLimited { retry_after: None }
-                } else {
-                    ErrorKind::ServerOverloaded
-                };
-                return Err(ProviderError::new(kind, msg));
-            }
+            "response.failed" | "error" => return Err(stream_error(&v, data)),
             _ => {}
         }
         Ok(out)
     }
 
-    pub(crate) fn finish(&mut self) -> Vec<StreamEvent> {
+    /// `response.output_item.added`: number a new function call and announce it.
+    fn item_added(&mut self, v: &Value, index: u32, out: &mut Vec<StreamEvent>) {
+        let item = &v["item"];
+        if item["type"] == "function_call" {
+            self.numbers.insert(index, self.numbers.len() as u64);
+            self.calls.insert(index);
+            out.push(StreamEvent::ToolCallStart {
+                index,
+                id: item["call_id"].as_str().map(str::to_owned),
+                name: item["name"].as_str().unwrap_or_default().to_owned(),
+            });
+        }
+    }
+
+    /// A live arguments fragment; once one arrived, `.done` must not repeat the whole.
+    fn args_delta(&mut self, v: &Value, index: u32, out: &mut Vec<StreamEvent>) {
+        if let Some(f) = str_field(v, "delta") {
+            self.streamed.insert(index);
+            out.push(StreamEvent::ToolCallArgsDelta { index, fragment: f });
+        }
+    }
+
+    fn args_done(&mut self, v: &Value, index: u32, out: &mut Vec<StreamEvent>) {
+        if !self.streamed.contains(&index)
+            && let Some(f) = str_field(v, "arguments")
+        {
+            self.streamed.insert(index);
+            out.push(StreamEvent::ToolCallArgsDelta { index, fragment: f });
+        }
+    }
+
+    /// `response.output_item.done`: keep the finished item for a sealed reply, in the
+    /// shape [`unsealed`] sends back.
+    fn item_done(&mut self, v: &Value, index: u32) {
+        let item = &v["item"];
+        if self.compaction_route.is_some() {
+            self.items.insert(index, item.clone());
+            return;
+        }
+        let kept = match item["type"].as_str() {
+            Some("reasoning") => {
+                self.keep = true;
+                // Ids refer to stored items; this adapter stores nothing.
+                let mut r = item.clone();
+                if let Some(o) = r.as_object_mut() {
+                    o.remove("id");
+                    o.remove("status");
+                }
+                Some(r)
+            }
+            Some("message") => {
+                let text: String = item["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c["text"].as_str())
+                    .collect();
+                let mut m = json!({ "type": "message", "text": text });
+                if let Some(phase) = item.get("phase").filter(|p| p.is_string()) {
+                    self.keep = true;
+                    m["phase"] = phase.clone();
+                }
+                Some(m)
+            }
+            Some("function_call") => self
+                .numbers
+                .get(&index)
+                .map(|n| json!({ "type": "function_call", "ref": n })),
+            _ => None,
+        };
+        if let Some(k) = kept {
+            self.items.insert(index, k);
+        }
+    }
+
+    /// `response.completed` / `response.incomplete`: seal whatever must be kept, then
+    /// finish, and report usage when the server sent it.
+    fn completed(
+        &mut self,
+        v: &Value,
+        kind: &str,
+        out: &mut Vec<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        let r = &v["response"];
+        let finish = if kind == "response.incomplete" {
+            match r["incomplete_details"]["reason"].as_str() {
+                Some("max_output_tokens") => FinishReason::Length,
+                Some("content_filter") => FinishReason::ContentFilter,
+                Some(other) => FinishReason::Other(other.to_owned()),
+                None => FinishReason::Other("incomplete".into()),
+            }
+        } else if self.calls.is_empty() {
+            FinishReason::Stop
+        } else {
+            FinishReason::ToolCalls
+        };
+        if let Some(route) = self.compaction_route
+            && finish == FinishReason::Stop
+        {
+            let items = compaction_items(
+                &mut self.items,
+                r["output"].as_array(),
+                route == Route::ChatgptPlan,
+            )?;
+            out.push(StreamEvent::Sealed(items));
+        } else if self.keep {
+            self.keep = false;
+            let items = std::mem::take(&mut self.items).into_values().collect();
+            out.push(StreamEvent::Sealed(items));
+        }
+        out.push(StreamEvent::Finish(finish));
+        if r["usage"].is_object() {
+            out.push(StreamEvent::Usage(usage(&r["usage"])));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(&self) -> Vec<StreamEvent> {
         Vec::new()
     }
+}
+
+/// The reply's output items up to the latest encrypted checkpoint, for compaction. The
+/// server's list wins; streamed items are the fallback when it sent none.
+fn compaction_items(
+    streamed: &mut std::collections::BTreeMap<u32, Value>,
+    output: Option<&Vec<Value>>,
+    plan_route: bool,
+) -> Result<Vec<Value>, ProviderError> {
+    let mut items: Vec<Value> = output
+        .filter(|items| !items.is_empty())
+        .cloned()
+        .unwrap_or_else(|| std::mem::take(streamed).into_values().collect());
+    let checkpoint = items.iter().rposition(|item| {
+        item["type"] == "compaction"
+            && item["encrypted_content"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty())
+    });
+    let Some(checkpoint) = checkpoint else {
+        return Err(ProviderError::new(
+            ErrorKind::Protocol,
+            "the response had no encrypted compaction item",
+        ));
+    };
+    items.truncate(checkpoint + 1);
+    // The plan route can compact more than once while generating a reply.
+    // Its latest server-side checkpoint subsumes the preceding items.
+    if plan_route {
+        items.drain(..checkpoint);
+    }
+    Ok(items)
+}
+
+/// `response.failed` / `error`: the server's error, mapped onto quack's kinds.
+fn stream_error(v: &Value, data: &str) -> ProviderError {
+    let msg = body_message(data);
+    let code = v
+        .pointer("/response/error/code")
+        .or_else(|| v.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let kind = if code.contains("context") || msg.contains("context") {
+        ErrorKind::ContextLengthExceeded
+    } else if code == "subscription_sharing_usage_limit_exceeded" {
+        // The plan's own limit: retrying soon will not help.
+        return ProviderError::new(
+            ErrorKind::BadRequest,
+            format!(
+                "{msg} · the ChatGPT plan's usage limit is reached; see Usage in \
+                 ChatGPT settings, or use an API key"
+            ),
+        );
+    } else if code.contains("rate_limit") {
+        ErrorKind::RateLimited { retry_after: None }
+    } else {
+        ErrorKind::ServerOverloaded
+    };
+    ProviderError::new(kind, msg)
+}
+
+/// The event's field, if it is a non-empty string.
+fn str_field(v: &Value, key: &str) -> Option<String> {
+    v[key].as_str().filter(|t| !t.is_empty()).map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -392,6 +496,35 @@ mod tests {
                 "{route:?}"
             );
         }
+    }
+
+    #[test]
+    fn plan_compaction_replays_only_the_latest_checkpoint() {
+        let body = compact_body(&ChatRequest::default(), Route::ChatgptPlan).expect("request");
+        assert_eq!(body["context_management"][0]["type"], "compaction");
+        assert_eq!(body["tool_choice"], "none");
+        assert_eq!(body["input"], json!([]));
+
+        let checkpoint = json!({ "type": "compaction", "encrypted_content": "latest" });
+        let completed = json!({
+            "type": "response.completed",
+            "response": { "output": [
+                { "type": "compaction", "encrypted_content": "earlier" },
+                { "type": "message", "role": "assistant", "content": [] },
+                checkpoint,
+                { "type": "message", "role": "assistant", "content": [] }
+            ] }
+        });
+        let events = EventParser::new(Some(Route::ChatgptPlan))
+            .parse(&completed.to_string())
+            .expect("compacted response");
+        assert_eq!(
+            events,
+            [
+                StreamEvent::Sealed(vec![checkpoint]),
+                StreamEvent::Finish(FinishReason::Stop)
+            ]
+        );
     }
 
     #[test]
@@ -662,12 +795,13 @@ mod tests {
         assert_eq!(api["prompt_cache_key"], "session-1");
         assert_eq!(api["max_output_tokens"], 100);
         assert_eq!(api["tools"][0]["name"], "read");
+        assert_eq!(api["tools"][0]["strict"], false);
 
         // The ChatGPT plan route: tools in a namespace, no cap or sampling.
         let plan = build_body(&req, Route::ChatgptPlan);
         assert_eq!(plan["input"][1], api["input"][1]);
         assert_eq!(plan["tools"][0]["type"], "namespace");
-        assert_eq!(plan["tools"][0]["tools"][0]["name"], "read");
+        assert_eq!(plan["tools"][0]["tools"][0], api["tools"][0]);
         assert_eq!(plan["input"][3]["namespace"], NAMESPACE);
         assert_eq!(plan["input"][4]["namespace"], NAMESPACE);
         assert!(plan.get("max_output_tokens").is_none());

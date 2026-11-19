@@ -6,13 +6,13 @@ use quack_config::settings::CacheStrategy;
 use quack_context::compact;
 use quack_context::prune::{self, Access};
 use quack_protocol::{ContextItem, ContextReport, ContextSegment, ContextZone, Event, PruneReport};
-use quack_providers::{FinishReason, Message, ResponseBuilder, ToolCall, tokens};
+use quack_providers::{FinishReason, Message, ResponseBuilder, Sealed, ToolCall, tokens};
 use quack_tools::Subject;
 use serde_json::{Value, json};
 
 use crate::session;
 use crate::startup::Setup;
-use crate::turn::{self, TurnCtx};
+use crate::turn::{self, raw_estimate, TurnCtx};
 
 /// Share of the budget that history kept verbatim may use after a compaction.
 const KEEP_RATIO: f64 = 0.35;
@@ -21,25 +21,38 @@ const PROTECT_MESSAGES: usize = 8;
 /// Assumed budget when the model's window is unknown.
 const FALLBACK_BUDGET: u32 = 32_000;
 
-/// Before each request: prune at the threshold (or every step with `aggressive`), and
-/// compact when pruning was not enough. Failures are warnings; the request still goes out.
-pub(crate) async fn fit(ctx: &TurnCtx, history: &mut Vec<Message>) {
+/// Fit each request to the window. Native compaction keeps the prefix intact until it
+/// reaches the server, unless the user explicitly selected aggressive pruning. Returns
+/// the post-fit raw estimate so the caller does not have to recompute it.
+pub(crate) async fn fit(ctx: &TurnCtx, history: &mut Vec<Message>) -> u32 {
     let s = &ctx.setup;
-    let Some(budget) = s.budget else { return };
+    let Some(budget) = s.budget else {
+        return raw_estimate(s, history);
+    };
     let threshold = (f64::from(budget) * s.context.compaction_threshold.clamp(0.1, 1.0)) as u32;
     let aggressive = s.context.cache_strategy == CacheStrategy::Aggressive;
-    if !aggressive && turn::estimate(s, history) <= threshold {
-        return;
-    }
-    prune_now(ctx, history);
-    if turn::estimate(s, history) > threshold {
-        let reason = format!("context is over {}% of the budget", percent(s));
-        if let Err(e) = compact_now(ctx, history, compact::KEEP_TURNS, None, &reason).await {
-            ctx.emit(Event::Warning {
-                message: format!("could not compact: {e}"),
-            });
+    if !aggressive {
+        let raw = raw_estimate(s, history);
+        if turn::scale(s, raw) <= threshold {
+            return raw;
         }
     }
+    if aggressive || !s.provider.native_compaction() {
+        prune_now(ctx, history);
+    }
+    let mut raw = raw_estimate(s, history);
+    if turn::scale(s, raw) > threshold {
+        let reason = format!("context is over {}% of the budget", percent(s));
+        match compact_now(ctx, history, compact::KEEP_TURNS, None, &reason).await {
+            Ok(()) => raw = raw_estimate(s, history),
+            Err(e) => {
+                ctx.emit(Event::Warning {
+                    message: format!("could not compact: {e}"),
+                });
+            }
+        }
+    }
+    raw
 }
 
 fn percent(s: &Setup) -> u32 {
@@ -115,7 +128,7 @@ fn apply_prune_ops(
         .map(|o| o.content.lines().next().unwrap_or_default().to_owned())
         .collect();
     let report = PruneReport {
-        removed_tokens: u32::try_from(removed * 2 / 7).unwrap_or(u32::MAX),
+        removed_tokens: turn::bytes_to_tokens(removed),
         items,
     };
     let ev = Event::ContextPruned {
@@ -212,15 +225,31 @@ pub(crate) async fn compact_now(
         reason: reason.to_owned(),
     });
 
+    let focus = focus.map(str::trim).filter(|f| !f.is_empty());
+    let extra = hooked.context_text();
+    if s.provider.native_compaction() && focus.is_none() && extra.is_none() {
+        match compact_native(ctx, &history[..cut]).await {
+            Ok(sealed) => {
+                let summary = compact::fallback_summary(&history[..cut]);
+                finish_compaction(ctx, history, cut, &summary, reason, Some(sealed));
+                return Ok(());
+            }
+            Err(e) if ctx.cancel.is_cancelled() => return Err(e),
+            Err(e) => ctx.emit(Event::Warning {
+                message: format!("native compaction failed ({e}) · using a text summary"),
+            }),
+        }
+    }
+
     let mut prompt = s
         .profile
         .compact_prompt
         .clone()
         .unwrap_or_else(|| compact::DEFAULT_PROMPT.to_owned());
-    if let Some(f) = focus.map(str::trim).filter(|f| !f.is_empty()) {
+    if let Some(f) = focus {
         prompt.push_str(&format!("\n\nPay particular attention to: {f}"));
     }
-    if let Some(extra) = hooked.context_text() {
+    if let Some(extra) = extra {
         prompt.push_str("\n\n");
         prompt.push_str(&extra);
     }
@@ -269,20 +298,53 @@ pub(crate) async fn compact_now(
         }
     };
 
-    let request = compact::carried_request(history, cut).map(str::to_owned);
-    let message = compact::summary_message(&summary, request.as_deref(), &turn::changed_files(ctx));
-    compact::apply(history, cut, message.clone());
+    finish_compaction(ctx, history, cut, &summary, reason, None);
+    Ok(())
+}
+
+async fn compact_native(ctx: &TurnCtx, prefix: &[Message]) -> Result<Sealed, String> {
+    let s = &ctx.setup;
+    let mut req = turn::request(s, turn::history_messages(s, prefix), true);
+    req.cache_key = Some(turn::cache_key(ctx));
+    ctx.start_request();
+    let sent = std::time::Instant::now();
+    let result = tokio::select! {
+        biased;
+        () = ctx.cancel.cancelled() => Err("interrupted".into()),
+        result = s.provider.compact(req, ctx.cancel.child_token()) => result.map_err(|e| format!("{}: {e}", s.provider.id)),
+    };
+    ctx.record_request(
+        result.as_ref().ok().and_then(|(_, usage)| usage.as_ref()),
+        sent.elapsed(),
+    );
+    result.map(|(sealed, _)| sealed)
+}
+
+fn finish_compaction(
+    ctx: &TurnCtx,
+    history: &mut Vec<Message>,
+    cut: usize,
+    summary: &str,
+    reason: &str,
+    native: Option<Sealed>,
+) {
+    let request = compact::carried_request(history, cut);
+    let message = compact::summary_message(summary, request, &turn::changed_files(ctx));
+    let summary_tokens = native.as_ref().map_or_else(
+        || tokens::estimate(summary),
+        |sealed| tokens::estimate(&serde_json::to_string(&sealed.items).unwrap_or_default()),
+    );
     session::record(
         ctx.log.as_ref(),
         "compaction",
-        json!({ "cut": cut, "message": message, "reason": reason }),
+        json!({ "cut": cut, "message": message, "reason": reason, "native": native }),
     );
+    session::apply_compaction(history, cut, message, native);
     ctx.emit(Event::Compacted {
-        summary_tokens: tokens::estimate(&summary),
+        summary_tokens,
         replaced: u32::try_from(cut).unwrap_or(u32::MAX),
     });
     ctx.context_estimate(history);
-    Ok(())
 }
 
 /// Stream a request with no tools and return its text.
@@ -399,7 +461,7 @@ pub(crate) fn report(s: &Setup, history: Option<&[Message]>) -> ContextReport {
             for (idx, m) in history.iter().enumerate() {
                 let g = match m {
                     _ if compact::is_summary(m) => 0,
-                    Message::User { .. } | Message::System { .. } => 1,
+                    Message::User { .. } | Message::System { .. } | Message::Compaction { .. } => 1,
                     Message::Assistant { .. } => 2,
                     Message::Tool { .. } => 3,
                 };
@@ -471,7 +533,7 @@ pub(crate) fn report(s: &Setup, history: Option<&[Message]>) -> ContextReport {
 fn item_role(m: &Message) -> String {
     match m {
         _ if compact::is_summary(m) => "summary".into(),
-        Message::User { .. } => "user".into(),
+        Message::User { .. } | Message::Compaction { .. } => "user".into(),
         Message::System { .. } => "system".into(),
         Message::Assistant { .. } => "assistant".into(),
         Message::Tool { .. } => "tool".into(),
@@ -480,7 +542,9 @@ fn item_role(m: &Message) -> String {
 
 fn item_label(m: &Message) -> String {
     let raw = match m {
-        Message::User { content, .. } | Message::System { content } => content.as_str(),
+        Message::User { content, .. }
+        | Message::System { content }
+        | Message::Compaction { content, .. } => content.as_str(),
         Message::Assistant {
             content,
             tool_calls,

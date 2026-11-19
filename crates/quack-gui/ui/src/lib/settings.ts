@@ -560,7 +560,7 @@ export const SETTING_FIELDS: readonly SettingFieldDef[] = [
 		kind: 'text',
 		defaultValue: '""',
 		placeholder: 'http://127.0.0.1:8080',
-		emptyMeaning: 'Uses HTTPS_PROXY / ALL_PROXY env vars if set',
+		emptyMeaning: 'Uses HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, or system settings',
 		fallbackDescription: 'Proxy URL used for outbound model and catalog requests.'
 	},
 	{
@@ -581,7 +581,7 @@ export const SETTING_FIELDS: readonly SettingFieldDef[] = [
 		label: 'Force HTTP/1.1',
 		kind: 'bool',
 		defaultValue: 'false',
-		fallbackDescription: 'Disable HTTP/2 negotiation for proxies or gateways that mishandle it.'
+		fallbackDescription: 'Default to HTTP/1.1. Individual providers can override this setting.'
 	},
 	{
 		key: 'network.secret_guard',

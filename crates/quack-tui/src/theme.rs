@@ -202,13 +202,10 @@ impl Theme {
         text.chars()
             .enumerate()
             .map(|(i, c)| {
-                #[allow(clippy::cast_precision_loss)]
                 let pos = i as f32 / n as f32 * (self.gradient.len() - 1) as f32;
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let seg = (pos.floor() as usize).min(self.gradient.len() - 2);
                 let f = pos - seg as f32;
                 let (a, b) = (self.gradient[seg], self.gradient[seg + 1]);
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let mix =
                     |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * f).round() as u8;
                 Span::styled(
@@ -235,11 +232,6 @@ impl Theme {
 /// A small meter, e.g. `▰▰▰▱▱`, filled `frac` of `width` cells.
 pub(crate) fn meter(frac: f32, width: usize, ascii: bool) -> String {
     let (on, off) = if ascii { ('#', '-') } else { ('▰', '▱') };
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
     let filled = ((frac.clamp(0.0, 1.0) * width as f32).round() as usize).min(width);
     std::iter::repeat_n(on, filled)
         .chain(std::iter::repeat_n(off, width - filled))

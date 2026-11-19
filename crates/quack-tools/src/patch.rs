@@ -130,7 +130,7 @@ pub(crate) fn write(changes: &[Change], ctx: &ToolCtx) -> Result<ToolOutput, Str
                     c.before.as_ref().map(|f| f.text.as_str()),
                     text,
                     "change",
-                    true,
+                    crate::text::NamedFile::Yes,
                 );
                 lines.push(match c.before {
                     Some(_) => format!("Edited {}", c.shown),

@@ -3,10 +3,23 @@
 	import { partitionExpertProviders, splitInlineCode } from '#lib/setup';
 
 	let { session }: { session: Session } = $props();
+	const advancedId = $props.id();
 	let serviceId = $state('');
 	let serviceKey = $state('');
 	let baseUrl = $state('');
 	let serverKey = $state('');
+	let advancedProvider = $state('');
+	const connection = $derived(
+		session.providerConnections?.find((p) => p.id === advancedProvider) ??
+			session.providerConnections?.[0]
+	);
+	let httpVersion = $derived(connection?.http_version ?? 'inherit');
+	let proxyMode = $derived(connection?.no_proxy ? 'direct' : 'inherit');
+	const connectionBusy = $derived(session.closed || session.starting || session.providerConnectionSaving);
+	const connectionChanged = $derived(
+		connection &&
+			(httpVersion !== connection.http_version || (proxyMode === 'direct') !== connection.no_proxy)
+	);
 	const available = $derived(session.providers.filter((p) => p.available && p.models.length > 0));
 	const busy = $derived(session.setupWorking || session.closed || session.starting);
 	const service = $derived(session.services.find((s) => s.id === serviceId) ?? null);
@@ -49,6 +62,20 @@
 	}
 </script>
 
+{#snippet accordionChevron()}
+	<span class="accordion-chevron" aria-hidden="true">
+		<svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+			<path
+				d="M6 3.5 10.5 8 6 12.5"
+				stroke="currentColor"
+				stroke-width="1.6"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			/>
+		</svg>
+	</span>
+{/snippet}
+
 <section class="setup" aria-labelledby="setup-heading">
 	<div class="heading">
 		<div>
@@ -61,6 +88,70 @@
 	</div>
 	{#if session.setupNotice}<p class="notice" role="status">{session.setupNotice}</p>{/if}
 	{#if session.setupWorking}<p role="status">Connecting…</p>{/if}
+
+	<section aria-label="Advanced provider connections">
+		<details class="accordion">
+			<summary>
+				<span class="accordion-title">Advanced connection settings</span>
+				{@render accordionChevron()}
+			</summary>
+			<div class="accordion-body">
+				{#if session.providerConnections === null}
+					<p role="status">Loading providers…</p>
+				{:else if connection}
+					<form onsubmit={(event) => {
+						event.preventDefault();
+						if (connectionChanged) {
+							void session.saveProviderConnection(connection, httpVersion, proxyMode === 'direct');
+						}
+					}}>
+						<div class="connection-field">
+							<label for={`${advancedId}-provider`}>Provider</label>
+							<select
+								id={`${advancedId}-provider`}
+								value={connection.id}
+								onchange={(event) => (advancedProvider = event.currentTarget.value)}
+								disabled={connectionBusy}
+							>
+								{#each session.providerConnections as provider (provider.id)}
+									<option value={provider.id}>{provider.id}</option>
+								{/each}
+							</select>
+						</div>
+						<div class="connection-field">
+							<label for={`${advancedId}-http`}>HTTP version</label>
+							<select id={`${advancedId}-http`} bind:value={httpVersion} disabled={connectionBusy}>
+								<option value="inherit">
+									Inherit ({connection.inherited_http1_only ? 'HTTP/1.1 only' : 'Negotiate'})
+								</option>
+								<option value="http1_only">HTTP/1.1 only</option>
+								<option value="negotiate">Negotiate</option>
+							</select>
+						</div>
+						<div class="connection-field">
+							<label for={`${advancedId}-proxy`}>Proxy</label>
+							<select id={`${advancedId}-proxy`} bind:value={proxyMode} disabled={connectionBusy}>
+								<option value="inherit">Use configured proxy settings</option>
+								<option value="direct">Direct connection</option>
+							</select>
+						</div>
+						<p>For a provider reachable directly over your VPN, choose Direct connection.</p>
+						<button class="btn" type="submit" disabled={connectionBusy || !connectionChanged}>
+							{session.providerConnectionSaving ? 'Saving…' : 'Save connection settings'}
+						</button>
+						{#if session.providerConnectionNotice}
+							<p class="notice" role="status">{session.providerConnectionNotice}</p>
+						{/if}
+						{#if session.providerConnectionError}
+							<p class="status" role="alert">{session.providerConnectionError}</p>
+						{/if}
+					</form>
+				{:else}
+					<p>Add a provider to edit its connection settings.</p>
+				{/if}
+			</div>
+		</details>
+	</section>
 
 	{#if available.length > 0}
 		<section aria-labelledby="ready-heading">
@@ -254,17 +345,7 @@
 							<span class="accordion-sub">{expertSummary}</span>
 						{/if}
 					</span>
-					<span class="accordion-chevron" aria-hidden="true">
-						<svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-							<path
-								d="M6 3.5 10.5 8 6 12.5"
-								stroke="currentColor"
-								stroke-width="1.6"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							/>
-						</svg>
-					</span>
+					{@render accordionChevron()}
 				</summary>
 				<div class="accordion-body">
 					{#if expert.envProviders.length > 0}
@@ -386,7 +467,8 @@
 		max-width: 480px;
 		margin-top: var(--sp-sm);
 	}
-	label {
+	label,
+	.connection-field {
 		display: grid;
 		gap: 4px;
 		max-width: 480px;

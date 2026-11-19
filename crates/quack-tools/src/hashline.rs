@@ -16,8 +16,8 @@ use quack_protocol::ApprovalRequest;
 use serde_json::{Value, json};
 
 use crate::paths;
-use crate::registry::{Subject, Tool, ToolCtx, ToolKind, ToolOutput, opt_bool, opt_str};
-use crate::text::{TextFile, diff_stats, io_msg, unified_diff};
+use crate::registry::{Subject, Tool, ToolCtx, ToolKind, ToolOutput, View, opt_bool, opt_str};
+use crate::text::{TextFile, io_msg, stats_of, unified_diff, unified_from};
 
 const PATH: &[&str] = &["path", "file_path", "filename", "file"];
 const TAG: &[&str] = &["tag", "hash", "file_tag", "version", "snapshot"];
@@ -742,57 +742,13 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, Refused> {
     let specs = specs(args)?;
     let current = split(&file.text);
     let now = file_tag(&file.text);
-
-    // The version the numbers come from: the tag given, else the newest view that showed
-    // all the lines named, else the newest that showed any. Edit results show no lines,
-    // so after an edit the numbers still mean the read they came from.
     let views = ctx.reads.views(&path);
-    let given = top(args, TAG).map(clean_tag).or_else(|| {
-        split_tag(top(args, PATH).unwrap_or_default())
-            .1
-            .map(clean_tag)
-    });
-    let mut notes = Vec::new();
-    let base: Option<crate::registry::View> = match &given {
-        Some(t) if *t == now => None,
-        Some(t) if let Some(v) = views.iter().find(|v| v.tag == *t) => Some(v.clone()),
-        _ if views.is_empty() => None,
-        _ if !views.iter().any(|v| v.tag == now) => {
-            let n = anchors(&specs).into_iter().min().unwrap_or(1);
-            return Err(refuse(
-                format!(
-                    "{shown} changed since you last read it (not through edit_hashline), so \
-                     these line numbers may be off; nothing was edited."
-                ),
-                &shown,
-                &file.text,
-                n.saturating_sub(1 + CONTEXT),
-                n + 2 * CONTEXT,
-            ));
-        }
-        _ => {
-            let want = anchors(&specs);
-            let v = views
-                .iter()
-                .rev()
-                .find(|v| want.iter().all(|n| v.covers(*n)))
-                .or_else(|| views.iter().rev().find(|v| v.covers_any()))
-                .filter(|v| v.tag != now)
-                .cloned();
-            if let Some(t) = &given {
-                let used = v.as_ref().map_or(now.as_str(), |v| v.tag.as_str());
-                notes.push(format!(
-                    "`{t}` is not a tag {shown} was shown with; the numbers were read \
-                     against {}.",
-                    header(&shown, used)
-                ));
-            }
-            v
-        }
-    };
 
-    // The version the numbers are numbered against: the base view, else the view of
-    // the file as it is now. `block` anchors are resolved against it, in its numbering.
+    let mut notes = Vec::new();
+    // Phase 1: which version the model's numbers were read from.
+    let base = base_view(args, &views, &now, &specs, &shown, &file.text, &mut notes)?;
+    // The version anchors are resolved against: base, else the newest view of the file as
+    // it is now. `block` anchors are resolved in its numbering.
     let numbering = base
         .clone()
         .or_else(|| views.iter().rev().find(|v| v.tag == now).cloned());
@@ -800,80 +756,19 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, Refused> {
         .as_ref()
         .map_or(file.text.clone(), |v| v.text.to_string());
 
-    // `block` edits become the lines of the construct around their anchor, numbered
-    // against the same version as the numbers the model sent.
-    let mut specs = specs;
-    for spec in &mut specs {
-        let (anchor, text) = match spec {
-            Spec::Block { anchor, text } => (*anchor, text.take()),
-            Spec::AfterBlock { anchor, text } => (*anchor, Some(std::mem::take(text))),
-            _ => continue,
-        };
-        let after_construct = matches!(spec, Spec::AfterBlock { .. });
-        // A line the numbered version lacks is one the model's own edits added: resolve
-        // it against the file as it is, the way past-the-end numbers are re-read.
-        let resolved = around(&path, &numbering_text, anchor).ok().flatten();
-        let (span, from_now) = match resolved {
-            Some(span) => (span, false),
-            None => match numbering
-                .as_ref()
-                .and_then(|_| around(&path, &file.text, anchor).ok().flatten())
-            {
-                Some(span) => (span, true),
-                None => {
-                    let next = around(&path, &numbering_text, anchor)
-                        .err()
-                        .unwrap_or(anchor);
-                    let why = if next == anchor {
-                        format!(
-                            "no function, class or other definition around line {anchor} of \
-                             {shown} can be found here, so `block` cannot resolve; give `start` \
-                             and `end` lines instead. Nothing was edited."
-                        )
-                    } else {
-                        format!(
-                            "line {anchor} of {shown} is not inside a definition; the next one \
-                             starts at line {next}. Give `block` a line inside a function, class \
-                             or other definition, or `start` and `end` lines. Nothing was \
-                             edited."
-                        )
-                    };
-                    return Err(refuse_in(
-                        why,
-                        &shown,
-                        numbering.as_ref().map_or(now.as_str(), |v| v.tag.as_str()),
-                        &numbering_text,
-                        anchor.saturating_sub(1 + CONTEXT),
-                        next.max(anchor) + CONTEXT,
-                    ));
-                }
-            },
-        };
-        let (start, end) = span;
-        notes.push(if from_now {
-            format!(
-                "the construct around line {anchor} is lines {start}-{end} as the file is \
-                 now (`block`)"
-            )
-        } else {
-            format!("lines {start}-{end} are the construct around line {anchor} (`block`)")
-        });
-        *spec = if after_construct {
-            Spec::Insert {
-                at: Gap::After(end),
-                text: text.unwrap_or_default(),
-            }
-        } else {
-            Spec::Replace {
-                start,
-                end,
-                text: text.unwrap_or_default(),
-            }
-        };
-    }
+    // Phase 2: turn `block` specs into numbered ranges.
+    let block_ctx = BlockCtx {
+        path: &path,
+        shown: &shown,
+        now: &now,
+        numbering: numbering.as_ref(),
+        numbering_text: &numbering_text,
+        file_text: &file.text,
+    };
+    let specs = resolve_blocks(&block_ctx, specs, &mut notes)?;
 
-    // The ranges the model wrote out itself, plus the constructs `block` resolved to:
-    // every range an edit replaces is checked against what outputs showed.
+    // Ranges the model wrote out itself (post-`block` resolution): the ones whose lines
+    // must have been shown.
     let written: Vec<(usize, usize)> = specs
         .iter()
         .filter_map(|s| match s {
@@ -882,114 +777,22 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, Refused> {
         })
         .collect();
 
-    let ops_for = |len: usize| -> Result<Vec<Op>, String> {
-        specs.iter().map(|s| to_op(s, len, &shown)).collect()
-    };
-    // Set when past-the-end numbers were re-read against the current file: those the
-    // model worked out itself, so no output could have shown them.
-    let mut trusts_current = false;
-    let (base, mut ops) = match base {
-        Some(v) => match ops_for(split(&v.text).len()) {
-            Ok(ops) => (Some(v), ops),
-            // Past the end of that version but not of the file: numbers worked out
-            // after the model's own edits, sent with the older tag.
-            Err(e) => match ops_for(current.len()) {
-                Ok(ops) => {
-                    notes.push(format!(
-                        "{} with {}, so the numbers were read against the file as it is \
-                         now, {}.",
-                        capitalize(&e),
-                        header(&shown, &v.tag),
-                        header(&shown, &now)
-                    ));
-                    trusts_current = true;
-                    (None, ops)
-                }
-                Err(_) => return Err(e.into()),
-            },
-        },
-        None => (None, ops_for(current.len())?),
-    };
-    let base_lines = base.as_ref().map(|v| split(&v.text));
-    if let (Some(view), Some(old)) = (&base, &base_lines) {
-        let map = line_map(old, &current);
-        for op in &mut ops {
-            let Some(new) = remap(op, &map, current.len()) else {
-                // Show the current lines nearest to where the range was.
-                let near = (0..=op.from.min(map.len().saturating_sub(1)))
-                    .rev()
-                    .find_map(|i| map.get(i).copied().flatten())
-                    .unwrap_or(op.from.min(current.len()));
-                let what = if op.from == op.to {
-                    format!("The lines around line {}", op.from)
-                } else if op.to == op.from + 1 {
-                    format!("Line {}", op.to)
-                } else {
-                    format!("Lines {}-{}", op.from + 1, op.to)
-                };
-                return Err(refuse(
-                    format!(
-                        "{what} of {} changed since; nothing was edited.",
-                        header(&shown, &view.tag)
-                    ),
-                    &shown,
-                    &file.text,
-                    near.saturating_sub(CONTEXT),
-                    near + (op.to - op.from) + 2 * CONTEXT,
-                ));
-            };
-            *op = new;
-        }
+    // Phase 3: ops numbered against the base view, then moved onto the file as it is now.
+    let (base, mut ops, trusts_current) =
+        current_ops(base, &specs, &current, &shown, &now, &mut notes)?;
+    // Phase 4: remap old numbered ops to current file coordinates.
+    if let Some(view) = &base {
+        ops = remapped(view, &split(&view.text), &current, ops, &shown, &file.text)?;
     }
 
-    // Lines an edit replaces must have been shown to the model: a range over lines no
-    // output displayed (an elided middle, a folded outline, a number from memory)
-    // mangles the file. The refusal shows them, and counts as reading them, so the
-    // same edit again goes through.
+    // Phase 5: refuse if any edit's range was never shown to the model.
     let cover = base.as_ref().or_else(|| {
         (!trusts_current)
             .then(|| views.iter().rev().find(|v| v.tag == now))
             .flatten()
     });
     if !written.is_empty() && !trusts_current && !opt_bool(args, &["force"]) {
-        let unseen = written
-            .iter()
-            .find(|(start, end)| cover.is_none_or(|v| (*start..=*end).any(|n| !v.covers(n))));
-        if let Some((start, end)) = unseen {
-            let named = if start == end {
-                format!("line {start}")
-            } else {
-                format!("lines {start}-{end}")
-            };
-            let (tag, text) = match cover {
-                Some(v) => (v.tag.clone(), v.text.to_string()),
-                // No view at all: the file was never read. `trusts_current` is false
-                // here, or the numbers would have been re-read against the file.
-                None => (now.clone(), file.text.clone()),
-            };
-            let why = if cover.is_some() {
-                format!(
-                    "the output these numbers come from did not show {named} of {shown} (it \
-                     showed a range, a search hit or an outline), so they may be wrong. Nothing \
-                     was edited; these lines now count as read, so re-issue the edit to apply \
-                     it, or fix the numbers."
-                )
-            } else {
-                format!(
-                    "{shown} has not been read with its line numbers yet, so {named} cannot be \
-                     checked. Nothing was edited; read it first (or send the edit again with \
-                     `force`), and these lines now count as read."
-                )
-            };
-            return Err(refuse_in(
-                why,
-                &shown,
-                &tag,
-                &text,
-                start.saturating_sub(1 + CONTEXT),
-                end + CONTEXT,
-            ));
-        }
+        check_shown(&written, cover, &now, &file.text, &shown)?;
     }
 
     for op in &mut ops {
@@ -1055,27 +858,7 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, Refused> {
             after = assemble(&ops);
             (done, spans) = landing(&ops);
         } else {
-            let lines = split(&after);
-            let around: Vec<String> = merge(
-                spans
-                    .iter()
-                    .map(|(a, b)| (a.saturating_sub(1 + CONTEXT), b + CONTEXT))
-                    .chain([(line.saturating_sub(1 + CONTEXT), line + CONTEXT)])
-                    .collect(),
-                lines.len(),
-            )
-            .into_iter()
-            .map(|(a, b)| numbered(&lines, a, b))
-            .collect();
-            return Err(format!(
-                "Nothing was edited: this edit would leave a syntax error at line {line}, and \
-                 {shown} parsed cleanly before. Check the range: `end` may stop a line short, or \
-                 `content` may repeat or leave out a line. The lines as they would read:\n{}\
-                 If a later edit fixes it, send both in one call; to make this edit anyway, send \
-                 it again with \"force\": true.",
-                around.join("…\n")
-            )
-            .into());
+            return Err(syntax_refusal(line, &shown, &spans, &after));
         }
     }
     Ok(Plan {
@@ -1087,6 +870,318 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, Refused> {
         spans,
         notes,
     })
+}
+
+/// Phase 1: which version the model's numbers were read from. The tag it gave (if the
+/// file was shown with it), else the newest view that showed all the named lines, else
+/// the newest that showed any — `None` for the file as it is now. Refuses when no view
+/// matches the current file.
+fn base_view(
+    args: &Value,
+    views: &[View],
+    now: &str,
+    specs: &[Spec],
+    shown: &str,
+    file_text: &str,
+    notes: &mut Vec<String>,
+) -> Result<Option<View>, Refused> {
+    let given = top(args, TAG).map(clean_tag).or_else(|| {
+        split_tag(top(args, PATH).unwrap_or_default())
+            .1
+            .map(clean_tag)
+    });
+    match &given {
+        Some(t) if *t == now => Ok(None),
+        Some(t) if let Some(v) = views.iter().find(|v| v.tag == *t) => Ok(Some(v.clone())),
+        _ if views.is_empty() => Ok(None),
+        _ if !views.iter().any(|v| v.tag == now) => {
+            let n = anchors(specs).into_iter().min().unwrap_or(1);
+            Err(refuse(
+                format!(
+                    "{shown} changed since you last read it (not through edit_hashline), so \
+                     these line numbers may be off; nothing was edited."
+                ),
+                shown,
+                file_text,
+                n.saturating_sub(1 + CONTEXT),
+                n + 2 * CONTEXT,
+            ))
+        }
+        _ => {
+            let want = anchors(specs);
+            let v = views
+                .iter()
+                .rev()
+                .find(|v| want.iter().all(|n| v.covers(*n)))
+                .or_else(|| views.iter().rev().find(|v| v.covers_any()))
+                .filter(|v| v.tag != now)
+                .cloned();
+            if let Some(t) = &given {
+                let used = v.as_ref().map_or(now, |v| v.tag.as_str());
+                notes.push(format!(
+                    "`{t}` is not a tag {shown} was shown with; the numbers were read \
+                     against {}.",
+                    header(shown, used)
+                ));
+            }
+            Ok(v)
+        }
+    }
+}
+
+/// What [`resolve_blocks`] needs to find a construct around an anchor. Bundled so the
+/// helper stays readable when its argument list grows another field.
+struct BlockCtx<'a> {
+    path: &'a Path,
+    shown: &'a str,
+    now: &'a str,
+    numbering: Option<&'a View>,
+    /// The text of `numbering` (its view's text, or `file.text` when no view).
+    numbering_text: &'a str,
+    /// The file's current text — used when the anchor is past `numbering`'s range.
+    file_text: &'a str,
+}
+
+/// Phase 2: turn `block` and `after_block` specs into `Replace` / `Insert` numbered
+/// against `numbering_text`, or `file.text` when the line is past `numbering`. Records
+/// each resolved span as a note.
+fn resolve_blocks(
+    ctx: &BlockCtx<'_>,
+    mut specs: Vec<Spec>,
+    notes: &mut Vec<String>,
+) -> Result<Vec<Spec>, Refused> {
+    let BlockCtx {
+        path,
+        shown,
+        now,
+        numbering,
+        numbering_text,
+        file_text,
+    } = *ctx;
+    for spec in &mut specs {
+        let (anchor, text) = match spec {
+            Spec::Block { anchor, text } => (*anchor, text.take()),
+            Spec::AfterBlock { anchor, text } => (*anchor, Some(std::mem::take(text))),
+            _ => continue,
+        };
+        let after_construct = matches!(spec, Spec::AfterBlock { .. });
+        // A line the numbered version lacks is one the model's own edits added: resolve
+        // it against the file as it is, the way past-the-end numbers are re-read.
+        let resolved = around(path, numbering_text, anchor).ok().flatten();
+        let (span, from_now) = match resolved {
+            Some(span) => (span, false),
+            None => match numbering.and_then(|_| around(path, file_text, anchor).ok().flatten()) {
+                Some(span) => (span, true),
+                None => {
+                    let next = around(path, numbering_text, anchor).err().unwrap_or(anchor);
+                    let why_v = || {
+                        if next == anchor {
+                            format!(
+                                "no function, class or other definition around line {anchor} of \
+                                 {shown} can be found here, so `block` cannot resolve; give \
+                                 `start` and `end` lines instead. Nothing was edited."
+                            )
+                        } else {
+                            format!(
+                                "line {anchor} of {shown} is not inside a definition; the next \
+                                 one starts at line {next}. Give `block` a line inside a \
+                                 function, class or other definition, or `start` and `end` lines. \
+                                 Nothing was edited."
+                            )
+                        }
+                    };
+                    return Err(refuse_in(
+                        why_v(),
+                        shown,
+                        numbering.map_or(now, |v| v.tag.as_str()),
+                        numbering_text,
+                        anchor.saturating_sub(1 + CONTEXT),
+                        next.max(anchor) + CONTEXT,
+                    ));
+                }
+            },
+        };
+        let (start, end) = span;
+        notes.push(if from_now {
+            format!(
+                "the construct around line {anchor} is lines {start}-{end} as the file is \
+                 now (`block`)"
+            )
+        } else {
+            format!("lines {start}-{end} are the construct around line {anchor} (`block`)")
+        });
+        *spec = if after_construct {
+            Spec::Insert {
+                at: Gap::After(end),
+                text: text.unwrap_or_default(),
+            }
+        } else {
+            Spec::Replace {
+                start,
+                end,
+                text: text.unwrap_or_default(),
+            }
+        };
+    }
+    Ok(specs)
+}
+
+/// Phase 3: build the ops numbered against the base view. Returns the (possibly
+/// downgraded) base, the ops, and whether `trusts_current` — true when past-the-end
+/// numbers were re-read against the file and so no output could have shown them.
+fn current_ops(
+    base: Option<View>,
+    specs: &[Spec],
+    current: &[&str],
+    shown: &str,
+    now: &str,
+    notes: &mut Vec<String>,
+) -> Result<(Option<View>, Vec<Op>, bool), Refused> {
+    let ops_for = |len: usize| -> Result<Vec<Op>, String> {
+        specs.iter().map(|s| to_op(s, len, shown)).collect()
+    };
+    match base {
+        Some(v) => match ops_for(split(&v.text).len()) {
+            Ok(ops) => Ok((Some(v), ops, false)),
+            // Past the end of that version but not of the file: numbers worked out
+            // after the model's own edits, sent with the older tag.
+            Err(e) => match ops_for(current.len()) {
+                Ok(ops) => {
+                    notes.push(format!(
+                        "{} with {}, so the numbers were read against the file as it is \
+                         now, {}.",
+                        capitalize(&e),
+                        header(shown, &v.tag),
+                        header(shown, now),
+                    ));
+                    Ok((None, ops, true))
+                }
+                Err(_) => Err(Refused::from(e)),
+            },
+        },
+        None => match ops_for(current.len()) {
+            Ok(ops) => Ok((None, ops, false)),
+            Err(e) => Err(Refused::from(e)),
+        },
+    }
+}
+
+/// Phase 4: move ops numbered against `view` onto the file as it is now. Each op's lines
+/// must all be unchanged and still together, with at least one anchor line beside them
+/// (which tells a moved closer from another one). Inserts need their neighbours to agree.
+fn remapped(
+    view: &View,
+    old: &[&str],
+    current: &[&str],
+    mut ops: Vec<Op>,
+    shown: &str,
+    file_text: &str,
+) -> Result<Vec<Op>, Refused> {
+    let map = line_map(old, current);
+    for op in &mut ops {
+        let Some(new) = remap(op, &map, current.len()) else {
+            // Show the current lines nearest to where the range was.
+            let near = (0..=op.from.min(map.len().saturating_sub(1)))
+                .rev()
+                .find_map(|i| map.get(i).copied().flatten())
+                .unwrap_or(op.from.min(current.len()));
+            let what = if op.from == op.to {
+                format!("The lines around line {}", op.from)
+            } else if op.to == op.from + 1 {
+                format!("Line {}", op.to)
+            } else {
+                format!("Lines {}-{}", op.from + 1, op.to)
+            };
+            return Err(refuse(
+                format!(
+                    "{what} of {} changed since; nothing was edited.",
+                    header(shown, &view.tag)
+                ),
+                shown,
+                file_text,
+                near.saturating_sub(CONTEXT),
+                near + (op.to - op.from) + 2 * CONTEXT,
+            ));
+        };
+        *op = new;
+    }
+    Ok(ops)
+}
+
+/// Phase 5: every range an edit replaces must have been shown to the model — a range
+/// over lines no output displayed (an elided middle, a folded outline, a number from
+/// memory) mangles the file. The refusal shows them, and counts as reading them, so the
+/// same edit again goes through.
+fn check_shown(
+    written: &[(usize, usize)],
+    cover: Option<&View>,
+    now: &str,
+    file_text: &str,
+    shown: &str,
+) -> Result<(), Refused> {
+    let Some((start, end)) = written
+        .iter()
+        .find(|(start, end)| cover.is_none_or(|v| (*start..=*end).any(|n| !v.covers(n))))
+    else {
+        return Ok(());
+    };
+    let named = if start == end {
+        format!("line {start}")
+    } else {
+        format!("lines {start}-{end}")
+    };
+    let (tag, text) = match cover {
+        Some(v) => (v.tag.clone(), v.text.to_string()),
+        // No view at all: the file was never read.
+        None => (now.to_owned(), file_text.to_owned()),
+    };
+    let why = if cover.is_some() {
+        format!(
+            "the output these numbers come from did not show {named} of {shown} (it showed a \
+             range, a search hit or an outline), so they may be wrong. Nothing was edited; \
+             these lines now count as read, so re-issue the edit to apply it, or fix the \
+             numbers."
+        )
+    } else {
+        format!(
+            "{shown} has not been read with its line numbers yet, so {named} cannot be checked. \
+             Nothing was edited; read it first (or send the edit again with `force`), and \
+             these lines now count as read."
+        )
+    };
+    Err(refuse_in(
+        why,
+        shown,
+        &tag,
+        &text,
+        start.saturating_sub(1 + CONTEXT),
+        end + CONTEXT,
+    ))
+}
+
+/// The refusal for an edit that would leave a syntax error: the lines of `spans` and the
+/// error line, merged into context windows, are shown under the file's tag.
+fn syntax_refusal(line: usize, shown: &str, spans: &[(usize, usize)], after: &str) -> Refused {
+    let lines = split(after);
+    let around: Vec<String> = merge(
+        spans
+            .iter()
+            .map(|(a, b)| (a.saturating_sub(1 + CONTEXT), b + CONTEXT))
+            .chain([(line.saturating_sub(1 + CONTEXT), line + CONTEXT)])
+            .collect(),
+        lines.len(),
+    )
+    .into_iter()
+    .map(|(a, b)| numbered(&lines, a, b))
+    .collect();
+    Refused::from(format!(
+        "Nothing was edited: this edit would leave a syntax error at line {line}, and {shown} \
+         parsed cleanly before. Check the range: `end` may stop a line short, or `content` may \
+         repeat or leave out a line. The lines as they would read:\n{}\
+         If a later edit fixes it, send both in one call; to make this edit anyway, send it \
+         again with \"force\": true.",
+        around.join("…\n")
+    ))
 }
 
 /// Overlapping or touching windows (0-based, exclusive end) joined, clamped to `len`.
@@ -1328,12 +1423,11 @@ fn output(p: &Plan, ctx: &ToolCtx) -> ToolOutput {
     for note in &p.notes {
         model.push_str(&format!(" {note}"));
     }
-    let (add, del) = diff_stats(&p.file.text, &p.after);
-    ToolOutput::ok(model, format!("+{add} -{del}")).with_detail(unified_diff(
-        &p.shown,
-        &p.file.text,
-        &p.after,
-    ))
+    // One diff walk shared between the stats and the detail (matches text.rs::commit).
+    let diff = similar::TextDiff::from_lines(&p.file.text, &p.after);
+    let (add, del) = stats_of(&diff);
+    let detail = unified_from(&diff, &p.shown);
+    ToolOutput::ok(model, format!("+{add} -{del}")).with_detail(detail)
 }
 
 /// Note a whole file as seen: `write` content, which the model wrote itself.

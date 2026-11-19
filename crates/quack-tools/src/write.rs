@@ -154,7 +154,7 @@ impl Tool for Write {
                 p.before.as_deref(),
                 &p.after,
                 "change",
-                false,
+                crate::text::NamedFile::No,
             );
             crate::hashline::saw_whole(&ctx, &p.path, &p.after);
             let verb = if p.before.is_some() {

@@ -11,6 +11,7 @@ publish.workspace = true
 
 [dependencies]
 tokio = { workspace = true, features = ["process"] }
+tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Already in the tree (through nix, tokio and others).

@@ -44,7 +44,9 @@ const OP_CAPACITY: usize = 64;
 /// A client's connection to a running engine.
 #[derive(Debug)]
 pub struct EngineHandle {
+    /// Sends client operations to the engine, usually through [`submit`](Self::submit).
     pub ops: mpsc::Sender<Op>,
+    /// Receives the engine's event stream; clients wait on it to update their state.
     pub events: broadcast::Receiver<Event>,
     tx: broadcast::Sender<Event>,
     config: watch::Receiver<Arc<Loaded>>,
@@ -74,6 +76,13 @@ impl EngineHandle {
 }
 
 #[derive(Debug)]
+struct RewindOpts {
+    conversation: bool,
+    files: bool,
+    force: bool,
+}
+
+#[derive(Debug)]
 struct SaveMemoryArgs {
     scope: String,
     name: String,
@@ -82,6 +91,16 @@ struct SaveMemoryArgs {
     body: String,
     previous_scope: Option<String>,
     previous_name: Option<String>,
+}
+
+struct TurnLaunch {
+    done: mpsc::Sender<(TurnId, Vec<Message>)>,
+    history: Vec<Message>,
+    mcp_prompt: Option<crate::mcp::PromptCall>,
+    typed: String,
+    expanded: Option<String>,
+    images: Vec<quack_protocol::Image>,
+    start: Option<JoinHandle<Vec<String>>>,
 }
 
 /// Work that waits for startup or the running turn.
@@ -206,6 +225,8 @@ pub struct Engine {
     ledger_log: Arc<Mutex<Option<SharedLog>>>,
     /// SHA-256 secret fingerprints explicitly allowed for the active session.
     secret_allowlist: Arc<Mutex<Vec<String>>>,
+    /// One user question at a time: every turn and sampling request shares this.
+    prompt_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Engine {
@@ -233,6 +254,7 @@ impl Engine {
         let ledger_log: Arc<Mutex<Option<SharedLog>>> = Arc::default();
         let secret_allowlist =
             Arc::new(Mutex::new(config.settings.network.secret_allowlist.clone()));
+        let prompt_lock = Arc::default();
         wire_ledger(&ledger, &tx, &ledger_log);
         let engine = Self {
             config,
@@ -271,6 +293,7 @@ impl Engine {
             agent_runs: Arc::default(),
             asks,
             asked: 0,
+            prompt_lock,
             sign_in: None,
             hook_tasks: JoinSet::new(),
             hook_checks: BTreeMap::new(),
@@ -312,7 +335,7 @@ impl Engine {
 
     async fn run(mut self, mut ops: mpsc::Receiver<Op>, mut asks: mpsc::Receiver<ServerAsk>) {
         self.emit(Event::SessionConfigured {
-            session: self.session.clone(),
+            session: Box::new(self.session.clone()),
         });
         self.start_mcp().await;
         self.start_lsp().await;
@@ -334,17 +357,21 @@ impl Engine {
             tokio::select! {
                 outcome = &mut startup, if !self.started => {
                     self.started = true;
-                    self.on_started(outcome.unwrap_or_default());
+                    let outcome = outcome.unwrap_or_else(|e| {
+                        tracing::error!("the startup task failed: {e}");
+                        Default::default()
+                    });
+                    self.on_started(outcome);
                     self.emit(Event::StartupComplete);
                     crate::checks::background(self.config.clone(), self.tx.clone());
-                    self.next_queued(&done_tx, &reload_tx);
+                    self.next_queued(&done_tx, &reload_tx).await;
                 }
                 Some((role, result)) = switch_rx.recv() => {
                     match role {
                         Role::Session => self.on_switched(result),
                         Role::Planner => self.on_planner(result),
                     }
-                    self.next_queued(&done_tx, &reload_tx);
+                    self.next_queued(&done_tx, &reload_tx).await;
                 }
                 Some(step) = reload_rx.recv() => {
                     match step {
@@ -373,7 +400,7 @@ impl Engine {
                             }
                         }
                     }
-                    self.next_queued(&done_tx, &reload_tx);
+                    self.next_queued(&done_tx, &reload_tx).await;
                 }
                 Some((turn, history)) = done_rx.recv() => {
                     if let Some(c) = &mut self.convo {
@@ -383,7 +410,7 @@ impl Engine {
                     if self.running.as_ref().is_some_and(|(t, _)| *t == turn) {
                         self.running = None;
                     }
-                    self.next_queued(&done_tx, &reload_tx);
+                    self.next_queued(&done_tx, &reload_tx).await;
                 }
                 result = self.title_tasks.join_next(), if !self.title_tasks.is_empty() => {
                     if let Some(Ok((session, Some(title)))) = result
@@ -554,6 +581,7 @@ impl Engine {
                     setup: c.setup.clone(),
                     stats: self.stats.clone(),
                     log: self.log.clone(),
+                    prompt_lock: self.prompt_lock.clone(),
                     cancel,
                     call_id,
                 };
@@ -577,7 +605,7 @@ impl Engine {
                 Resume::Id(_) => true,
             };
             if has_resume_target {
-                self.warn("cannot resume: no model is ready".into());
+                self.resume_failed("cannot resume: no model is ready".into());
             }
             return;
         };
@@ -593,7 +621,7 @@ impl Engine {
             self.emit(Event::Plan { checklist: plan });
         }
         self.emit(Event::SessionConfigured {
-            session: self.session.clone(),
+            session: Box::new(self.session.clone()),
         });
         self.convo = Some(Conversation {
             perms: Arc::new(Mutex::new(setup.permissions.clone())),
@@ -614,11 +642,7 @@ impl Engine {
         if let Some(mode) = self.pending_work_mode.take() {
             self.set_work_mode(mode);
         }
-        if self
-            .convo
-            .as_ref()
-            .is_some_and(|c| c.perms.lock().is_ok_and(|p| p.work_mode == WorkMode::Plan))
-        {
+        if self.in_plan_mode() {
             self.start_planner();
         }
         if let Some(off) = self.pending_sandbox.take() {
@@ -640,7 +664,7 @@ impl Engine {
             Ok(Some(e)) => e,
             Ok(None) => return None,
             Err(e) => {
-                self.warn(format!("cannot resume: {e}"));
+                self.resume_failed(format!("cannot resume: {e}"));
                 return None;
             }
         };
@@ -648,7 +672,7 @@ impl Engine {
         let records = match ps.read(&entry) {
             Ok(r) => r,
             Err(e) => {
-                self.warn(format!("cannot read session {}: {e}", entry.id));
+                self.resume_failed(format!("cannot read session {}: {e}", entry.id));
                 return None;
             }
         };
@@ -688,16 +712,17 @@ impl Engine {
         self.set_title(Some(entry.title));
         self.configure_reasoning(setup);
         self.emit(Event::SessionResumed {
-            session: self.session.clone(),
-            items,
+            session: Box::new(self.session.clone()),
+            items: items.into(),
         });
         let (entries, stats) = self.ledger.snapshot();
         self.emit(Event::EgressLedger { entries, stats });
         Some((history, plan))
     }
 
-    /// `/export`: the transcript so far, from the session log.
-    fn export(&mut self, format: ExportFormat, path: Option<&str>) {
+    /// `/export`: the transcript so far, from the session log. Reading and rendering
+    /// can be the whole session in text, so it stays off the async runtime.
+    async fn export(&mut self, format: ExportFormat, path: Option<&str>) {
         self.sync_log();
         let Some(entry) = self
             .log
@@ -707,36 +732,46 @@ impl Engine {
             return self
                 .warn("nothing to export yet: the session starts with its first message".into());
         };
-        let records = match session::project_sessions(&self.config).read(&entry) {
-            Ok(r) => r,
-            Err(e) => return self.warn(format!("cannot read the session log: {e}")),
-        };
-        let items = session::replay(&records).items;
-        let started = quack_store::time::date(entry.started);
-        let header = crate::export::Header {
-            id: &self.session.id.0,
-            title: self.title.as_deref(),
-            model: &entry.model,
-            started: &started,
-        };
-        let text = crate::export::render(format, &header, &items);
+        let ps = session::project_sessions(&self.config);
+        let id = self.session.id.0.clone();
+        let title = self.title.clone();
+        let cwd = self.session.cwd.clone();
         let name = path
             .map(str::trim)
             .filter(|p| !p.is_empty())
-            .map_or_else(|| crate::export::file_name(&header, format), str::to_owned);
-        let file = std::path::Path::new(&self.session.cwd)
-            .join(quack_config::expand_home(&name, &|k| std::env::var_os(k)));
-        match std::fs::write(&file, text) {
-            Ok(()) => self.emit(Event::Notice {
+            .map(str::to_owned);
+        let written = tokio::task::spawn_blocking(move || {
+            let records = ps.read(&entry)?;
+            let items = session::replay(&records).items;
+            let started = quack_store::time::date(entry.started);
+            let header = crate::export::Header {
+                id: &id,
+                title: title.as_deref(),
+                model: &entry.model,
+                started: &started,
+            };
+            let text = crate::export::render(format, &header, &items);
+            let name = name.unwrap_or_else(|| crate::export::file_name(&header, format));
+            let file = std::path::Path::new(&cwd)
+                .join(quack_config::expand_home(&name, &|k| std::env::var_os(k)));
+            std::fs::write(&file, text).map(|()| file)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("the export task failed: {e}");
+            Err(std::io::Error::other("the export task failed"))
+        });
+        match written {
+            Ok(file) => self.emit(Event::Notice {
                 message: format!("exported the transcript to {}", file.display()),
             }),
-            Err(e) => self.warn(format!("cannot write {}: {e}", file.display())),
+            Err(e) => self.warn(format!("cannot read or write the transcript: {e}")),
         }
     }
 
     /// `/fork`: go on in a new session that starts as a copy of this one, with its undo
     /// points. The original is left as it is; `session_start` names it as `parent`.
-    fn fork_session(&mut self) {
+    async fn fork_session(&mut self) {
         self.sync_log();
         let Some((entry, dir)) = self
             .log
@@ -748,28 +783,38 @@ impl Engine {
         };
         let ps = session::project_sessions(&self.config);
         let id = new_session_id();
-        let forked = ps.read(&entry).and_then(|records| {
-            let mut log = ps.create(&id.0, &entry.model)?;
-            log.append(
-                "session_start",
-                serde_json::json!({
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "os": std::env::consts::OS,
-                    "cwd": self.session.cwd,
-                    "model": entry.model,
-                    "profile": self.session.profile,
-                    "parent": entry.id,
-                    "at": records.len(),
-                }),
-            )?;
-            for r in records
-                .iter()
-                .filter(|r| !matches!(r.kind.as_str(), "session_start" | "resume"))
-            {
-                log.copy(r)?;
-            }
-            copy_dir(&dir.join("checkpoints"), &log.dir().join("checkpoints"))?;
-            Ok(log)
+        let task_id = id.clone();
+        let cwd = self.session.cwd.clone();
+        let profile = self.session.profile.clone();
+        let forked = tokio::task::spawn_blocking(move || {
+            ps.read(&entry).and_then(|records| {
+                let mut log = ps.create(&task_id.0, &entry.model)?;
+                log.append(
+                    "session_start",
+                    serde_json::json!({
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "os": std::env::consts::OS,
+                        "cwd": cwd,
+                        "model": entry.model,
+                        "profile": profile,
+                        "parent": entry.id,
+                        "at": records.len(),
+                    }),
+                )?;
+                for r in records
+                    .iter()
+                    .filter(|r| !matches!(r.kind.as_str(), "session_start" | "resume"))
+                {
+                    log.copy(r)?;
+                }
+                copy_dir(&dir.join("checkpoints"), &log.dir().join("checkpoints"))?;
+                Ok(log)
+            })
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("the session fork task failed: {e}");
+            Err(std::io::Error::other("the session fork task failed"))
         });
         let log = match forked {
             Ok(log) => log,
@@ -783,7 +828,7 @@ impl Engine {
         self.set_title(title);
         self.sync_log();
         self.emit(Event::SessionConfigured {
-            session: self.session.clone(),
+            session: Box::new(self.session.clone()),
         });
         let short: String = parent.0.chars().take(8).collect();
         self.emit(Event::Notice {
@@ -850,15 +895,11 @@ impl Engine {
         self.restore_modes();
         self.emit(Event::Plan { checklist: plan });
         self.emit_mode();
-        if self
-            .convo
-            .as_ref()
-            .is_some_and(|c| c.perms.lock().is_ok_and(|p| p.work_mode == WorkMode::Plan))
-        {
+        if self.in_plan_mode() {
             self.start_planner();
         }
         self.emit(Event::SessionConfigured {
-            session: self.session.clone(),
+            session: Box::new(self.session.clone()),
         });
         self.start_context = self.session_hooks(HookEvent::SessionStart, source);
     }
@@ -1159,7 +1200,12 @@ impl Engine {
 
     /// `/rewind`: put files back and/or cut the conversation back to before a user message.
     /// When files changed again since, nothing happens without `force`.
-    fn rewind(&mut self, back: u32, conversation: bool, files: bool, force: bool) {
+    fn rewind(&mut self, back: u32, opts: RewindOpts) {
+        let RewindOpts {
+            conversation,
+            files,
+            force,
+        } = opts;
         if self.running.is_some() {
             return self.warn("wait for the current turn to finish before /rewind".into());
         }
@@ -1554,7 +1600,8 @@ impl Engine {
         let levels = &setup.model.reasoning.efforts;
         if levels.is_empty() {
             return self.warn(format!(
-                "{} has no selectable thinking levels; declare reasoning.efforts in its provider file.",
+                "{} has no selectable thinking levels; run `quack catalog refresh` for the \
+                 catalog's, or declare reasoning.efforts in its provider file.",
                 setup.model_ref
             ));
         }
@@ -1595,7 +1642,7 @@ impl Engine {
         );
         self.pool = None;
         self.emit(Event::SessionConfigured {
-            session: self.session.clone(),
+            session: Box::new(self.session.clone()),
         });
         self.emit(Event::Notice {
             message: format!(
@@ -1625,13 +1672,7 @@ impl Engine {
         self.session.model = Some(setup.model_ref.clone());
         self.session.profile = setup.profile.id.clone();
         setup.provider.set_ledger(self.ledger.clone());
-        if let Ok(mut list) = self.secret_allowlist.lock() {
-            for fp in &self.config.settings.network.secret_allowlist {
-                if !list.contains(fp) {
-                    list.push(fp.clone());
-                }
-            }
-        }
+        self.merge_secret_allowlist();
         self.configure_reasoning(&setup);
         if self.config.settings.model.remember_last
             && let Err(e) =
@@ -1671,7 +1712,7 @@ impl Engine {
             }
         }
         self.emit(Event::SessionConfigured {
-            session: self.session.clone(),
+            session: Box::new(self.session.clone()),
         });
     }
 
@@ -1741,13 +1782,7 @@ impl Engine {
         self.session.model = Some(setup.model_ref.clone());
         self.session.profile = setup.profile.id.clone();
         setup.provider.set_ledger(self.ledger.clone());
-        if let Ok(mut list) = self.secret_allowlist.lock() {
-            for fp in &self.config.settings.network.secret_allowlist {
-                if !list.contains(fp) {
-                    list.push(fp.clone());
-                }
-            }
-        }
+        self.merge_secret_allowlist();
         self.configure_reasoning(&setup);
         session::record(
             self.log.as_ref(),
@@ -1755,14 +1790,14 @@ impl Engine {
             serde_json::json!({ "to": setup.model_ref, "profile": setup.profile.id, "role": role }),
         );
         self.emit(Event::SessionConfigured {
-            session: self.session.clone(),
+            session: Box::new(self.session.clone()),
         });
     }
 
     /// `/plan accept`: leave plan mode for `mode` and carry out the plan. After a planner,
     /// its messages give way to one brief, so the session's model reads only that on top of
     /// the history it already has cached.
-    fn accept_plan(&mut self, mode: &str, done: mpsc::Sender<(TurnId, Vec<Message>)>) {
+    async fn accept_plan(&mut self, mode: &str, done: mpsc::Sender<(TurnId, Vec<Message>)>) {
         let approvals = (!mode.is_empty())
             .then(|| serde_json::from_value::<ApprovalPolicy>(serde_json::Value::from(mode)).ok())
             .flatten();
@@ -1809,11 +1844,17 @@ impl Engine {
             }
             None => "Carry out the plan above.".to_owned(),
         };
-        self.start_turn(vec![InputItem::text(text)], done);
+        self.start_turn(vec![InputItem::text(text)], done).await;
     }
 
     fn warn(&self, message: String) {
         self.emit(Event::Warning { message });
+    }
+
+    /// A resume was asked for and failed; unlike [`Event::Warning`], clients can tell
+    /// this apart from any other warning without matching the prose.
+    fn resume_failed(&self, reason: String) {
+        self.emit(Event::SessionResumeFailed { reason });
     }
 
     /// The sub-agent pool, made again when a reload replaced the config or the servers.
@@ -1834,14 +1875,25 @@ impl Engine {
     }
 
     /// Create the session log on the first turn.
-    fn ensure_log(&mut self) {
+    async fn ensure_log(&mut self) {
         if self.log.is_some() {
             return;
         }
         let ps = session::project_sessions(&self.config);
         let model = self.session.model.clone().unwrap_or_default();
-        match std::fs::create_dir_all(&ps.dir).and_then(|()| ps.create(&self.session.id.0, &model))
-        {
+        let id = self.session.id.0.clone();
+        let task_model = model.clone();
+        let created = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&ps.dir).and_then(|()| ps.create(&id, &task_model))
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("the session log creation task failed: {e}");
+            Err(std::io::Error::other(
+                "the session log creation task failed",
+            ))
+        });
+        match created {
             Ok(log) => {
                 let log = Arc::new(Mutex::new(log));
                 session::record(
@@ -1885,6 +1937,665 @@ impl Engine {
         }
     }
 
+    async fn user_turn(
+        &mut self,
+        items: Vec<InputItem>,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+    ) {
+        if self.reloading {
+            self.queue_turn(items, "the config reload");
+        } else if self.switching {
+            self.queue_turn(items, "the planner model");
+        } else if !self.started {
+            self.queue_turn(items, "startup");
+        } else if self.running.is_some() {
+            self.queue_turn(items, "the current turn");
+        } else {
+            self.start_turn(items, done.clone()).await;
+        }
+    }
+
+    fn interrupt(&mut self) {
+        if let Some((_, cancel)) = &self.running {
+            cancel.cancel();
+        }
+        self.queued.clear();
+    }
+
+    fn answer_questions(
+        &mut self,
+        call_id: CallId,
+        answers: Vec<quack_protocol::Answer>,
+        stop_asking: bool,
+    ) {
+        let waiting = self
+            .questions
+            .lock()
+            .ok()
+            .and_then(|mut p| p.remove(&call_id.0));
+        match waiting {
+            Some(tx) => {
+                let _ = tx.send(quack_tools::Answers {
+                    answers,
+                    stop_asking,
+                });
+            }
+            None => self.emit(Event::Warning {
+                message: format!("no pending question for call {}", call_id.0),
+            }),
+        }
+    }
+
+    fn answer_approval(&mut self, call_id: CallId, decision: quack_protocol::ApprovalDecision) {
+        let waiting = self
+            .approvals
+            .lock()
+            .ok()
+            .and_then(|mut p| p.remove(&call_id.0));
+        match waiting {
+            Some(tx) => {
+                let _ = tx.send(decision);
+            }
+            None => self.emit(Event::Warning {
+                message: format!("no pending approval for call {}", call_id.0),
+            }),
+        }
+    }
+
+    fn answer_continue(&mut self, turn: TurnId, proceed: bool) {
+        let waiting = self.continues.lock().ok().and_then(|mut p| p.remove(&turn));
+        match waiting {
+            Some(tx) => {
+                let _ = tx.send(proceed);
+            }
+            None => self.emit(Event::Warning {
+                message: format!("turn {} is not paused at its step limit", turn.0),
+            }),
+        }
+    }
+
+    fn list_models(&self) {
+        let config = self.config.clone();
+        let tx = self.tx.clone();
+        let current = self.session.model.clone();
+        tokio::spawn(async move {
+            let providers = crate::models::catalog(config).await;
+            let _ = tx.send(Event::ModelCatalog { providers, current });
+        });
+    }
+
+    fn list_profiles(&self) -> bool {
+        let Some(setup) = self.convo.as_ref().map(|c| c.setup.clone()) else {
+            return self.warn_continue("no model is ready yet; profiles are shown for one");
+        };
+        let config = self.config.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let event =
+                tokio::task::spawn_blocking(move || startup::profiles(&config, &setup)).await;
+            if let Ok(event) = event {
+                let _ = tx.send(event);
+            }
+        });
+        true
+    }
+
+    fn set_model(&self, provider: quack_protocol::ProviderId, model: quack_protocol::ModelId) {
+        if self.running.is_some() {
+            self.warn("wait for the current turn to finish before switching models".into());
+        } else {
+            self.switch_to(Role::Session, provider.0, model.0);
+        }
+    }
+
+    async fn queue_reasoning_effort(
+        &mut self,
+        effort: Option<String>,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        self.queued.push_back(Queued::ReasoningEffort(effort));
+        self.next_queued(done, reload).await;
+    }
+
+    async fn queue_fork(
+        &mut self,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        self.queued.push_back(Queued::Fork);
+        self.next_queued(done, reload).await;
+    }
+
+    async fn queue_compact(
+        &mut self,
+        focus: Option<String>,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        if !self.started || self.running.is_some() {
+            self.emit(Event::TurnQueued {
+                waiting_for: if self.started {
+                    "the current turn".into()
+                } else {
+                    "startup".into()
+                },
+            });
+        }
+        self.queued.push_back(Queued::Compact(focus));
+        self.next_queued(done, reload).await;
+    }
+
+    fn send_rewind_points(&self) {
+        let points = self.rewind_points().into_iter().map(|p| p.point).collect();
+        self.emit(Event::RewindPoints { points });
+    }
+
+    fn run_doctor(&self) {
+        let config = self.config.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let checks = crate::doctor::run(config).await;
+            let _ = tx.send(Event::DoctorReport { checks });
+        });
+    }
+
+    async fn init_instructions(
+        &mut self,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) -> bool {
+        let prompt = init_prompt(&self.config);
+        Box::pin(self.handle(
+            Op::UserTurn {
+                items: vec![InputItem::text(prompt)],
+                overrides: Default::default(),
+            },
+            done,
+            reload,
+        ))
+        .await
+    }
+
+    async fn queue_prune(
+        &mut self,
+        indices: Option<Vec<usize>>,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        if !self.started || self.running.is_some() {
+            self.emit(Event::TurnQueued {
+                waiting_for: if self.started {
+                    "the current turn".into()
+                } else {
+                    "startup".into()
+                },
+            });
+        }
+        self.queued.push_back(Queued::Prune(indices));
+        self.next_queued(done, reload).await;
+    }
+
+    fn restart_mcp(&self, id: String) {
+        let mcp = self.mcp.clone();
+        let tx = self.tx.clone();
+        let budget = self.convo.as_ref().and_then(|c| c.setup.budget);
+        tokio::spawn(async move {
+            if let Err(message) = mcp.manager.restart(&id).await {
+                let _ = tx.send(Event::Warning { message });
+            }
+            let _ = tx.send(Event::McpServers {
+                servers: mcp.info(budget),
+            });
+        });
+    }
+
+    async fn enable_mcp(
+        &mut self,
+        id: String,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        let target = id.clone();
+        self.apply_config_edit(
+            done,
+            reload,
+            move |cfg| {
+                crate::mcp::enable_mcp_in_config_detail(cfg, &target, &|v| {
+                    std::env::var_os(v).is_some()
+                })
+            },
+            move |engine, (path, message)| {
+                engine.emit(Event::McpEnabled {
+                    id: id.clone(),
+                    path: path.display().to_string(),
+                });
+                engine.emit(Event::McpChanged { id, message });
+            },
+        )
+        .await;
+    }
+
+    async fn disable_mcp(
+        &mut self,
+        id: String,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        let target = id.clone();
+        self.apply_mcp_change(id, done, reload, move |cfg| {
+            crate::mcp::disable_mcp_in_config(cfg, &target)
+        })
+        .await;
+    }
+
+    async fn add_mcp(
+        &mut self,
+        fields: AddMcpFields,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        let AddMcpFields {
+            id,
+            url,
+            command,
+            args,
+            bearer_env,
+            bearer_token,
+            scope,
+        } = fields;
+        let project = match scope {
+            None | Some(WriteScope::User) => Some(false),
+            Some(WriteScope::Project) => Some(true),
+            Some(WriteScope::Session) => None,
+        };
+        if let Some(project) = project {
+            let target = id.clone();
+            self.apply_mcp_change(id, done, reload, move |cfg| {
+                crate::mcp::add_mcp_in_config(
+                    cfg,
+                    crate::mcp::AddMcpInput {
+                        id: target,
+                        url,
+                        command,
+                        args,
+                        bearer_env,
+                        bearer_token: bearer_token.map(|s| s.0),
+                        project,
+                    },
+                )
+            })
+            .await;
+        } else {
+            self.warn("MCP servers are saved to the user or project layer".into());
+        }
+    }
+
+    async fn save_mcp_server(
+        &mut self,
+        scope: WriteScope,
+        fields: SavedMcpFields,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        let layer = match scope {
+            WriteScope::User => Some(LayerKind::User),
+            WriteScope::Project => Some(LayerKind::Project),
+            WriteScope::Session => {
+                self.warn("MCP servers are saved to the user or project layer".into());
+                None
+            }
+        };
+        if let Some(layer) = layer {
+            let saved_id = fields.id.clone();
+            let spec = build_saved_mcp_server(fields);
+            match spec {
+                Ok(spec) => {
+                    self.apply_config_edit(
+                        done,
+                        reload,
+                        move |cfg| cfg.save_mcp_server(layer, spec),
+                        move |engine, path| {
+                            engine.emit(Event::McpServerSaved {
+                                id: saved_id,
+                                path: path.display().to_string(),
+                            });
+                        },
+                    )
+                    .await;
+                }
+                Err(message) => self.emit(Event::Error {
+                    error: EngineError {
+                        kind: EngineErrorKind::Config,
+                        message,
+                    },
+                }),
+            }
+        }
+    }
+
+    fn detect_servers(&self) {
+        let config = self.config.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let servers = crate::setup::detect(config).await;
+            let _ = tx.send(Event::ServersDetected { servers });
+        });
+    }
+
+    async fn start_sign_in(&mut self, id: Option<String>) {
+        if let Some(task) = self.sign_in.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(id) = id {
+            let config = self.config.clone();
+            let tx = self.tx.clone();
+            self.sign_in = Some(tokio::spawn(async move {
+                let result = match crate::setup::sign_in_provider(&config, &id) {
+                    Ok(provider) => {
+                        provider
+                            .sign_in(|url| {
+                                let _ = tx.send(Event::SignInUrl {
+                                    id: id.clone(),
+                                    url: url.to_owned(),
+                                });
+                            })
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
+                let _ = tx.send(Event::SignInResult {
+                    id,
+                    error: result.err(),
+                });
+            }));
+        }
+    }
+
+    fn list_services(&self) {
+        let config = self.config.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let services =
+                tokio::task::spawn_blocking(move || crate::setup::service_infos(&config))
+                    .await
+                    .unwrap_or_default();
+            let _ = tx.send(Event::Services { services });
+        });
+    }
+
+    fn set_provider_key(&self, id: String, key: quack_protocol::SecretText) {
+        // The session (and the planner, or the editor it stands in for) sends the
+        // new key from its next request, a running turn's included.
+        let live = self
+            .convo
+            .iter()
+            .flat_map(|c| [Some(&c.setup), c.editor.as_ref()])
+            .flatten()
+            .map(|s| s.provider.clone())
+            .filter(|p| p.id == id)
+            .collect();
+        self.connect(live, move |config| {
+            crate::setup::set_provider_key(config, &id, &key.0).map(|saved| crate::setup::Added {
+                id,
+                path: saved.path,
+                note: saved.note,
+            })
+        });
+    }
+
+    fn list_provider_connections(&self) {
+        let config = self.config.clone();
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let connections = crate::setup::provider_connections(&config);
+            let _ = tx.send(Event::ProviderConnections { connections });
+        });
+    }
+
+    async fn save_provider_connection(
+        &mut self,
+        id: String,
+        http_version: Option<quack_protocol::ProviderHttpVersion>,
+        no_proxy: Option<bool>,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        self.apply_config_edit(
+            done,
+            reload,
+            move |config| {
+                crate::setup::save_provider_connection(config, &id, http_version, no_proxy)
+            },
+            |engine, (connection, path)| {
+                engine.emit(Event::ProviderConnectionSaved {
+                    connection,
+                    path: path.display().to_string(),
+                });
+            },
+        )
+        .await;
+    }
+
+    async fn queue_accept_plan(
+        &mut self,
+        mode: String,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        self.queued.push_back(Queued::Accept(mode));
+        self.next_queued(done, reload).await;
+    }
+
+    fn delete_memory(&mut self, scope: String, name: String) {
+        let store = crate::env::memory_store(&self.config);
+        let result = Scope::parse(&scope)
+            .ok_or_else(|| format!("unknown scope `{scope}`"))
+            .and_then(|s| store.delete(s, &name));
+        match result {
+            Ok(()) => self.list_memory(),
+            Err(e) => self.warn(format!("cannot delete note: {e}")),
+        }
+    }
+
+    fn context_report(&self) {
+        match &self.convo {
+            Some(c) => self.emit(Event::ContextReport {
+                report: Box::new(crate::context::report(&c.setup, c.history.as_deref())),
+            }),
+            None => self.warn("no model is ready, so there is no context yet".into()),
+        }
+    }
+
+    fn stats_report(&self) {
+        let model = self
+            .convo
+            .as_ref()
+            .map(|c| c.setup.model_ref.clone())
+            .or_else(|| self.session.model.clone())
+            .unwrap_or_default();
+        let mut report = self
+            .stats
+            .lock()
+            .map(|s| s.report(&model, self.turns))
+            .unwrap_or_default();
+        if let Some(c) = &self.convo {
+            let s = turn::sampling(&c.setup);
+            report.sampling = [
+                ("temperature", s.temperature),
+                ("top_p", s.top_p),
+                ("top_k", s.top_k.map(f64::from)),
+                ("min_p", s.min_p),
+                ("repetition_penalty", s.repetition_penalty),
+            ]
+            .into_iter()
+            .filter_map(|(k, v)| Some((k.to_owned(), v?)))
+            .collect();
+        }
+        self.emit(Event::Stats {
+            report: Box::new(report),
+        });
+    }
+
+    fn set_session_title(&mut self, title: String) {
+        self.title_tasks = JoinSet::new();
+        self.save_title(title.trim().to_owned());
+    }
+
+    async fn queue_reload(
+        &mut self,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        self.queued.push_back(Queued::Reload(None));
+        self.next_queued(done, reload).await;
+    }
+
+    async fn trust_project(
+        &mut self,
+        decision: String,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        let saved = quack_config::TrustDecision::parse(&decision)
+            .ok_or_else(|| {
+                format!("unknown decision `{decision}`; use trusted, settings-only or ignored")
+            })
+            .and_then(|d| self.config.trust_project(d));
+        match saved {
+            Ok(_) => {
+                self.queued.push_back(Queued::Reload(None));
+                self.next_queued(done, reload).await;
+            }
+            Err(message) => self.emit(Event::Error {
+                error: EngineError {
+                    kind: EngineErrorKind::Config,
+                    message: format!("cannot save the trust decision: {message}"),
+                },
+            }),
+        }
+    }
+
+    async fn enable_hook(
+        &mut self,
+        id: String,
+        replace_payload: Option<bool>,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        let config = self.config.clone();
+        let requested = id.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            config
+                .reload()
+                .map_err(|e| e.to_string())?
+                .enable_hook_with_payload(&requested, replace_payload)
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+        match outcome {
+            Ok(quack_config::HookEnableOutcome::Enabled(outcome)) => {
+                self.queued.push_back(Queued::Reload(Some((
+                    id,
+                    outcome.path.display().to_string(),
+                ))));
+                self.next_queued(done, reload).await;
+            }
+            Ok(quack_config::HookEnableOutcome::ChoosePayload(path)) => {
+                self.emit(Event::HookPayloadChoice {
+                    id,
+                    path: path.display().to_string(),
+                })
+            }
+            Err(message) => self.emit(Event::Error {
+                error: EngineError {
+                    kind: EngineErrorKind::Config,
+                    message,
+                },
+            }),
+        }
+    }
+
+    fn inspect_hook_setup(&mut self, id: String, request: u64) {
+        let config = self.config.clone();
+        let tx = self.tx.clone();
+        self.hook_tasks.spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let fresh = config.reload().map_err(|_| {
+                    "Cannot reload the configuration; fix its errors first.".to_owned()
+                })?;
+                crate::hook_setup::inspect(&fresh, &id)
+            })
+            .await
+            .unwrap_or_else(|_| Err("Cannot inspect the hook configuration.".into()));
+            let event = match result {
+                Ok(info) => Event::HookSetup {
+                    request,
+                    info: Box::new(info),
+                },
+                Err(message) => Event::HookSetupFailed { request, message },
+            };
+            let _ = tx.send(event);
+        });
+    }
+
+    async fn queue_hook_save(
+        &mut self,
+        op: Op,
+        done: &mpsc::Sender<(TurnId, Vec<Message>)>,
+        reload: &mpsc::Sender<Reload>,
+    ) {
+        if let Op::SaveHookSetup { request, .. } = &op {
+            self.emit(Event::HookSetupPending { request: *request });
+        }
+        self.queued.push_back(Queued::HookSave(Box::new(op)));
+        self.next_queued(done, reload).await;
+    }
+
+    fn check_hook_setup(
+        &mut self,
+        id: String,
+        request: u64,
+        revision: String,
+        connection: quack_protocol::HookConnectionDraft,
+        url: String,
+    ) {
+        let config = self.config.clone();
+        let tx = self.tx.clone();
+        let cancel = CancellationToken::new();
+        self.hook_checks.insert(request, cancel.clone());
+        self.hook_tasks.spawn(async move {
+            let root = config.dirs.workspace_root.clone();
+            let prepared = tokio::task::spawn_blocking(move || {
+                crate::hook_setup::check_binding(&config, &id, &revision, &connection, &url)
+                    .map(|(file, dir)| (file, dir, url))
+            })
+            .await;
+            let result = match prepared {
+                Ok(Ok((file, dir, url))) => {
+                    crate::hooks::check(file, dir, root, url, cancel.clone()).await
+                }
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err("Cannot prepare the access check.".into()),
+            };
+            let (status, message) = result.unwrap_or_else(|message| ("invalid".into(), message));
+            let _ = tx.send(Event::HookCheckResult {
+                request,
+                status,
+                message,
+            });
+            cancel.cancel();
+        });
+    }
+
+    fn cancel_hook_check(&mut self, request: u64) {
+        if let Some(cancel) = self.hook_checks.remove(&request) {
+            cancel.cancel();
+        }
+    }
+
     /// Returns false when the engine should stop.
     async fn handle(
         &mut self,
@@ -1894,180 +2605,52 @@ impl Engine {
     ) -> bool {
         tracing::debug!(op = op_name(&op), "op");
         match op {
-            Op::UserTurn { items, .. } => {
-                if self.reloading {
-                    self.emit(Event::TurnQueued {
-                        waiting_for: "the config reload".into(),
-                    });
-                    self.queued.push_back(Queued::Turn(items));
-                } else if self.switching {
-                    self.emit(Event::TurnQueued {
-                        waiting_for: "the planner model".into(),
-                    });
-                    self.queued.push_back(Queued::Turn(items));
-                } else if !self.started {
-                    self.emit(Event::TurnQueued {
-                        waiting_for: "startup".into(),
-                    });
-                    self.queued.push_back(Queued::Turn(items));
-                } else if self.running.is_some() {
-                    self.emit(Event::TurnQueued {
-                        waiting_for: "the current turn".into(),
-                    });
-                    self.queued.push_back(Queued::Turn(items));
-                } else {
-                    self.start_turn(items, done.clone());
-                }
-            }
-            Op::Interrupt => {
-                if let Some((_, cancel)) = &self.running {
-                    cancel.cancel();
-                }
-                self.queued.clear();
-            }
+            Op::UserTurn { items, .. } => self.user_turn(items, done).await,
+            Op::Interrupt => self.interrupt(),
             Op::AnswerQuestions {
                 call_id,
                 answers,
                 stop_asking,
-            } => {
-                let waiting = self
-                    .questions
-                    .lock()
-                    .ok()
-                    .and_then(|mut p| p.remove(&call_id.0));
-                match waiting {
-                    Some(tx) => {
-                        let _ = tx.send(quack_tools::Answers {
-                            answers,
-                            stop_asking,
-                        });
-                    }
-                    None => self.emit(Event::Warning {
-                        message: format!("no pending question for call {}", call_id.0),
-                    }),
-                }
-            }
-            Op::ApprovalResponse { call_id, decision } => {
-                let waiting = self
-                    .approvals
-                    .lock()
-                    .ok()
-                    .and_then(|mut p| p.remove(&call_id.0));
-                match waiting {
-                    Some(tx) => {
-                        let _ = tx.send(decision);
-                    }
-                    None => self.emit(Event::Warning {
-                        message: format!("no pending approval for call {}", call_id.0),
-                    }),
-                }
-            }
-            Op::ContinueTurn { turn, proceed } => {
-                let waiting = self.continues.lock().ok().and_then(|mut p| p.remove(&turn));
-                match waiting {
-                    Some(tx) => {
-                        let _ = tx.send(proceed);
-                    }
-                    None => self.emit(Event::Warning {
-                        message: format!("turn {} is not paused at its step limit", turn.0),
-                    }),
-                }
-            }
-            Op::ListModels => {
-                let config = self.config.clone();
-                let tx = self.tx.clone();
-                let current = self.session.model.clone();
-                tokio::spawn(async move {
-                    let providers = crate::models::catalog(config).await;
-                    let _ = tx.send(Event::ModelCatalog { providers, current });
-                });
-            }
-            Op::ListProfiles => {
-                let Some(setup) = self.convo.as_ref().map(|c| c.setup.clone()) else {
-                    return self.warn_continue("no model is ready yet; profiles are shown for one");
-                };
-                let config = self.config.clone();
-                let tx = self.tx.clone();
-                tokio::spawn(async move {
-                    let event =
-                        tokio::task::spawn_blocking(move || startup::profiles(&config, &setup))
-                            .await;
-                    if let Ok(event) = event {
-                        let _ = tx.send(event);
-                    }
-                });
-            }
+            } => self.answer_questions(call_id, answers, stop_asking),
+            Op::ApprovalResponse { call_id, decision } => self.answer_approval(call_id, decision),
+            Op::ContinueTurn { turn, proceed } => self.answer_continue(turn, proceed),
+            Op::ListModels => self.list_models(),
+            Op::ListProfiles => return self.list_profiles(),
             Op::SetProfile { id } => self.set_profile(id),
             Op::ListInstructions => self.list_instructions(),
-            Op::SetModel { provider, model } => {
-                if self.running.is_some() {
-                    self.warn("wait for the current turn to finish before switching models".into());
-                } else {
-                    self.switch_to(Role::Session, provider.0, model.0);
-                }
-            }
+            Op::SetModel { provider, model } => self.set_model(provider, model),
             Op::SetReasoningEffort { effort } => {
-                self.queued.push_back(Queued::ReasoningEffort(effort));
-                self.next_queued(done, reload);
+                self.queue_reasoning_effort(effort, done, reload).await
             }
             // A client may send these the moment it sees `TurnComplete`, before the turn
             // task has handed the history back, so they wait in the queue like turns do.
-            Op::ResumeSession { id } => self.queue_switch(Some(id), done, reload),
-            Op::NewSession => self.queue_switch(None, done, reload),
-            Op::ForkSession => {
-                self.queued.push_back(Queued::Fork);
-                self.next_queued(done, reload);
-            }
-            Op::Export { format, path } => self.export(format, path.as_deref()),
-            Op::Compact { focus } => {
-                if !self.started || self.running.is_some() {
-                    self.emit(Event::TurnQueued {
-                        waiting_for: if self.started {
-                            "the current turn".into()
-                        } else {
-                            "startup".into()
-                        },
-                    });
-                }
-                self.queued.push_back(Queued::Compact(focus));
-                self.next_queued(done, reload);
-            }
+            Op::ResumeSession { id } => self.queue_switch(Some(id), done, reload).await,
+            Op::NewSession => self.queue_switch(None, done, reload).await,
+            Op::ForkSession => self.queue_fork(done, reload).await,
+            Op::Export { format, path } => self.export(format, path.as_deref()).await,
+            Op::Compact { focus } => self.queue_compact(focus, done, reload).await,
             Op::ListSessions => self.list_sessions(),
             Op::ListMemory => self.list_memory(),
-            Op::ListRewindPoints => {
-                let points = self.rewind_points().into_iter().map(|p| p.point).collect();
-                self.emit(Event::RewindPoints { points });
-            }
+            Op::ListRewindPoints => self.send_rewind_points(),
             Op::Rewind {
                 back,
                 conversation,
                 files,
                 force,
-            } => self.rewind(back, conversation, files, force),
+            } => self.rewind(
+                back,
+                RewindOpts {
+                    conversation,
+                    files,
+                    force,
+                },
+            ),
             Op::Undo { force, .. } => self.undo(force),
-            Op::RunDoctor => {
-                let config = self.config.clone();
-                let tx = self.tx.clone();
-                tokio::spawn(async move {
-                    let checks = crate::doctor::run(config).await;
-                    let _ = tx.send(Event::DoctorReport { checks });
-                });
-            }
+            Op::RunDoctor => self.run_doctor(),
             Op::CheckUpdates => {
                 crate::checks::check_updates_now(self.config.clone(), self.tx.clone());
             }
-            Op::InitInstructions => {
-                let prompt = init_prompt(&self.config);
-                return Box::pin(self.handle(
-                    Op::UserTurn {
-                        items: vec![InputItem::text(prompt)],
-                        overrides: Default::default(),
-                    },
-                    done,
-                    reload,
-                ))
-                .await;
-            }
+            Op::InitInstructions => return self.init_instructions(done, reload).await,
             Op::ListLsp => self.emit(Event::LspServers {
                 servers: crate::lsp::info(&self.lsp),
             }),
@@ -2075,19 +2658,7 @@ impl Engine {
                 let (entries, stats) = self.ledger.snapshot();
                 self.emit(Event::EgressLedger { entries, stats });
             }
-            Op::PruneContext { indices } => {
-                if !self.started || self.running.is_some() {
-                    self.emit(Event::TurnQueued {
-                        waiting_for: if self.started {
-                            "the current turn".into()
-                        } else {
-                            "startup".into()
-                        },
-                    });
-                }
-                self.queued.push_back(Queued::Prune(indices));
-                self.next_queued(done, reload);
-            }
+            Op::PruneContext { indices } => self.queue_prune(indices, done, reload).await,
             Op::ProbeToolCalling => self.probe_tool_calling(),
             Op::ListLspDiagnostics { server_id } => {
                 self.list_lsp_diagnostics(server_id.as_deref());
@@ -2097,46 +2668,9 @@ impl Engine {
                     .mcp
                     .info(self.convo.as_ref().and_then(|c| c.setup.budget)),
             }),
-            Op::RestartMcp { id } => {
-                let mcp = self.mcp.clone();
-                let tx = self.tx.clone();
-                let budget = self.convo.as_ref().and_then(|c| c.setup.budget);
-                tokio::spawn(async move {
-                    if let Err(message) = mcp.manager.restart(&id).await {
-                        let _ = tx.send(Event::Warning { message });
-                    }
-                    let _ = tx.send(Event::McpServers {
-                        servers: mcp.info(budget),
-                    });
-                });
-            }
-            Op::EnableMcp { id } => {
-                let target = id.clone();
-                self.apply_config_edit(
-                    done,
-                    reload,
-                    move |cfg| {
-                        crate::mcp::enable_mcp_in_config_detail(cfg, &target, &|v| {
-                            std::env::var_os(v).is_some()
-                        })
-                    },
-                    move |engine, (path, message)| {
-                        engine.emit(Event::McpEnabled {
-                            id: id.clone(),
-                            path: path.display().to_string(),
-                        });
-                        engine.emit(Event::McpChanged { id, message });
-                    },
-                )
-                .await;
-            }
-            Op::DisableMcp { id } => {
-                let target = id.clone();
-                self.apply_mcp_change(id, done, reload, move |cfg| {
-                    crate::mcp::disable_mcp_in_config(cfg, &target)
-                })
-                .await;
-            }
+            Op::RestartMcp { id } => self.restart_mcp(id),
+            Op::EnableMcp { id } => self.enable_mcp(id, done, reload).await,
+            Op::DisableMcp { id } => self.disable_mcp(id, done, reload).await,
             Op::AddMcp {
                 id,
                 url,
@@ -2146,31 +2680,20 @@ impl Engine {
                 bearer_token,
                 scope,
             } => {
-                let project = match scope {
-                    None | Some(WriteScope::User) => Some(false),
-                    Some(WriteScope::Project) => Some(true),
-                    Some(WriteScope::Session) => None,
-                };
-                if let Some(project) = project {
-                    let target = id.clone();
-                    self.apply_mcp_change(id, done, reload, move |cfg| {
-                        crate::mcp::add_mcp_in_config(
-                            cfg,
-                            crate::mcp::AddMcpInput {
-                                id: target,
-                                url,
-                                command,
-                                args,
-                                bearer_env,
-                                bearer_token: bearer_token.map(|s| s.0),
-                                project,
-                            },
-                        )
-                    })
-                    .await;
-                } else {
-                    self.warn("MCP servers are saved to the user or project layer".into());
-                }
+                self.add_mcp(
+                    AddMcpFields {
+                        id,
+                        url,
+                        command,
+                        args,
+                        bearer_env,
+                        bearer_token,
+                        scope,
+                    },
+                    done,
+                    reload,
+                )
+                .await
             }
             Op::SaveMcpServer {
                 id,
@@ -2184,17 +2707,9 @@ impl Engine {
                 env,
                 headers,
             } => {
-                let layer = match scope {
-                    WriteScope::User => Some(LayerKind::User),
-                    WriteScope::Project => Some(LayerKind::Project),
-                    WriteScope::Session => {
-                        self.warn("MCP servers are saved to the user or project layer".into());
-                        None
-                    }
-                };
-                if let Some(layer) = layer {
-                    let saved_id = id.clone();
-                    let spec = build_saved_mcp_server(SavedMcpFields {
+                self.save_mcp_server(
+                    scope,
+                    SavedMcpFields {
                         id,
                         description,
                         command,
@@ -2204,109 +2719,34 @@ impl Engine {
                         sandbox,
                         env,
                         headers,
-                    });
-                    match spec {
-                        Ok(spec) => {
-                            self.apply_config_edit(
-                                done,
-                                reload,
-                                move |cfg| cfg.save_mcp_server(layer, spec),
-                                move |engine, path| {
-                                    engine.emit(Event::McpServerSaved {
-                                        id: saved_id,
-                                        path: path.display().to_string(),
-                                    });
-                                },
-                            )
-                            .await;
-                        }
-                        Err(message) => self.emit(Event::Error {
-                            error: EngineError {
-                                kind: EngineErrorKind::Config,
-                                message,
-                            },
-                        }),
-                    }
-                }
+                    },
+                    done,
+                    reload,
+                )
+                .await
             }
-            Op::DetectServers => {
-                let config = self.config.clone();
-                let tx = self.tx.clone();
-                tokio::spawn(async move {
-                    let servers = crate::setup::detect(config).await;
-                    let _ = tx.send(Event::ServersDetected { servers });
-                });
-            }
+            Op::DetectServers => self.detect_servers(),
             Op::AddProvider {
                 id,
                 base_url,
                 api,
                 model,
             } => self.add_provider(&id, &base_url, api.as_deref(), model),
-            Op::SignIn { id } => {
-                if let Some(task) = self.sign_in.take() {
-                    task.abort();
-                    let _ = task.await;
-                }
-                if let Some(id) = id {
-                    let config = self.config.clone();
-                    let tx = self.tx.clone();
-                    self.sign_in = Some(tokio::spawn(async move {
-                        let result = match crate::setup::sign_in_provider(&config, &id) {
-                            Ok(provider) => {
-                                provider
-                                    .sign_in(|url| {
-                                        let _ = tx.send(Event::SignInUrl {
-                                            id: id.clone(),
-                                            url: url.to_owned(),
-                                        });
-                                    })
-                                    .await
-                            }
-                            Err(error) => Err(error),
-                        };
-                        let _ = tx.send(Event::SignInResult {
-                            id,
-                            error: result.err(),
-                        });
-                    }));
-                }
-            }
-            Op::ListServices => {
-                let config = self.config.clone();
-                let tx = self.tx.clone();
-                tokio::spawn(async move {
-                    let services =
-                        tokio::task::spawn_blocking(move || crate::setup::service_infos(&config))
-                            .await
-                            .unwrap_or_default();
-                    let _ = tx.send(Event::Services { services });
-                });
-            }
-            Op::SetProviderKey { id, key } => {
-                // The session (and the planner, or the editor it stands in for) sends the
-                // new key from its next request, a running turn's included.
-                let live = self
-                    .convo
-                    .iter()
-                    .flat_map(|c| [Some(&c.setup), c.editor.as_ref()])
-                    .flatten()
-                    .map(|s| s.provider.clone())
-                    .filter(|p| p.id == id)
-                    .collect();
-                self.connect(live, move |config| {
-                    crate::setup::set_provider_key(config, &id, &key.0).map(|saved| {
-                        crate::setup::Added {
-                            id,
-                            path: saved.path,
-                            note: saved.note,
-                        }
-                    })
-                });
-            }
+            Op::SignIn { id } => self.start_sign_in(id).await,
+            Op::ListServices => self.list_services(),
+            Op::SetProviderKey { id, key } => self.set_provider_key(id, key),
             Op::AddServer { base_url, key } => self.connect(Vec::new(), move |config| {
                 crate::setup::add_server(config, &base_url, key.as_ref().map(|k| k.0.as_str()))
             }),
+            Op::ListProviderConnections => self.list_provider_connections(),
+            Op::SaveProviderConnection {
+                id,
+                http_version,
+                no_proxy,
+            } => {
+                self.save_provider_connection(id, http_version, no_proxy, done, reload)
+                    .await
+            }
             Op::SetPermissionMode { mode } if !self.started => self.pending_mode = Some(mode),
             Op::SetPermissionMode { mode } => self.set_mode(mode),
             Op::SetWorkMode { mode } if !self.started => self.pending_work_mode = Some(mode),
@@ -2317,10 +2757,7 @@ impl Engine {
             Op::SetApprovalPolicy { policy } => self.set_approval_policy(policy),
             Op::SetSandbox { off } if !self.started => self.pending_sandbox = Some(off),
             Op::SetSandbox { off } => self.set_sandbox(off),
-            Op::AcceptPlan { mode } => {
-                self.queued.push_back(Queued::Accept(mode));
-                self.next_queued(done, reload);
-            }
+            Op::AcceptPlan { mode } => self.queue_accept_plan(mode, done, reload).await,
             Op::SaveMemory {
                 scope,
                 name,
@@ -2338,211 +2775,56 @@ impl Engine {
                 previous_scope,
                 previous_name,
             }),
-            Op::DeleteMemory { scope, name } => {
-                let store = crate::env::memory_store(&self.config);
-                let result = Scope::parse(&scope)
-                    .ok_or_else(|| format!("unknown scope `{scope}`"))
-                    .and_then(|s| store.delete(s, &name));
-                match result {
-                    Ok(()) => self.list_memory(),
-                    Err(e) => self.warn(format!("cannot delete note: {e}")),
-                }
-            }
-            Op::GetContext => match &self.convo {
-                Some(c) => self.emit(Event::ContextReport {
-                    report: crate::context::report(&c.setup, c.history.as_deref()),
-                }),
-                None => self.warn("no model is ready, so there is no context yet".into()),
-            },
-            Op::GetStats => {
-                let model = self
-                    .convo
-                    .as_ref()
-                    .map(|c| c.setup.model_ref.clone())
-                    .or_else(|| self.session.model.clone())
-                    .unwrap_or_default();
-                let mut report = self
-                    .stats
-                    .lock()
-                    .map(|s| s.report(&model, self.turns))
-                    .unwrap_or_default();
-                if let Some(c) = &self.convo {
-                    let s = turn::sampling(&c.setup);
-                    report.sampling = [
-                        ("temperature", s.temperature),
-                        ("top_p", s.top_p),
-                        ("top_k", s.top_k.map(f64::from)),
-                        ("min_p", s.min_p),
-                        ("repetition_penalty", s.repetition_penalty),
-                    ]
-                    .into_iter()
-                    .filter_map(|(k, v)| Some((k.to_owned(), v?)))
-                    .collect();
-                }
-                self.emit(Event::Stats { report });
-            }
-            Op::SetTitle { title } => {
-                self.title_tasks = JoinSet::new();
-                self.save_title(title.trim().to_owned());
-            }
+            Op::DeleteMemory { scope, name } => self.delete_memory(scope, name),
+            Op::GetContext => self.context_report(),
+            Op::GetStats => self.stats_report(),
+            Op::SetTitle { title } => self.set_session_title(title),
             Op::SaveSetting { key, value, scope } => self.save_setting(&key, &value, &scope).await,
-            Op::ReloadConfig => {
-                self.queued.push_back(Queued::Reload(None));
-                self.next_queued(done, reload);
-            }
-            Op::TrustProject { decision } => {
-                let saved = quack_config::TrustDecision::parse(&decision)
-                    .ok_or_else(|| {
-                        format!(
-                            "unknown decision `{decision}`; use trusted, settings-only or ignored"
-                        )
-                    })
-                    .and_then(|d| self.config.trust_project(d));
-                match saved {
-                    Ok(_) => {
-                        self.queued.push_back(Queued::Reload(None));
-                        self.next_queued(done, reload);
-                    }
-                    Err(message) => self.emit(Event::Error {
-                        error: EngineError {
-                            kind: EngineErrorKind::Config,
-                            message: format!("cannot save the trust decision: {message}"),
-                        },
-                    }),
-                }
-            }
+            Op::ReloadConfig => self.queue_reload(done, reload).await,
+            Op::TrustProject { decision } => self.trust_project(decision, done, reload).await,
             Op::EnableHook {
                 id,
                 replace_payload,
-            } => {
-                let config = self.config.clone();
-                let requested = id.clone();
-                let outcome = tokio::task::spawn_blocking(move || {
-                    config
-                        .reload()
-                        .map_err(|e| e.to_string())?
-                        .enable_hook_with_payload(&requested, replace_payload)
-                })
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r);
-                match outcome {
-                    Ok(quack_config::HookEnableOutcome::Enabled(outcome)) => {
-                        self.queued.push_back(Queued::Reload(Some((
-                            id,
-                            outcome.path.display().to_string(),
-                        ))));
-                        self.next_queued(done, reload);
-                    }
-                    Ok(quack_config::HookEnableOutcome::ChoosePayload(path)) => {
-                        self.emit(Event::HookPayloadChoice {
-                            id,
-                            path: path.display().to_string(),
-                        })
-                    }
-                    Err(message) => self.emit(Event::Error {
-                        error: EngineError {
-                            kind: EngineErrorKind::Config,
-                            message,
-                        },
-                    }),
-                }
-            }
-            Op::InspectHookSetup { id, request } => {
-                let config = self.config.clone();
-                let tx = self.tx.clone();
-                self.hook_tasks.spawn(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                        let fresh = config.reload().map_err(|_| {
-                            "Cannot reload the configuration; fix its errors first.".to_owned()
-                        })?;
-                        crate::hook_setup::inspect(&fresh, &id)
-                    })
-                    .await
-                    .unwrap_or_else(|_| Err("Cannot inspect the hook configuration.".into()));
-                    let event = match result {
-                        Ok(info) => Event::HookSetup { request, info },
-                        Err(message) => Event::HookSetupFailed { request, message },
-                    };
-                    let _ = tx.send(event);
-                });
-            }
-            op @ Op::SaveHookSetup { .. } => {
-                if let Op::SaveHookSetup { request, .. } = &op {
-                    self.emit(Event::HookSetupPending { request: *request });
-                }
-                self.queued.push_back(Queued::HookSave(Box::new(op)));
-                self.next_queued(done, reload);
-            }
+            } => self.enable_hook(id, replace_payload, done, reload).await,
+            Op::InspectHookSetup { id, request } => self.inspect_hook_setup(id, request),
+            op @ Op::SaveHookSetup { .. } => self.queue_hook_save(op, done, reload).await,
             Op::CheckHookSetup {
                 id,
                 request,
                 revision,
                 connection,
                 url,
-            } => {
-                let config = self.config.clone();
-                let tx = self.tx.clone();
-                let cancel = CancellationToken::new();
-                self.hook_checks.insert(request, cancel.clone());
-                self.hook_tasks.spawn(async move {
-                    let root = config.dirs.workspace_root.clone();
-                    let prepared = tokio::task::spawn_blocking(move || {
-                        crate::hook_setup::check_binding(&config, &id, &revision, &connection, &url)
-                            .map(|(file, dir)| (file, dir, url))
-                    })
-                    .await;
-                    let result = match prepared {
-                        Ok(Ok((file, dir, url))) => {
-                            crate::hooks::check(file, dir, root, url, cancel.clone()).await
-                        }
-                        Ok(Err(error)) => Err(error),
-                        Err(_) => Err("Cannot prepare the access check.".into()),
-                    };
-                    let (status, message) =
-                        result.unwrap_or_else(|message| ("invalid".into(), message));
-                    let _ = tx.send(Event::HookCheckResult {
-                        request,
-                        status,
-                        message,
-                    });
-                    cancel.cancel();
-                });
-            }
-            Op::CancelHookCheck { request } => {
-                if let Some(cancel) = self.hook_checks.remove(&request) {
-                    cancel.cancel();
-                }
-            }
+            } => self.check_hook_setup(id, request, revision, connection, url),
+            Op::CancelHookCheck { request } => self.cancel_hook_check(request),
             Op::Shutdown => return false,
         }
         true
     }
 
-    fn queue_switch(
+    async fn queue_switch(
         &mut self,
         target: Option<SessionId>,
         done: &mpsc::Sender<(TurnId, Vec<Message>)>,
         reload: &mpsc::Sender<Reload>,
     ) {
         self.queued.push_back(Queued::Switch(target));
-        self.next_queued(done, reload);
+        self.next_queued(done, reload).await;
     }
 
-    fn next_queued(
+    async fn next_queued(
         &mut self,
         done: &mpsc::Sender<(TurnId, Vec<Message>)>,
         reload: &mpsc::Sender<Reload>,
     ) {
         while self.started && self.running.is_none() && !self.reloading && !self.switching {
             match self.queued.pop_front() {
-                Some(Queued::Turn(items)) => self.start_turn(items, done.clone()),
+                Some(Queued::Turn(items)) => self.start_turn(items, done.clone()).await,
                 Some(Queued::Switch(target)) => self.switch_session(target),
                 Some(Queued::Compact(focus)) => self.start_compact(focus, done.clone()),
                 Some(Queued::Prune(indices)) => self.prune_context(indices),
                 Some(Queued::Reload(hook)) => self.begin_reload(reload.clone(), hook),
-                Some(Queued::Accept(mode)) => self.accept_plan(&mode, done.clone()),
-                Some(Queued::Fork) => self.fork_session(),
+                Some(Queued::Accept(mode)) => self.accept_plan(&mode, done.clone()).await,
+                Some(Queued::Fork) => self.fork_session().await,
                 Some(Queued::HookSave(op)) => self.begin_hook_save(*op, reload.clone()),
                 Some(Queued::ReasoningEffort(effort)) => self.set_reasoning_effort(effort),
                 None => break,
@@ -2611,7 +2893,7 @@ impl Engine {
             Ok(value) => {
                 on_ok(self, value);
                 self.queued.push_back(Queued::Reload(None));
-                self.next_queued(done, reload);
+                self.next_queued(done, reload).await;
             }
             Err(message) => self.emit(Event::Error {
                 error: EngineError {
@@ -2779,7 +3061,7 @@ impl Engine {
             serde_json::json!({ "model": self.session.model }),
         );
         self.emit(Event::SessionConfigured {
-            session: self.session.clone(),
+            session: Box::new(self.session.clone()),
         });
         self.emit_mode();
         if self
@@ -2788,6 +3070,41 @@ impl Engine {
             .is_some_and(|c| c.perms.lock().is_ok_and(|p| p.work_mode == WorkMode::Plan))
         {
             self.start_planner();
+        }
+    }
+
+    fn turn_ctx(
+        &self,
+        turn: TurnId,
+        setup: Arc<Setup>,
+        perms: Arc<Mutex<Permissions>>,
+        nested: Arc<Nested>,
+        cancel: CancellationToken,
+        pool: Arc<crate::agent::Pool>,
+    ) -> TurnCtx {
+        TurnCtx {
+            turn,
+            setup,
+            perms,
+            nested,
+            approvals: self.approvals.clone(),
+            questions: self.questions.clone(),
+            tx: self.tx.clone(),
+            cancel,
+            log: self.log.clone(),
+            main_log: self.log.clone(),
+            checkpoints: None,
+            stats: self.stats.clone(),
+            hooks: self.hooks.clone(),
+            session: self.session.id.0.clone(),
+            agent: None,
+            max_steps: self.config.settings.agent.max_steps.get() as usize,
+            pool,
+            prompt_lock: self.prompt_lock.clone(),
+            continues: self.continues.clone(),
+            network: self.config.settings.network.clone(),
+            ledger: self.ledger.clone(),
+            secret_allowlist: self.secret_allowlist.clone(),
         }
     }
 
@@ -2804,29 +3121,12 @@ impl Engine {
         let turn = TurnId(self.next_turn);
         let cancel = CancellationToken::new();
         self.running = Some((turn, cancel.clone()));
+        let setup = convo.setup.clone();
+        let perms = convo.perms.clone();
+        let nested = convo.nested.clone();
         let ctx = TurnCtx {
-            turn,
-            setup: convo.setup.clone(),
-            perms: convo.perms.clone(),
-            nested: convo.nested.clone(),
-            approvals: self.approvals.clone(),
-            questions: self.questions.clone(),
-            tx: self.tx.clone(),
-            cancel,
-            log: self.log.clone(),
-            main_log: self.log.clone(),
             checkpoints: None,
-            stats: self.stats.clone(),
-            hooks: self.hooks.clone(),
-            session: self.session.id.0.clone(),
-            agent: None,
-            max_steps: self.config.settings.agent.max_steps.get() as usize,
-            pool,
-            prompt_lock: Arc::default(),
-            continues: self.continues.clone(),
-            network: self.config.settings.network.clone(),
-            ledger: self.ledger.clone(),
-            secret_allowlist: self.secret_allowlist.clone(),
+            ..self.turn_ctx(turn, setup, perms, nested, cancel, pool)
         };
         tokio::spawn(async move {
             ctx.emit(Event::TurnStarted { turn });
@@ -2910,7 +3210,42 @@ impl Engine {
         });
     }
 
-    fn start_turn(&mut self, items: Vec<InputItem>, done: mpsc::Sender<(TurnId, Vec<Message>)>) {
+    async fn load_images(&mut self, items: &[InputItem]) -> Vec<quack_protocol::Image> {
+        let Some(setup) = self.convo.as_ref().map(|c| c.setup.clone()) else {
+            return Vec::new();
+        };
+        let cwd = self.config.dirs.cwd.clone();
+        let paths: Vec<String> = items
+            .iter()
+            .filter_map(|item| match item {
+                InputItem::Image { path } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        // Attached images load here, so the turn itself stays synchronous.
+        let mut images = Vec::new();
+        for path in paths {
+            let setup = setup.clone();
+            let cwd = cwd.clone();
+            let loaded = tokio::task::spawn_blocking(move || load_image(&setup, &cwd, &path))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("the image loading task failed: {e}");
+                    Err("the image loading task failed".into())
+                });
+            match loaded {
+                Ok(img) => images.push(img),
+                Err(e) => self.warn(e),
+            }
+        }
+        images
+    }
+
+    async fn start_turn(
+        &mut self,
+        items: Vec<InputItem>,
+        done: mpsc::Sender<(TurnId, Vec<Message>)>,
+    ) {
         self.next_turn += 1;
         let turn = TurnId(self.next_turn);
         let prompt = items
@@ -2921,18 +3256,7 @@ impl Engine {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        // Attached images load here, so the turn itself stays synchronous.
-        let mut images = Vec::new();
-        if let Some(convo) = &self.convo {
-            for item in &items {
-                if let InputItem::Image { path } = item {
-                    match load_image(&convo.setup, &self.config.dirs.cwd, path) {
-                        Ok(img) => images.push(img),
-                        Err(e) => self.warn(e),
-                    }
-                }
-            }
-        }
+        let images = self.load_images(&items).await;
 
         // `/<server>:<prompt> args` runs an MCP prompt, unless a skill or custom command
         // has that name. Arguments are checked here; the prompt is fetched in the turn.
@@ -3040,7 +3364,7 @@ impl Engine {
             }
         };
         let manager = self.mcp.manager.clone();
-        self.ensure_log();
+        self.ensure_log().await;
         if let Some(at) = planner_start {
             session::record(
                 self.log.as_ref(),
@@ -3067,30 +3391,43 @@ impl Engine {
         self.running = Some((turn, cancel.clone()));
         let pool = self.pool();
         let ctx = TurnCtx {
-            turn,
-            setup,
-            perms,
-            nested,
-            approvals: self.approvals.clone(),
-            questions: self.questions.clone(),
-            tx: self.tx.clone(),
-            cancel,
-            log: self.log.clone(),
-            main_log: self.log.clone(),
             checkpoints: self.checkpoints(),
-            stats: self.stats.clone(),
-            hooks: self.hooks.clone(),
-            session: self.session.id.0.clone(),
-            agent: None,
-            max_steps: self.config.settings.agent.max_steps.get() as usize,
-            pool,
-            prompt_lock: Arc::default(),
-            continues: self.continues.clone(),
-            network: self.config.settings.network.clone(),
-            ledger: self.ledger.clone(),
-            secret_allowlist: self.secret_allowlist.clone(),
+            ..self.turn_ctx(turn, setup, perms, nested, cancel, pool)
         };
         let start = self.start_context.take();
+        self.spawn_turn(
+            ctx,
+            manager,
+            TurnLaunch {
+                done,
+                history,
+                mcp_prompt,
+                typed,
+                expanded,
+                images,
+                start,
+            },
+            compose,
+        );
+    }
+
+    fn spawn_turn(
+        &self,
+        ctx: TurnCtx,
+        manager: Arc<McpManager>,
+        launch: TurnLaunch,
+        compose: impl FnOnce(String) -> String + Send + 'static,
+    ) {
+        let TurnLaunch {
+            done,
+            history,
+            mcp_prompt,
+            typed,
+            expanded,
+            images,
+            start,
+        } = launch;
+        let turn = ctx.turn;
         let is_mcp_prompt = mcp_prompt.is_some();
         tokio::spawn(async move {
             let body = match mcp_prompt {
@@ -3155,9 +3492,36 @@ impl Engine {
         }
     }
 
+    /// Queue a turn that cannot start yet and tell the user what it waits for.
+    fn queue_turn(&mut self, items: Vec<InputItem>, waiting_for: &str) {
+        self.emit(Event::TurnQueued {
+            waiting_for: waiting_for.into(),
+        });
+        self.queued.push_back(Queued::Turn(items));
+    }
+
+    /// Whether the session is in plan mode (the planner swaps in for the session's model).
+    fn in_plan_mode(&self) -> bool {
+        self.convo
+            .as_ref()
+            .is_some_and(|c| c.perms.lock().is_ok_and(|p| p.work_mode == WorkMode::Plan))
+    }
+
     fn reset_secret_allowlist(&self) {
         if let Ok(mut list) = self.secret_allowlist.lock() {
             *list = self.config.settings.network.secret_allowlist.clone();
+        }
+    }
+
+    /// Add the config's `[network] secret_allowlist` to the live list; a reload may
+    /// have grown it, and duplicates are skipped.
+    fn merge_secret_allowlist(&self) {
+        if let Ok(mut list) = self.secret_allowlist.lock() {
+            for fp in &self.config.settings.network.secret_allowlist {
+                if !list.contains(fp) {
+                    list.push(fp.clone());
+                }
+            }
         }
     }
 
@@ -3187,7 +3551,9 @@ impl Engine {
         if report.items.is_empty() {
             self.emit(Event::ContextPruned { report });
         }
-        self.emit(Event::ContextReport { report: ctx_report });
+        self.emit(Event::ContextReport {
+            report: Box::new(ctx_report),
+        });
     }
 
     fn probe_tool_calling(&self) {
@@ -3425,6 +3791,8 @@ fn op_name(op: &Op) -> &'static str {
         Op::SignIn { .. } => "sign_in",
         Op::SetProviderKey { .. } => "set_provider_key",
         Op::AddServer { .. } => "add_server",
+        Op::ListProviderConnections => "list_provider_connections",
+        Op::SaveProviderConnection { .. } => "save_provider_connection",
         Op::SetPermissionMode { .. } => "set_permission_mode",
         Op::SetWorkMode { .. } => "set_work_mode",
         Op::SetApprovalPolicy { .. } => "set_approval_policy",
@@ -3474,6 +3842,16 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()>
 
 fn new_session_id() -> SessionId {
     SessionId(quack_store::session::new_session_id())
+}
+
+struct AddMcpFields {
+    id: String,
+    url: String,
+    command: String,
+    args: Vec<String>,
+    bearer_env: Option<String>,
+    bearer_token: Option<quack_protocol::SecretText>,
+    scope: Option<WriteScope>,
 }
 
 struct SavedMcpFields {

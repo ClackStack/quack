@@ -12,14 +12,15 @@ use std::time::Duration;
 use common::{sse_raw, turn};
 use quack_config::{LoadOptions, Loaded, load_with};
 use quack_core::checks::{self, Refreshed};
-use quack_core::protocol::{Event, ModelInfo, Op};
+use quack_core::protocol::{Event, ModelInfo, Op, SessionInfo};
 use quack_core::{Engine, EngineHandle};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const FEED: &str = r#"{
     "acme": { "api": "https://acme.example/v1", "models": {
-        "tiny": { "limit": { "context": 4096 }, "cost": { "input": 2, "output": 8 } } } },
+        "tiny": { "limit": { "context": 4096 }, "cost": { "input": 2, "output": 8 },
+                   "reasoning_options": [{ "type": "effort", "values": ["low", "medium", "high"] }] } } },
     "stranger": { "models": { "other": { "limit": { "context": 1 } } } }
 }"#;
 
@@ -112,6 +113,21 @@ async fn listed(engine: &mut EngineHandle) -> Vec<ModelInfo> {
     }
 }
 
+async fn configured(engine: &mut EngineHandle) -> SessionInfo {
+    let mut session = None;
+    loop {
+        let e = tokio::time::timeout(Duration::from_secs(10), engine.events.recv())
+            .await
+            .expect("event within 10s")
+            .expect("channel open");
+        match e {
+            Event::SessionConfigured { session: s } => session = Some(s),
+            Event::StartupComplete => return session.expect("configured at startup"),
+            _ => {}
+        }
+    }
+}
+
 /// 3000 in at $2 and 500 out at $8, per million.
 const CATALOG_COST: f64 = (6000.0 + 4000.0) / 1e6;
 
@@ -167,6 +183,40 @@ async fn declared_thinking_levels_reach_the_model_catalog() {
         models[0].reasoning_efforts,
         vec!["low".to_owned(), "high".to_owned()]
     );
+    engine.shutdown().await;
+}
+
+/// A model the provider file leaves without thinking levels still gets them, from the
+/// catalog, both in the session (so the picker works) and in `/models`.
+#[tokio::test]
+async fn the_catalog_offers_the_thinking_levels_the_provider_file_leaves_unset() {
+    let server = chat_server().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    put_catalog(tmp.path(), FEED);
+    let config = load(tmp.path(), &server.uri(), "models = [\"tiny\"]", "");
+    let mut engine = Engine::spawn(Arc::new(config));
+    assert_eq!(
+        configured(&mut engine).await.reasoning_efforts,
+        ["low", "medium", "high"]
+    );
+    assert_eq!(
+        listed(&mut engine).await[0].reasoning_efforts,
+        ["low", "medium", "high"]
+    );
+    engine.shutdown().await;
+}
+
+/// What the provider file declares wins: the catalog cannot take levels away or add to them.
+#[tokio::test]
+async fn the_provider_files_thinking_levels_beat_the_catalogs() {
+    let server = chat_server().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    put_catalog(tmp.path(), FEED);
+    let models = "[[models]]\nid = \"tiny\"\nreasoning = { efforts = [\"low\"] }";
+    let config = load(tmp.path(), &server.uri(), models, "");
+    let mut engine = Engine::spawn(Arc::new(config));
+    assert_eq!(configured(&mut engine).await.reasoning_efforts, ["low"]);
+    assert_eq!(listed(&mut engine).await[0].reasoning_efforts, ["low"]);
     engine.shutdown().await;
 }
 

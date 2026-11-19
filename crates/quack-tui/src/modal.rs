@@ -5,7 +5,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
@@ -55,6 +55,8 @@ pub(crate) struct Modal {
     filter: String,
     filtered: Vec<usize>,
     selected: usize,
+    /// Optional section header per item for each tab (`groups[tab][item]`).
+    groups: Vec<Vec<Option<&'static str>>>,
     /// Tab whose item actions copy text while keeping the modal open.
     copy_tab: Option<usize>,
     /// True when `^l` toggles between user and project (`.quack/`) write scope.
@@ -89,6 +91,7 @@ impl Modal {
             filter: String::new(),
             filtered: Vec::new(),
             selected: 0,
+            groups: Vec::new(),
             copy_tab: None,
             scoped: false,
             footer: vec![
@@ -98,6 +101,26 @@ impl Modal {
                 ("esc", "close"),
             ],
         };
+        m.refilter();
+        m
+    }
+
+    /// Build a single-tab modal whose items are visually separated into named sections.
+    pub fn grouped(
+        title: impl Into<String>,
+        sections: Vec<(&'static str, Vec<ModalItem>)>,
+    ) -> Self {
+        let mut items = Vec::new();
+        let mut item_groups = Vec::new();
+        for (heading, section_items) in sections {
+            for item in section_items {
+                items.push(item);
+                item_groups.push(Some(heading));
+            }
+        }
+        let title = title.into();
+        let mut m = Self::new(title.clone(), vec![ModalTab { title, items }]);
+        m.groups = vec![item_groups];
         m.refilter();
         m
     }
@@ -143,6 +166,18 @@ impl Modal {
         self
     }
 
+    /// Select the first visible item matching `pred`, if any.
+    pub fn select_matching(mut self, mut pred: impl FnMut(&ModalItem) -> bool) -> Self {
+        if let Some(pos) = self
+            .filtered
+            .iter()
+            .position(|i| self.items().get(*i).is_some_and(&mut pred))
+        {
+            self.selected = pos;
+        }
+        self
+    }
+
     /// Open on `tab`.
     pub fn with_tab(mut self, tab: usize) -> Self {
         self.tab = tab.min(self.tabs.len().saturating_sub(1));
@@ -154,8 +189,38 @@ impl Modal {
         self.tabs.get(self.tab).map_or(&[], |t| t.items.as_slice())
     }
 
+    fn item_group(&self, item_idx: usize) -> Option<&'static str> {
+        self.groups
+            .get(self.tab)
+            .and_then(|g| g.get(item_idx))
+            .copied()
+            .flatten()
+    }
+
+    fn has_groups(&self) -> bool {
+        self.groups
+            .get(self.tab)
+            .is_some_and(|g| g.iter().any(Option::is_some))
+    }
+
     fn refilter(&mut self) {
-        self.filtered = fuzzy::filter(&self.filter, self.items().iter().map(|i| i.label.as_str()));
+        if self.has_groups() {
+            let candidates: Vec<String> = self
+                .items()
+                .iter()
+                .enumerate()
+                .map(|(i, item)| match self.item_group(i) {
+                    Some(g) => format!("{g} {}", item.label),
+                    None => item.label.clone(),
+                })
+                .collect();
+            self.filtered = fuzzy::filter(&self.filter, candidates.iter().map(String::as_str));
+            // Keep items in their section order so group headers never split or repeat.
+            self.filtered.sort_unstable();
+        } else {
+            self.filtered =
+                fuzzy::filter(&self.filter, self.items().iter().map(|i| i.label.as_str()));
+        }
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
     }
 
@@ -354,38 +419,96 @@ impl Modal {
             .padding(Padding::top(top));
         let inner = block.inner(area);
         let width = usize::from(inner.width);
-        let rows: Vec<ListItem<'_>> = self
-            .filtered
-            .iter()
-            .enumerate()
-            .filter_map(|(n, i)| self.items().get(*i).map(|item| (n == self.selected, item)))
-            .map(|(on, item)| {
-                let soft = if on { theme.sel_text } else { theme.dim };
-                let hint = truncate(&item.hint, width / 2);
-                let label = truncate(&item.label, width.saturating_sub(hint.width() + 4));
-                let hits = if label == item.label {
-                    fuzzy::positions(&self.filter, &item.label)
-                } else {
-                    Vec::new()
+        let height = usize::from(inner.height);
+        let grouped = self.has_groups();
+        let make_row = |item: &ModalItem, on: bool| -> ListItem<'static> {
+            let soft = if on { theme.sel_text } else { theme.dim };
+            let hint = truncate(&item.hint, width / 2);
+            let label = truncate(&item.label, width.saturating_sub(hint.width() + 4));
+            let hits = if label == item.label {
+                fuzzy::positions(&self.filter, &item.label)
+            } else {
+                Vec::new()
+            };
+            let pad = width.saturating_sub(label.width() + hint.width() + 3);
+            let mut spans = vec![
+                Span::styled(if on { glyphs.bar } else { " " }, theme.accent),
+                Span::raw(" "),
+            ];
+            let base = if on { theme.selected } else { Style::new() };
+            spans.extend(theme.highlight(&label, &hits, base));
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(hint, soft));
+            ListItem::new(Line::from(spans))
+        };
+        let (rows, selected_row, total_rows, scroll_pos) = if grouped {
+            let mut rows: Vec<ListItem<'_>> = Vec::new();
+            let mut selected_row = None;
+            let mut prev_group: Option<&str> = None;
+            for (pos, &i) in self.filtered.iter().enumerate() {
+                let Some(item) = self.items().get(i) else {
+                    continue;
                 };
-                let pad = width.saturating_sub(label.width() + hint.width() + 3);
-                let mut spans = vec![
-                    Span::styled(if on { glyphs.bar } else { " " }, theme.accent),
-                    Span::raw(" "),
-                ];
-                let base = if on { theme.selected } else { Style::new() };
-                spans.extend(theme.highlight(&label, &hits, base));
-                spans.push(Span::raw(" ".repeat(pad)));
-                spans.push(Span::styled(hint, soft));
-                ListItem::new(Line::from(spans))
-            })
-            .collect();
+                let group = self.item_group(i);
+                if group != prev_group {
+                    if !rows.is_empty() {
+                        rows.push(ListItem::new(Line::raw("")));
+                    }
+                    if let Some(title) = group {
+                        let label = format!("  {title} ");
+                        let rule_len = width.saturating_sub(label.width() + 1);
+                        let mut spans =
+                            vec![Span::styled(label, theme.dim.add_modifier(Modifier::BOLD))];
+                        if rule_len > 0 {
+                            spans.push(Span::styled(glyphs.rule.repeat(rule_len), theme.border));
+                        }
+                        rows.push(ListItem::new(Line::from(spans)));
+                    }
+                    prev_group = group;
+                }
+                let on = pos == self.selected;
+                if on {
+                    selected_row = Some(rows.len());
+                }
+                rows.push(make_row(item, on));
+            }
+            let total_rows = rows.len();
+            let scroll_pos = selected_row.unwrap_or(0);
+            (rows, selected_row, total_rows, scroll_pos)
+        } else {
+            // Only the rows that can be visible are built. A fresh `ListState`
+            // starts at offset 0 and ratatui slides the window to keep `selected`
+            // on screen, so with single-line rows the visible range is
+            // `first..last` below and rows outside it are never drawn.
+            // (`selected` is kept below `filtered.len()` by `refilter` and the
+            // movement keys, so the clamp only guards the empty list.)
+            let len = self.filtered.len();
+            let shown = self.selected.min(len.saturating_sub(1));
+            let first = shown.saturating_sub(height.saturating_sub(1));
+            let last = (first + height).min(len);
+            let mut rows: Vec<ListItem<'_>> = Vec::with_capacity(last - first);
+            let mut selected_row = None;
+            for (n, i) in self.filtered[first..last].iter().enumerate() {
+                let Some(item) = self.items().get(*i) else {
+                    continue;
+                };
+                let on = first + n == self.selected;
+                if on {
+                    selected_row = Some(rows.len());
+                }
+                rows.push(make_row(item, on));
+            }
+            (rows, selected_row, self.filtered.len(), self.selected)
+        };
         let empty = rows.is_empty();
+        // The selected row's position in `rows`, or the last row, matching how
+        // ratatui clamps an out-of-range selection.
+        let selected = (!empty).then(|| selected_row.unwrap_or(rows.len() - 1));
         let list = List::new(rows).block(block).highlight_style(theme.selected);
-        let mut state = ListState::default().with_selected((!empty).then_some(self.selected));
+        let mut state = ListState::default().with_selected(selected);
         f.render_stateful_widget(list, area, &mut state);
-        if self.filtered.len() > usize::from(inner.height) {
-            let mut sb = ScrollbarState::new(self.filtered.len()).position(self.selected);
+        if total_rows > height {
+            let mut sb = ScrollbarState::new(total_rows).position(scroll_pos);
             f.render_stateful_widget(
                 Scrollbar::new(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(None)
@@ -564,7 +687,8 @@ pub(crate) fn thinking(
             hint: String::new(),
             detail: vec![Line::raw(match model {
                 Some(model) => format!(
-                    "{model} does not declare thinking levels. Add reasoning.efforts to its model entry in the provider file."
+                    "{model} does not declare thinking levels. Run `quack catalog refresh` to fetch \
+                     the catalog's, or add reasoning.efforts to a user-layer copy of the provider file."
                 ),
                 None => "Select a model with /models first.".into(),
             })],
@@ -1118,7 +1242,7 @@ pub(crate) fn sessions(
 /// The `/config` modal: every setting with its value and where it came from.
 pub(crate) fn config(
     rows: &[quack_config::SettingRow],
-    files: &[(String, String)],
+    files: &[crate::app::ConfigLayer],
     scope: WriteScope,
     project_status: ProjectStatus,
     theme: &Theme,
@@ -1183,33 +1307,28 @@ pub(crate) fn config(
         .collect();
     let layers = files
         .iter()
-        .map(|(layer, report)| {
-            let (status, path) = report
-                .split_once('\n')
-                .map_or((report.as_str(), None), |(status, path)| {
-                    (status, Some(path))
-                });
-            let (hint, style) = match status {
+        .map(|file| {
+            let (hint, style) = match file.status.as_str() {
                 "loaded" => ("loaded", theme.ok),
                 "no config.toml" => ("missing", theme.dim),
                 s if s.starts_with("failed") => ("failed", theme.warn),
                 _ => ("skipped", theme.dim),
             };
             let mut detail = vec![
-                Line::styled(layer.clone(), theme.accent),
-                Line::styled(status.to_owned(), style),
+                Line::styled(file.layer.clone(), theme.accent),
+                Line::styled(file.status.clone(), style),
                 Line::raw(""),
             ];
-            if let Some(path) = path {
-                detail.push(Line::raw(path.to_owned()));
+            if let Some(path) = &file.path {
+                detail.push(Line::raw(path.clone()));
             } else {
                 detail.push(Line::styled("No file path for this layer", theme.dim));
             }
             ModalItem {
-                label: layer.clone(),
+                label: file.layer.clone(),
                 hint: hint.into(),
                 detail,
-                action: path.map(str::to_owned),
+                action: file.path.clone(),
                 run: false,
                 alt: None,
                 charts: Vec::new(),
@@ -1277,6 +1396,79 @@ impl Detail {
 /// How many tools `/stats` draws bars for; the rest are counted below them.
 const TOOL_BARS: usize = 8;
 
+/// Chart helpers shared by the `/stats` sections.
+fn stat_k(n: u64) -> String {
+    crate::theme::tokens(u32::try_from(n).unwrap_or(u32::MAX))
+}
+
+fn stat_time(ms: u64) -> String {
+    crate::theme::elapsed(std::time::Duration::from_millis(ms))
+}
+
+fn stat_pct(n: u64, of: u64) -> u64 {
+    n * 100 / of.max(1)
+}
+
+fn stat_ratio(n: u64, of: u64) -> f64 {
+    n as f64 / of.max(1) as f64
+}
+
+fn stat_bars(rows: Vec<BarRow>, ascii: bool, theme: &Theme) -> Visual {
+    Visual::Bars {
+        rows,
+        ascii,
+        on_bar: theme.pill(theme.accent).bg(ratatui::style::Color::Reset),
+    }
+}
+
+fn stat_spark(
+    label: &str,
+    caption: String,
+    data: Vec<u64>,
+    style: Style,
+    height: u16,
+    ascii: bool,
+) -> Visual {
+    Visual::Spark {
+        label: label.to_owned(),
+        caption,
+        data,
+        style,
+        height,
+        ascii,
+    }
+}
+
+fn stat_meter(label: &str, text: String, ratio: f64, style: Style, ascii: bool) -> Visual {
+    Visual::Meter {
+        label: label.to_owned(),
+        text,
+        ratio,
+        style,
+        ascii,
+    }
+}
+
+fn stat_row(label: &str, value: u64, text: String, style: Style) -> BarRow {
+    BarRow {
+        label: label.to_owned(),
+        value,
+        text,
+        style,
+    }
+}
+
+fn stat_series(
+    r: &quack_protocol::StatsReport,
+    f: impl Fn(&quack_protocol::RequestStat) -> u64,
+) -> Vec<u64> {
+    r.history.iter().map(f).collect()
+}
+
+fn stat_peak(v: &[u64]) -> u64 {
+    v.iter().copied().max().unwrap_or(0)
+}
+
 /// The `/stats` modal. `report` is `None` until the engine answers.
 pub(crate) fn stats(
     report: Option<&quack_protocol::StatsReport>,
@@ -1299,42 +1491,6 @@ pub(crate) fn stats(
             theme,
         )]);
     };
-    let k = |n: u64| crate::theme::tokens(u32::try_from(n).unwrap_or(u32::MAX));
-    let time = |ms: u64| crate::theme::elapsed(std::time::Duration::from_millis(ms));
-    let pct = |n: u64, of: u64| n * 100 / of.max(1);
-    #[allow(clippy::cast_precision_loss)]
-    let ratio = |n: u64, of: u64| n as f64 / of.max(1) as f64;
-    let on_bar = theme.pill(theme.accent).bg(ratatui::style::Color::Reset);
-    let bars = |rows| Visual::Bars {
-        rows,
-        ascii,
-        on_bar,
-    };
-    let spark = |label: &str, caption: String, data: Vec<u64>, style, height| Visual::Spark {
-        label: label.to_owned(),
-        caption,
-        data,
-        style,
-        height,
-        ascii,
-    };
-    let meter = |label: &str, text: String, ratio: f64, style| Visual::Meter {
-        label: label.to_owned(),
-        text,
-        ratio,
-        style,
-        ascii,
-    };
-    let row = |label: &str, value: u64, text: String, style| BarRow {
-        label: label.to_owned(),
-        value,
-        text,
-        style,
-    };
-    let series = |f: &dyn Fn(&quack_protocol::RequestStat) -> u64| -> Vec<u64> {
-        r.history.iter().map(f).collect()
-    };
-    let peak = |v: &[u64]| v.iter().copied().max().unwrap_or(0);
     let since = if r.resumed {
         "Resumed: tokens and cost include earlier runs; times and tools start at the resume."
     } else {
@@ -1342,10 +1498,32 @@ pub(crate) fn stats(
     };
     let calls: u32 = r.tools.iter().map(|t| t.calls).sum();
     let failed: u32 = r.tools.iter().map(|t| t.failed).sum();
-    let sent = series(&|q| u64::from(q.prompt));
-    let received = series(&|q| u64::from(q.completion));
+    let sent = stat_series(r, |q| u64::from(q.prompt));
+    let received = stat_series(r, |q| u64::from(q.completion));
+    let overview = stat_overview(r, since, &sent, calls, failed, ascii, theme);
+    let tokens = stat_tokens(r, sent, received, ascii, theme);
+    let (cost_hint, cost) = stat_cost(r, ascii, theme);
+    let timing = stat_time_section(r, ascii, theme);
+    let tools = stat_tools(r, calls, failed, ascii, theme);
+    tabs(vec![
+        overview.item("Overview", format!("{} turns", r.turns)),
+        tokens.item("Tokens", stat_k(r.prompt_tokens + r.completion_tokens)),
+        cost.item("Cost", cost_hint),
+        timing.item("Time", stat_time(r.open_ms)),
+        tools.item("Tools", format!("{calls} calls")),
+    ])
+}
 
-    // Overview: the headline figures, then how well the cache and the clock went.
+/// Overview: the headline figures, then how well the cache and the clock went.
+fn stat_overview(
+    r: &quack_protocol::StatsReport,
+    since: &'static str,
+    sent: &[u64],
+    calls: u32,
+    failed: u32,
+    ascii: bool,
+    theme: &Theme,
+) -> Detail {
     let mut overview = Detail::default();
     overview
         .line(Line::styled(r.model.clone(), theme.accent))
@@ -1353,95 +1531,114 @@ pub(crate) fn stats(
         .gap();
     let mut tiles = vec![
         (r.turns.to_string(), "turns".to_owned(), theme.user),
-        (k(r.prompt_tokens), "sent".to_owned(), theme.accent),
-        (k(r.completion_tokens), "received".to_owned(), theme.magenta),
+        (stat_k(r.prompt_tokens), "sent".to_owned(), theme.accent),
+        (
+            stat_k(r.completion_tokens),
+            "received".to_owned(),
+            theme.magenta,
+        ),
     ];
     if let Some(c) = r.cost {
         tiles.push((dollars(c), "cost".to_owned(), theme.ok));
     }
-    tiles.push((time(r.open_ms), "open".to_owned(), theme.warn));
+    tiles.push((stat_time(r.open_ms), "open".to_owned(), theme.warn));
     overview.chart(Visual::Tiles(tiles));
     if r.cache_reported > 0 {
-        overview.meter(meter(
+        overview.meter(stat_meter(
             "cached",
-            format!("{}% of sent", pct(r.cached_tokens, r.prompt_tokens)),
-            ratio(r.cached_tokens, r.prompt_tokens),
+            format!("{}% of sent", stat_pct(r.cached_tokens, r.prompt_tokens)),
+            stat_ratio(r.cached_tokens, r.prompt_tokens),
             theme.ok,
+            ascii,
         ));
     }
-    overview.meter(meter(
+    overview.meter(stat_meter(
         "model",
-        format!("{}% of the time", pct(r.model_ms, r.open_ms)),
-        ratio(r.model_ms, r.open_ms),
+        format!("{}% of the time", stat_pct(r.model_ms, r.open_ms)),
+        stat_ratio(r.model_ms, r.open_ms),
         theme.accent,
+        ascii,
     ));
     if calls > 0 {
         let ok = calls - failed;
-        overview.meter(meter(
+        overview.meter(stat_meter(
             "tools",
             format!("{ok} of {calls} ok"),
-            ratio(u64::from(ok), u64::from(calls)),
+            stat_ratio(u64::from(ok), u64::from(calls)),
             if failed > 0 { theme.warn } else { theme.ok },
+            ascii,
         ));
     }
     overview.gap();
     if sent.len() >= 2 {
-        overview.chart(spark(
+        overview.chart(stat_spark(
             "sent",
             "by request".into(),
-            sent.clone(),
+            sent.to_vec(),
             theme.accent,
             3,
+            ascii,
         ));
     }
+    overview
+}
 
-    // Tokens
+/// Tokens sent, cached and received, with their per-request history.
+fn stat_tokens(
+    r: &quack_protocol::StatsReport,
+    sent: Vec<u64>,
+    received: Vec<u64>,
+    ascii: bool,
+    theme: &Theme,
+) -> Detail {
     let mut tokens = Detail::default();
     tokens.line(Line::styled("Tokens", theme.accent)).gap();
     let fresh = r.prompt_tokens.saturating_sub(r.cached_tokens);
-    let mut rows = vec![row(
+    let mut rows = vec![stat_row(
         "sent",
         fresh,
         if r.cache_reported > 0 {
-            format!("{} fresh", k(fresh))
+            format!("{} fresh", stat_k(fresh))
         } else {
-            k(fresh)
+            stat_k(fresh)
         },
         theme.accent,
     )];
     if r.cache_reported > 0 {
-        rows.push(row(
+        rows.push(stat_row(
             "cached",
             r.cached_tokens,
             format!(
                 "{} · {}%",
-                k(r.cached_tokens),
-                pct(r.cached_tokens, r.prompt_tokens)
+                stat_k(r.cached_tokens),
+                stat_pct(r.cached_tokens, r.prompt_tokens)
             ),
             theme.ok,
         ));
     }
-    rows.push(row(
+    rows.push(stat_row(
         "received",
         r.completion_tokens,
-        k(r.completion_tokens),
+        stat_k(r.completion_tokens),
         theme.magenta,
     ));
-    tokens.chart(bars(rows));
+    tokens.chart(stat_bars(rows, ascii, theme));
     if sent.len() >= 2 {
-        tokens.chart(spark(
+        tokens.chart(stat_spark(
             "sent",
-            format!("peak {}", k(peak(&sent))),
+            format!("peak {}", stat_k(stat_peak(&sent))),
             sent,
             theme.accent,
             3,
+            ascii,
         ));
-        tokens.chart(spark(
+        tokens.chart(stat_spark(
             "received",
-            format!("peak {}", k(peak(&received))),
+            format!("peak {}", stat_k(stat_peak(&received))),
             received,
             theme.magenta,
             2,
+            ascii,
         ));
     }
     tokens
@@ -1467,8 +1664,11 @@ pub(crate) fn stats(
             theme.warn,
         ));
     }
+    tokens
+}
 
-    // Cost: the figures, and the total climbing request by request.
+/// Cost figures, and the total climbing request by request.
+fn stat_cost(r: &quack_protocol::StatsReport, ascii: bool, theme: &Theme) -> (String, Detail) {
     let cost_hint = r.cost.map_or_else(|| "–".to_owned(), dollars);
     let mut cost = Detail::default();
     cost.line(Line::styled("Cost", theme.accent)).gap();
@@ -1495,7 +1695,6 @@ pub(crate) fn stats(
             if each.len() >= 2 {
                 // Requests older than the history start the line where they left it.
                 let mut total = (c - each.iter().sum::<f64>()).max(0.0);
-                #[allow(clippy::cast_precision_loss)]
                 let points: Vec<(f64, f64)> = each
                     .iter()
                     .enumerate()
@@ -1507,9 +1706,8 @@ pub(crate) fn stats(
                 let n = points.len();
                 cost.chart(if ascii {
                     // Micro-dollars, so the sparkline has whole numbers to scale.
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let data = points.iter().map(|p| (p.1 * 1e6) as u64).collect();
-                    spark("total", "by request".into(), data, theme.ok, 4)
+                    stat_spark("total", "by request".into(), data, theme.ok, 4, true)
                 } else {
                     Visual::Trend {
                         points,
@@ -1546,8 +1744,11 @@ pub(crate) fn stats(
                 ));
         }
     }
+    (cost_hint, cost)
+}
 
-    // Time: where it went, then how quick the model was request by request.
+/// Where time went, then how quick the model was request by request.
+fn stat_time_section(r: &quack_protocol::StatsReport, ascii: bool, theme: &Theme) -> Detail {
     let other = r
         .open_ms
         .saturating_sub(r.model_ms + r.tools_ms + r.approval_ms);
@@ -1565,37 +1766,44 @@ pub(crate) fn stats(
     .into_iter()
     .filter(|(name, ms, _)| *ms > 0 || *name == "the model")
     .map(|(name, ms, style)| {
-        row(
+        stat_row(
             name,
             ms,
-            format!("{} · {}%", time(ms), pct(ms, total)),
+            format!("{} · {}%", stat_time(ms), stat_pct(ms, total)),
             style,
         )
     })
     .collect();
-    timing.chart(bars(rows));
+    timing.chart(stat_bars(rows, ascii, theme));
     let latency: Vec<u64> = r
         .history
         .iter()
         .filter_map(|q| q.ttft_ms.map(u64::from))
         .collect();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let speeds: Vec<u64> = r
         .history
         .iter()
         .filter_map(|q| q.tokens_per_sec.map(|t| t.round() as u64))
         .collect();
     if let (Some((median, _)), true) = (r.ttft_ms, latency.len() >= 2) {
-        timing.chart(spark(
+        timing.chart(stat_spark(
             "latency",
-            format!("{} typ.", time(u64::from(median))),
+            format!("{} typ.", stat_time(u64::from(median))),
             latency,
             theme.warn,
             2,
+            ascii,
         ));
     }
     if let (Some(tps), true) = (r.tokens_per_sec, speeds.len() >= 2) {
-        timing.chart(spark("speed", format!("{tps:.0} t/s"), speeds, theme.ok, 2));
+        timing.chart(stat_spark(
+            "speed",
+            format!("{tps:.0} t/s"),
+            speeds,
+            theme.ok,
+            2,
+            ascii,
+        ));
     }
     if let Some((median, slowest)) = r.ttft_ms {
         timing.line(field(
@@ -1603,8 +1811,8 @@ pub(crate) fn stats(
             "latency",
             format!(
                 "{} to first token · {} slowest",
-                time(u64::from(median)),
-                time(u64::from(slowest))
+                stat_time(u64::from(median)),
+                stat_time(u64::from(slowest))
             ),
         ));
     }
@@ -1618,8 +1826,17 @@ pub(crate) fn stats(
         parts.join(" · ")
     };
     timing.line(field(theme, "sampling", sampling));
+    timing
+}
 
-    // Tools: the busiest as bars in their transcript colours.
+/// The busiest tools as bars in their transcript colours.
+fn stat_tools(
+    r: &quack_protocol::StatsReport,
+    calls: u32,
+    failed: u32,
+    ascii: bool,
+    theme: &Theme,
+) -> Detail {
     let mut tools = Detail::default();
     tools.line(Line::styled("Tools", theme.accent)).gap();
     if r.tools.is_empty() {
@@ -1631,14 +1848,14 @@ pub(crate) fn stats(
             .take(TOOL_BARS)
             .map(|t| {
                 let text = if t.failed > 0 {
-                    format!("{} · {} failed · {}", t.calls, t.failed, time(t.ms))
+                    format!("{} · {} failed · {}", t.calls, t.failed, stat_time(t.ms))
                 } else {
-                    format!("{} · {}", t.calls, time(t.ms))
+                    format!("{} · {}", t.calls, stat_time(t.ms))
                 };
-                row(&t.name, u64::from(t.calls), text, theme.tool(&t.name))
+                stat_row(&t.name, u64::from(t.calls), text, theme.tool(&t.name))
             })
             .collect();
-        tools.chart(bars(rows));
+        tools.chart(stat_bars(rows, ascii, theme));
         if r.tools.len() > TOOL_BARS {
             let rest = &r.tools[TOOL_BARS..];
             tools.line(Line::styled(
@@ -1651,11 +1868,12 @@ pub(crate) fn stats(
             ));
             tools.gap();
         }
-        tools.chart(meter(
+        tools.chart(stat_meter(
             "succeeded",
             format!("{} of {calls}", calls - failed),
-            ratio(u64::from(calls - failed), u64::from(calls)),
+            stat_ratio(u64::from(calls - failed), u64::from(calls)),
             if failed > 0 { theme.warn } else { theme.ok },
+            ascii,
         ));
     }
     if r.compactions + r.pruned > 0 {
@@ -1671,14 +1889,7 @@ pub(crate) fn stats(
                 format!("{} old result(s)", r.pruned),
             ));
     }
-
-    tabs(vec![
-        overview.item("Overview", format!("{} turns", r.turns)),
-        tokens.item("Tokens", k(r.prompt_tokens + r.completion_tokens)),
-        cost.item("Cost", cost_hint),
-        timing.item("Time", time(r.open_ms)),
-        tools.item("Tools", format!("{calls} calls")),
-    ])
+    tools
 }
 
 /// `$0.0042`, `$0.312`, `$12.40`.
@@ -1788,7 +1999,6 @@ pub(crate) fn context(
     } else if growth.len() >= 2 {
         // Context at the end of each turn, rising towards the dashed compaction line.
         over.push(Line::raw(""));
-        #[allow(clippy::cast_precision_loss)]
         let points: Vec<(f64, f64)> = growth
             .iter()
             .enumerate()
@@ -1835,7 +2045,6 @@ pub(crate) fn context(
             Line::raw(""),
         ];
         // Its share of what is used and of the budget, in its band colour.
-        #[allow(clippy::cast_precision_loss)]
         let meter = |label: &str, of: u32| Visual::Meter {
             label: label.to_owned(),
             text: format!("{}%", share(seg.tokens, of)),
@@ -2422,17 +2631,57 @@ pub(crate) fn key_source(key: &quack_protocol::KeySource) -> String {
     }
 }
 
+pub(crate) fn provider_label_id(label: &str) -> &str {
+    label.strip_suffix(" ●").unwrap_or(label)
+}
+
 pub(crate) fn providers(
     catalog: Option<&[quack_protocol::ProviderModels]>,
+    connections: Option<&[quack_protocol::ProviderConnection]>,
     current: Option<&str>,
     theme: &Theme,
 ) -> Modal {
     let items = match catalog {
-        None => vec![placeholder(
-            "checking providers…",
-            "Asking each provider for its models.",
-            theme,
-        )],
+        None => match connections.filter(|list| !list.is_empty()) {
+            Some(list) => list
+                .iter()
+                .map(|conn| {
+                    let in_use = current.is_some_and(|c| c.starts_with(&format!("{}/", conn.id)));
+                    let mut detail = vec![
+                        Line::styled(conn.id.clone(), theme.accent),
+                        Line::raw(""),
+                        Line::styled("checking models…", theme.dim),
+                    ];
+                    if in_use {
+                        detail.push(Line::styled("the current model is from here", theme.dim));
+                    }
+                    detail.push(Line::raw(""));
+                    detail.push(field(theme, "HTTP", provider_http_version(conn).into()));
+                    detail.push(field(theme, "proxy", provider_proxy(conn).into()));
+                    detail.push(Line::raw(""));
+                    detail.push(Line::styled("⏎ or ^s edit connection settings", theme.dim));
+                    let edit = format!("/providers advanced {}", conn.id);
+                    ModalItem {
+                        label: if in_use {
+                            format!("{} ●", conn.id)
+                        } else {
+                            conn.id.clone()
+                        },
+                        hint: "checking…".into(),
+                        detail,
+                        run: true,
+                        action: Some(edit.clone()),
+                        alt: Some(edit),
+                        charts: Vec::new(),
+                    }
+                })
+                .collect(),
+            None => vec![placeholder(
+                "checking providers…",
+                "Asking each provider for its models.",
+                theme,
+            )],
+        },
         Some([]) => vec![placeholder(
             "no providers",
             "/setup adds one: a server on this machine, a hosted service with its key, or \
@@ -2444,6 +2693,7 @@ pub(crate) fn providers(
             .iter()
             .map(|p| {
                 let in_use = current.is_some_and(|c| c.starts_with(&format!("{}/", p.id)));
+                let conn = connections.and_then(|cs| cs.iter().find(|c| c.id == p.id));
                 let mut detail = vec![
                     Line::styled(p.id.clone(), theme.accent),
                     Line::raw(""),
@@ -2461,33 +2711,65 @@ pub(crate) fn providers(
                 if in_use {
                     detail.push(Line::styled("the current model is from here", theme.dim));
                 }
-                if let Some(key) = &p.key {
+                if p.key.is_some() || conn.is_some() || connections.is_none() {
                     detail.push(Line::raw(""));
+                }
+                if let Some(key) = &p.key {
                     detail.push(field(theme, "key", key_source(key)));
-                    detail.push(Line::styled(
-                        "⏎ replace its key, for example after rotating it",
-                        theme.dim,
-                    ));
                 }
-                detail.push(Line::raw(""));
-                detail.extend(p.models.iter().take(30).map(|m| {
-                    Line::raw(format!(
-                        "  {}{}",
-                        m.alias
-                            .as_ref()
-                            .map_or_else(|| m.id.clone(), |a| format!("{a} ({})", m.id)),
-                        m.context_window.map_or_else(String::new, |c| format!(
-                            " · {}",
-                            crate::theme::tokens(c)
+                if let Some(conn) = conn {
+                    detail.push(field(theme, "HTTP", provider_http_version(conn).into()));
+                    detail.push(field(theme, "proxy", provider_proxy(conn).into()));
+                } else if connections.is_none() {
+                    detail.push(field(theme, "network", "loading…".into()));
+                }
+                match (&p.key, conn) {
+                    (Some(_), Some(_)) => {
+                        detail.push(Line::raw(""));
+                        detail.push(Line::styled(
+                            "⏎ replace its key · ^s connection settings",
+                            theme.dim,
+                        ));
+                    }
+                    (Some(_), None) => {
+                        detail.push(Line::styled(
+                            "⏎ replace its key, for example after rotating it",
+                            theme.dim,
+                        ));
+                    }
+                    (None, Some(_)) => {
+                        detail.push(Line::raw(""));
+                        detail.push(Line::styled("⏎ or ^s edit connection settings", theme.dim));
+                    }
+                    (None, None) => {}
+                }
+                if !p.models.is_empty() {
+                    detail.push(Line::raw(""));
+                    detail.extend(p.models.iter().take(30).map(|m| {
+                        Line::raw(format!(
+                            "  {}{}",
+                            m.alias
+                                .as_ref()
+                                .map_or_else(|| m.id.clone(), |a| format!("{a} ({})", m.id)),
+                            m.context_window.map_or_else(String::new, |c| format!(
+                                " · {}",
+                                crate::theme::tokens(c)
+                            ))
                         ))
-                    ))
-                }));
-                if p.models.len() > 30 {
-                    detail.push(Line::styled(
-                        format!("  … {} more in /models", p.models.len() - 30),
-                        theme.dim,
-                    ));
+                    }));
+                    if p.models.len() > 30 {
+                        detail.push(Line::styled(
+                            format!("  … {} more in /models", p.models.len() - 30),
+                            theme.dim,
+                        ));
+                    }
                 }
+                let edit_connection = conn.map(|_| format!("/providers advanced {}", p.id));
+                let action = if p.key.is_some() {
+                    Some(format!("/key {}", p.id))
+                } else {
+                    edit_connection.clone()
+                };
                 ModalItem {
                     label: if in_use {
                         format!("{} ●", p.id)
@@ -2502,9 +2784,9 @@ pub(crate) fn providers(
                         "unavailable".into()
                     },
                     detail,
-                    run: p.key.is_some(),
-                    action: p.key.as_ref().map(|_| format!("/key {}", p.id)),
-                    alt: None,
+                    run: action.is_some(),
+                    action,
+                    alt: edit_connection,
                     charts: Vec::new(),
                 }
             })
@@ -2516,6 +2798,100 @@ pub(crate) fn providers(
             title: "Providers".into(),
             items,
         }],
+    )
+    .with_alt("connection")
+}
+
+fn provider_http_version(p: &quack_protocol::ProviderConnection) -> &'static str {
+    use quack_protocol::ProviderHttpVersion::*;
+    match p.http_version {
+        Inherit if p.inherited_http1_only => "Inherited · HTTP/1.1 only",
+        Inherit => "Inherited · Negotiate",
+        Http1Only => "HTTP/1.1 only",
+        Negotiate => "Negotiate",
+    }
+}
+
+fn provider_proxy(p: &quack_protocol::ProviderConnection) -> &'static str {
+    if p.no_proxy {
+        "Direct connection"
+    } else {
+        "Use configured proxy settings"
+    }
+}
+
+pub(crate) fn provider_connection(p: &quack_protocol::ProviderConnection, theme: &Theme) -> Modal {
+    use quack_protocol::ProviderHttpVersion::*;
+    let option = |label: &str, setting: &str, selected, detail: &str| ModalItem {
+        label: label.into(),
+        hint: if selected {
+            "current".into()
+        } else {
+            String::new()
+        },
+        detail: vec![
+            Line::styled(p.id.clone(), theme.accent),
+            Line::raw(""),
+            field(theme, "HTTP", provider_http_version(p).into()),
+            field(theme, "proxy", provider_proxy(p).into()),
+            Line::raw(""),
+            Line::raw(detail.to_owned()),
+            Line::raw(""),
+            Line::styled("⏎ save setting · esc back to providers", theme.dim),
+        ],
+        action: Some(format!("/providers {setting} {}", p.id)),
+        run: true,
+        alt: None,
+        charts: Vec::new(),
+    };
+    Modal::grouped(
+        format!("Connection: {}", p.id),
+        vec![
+            (
+                "HTTP version",
+                vec![
+                    option(
+                        if p.inherited_http1_only {
+                            "Inherit (HTTP/1.1)"
+                        } else {
+                            "Inherit (Negotiate)"
+                        },
+                        "http-inherit",
+                        p.http_version == Inherit,
+                        "Remove this file's HTTP version override.",
+                    ),
+                    option(
+                        "HTTP/1.1 only",
+                        "http-1",
+                        p.http_version == Http1Only,
+                        "Try this when HTTP/2 connections stall behind a VPN or proxy.",
+                    ),
+                    option(
+                        "Negotiate",
+                        "http-negotiate",
+                        p.http_version == Negotiate,
+                        "Let quack and the server negotiate the HTTP version.",
+                    ),
+                ],
+            ),
+            (
+                "Proxy",
+                vec![
+                    option(
+                        "Configured proxy",
+                        "proxy-inherit",
+                        !p.no_proxy,
+                        "Use the provider, global, environment or system proxy settings.",
+                    ),
+                    option(
+                        "Direct connection",
+                        "proxy-direct",
+                        p.no_proxy,
+                        "Bypass proxies for this provider. Use this when your VPN routes to the provider directly.",
+                    ),
+                ],
+            ),
+        ],
     )
 }
 

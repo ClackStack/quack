@@ -82,11 +82,13 @@ impl ProviderError {
         } else {
             ErrorKind::Network
         };
-        // The innermost source is the useful part ("Connection refused", "dns error: …").
+        // The OS supplies the detail, but the connector supplies the DNS context.
         let mut inner = e.to_string();
+        let mut dns = false;
         let mut source = std::error::Error::source(e);
         while let Some(s) = source {
             inner = s.to_string();
+            dns |= inner.starts_with("dns error");
             source = s.source();
         }
         let inner = match inner.find(" (os error") {
@@ -100,13 +102,17 @@ impl ProviderError {
                 None => host.to_owned(),
             })
         });
-        let message = match (kind, host) {
+        let mut message = match (kind, host) {
             (ErrorKind::Network, Some(h)) if e.is_connect() => {
                 format!("cannot connect to {h}: {}", inner.to_lowercase())
             }
             (_, Some(h)) => format!("{h}: {inner}"),
             (_, None) => inner,
         };
+        if dns && e.is_connect() {
+            message
+                .push_str(" · check DNS where quack is running and the provider's proxy settings");
+        }
         Self::new(kind, message)
     }
 

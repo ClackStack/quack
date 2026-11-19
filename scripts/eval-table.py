@@ -33,25 +33,38 @@ def main(args):
           "| prompt k (cached) | out k | peak k | compact / pruned | cost | time | failures |")
     print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     total = 0.0
+    priced_total = ran_total = 0
     for (suite, model, profile, planner), r in sorted(runs.items()):
         rs = [x for x in r["results"] if not x.get("skipped")]
 
         def s(key):
             return sum(x.get(key) or 0 for x in rs)
 
-        cost = s("cost")
+        costs = [x["cost"] for x in rs if x.get("cost") is not None]
+        cost = sum(costs)
         total += cost
+        priced_total += len(costs)
+        ran_total += len(rs)
+        cost_label = f"${cost:.3f}" if costs else "n/a"
+        if len(costs) != len(rs):
+            cost_label += f" ({len(costs)}/{len(rs)} priced)"
         cached = 100 * s("cached_tokens") / max(1, s("prompt_tokens"))
         failures = Counter(x.get("failure") or "?" for x in rs if not x["passed"])
         labels = ", ".join(f"{k} {v}" for k, v in failures.most_common()) or "-"
-        print(f"| {suite} | {model} | {profile} | {planner} | {sum(x['passed'] for x in rs)}/{len(rs)} "
+        coverage = (f" ({len(r['results'])}/{r['planned_trials']} recorded)"
+                    if r.get("planned_trials", 0) > len(r["results"]) else "")
+        print(f"| {suite} | {model} | {profile} | {planner} | {sum(x['passed'] for x in rs)}/{len(rs)}{coverage} "
               f"| {s('steps')} | {s('tool_errors')} | {s('parse_failures')} "
               f"| {s('edit_failures')} | {s('prompt_tokens') / 1000:.0f} ({cached:.0f}%) "
               f"| {s('completion_tokens') / 1000:.1f} "
               f"| {max((x.get('peak_prompt') or 0 for x in rs), default=0) / 1000:.0f} "
-              f"| {s('compactions')} / {s('pruned')} | ${cost:.3f} | {s('seconds'):.0f}s "
+              f"| {s('compactions')} / {s('pruned')} | {cost_label} | {s('seconds'):.0f}s "
               f"| {labels} |")
-    print(f"\ntotal ${total:.2f}")
+    if priced_total == ran_total and ran_total:
+        print(f"\ntotal ${total:.2f}")
+    else:
+        subtotal = f"${total:.2f}" if priced_total else "n/a"
+        print(f"\npriced subtotal {subtotal} ({priced_total}/{ran_total} trials)")
     for (suite, model, profile, planner), r in sorted(runs.items()):
         for x in r["results"]:
             if not x.get("passed") and not x.get("skipped"):

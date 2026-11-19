@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use quack_config::LoadOptions;
-use quack_exec::eval::{EvalOptions, Report, load_tasks, run_task, table};
+use quack_exec::eval::{EvalOptions, Report, RunErrorKind, load_tasks, run_task, table};
 use serde_json::json;
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -119,6 +119,9 @@ async fn runs_checks_and_reports() {
         tmp.path().join("cache").into_os_string(),
     );
     env.insert("QUACK_DEFAULTS_DIR".into(), "none".into());
+    // A cache directory under a checkout must not redirect edits out of the task copy.
+    std::fs::create_dir(tmp.path().join(".git")).expect("enclosing Git root");
+    std::fs::write(tmp.path().join("a.txt"), "leave this alone\n").expect("outside task");
     let opts = EvalOptions {
         load: LoadOptions::default(),
         repeat: 1,
@@ -136,6 +139,10 @@ async fn runs_checks_and_reports() {
     let by = |id: &str| results.iter().find(|r| r.task == id).expect("result");
     let edit = by("edit-one");
     assert!(edit.passed, "{edit:?}");
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("a.txt")).expect("untouched file"),
+        "leave this alone\n"
+    );
     assert_eq!((edit.steps, edit.tool_calls, edit.edit_failures), (3, 2, 0));
     // How full the context got: the largest of the three requests.
     assert_eq!(
@@ -151,6 +158,8 @@ async fn runs_checks_and_reports() {
     let answer = by("answer");
     assert!(!answer.passed);
     assert_eq!(answer.failed_checks.len(), 1, "{answer:?}");
+    assert_eq!(answer.unreported_requests, Some(1));
+    assert!(answer.cost.is_none());
     assert!(by("needs-tool").skipped.is_some());
     let asks = by("asks");
     assert!(asks.passed, "{asks:?}");
@@ -166,6 +175,8 @@ async fn runs_checks_and_reports() {
         planner: None,
         window: None,
         sampling: Report::sampling_of(&edit.sampling),
+        revision: None,
+        planned_trials: Some(4),
         results,
     };
     assert_eq!(report.score(), (2, 3));
@@ -346,4 +357,156 @@ async fn a_shared_base_hidden_checks_and_failure_labels() {
     assert_eq!(r.failure.map(|f| f.label()), Some("wrong-files"));
     let json = serde_json::to_value(&r).expect("json");
     assert_eq!(json["failure"], "wrong-files");
+}
+
+fn mock_options(root: &Path, server: &MockServer, models: &str) -> EvalOptions {
+    let user = root.join("user");
+    std::fs::create_dir_all(user.join("providers.d")).expect("providers.d");
+    std::fs::write(
+        user.join("providers.d").join("mock.toml"),
+        format!("base_url = \"{}/v1\"\nmodels = {models}\n", server.uri()),
+    )
+    .expect("provider file");
+    let env = [
+        ("QUACK_CONFIG_DIR", user.into_os_string()),
+        ("QUACK_SYSTEM_DIR", root.join("system").into_os_string()),
+        ("QUACK_CACHE_DIR", root.join("cache").into_os_string()),
+        ("QUACK_DEFAULTS_DIR", "none".into()),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.into(), v))
+    .collect();
+    EvalOptions {
+        load: LoadOptions::default(),
+        repeat: 1,
+        keep: false,
+        planner: None,
+        scratch: root.join("scratch"),
+        env,
+    }
+}
+
+#[tokio::test]
+async fn explicit_and_automatic_profiles_reach_the_wire_and_the_report() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse(json!({
+            "choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":100,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":40}}
+        })))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let suite = tmp.path().join("tasks");
+    task(
+        &suite,
+        "answer",
+        "category = \"navigate\"\nprompt = \"Say done.\"\n[[check]]\nanswer_contains = \"done\"\n",
+        &[],
+    );
+    let tasks = load_tasks(&suite, &[]).expect("tasks");
+    let mut opts = mock_options(
+        tmp.path(),
+        &server,
+        r#"[{id = "accounts/fireworks/models/glm-5p3-flash", reasoning = {effort = "low"}, cost = {input = 0.15, cached_input = 0.03, output = 0.5}}]"#,
+    );
+    // Use the shipped profiles with only a loopback provider, no bundled services.
+    let profile_src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("defaults")
+        .join("profiles.d");
+    let user_profiles = tmp.path().join("user").join("profiles.d");
+    for id in ["generic", "zcode"] {
+        quack_exec::eval::copy_dir(&profile_src.join(id), &user_profiles.join(id))
+            .expect("copy profile");
+    }
+    for (attempt, (requested, effective, read, path)) in [
+        ("generic", "generic", "read", "path"),
+        ("zcode", "zcode", "Read", "file_path"),
+        ("auto", "zcode", "Read", "file_path"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        opts.load.overrides = vec![
+            format!("model.profile={requested}"),
+            "context.window=16384".into(),
+        ];
+        let result = run_task(&tasks[0], &opts, attempt as u32).await;
+        assert!(result.passed && !result.incomplete(), "{result:?}");
+        let row = serde_json::to_value(&result).expect("result JSON");
+        assert_eq!(row["attempt"], attempt + 1);
+        assert_eq!(row["model"], "mock/accounts/fireworks/models/glm-5p3-flash");
+        assert_eq!(row["profile"], effective);
+        assert_eq!(row["edit_format"], "str_replace");
+        assert_eq!(row["reasoning_effort"], "low");
+        assert_eq!(row["window"], 16384);
+        assert_eq!(row["unreported_requests"], 0);
+        assert_eq!(row["cache_reported_requests"], 1);
+
+        let requests = server.received_requests().await.expect("recorded requests");
+        let body: serde_json::Value = requests
+            .iter()
+            .filter(|r| r.method.as_str() == "POST")
+            .nth(attempt)
+            .expect("model call")
+            .body_json()
+            .expect("request JSON");
+        assert_eq!(body["reasoning_effort"], "low");
+        assert_eq!(body["model"], "accounts/fireworks/models/glm-5p3-flash");
+        let tools = body["tools"].as_array().expect("tool surface");
+        let reader = tools
+            .iter()
+            .find(|tool| tool["function"]["name"] == read)
+            .expect("reader");
+        assert!(
+            reader["function"]["parameters"]["properties"]
+                .get(path)
+                .is_some()
+        );
+    }
+}
+
+#[tokio::test]
+async fn provider_error_retains_observed_cost_without_pricing_the_trial() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains(r#""role":"tool""#))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({"error":{"message":"request rejected"}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse(json!({
+            "choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":"tool_calls"}],
+            "usage":{"prompt_tokens":100,"completion_tokens":8}
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let suite = tmp.path().join("tasks");
+    task(
+        &suite,
+        "answer",
+        "category = \"navigate\"\nprompt = \"Read a.txt.\"\n",
+        &[("a.txt", "fixture")],
+    );
+    let tasks = load_tasks(&suite, &[]).expect("tasks");
+    let opts = mock_options(
+        tmp.path(),
+        &server,
+        r#"[{id = "tiny", cost = {input = 1.0, output = 2.0}}]"#,
+    );
+    let result = run_task(&tasks[0], &opts, 0).await;
+    assert!(!result.passed && result.incomplete(), "{result:?}");
+    assert_eq!(result.error_kind, Some(RunErrorKind::Provider));
+    assert_eq!(result.failure.map(|f| f.label()), Some("error"));
+    assert!(result.cost.is_none());
+    assert!(result.observed_cost.is_some_and(|cost| cost > 0.0));
+    assert!(result.failed_checks.is_empty());
 }

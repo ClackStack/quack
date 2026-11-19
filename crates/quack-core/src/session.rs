@@ -233,7 +233,10 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
                     let cut = usize::try_from(cut)
                         .unwrap_or(usize::MAX)
                         .min(history.len());
-                    compact::apply(&mut history, cut, msg);
+                    let native = r.data.get("native").and_then(|v| {
+                        <quack_providers::Sealed as serde::Deserialize>::deserialize(v).ok()
+                    });
+                    apply_compaction(&mut history, cut, msg, native);
                     planner_start =
                         planner_start.map(|start| if start >= cut { start - cut + 1 } else { 0 });
                     marks.retain(|(i, _)| *i >= cut);
@@ -342,7 +345,22 @@ fn repair_dangling_calls(history: &mut Vec<Message>) {
     }
 }
 
-/// Append a record, logging (not failing) on I/O errors: losing the log must not stop work.
+/// Splice the compaction summary into the history at the cut point: a native
+/// compaction becomes a `Compaction` message carrying its sealed state, and anything
+/// else is the summary message as-is.
+pub(crate) fn apply_compaction(
+    history: &mut Vec<Message>,
+    cut: usize,
+    summary: Message,
+    native: Option<quack_providers::Sealed>,
+) {
+    let message = match (summary, native) {
+        (Message::User { content, .. }, Some(sealed)) => Message::Compaction { content, sealed },
+        (summary, _) => summary,
+    };
+    compact::apply(history, cut, message);
+}
+
 pub(crate) fn record(log: Option<&SharedLog>, kind: &str, payload: serde_json::Value) {
     if let Some(log) = log
         && let Ok(mut l) = log.lock()

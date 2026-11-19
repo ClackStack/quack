@@ -1,10 +1,11 @@
-//! The model catalog: prices and context windows for models their provider doesn't describe.
+//! The model catalog: prices, context windows and thinking levels for models their provider
+//! doesn't describe.
 //!
-//! This is data about models and never says where to send anything: it can only fill in a
-//! number, so it is safe to download. The format is models.dev's, so a mirror can serve the
-//! original; quack keeps only what it uses. Precedence for a model's facts, highest first:
-//! the provider file, the provider's models endpoint, the downloaded catalog
-//! (`quack catalog refresh`), the snapshot in the defaults bundle (`catalog.json`).
+//! This is data about models and never says where to send anything: it can only fill in
+//! numbers and reasoning effort names, so it is safe to download. The format is models.dev's,
+//! so a mirror can serve the original; quack keeps only what it uses. Precedence for a model's
+//! facts, highest first: the provider file, the provider's models endpoint, the downloaded
+//! catalog (`quack catalog refresh`), the snapshot in the defaults bundle (`catalog.json`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -22,6 +23,10 @@ const SOURCE: &str = "From models.dev (MIT). Regenerate with scripts/update-cata
 pub struct ModelFacts {
     pub context_window: Option<u32>,
     pub cost: Option<Cost>,
+    /// Supported thinking levels, models.dev's `reasoning_options`. They widen the picker
+    /// for models the provider file leaves silent and never override it: an effort name
+    /// goes into a request to the provider the user already picked, nowhere else.
+    pub efforts: Vec<String>,
 }
 
 /// One catalog file, by catalog provider id and then model id.
@@ -72,6 +77,13 @@ impl Catalog {
         self.providers.get(provider)?.get(model)
     }
 
+    /// Every entry, by catalog provider id and model id.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &str, &ModelFacts)> {
+        self.providers
+            .iter()
+            .flat_map(|(p, models)| models.iter().map(move |(m, f)| (p.as_str(), m.as_str(), f)))
+    }
+
     /// The file form: models.dev's shape, one model per line so changes read well in a diff.
     pub fn render(&self) -> String {
         let quoted = |s: &str| Value::from(s).to_string();
@@ -97,10 +109,29 @@ fn facts(model: &Value) -> Option<ModelFacts> {
         .filter(|n| *n > 0)
         .and_then(|n| u32::try_from(n).ok());
     let cost = model.get("cost").and_then(cost);
-    (context_window.is_some() || cost.is_some()).then_some(ModelFacts {
+    let efforts = efforts(model);
+    (context_window.is_some() || cost.is_some() || !efforts.is_empty()).then_some(ModelFacts {
         context_window,
         cost,
+        efforts,
     })
+}
+
+/// models.dev's `reasoning_options`: the entry of type `effort` names the levels. Entries of
+/// other types, and other keys, are ignored; so are empty names and non-strings.
+fn efforts(model: &Value) -> Vec<String> {
+    model
+        .get("reasoning_options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|o| o.get("type").and_then(Value::as_str) == Some("effort"))
+        .filter_map(|o| o.get("values").and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|e| !e.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn cost(cost: &Value) -> Option<Cost> {
@@ -121,6 +152,9 @@ fn entry(m: &ModelFacts) -> Value {
     let mut out = json!({});
     if let Some(c) = m.context_window {
         out["limit"] = json!({ "context": c });
+    }
+    if !m.efforts.is_empty() {
+        out["reasoning_options"] = json!([{ "type": "effort", "values": &m.efforts }]);
     }
     if let Some(c) = &m.cost {
         out["cost"] = json!({ "input": c.input, "output": c.output });
@@ -169,6 +203,10 @@ impl Catalogs {
         ModelFacts {
             context_window: found.iter().find_map(|m| m.context_window),
             cost: found.iter().find_map(|m| m.cost.clone()),
+            efforts: found
+                .iter()
+                .find_map(|m| (!m.efforts.is_empty()).then(|| m.efforts.clone()))
+                .unwrap_or_default(),
         }
     }
 }
@@ -185,7 +223,10 @@ mod tests {
         "source": "not a provider",
         "acme": { "name": "Acme", "api": "https://acme.example", "models": {
             "big": { "name": "Big", "limit": { "context": 1000, "output": 10 },
-                     "cost": { "input": 1.5, "output": 3, "cache_read": 0.15, "reasoning": 9 } },
+                     "cost": { "input": 1.5, "output": 3, "cache_read": 0.15, "reasoning": 9 },
+                     "reasoning_options": [{ "type": "summary", "values": ["auto"] },
+                                          { "type": "effort", "values": ["low", "", "high"] }] },
+            "thoughtful": { "reasoning_options": [{ "type": "effort", "values": ["none", "low"] }] },
             "windowless": { "cost": { "input": 1, "output": 2 } },
             "priceless": { "limit": { "context": 500 } },
             "negative": { "cost": { "input": -1, "output": 2 } },
@@ -201,12 +242,21 @@ mod tests {
     #[test]
     fn keeps_what_it_can_use_and_skips_the_rest() {
         let c = Catalog::parse(FEED).expect("parse");
-        assert_eq!((c.provider_count(), c.model_count()), (1, 3));
+        assert_eq!((c.provider_count(), c.model_count()), (1, 4));
         let big = c.get("acme", "big").expect("big");
         assert_eq!(big.context_window, Some(1000));
         let cost = big.cost.as_ref().expect("cost");
         assert_eq!((cost.input, cost.cached_input), (1.5, Some(0.15)));
         assert_eq!(cost.cache_write, None, "unset means the input price");
+        assert_eq!(
+            big.efforts,
+            ["low", "high"],
+            "non-effort options and blanks drop out"
+        );
+        assert_eq!(
+            c.get("acme", "thoughtful").expect("only efforts").efforts,
+            ["none", "low"]
+        );
         assert!(c.get("acme", "negative").is_none());
         assert!(c.get("acme", "odd").is_none());
     }
@@ -227,9 +277,11 @@ mod tests {
 
     #[test]
     fn newer_catalog_wins_fact_by_fact() {
-        let downloaded = r#"{"acme":{"models":{"big":{"cost":{"input":9,"output":9}}}}}"#;
+        let downloaded = r#"{"acme":{"models":{"big":{"cost":{"input":9,"output":9},
+            "reasoning_options":[{"type":"effort","values":["high"]}]}}}}"#;
         let bundled = r#"{"acme":{"models":{"big":{"limit":{"context":7},
-            "cost":{"input":1,"output":1}},"old":{"limit":{"context":5}}}}}"#;
+            "cost":{"input":1,"output":1},"reasoning_options":[{"type":"effort","values":["low","high"]}]},
+            "old":{"limit":{"context":5},"reasoning_options":[{"type":"effort","values":["none"]}]}}}}"#;
         let c = Catalogs {
             downloaded: Catalog::parse(downloaded).ok(),
             bundled: Catalog::parse(bundled).ok(),
@@ -237,7 +289,14 @@ mod tests {
         let big = c.facts("acme", &file(""), "big");
         assert_eq!(big.context_window, Some(7));
         assert_eq!(big.cost.expect("cost").input, 9.0);
-        assert_eq!(c.facts("acme", &file(""), "old").context_window, Some(5));
+        assert_eq!(big.efforts, ["high"], "the newer catalog's levels win");
+        let old = c.facts("acme", &file(""), "old");
+        assert_eq!(old.context_window, Some(5));
+        assert_eq!(
+            old.efforts,
+            ["none"],
+            "the older catalog still fills the gaps"
+        );
         assert_eq!(c.facts("acme", &file(""), "bi"), ModelFacts::default());
     }
 

@@ -33,6 +33,14 @@ const WHEEL_ROWS: usize = 3;
 /// Frames (16 ms each) the status bar says a selection was copied.
 const COPIED_FRAMES: u64 = 125;
 
+/// One configuration source shown by `/config`, with its file when it has one.
+#[derive(Debug, Clone)]
+pub struct ConfigLayer {
+    pub layer: String,
+    pub status: String,
+    pub path: Option<String>,
+}
+
 /// Static facts the UI shows, captured once at startup.
 #[derive(Debug, Clone)]
 pub struct AppInfo {
@@ -56,8 +64,8 @@ pub struct AppInfo {
     pub project_config: String,
     /// Trust state of this workspace's `.quack/`.
     pub project_status: ProjectStatus,
-    /// `(layer, status and file)` rows for `/config`.
-    pub layers: Vec<(String, String)>,
+    /// Configuration sources for `/config`.
+    pub layers: Vec<ConfigLayer>,
     /// `(list, rule)` from `[permissions]`, e.g. `("allow", "shell:git status*")`.
     pub rules: Vec<(String, String)>,
     /// `grammars/` folders of the active layers, lowest first, for highlighting.
@@ -140,10 +148,15 @@ impl AppInfo {
                         LayerStatus::Failed => "failed to parse (see config check)".to_owned(),
                         LayerStatus::Skipped(why) => format!("skipped: {why}"),
                     };
-                    let file = l.dir.as_ref().map_or_else(String::new, |d| {
-                        format!("\n{}", d.join("config.toml").display())
-                    });
-                    (l.kind.label().to_owned(), format!("{status}{file}"))
+                    let path = l
+                        .dir
+                        .as_ref()
+                        .map(|d| d.join("config.toml").display().to_string());
+                    ConfigLayer {
+                        layer: l.kind.label().to_owned(),
+                        status,
+                        path,
+                    }
                 })
                 .collect(),
         }
@@ -247,7 +260,7 @@ pub(crate) enum Entry {
     User(String),
     Assistant(String),
     Reasoning(String),
-    Tool(ToolEntry),
+    Tool(Box<ToolEntry>),
     System(String),
     Warning(String),
     Error(String),
@@ -372,6 +385,9 @@ impl AgentRun {
                 }
             }
             Event::Warning { message } => self.items.push(AgentItem::Text(format!("! {message}"))),
+            Event::SessionResumeFailed { reason } => {
+                self.items.push(AgentItem::Text(format!("! {reason}")))
+            }
             Event::Error { error } => {
                 self.items
                     .push(AgentItem::Text(format!("! {}", error.message)));
@@ -851,6 +867,7 @@ pub struct App {
     /// The model catalog as last listed, to know a chosen model's thinking levels.
     catalog: Vec<quack_protocol::ProviderModels>,
     catalog_loaded: bool,
+    provider_connections: Option<Vec<quack_protocol::ProviderConnection>>,
     /// Last profile list returned by the engine, so `^l` can rebuild `/profiles` in place.
     profiles_cache: Option<(String, bool, Vec<quack_protocol::ProfileInfo>)>,
     /// Last MCP server list returned by the engine, so `^l` can rebuild `/mcp` in place.
@@ -859,6 +876,8 @@ pub struct App {
     pub(crate) write_scope: WriteScope,
     /// Model selected for `^s` in `/models`, so `^l` and `esc` in the role picker know it.
     default_picker_model: Option<String>,
+    /// Provider whose connection picker is open, so `esc` returns to `/providers` on it.
+    connection_picker_provider: Option<String>,
     /// A `/models <provider>/<model>` selection whose thinking-level picker is still owed
     /// once the engine confirms the switch.
     pick_thinking: Option<String>,
@@ -902,6 +921,7 @@ enum Focus {
 }
 
 impl App {
+    /// Build all UI state from startup facts, ready for the initial dirty draw.
     pub fn new(info: AppInfo) -> Self {
         let input = Input::with_history(info.history.clone());
         Self {
@@ -977,10 +997,12 @@ impl App {
             key_sources: BTreeMap::new(),
             catalog: Vec::new(),
             catalog_loaded: false,
+            provider_connections: None,
             profiles_cache: None,
             mcp_servers_cache: None,
             write_scope: WriteScope::User,
             default_picker_model: None,
+            connection_picker_provider: None,
             pick_thinking: None,
             setup_offered: false,
             plan_note_shown: false,
@@ -996,10 +1018,12 @@ impl App {
         }
     }
 
+    /// Whether the user asked the event loop to exit.
     pub fn should_quit(&self) -> bool {
         self.quit
     }
 
+    /// Whether exit should hand this session to the desktop GUI instead.
     pub fn wants_gui_handoff(&self) -> bool {
         self.gui_handoff
     }
@@ -1025,14 +1049,17 @@ impl App {
             .map(|id| id.chars().take(12).collect())
     }
 
+    /// Return the redraw flag and clear it; later input or events set it again.
     pub fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }
 
+    /// Drain a URL waiting to be opened in the browser, opening it only once.
     pub fn take_browser(&mut self) -> Option<String> {
         self.browser.take()
     }
 
+    /// Drain text waiting for the system clipboard, copying it only once.
     pub fn take_clipboard(&mut self) -> Option<String> {
         self.clipboard.take()
     }
@@ -1072,6 +1099,7 @@ impl App {
         Some(format!("{state}{} {title}", g.assistant))
     }
 
+    /// Drain engine operations accumulated by UI actions, in submission order.
     pub fn take_ops(&mut self) -> Vec<Op> {
         std::mem::take(&mut self.ops)
     }
@@ -1255,6 +1283,7 @@ impl App {
         items
     }
 
+    /// Advance frame-driven animation and mark a redraw only when something visible changes.
     pub fn on_tick(&mut self) {
         self.frame = self.frame.wrapping_add(1);
         let animating = self.turn_running
@@ -1285,6 +1314,7 @@ impl App {
         }
     }
 
+    /// Apply one engine event and schedule any transcript highlighting it requires.
     pub fn on_engine(&mut self, event: Event) {
         self.dirty = true;
         // Assistant text changed: the last entry, or any of them.
@@ -1334,6 +1364,15 @@ impl App {
         self.highlights.take_results()
     }
 
+    /// Rebuild a modal with `title` if it is still open; late responses leave other UI alone.
+    fn refresh_modal(&mut self, title: &str, build: impl FnOnce(&Self) -> Modal) -> bool {
+        if !self.modal.as_ref().is_some_and(|m| m.title == title) {
+            return false;
+        }
+        self.modal = Some(build(self));
+        true
+    }
+
     fn on_engine_event(&mut self, event: Event) {
         match event {
             Event::StartupProgress { subsystem, state } => {
@@ -1361,30 +1400,28 @@ impl App {
                 self.startup_dismissed = false;
                 self.trust = None;
                 self.note("config reloaded".into());
-                if self.modal.as_ref().is_some_and(|m| m.title == "Config") {
-                    self.modal = Some(
-                        modal::config(
-                            &self.info.settings,
-                            &self.info.layers,
-                            self.write_scope,
-                            self.info.project_status,
-                            &self.theme,
-                        )
-                        .keep_place(self.modal.as_ref()),
-                    );
+                if self.modal.as_ref().is_some_and(|m| m.title == "Providers") {
+                    self.ops.push(Op::ListProviderConnections);
                 }
-                if self.modal.as_ref().is_some_and(|m| m.title == "Hooks") {
-                    self.modal = Some(
-                        modal::hooks(&self.info.hooks, &self.hook_runs, self.write_scope, &self.theme)
-                            .keep_place(self.modal.as_ref()),
-                    );
-                }
-                if self.modal.as_ref().is_some_and(|m| m.title == "MCP") {
+                self.refresh_modal("Config", |app| {
+                    modal::config(
+                        &app.info.settings,
+                        &app.info.layers,
+                        app.write_scope,
+                        app.info.project_status,
+                        &app.theme,
+                    )
+                    .keep_place(app.modal.as_ref())
+                });
+                self.refresh_modal("Hooks", |app| {
+                    modal::hooks(&app.info.hooks, &app.hook_runs, app.write_scope, &app.theme)
+                        .keep_place(app.modal.as_ref())
+                });
+                if self.refresh_modal("MCP", |app| {
+                    modal::mcp(None, &app.info.mcp_items, app.write_scope, &app.theme)
+                        .keep_place(app.modal.as_ref())
+                }) {
                     self.mcp_servers_cache = None;
-                    self.modal = Some(
-                        modal::mcp(None, &self.info.mcp_items, self.write_scope, &self.theme)
-                            .keep_place(self.modal.as_ref()),
-                    );
                     self.ops.push(Op::ListMcp);
                 }
             }
@@ -1436,53 +1473,68 @@ impl App {
             Event::ModelCatalog { providers, current }
                 if self.modal.as_ref().is_some_and(|m| m.title == "Providers") =>
             {
-                self.modal = Some(modal::providers(
-                    Some(&providers),
-                    current.as_deref(),
-                    &self.theme,
-                ));
                 self.catalog = providers;
                 self.catalog_loaded = true;
+                self.refresh_providers(current.as_deref());
+            }
+            Event::ProviderConnections { connections } => {
+                self.provider_connections = Some(connections);
+                self.refresh_providers(self.info.model.clone().as_deref());
+            }
+            Event::ProviderConnectionSaved { connection, path } => {
+                self.note(format!(
+                    "saved {} connection settings in {path}",
+                    connection.id
+                ));
+                match &mut self.provider_connections {
+                    Some(list) => {
+                        if let Some(item) = list.iter_mut().find(|p| p.id == connection.id) {
+                            *item = connection;
+                        } else {
+                            list.push(connection);
+                        }
+                    }
+                    None => self.provider_connections = Some(vec![connection]),
+                }
+                self.refresh_providers(self.info.model.clone().as_deref());
+                if self.modal.as_ref().is_some_and(|m| m.title == "Providers") {
+                    self.ops.push(Op::ListModels);
+                }
             }
             Event::ModelCatalog { providers, current } => {
-                // Only refresh a /models modal that is still open.
-                if self.modal.as_ref().is_some_and(|m| m.title == "Models") {
-                    let mut roles = self.model_roles();
+                self.refresh_modal("Models", |app| {
+                    let mut roles = app.model_roles();
                     roles.current = current.as_deref();
-                    self.modal = Some(
-                        modal::models(
-                            Some(&providers),
-                            roles,
-                            self.info.ui.ascii,
-                            self.write_scope,
-                            &self.theme,
-                        )
-                        .keep_place(self.modal.as_ref()),
-                    );
-                }
+                    modal::models(
+                        Some(&providers),
+                        roles,
+                        app.info.ui.ascii,
+                        app.write_scope,
+                        &app.theme,
+                    )
+                    .keep_place(app.modal.as_ref())
+                });
                 self.catalog = providers;
                 self.catalog_loaded = true;
             }
             Event::Instructions { files } => {
-                if self.modal.as_ref().is_some_and(|m| m.title == "Instructions") {
-                    self.modal = Some(modal::instructions(Some(&files), &self.theme));
-                }
+                self.refresh_modal("Instructions", |app| {
+                    modal::instructions(Some(&files), &app.theme)
+                });
             }
             Event::Profiles {
                 active,
                 forced,
                 profiles,
             } => {
-                if self.modal.as_ref().is_some_and(|m| m.title == "Profiles") {
-                    self.modal = Some(
-                        modal::profiles(
-                            Some((&active, forced, &profiles)),
-                            self.write_scope,
-                            &self.theme,
-                        )
-                        .keep_place(self.modal.as_ref()),
-                    );
-                }
+                self.refresh_modal("Profiles", |app| {
+                    modal::profiles(
+                        Some((&active, forced, &profiles)),
+                        app.write_scope,
+                        &app.theme,
+                    )
+                    .keep_place(app.modal.as_ref())
+                });
                 self.profiles_cache = Some((active, forced, profiles));
             }
             Event::Skills { skills } => {
@@ -1524,9 +1576,9 @@ impl App {
                 }
             }
             Event::RewindPoints { points } => {
-                if self.modal.as_ref().is_some_and(|m| m.title == "Rewind") {
-                    self.modal = Some(modal::rewind(Some(&points), &self.theme));
-                }
+                self.refresh_modal("Rewind", |app| {
+                    modal::rewind(Some(&points), &app.theme)
+                });
             }
             Event::Rewound { back, text } => {
                 // Cut the transcript at the same user message, counted from the end.
@@ -1549,26 +1601,22 @@ impl App {
                 self.note("rewound; the message is back in the input to edit or send again".into());
             }
             Event::McpServers { servers } => {
-                if self.modal.as_ref().is_some_and(|m| m.title == "MCP") {
-                    self.modal = Some(
-                        modal::mcp(
-                            Some(&servers),
-                            &self.info.mcp_items,
-                            self.write_scope,
-                            &self.theme,
-                        )
-                        .keep_place(self.modal.as_ref()),
-                    );
-                }
+                self.refresh_modal("MCP", |app| {
+                    modal::mcp(
+                        Some(&servers),
+                        &app.info.mcp_items,
+                        app.write_scope,
+                        &app.theme,
+                    )
+                    .keep_place(app.modal.as_ref())
+                });
                 self.mcp_servers_cache = Some(servers);
             }
             Event::McpChanged { message, .. } => {
                 self.note(message);
             }
             Event::LspServers { servers } => {
-                if self.modal.as_ref().is_some_and(|m| m.title == "LSP") {
-                    self.modal = Some(modal::lsp(Some(&servers), &self.theme));
-                }
+                self.refresh_modal("LSP", |app| modal::lsp(Some(&servers), &app.theme));
             }
             Event::ServersDetected { servers } => {
                 self.setup.local = modal::Scan::Found(servers);
@@ -1643,39 +1691,32 @@ impl App {
                 None => format!("using the existing provider {id}; switching…"),
             }),
             Event::DoctorReport { checks } => {
-                if self.modal.as_ref().is_some_and(|m| m.title == "Doctor") {
-                    self.modal = Some(modal::doctor(Some(&checks), &self.theme));
-                }
+                self.refresh_modal("Doctor", |app| modal::doctor(Some(&checks), &app.theme));
             }
             Event::ToolProbeResult { report } => {
-                if self.modal.as_ref().is_some_and(|m| m.title == "Tool Probe") {
-                    self.modal = Some(modal::tool_probe(Some(&report), &self.theme));
-                }
+                self.refresh_modal("Tool Probe", |app| {
+                    modal::tool_probe(Some(&report), &app.theme)
+                });
             }
             Event::MemoryNotes { notes, index_fill } => {
-                if self.modal.as_ref().is_some_and(|m| m.title == "Memory") {
-                    self.modal = Some(modal::memory(Some(&notes), index_fill, &self.theme));
-                }
+                self.refresh_modal("Memory", |app| {
+                    modal::memory(Some(&notes), index_fill, &app.theme)
+                });
             }
             Event::ContextReport { report } => {
-                if self.modal.as_ref().is_some_and(|m| m.title == "Context") {
-                    self.modal = Some(modal::context(
-                        Some(&report),
-                        &self.growth,
-                        self.info.ui.ascii,
-                        &self.theme,
-                    ));
-                }
+                self.refresh_modal("Context", |app| {
+                    modal::context(Some(&report), &app.growth, app.info.ui.ascii, &app.theme)
+                });
             }
             Event::Stats { report } => {
-                if self.modal.as_ref().is_some_and(|m| m.title == "Stats") {
-                    self.modal = Some(modal::stats(Some(&report), self.info.ui.ascii, &self.theme));
-                }
+                self.refresh_modal("Stats", |app| {
+                    modal::stats(Some(&report), app.info.ui.ascii, &app.theme)
+                });
             }
             Event::SessionList { sessions } => {
-                if self.modal.as_ref().is_some_and(|m| m.title == "Sessions") {
-                    self.modal = Some(modal::sessions(Some(&sessions), &self.theme));
-                }
+                self.refresh_modal("Sessions", |app| {
+                    modal::sessions(Some(&sessions), &app.theme)
+                });
             }
             Event::SettingSaved {
                 key,
@@ -1687,7 +1728,7 @@ impl App {
                 if self.hook_inspect == Some(request) && self.modal.as_ref().is_some_and(|m| m.title == "Hook setup") {
                     self.hook_inspect = None;
                     self.modal = None;
-                    let mut form = HookForm::new(info);
+                    let mut form = HookForm::new(*info);
                     if let Some(drafts) = self.hook_reapply.take() { form.restore_drafts(drafts); }
                     if self.hook_test_after_inspect {
                         if form.drafts.len() == 1 { form.key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)); }
@@ -1768,7 +1809,7 @@ impl App {
                             ok,
                             result,
                             detail,
-                        } => Entry::Tool(ToolEntry {
+                        } => Entry::Tool(Box::new(ToolEntry {
                             call_id: CallId(String::new()),
                             name: summary.split_whitespace().next().unwrap_or_default().to_owned(),
                             summary,
@@ -1777,7 +1818,7 @@ impl App {
                             detail: detail.unwrap_or_default(),
                             started: None,
                             took: None,
-                        }),
+                        })),
                         ReplayItem::Reasoning { text } => Entry::Reasoning(text),
                         ReplayItem::Compacted => {
                             Entry::System("── earlier conversation summarized ──".into())
@@ -1823,7 +1864,7 @@ impl App {
             ),
             Event::ToolCallBegin { call } => {
                 self.turn_tools += 1;
-                self.transcript.push(Entry::Tool(ToolEntry {
+                self.transcript.push(Entry::Tool(Box::new(ToolEntry {
                     call_id: call.call_id,
                     name: call.name,
                     summary: call.summary,
@@ -1832,7 +1873,7 @@ impl App {
                     detail: String::new(),
                     started: Some(Instant::now()),
                     took: None,
-                }));
+                })));
             }
             Event::ToolCallOutputDelta { call_id, chunk } => {
                 if let Some(t) = self.tool_mut(&call_id) {
@@ -2034,17 +2075,10 @@ impl App {
                     message: message.clone(),
                     context_tokens,
                 });
-                if self.modal.as_ref().is_some_and(|m| m.title == "Hooks") {
-                    self.modal = Some(
-                        modal::hooks(
-                            &self.info.hooks,
-                            &self.hook_runs,
-                            self.write_scope,
-                            &self.theme,
-                        )
-                        .keep_place(self.modal.as_ref()),
-                    );
-                }
+                self.refresh_modal("Hooks", |app| {
+                    modal::hooks(&app.info.hooks, &app.hook_runs, app.write_scope, &app.theme)
+                        .keep_place(app.modal.as_ref())
+                });
                 // Quiet unless the hook changed something; failures arrive as warnings.
                 let did = match outcome {
                     HookOutcome::Context => format!(
@@ -2072,6 +2106,7 @@ impl App {
                 format!("quack {latest} is out (you have {current}) · `quack update` says how"),
             )),
             Event::Warning { message } => self.transcript.push(Entry::Warning(message)),
+            Event::SessionResumeFailed { reason } => self.transcript.push(Entry::Warning(reason)),
             Event::Error { error } => {
                 if std::mem::take(&mut self.setup_adding) {
                     self.note("run /setup to try again".into());
@@ -2083,6 +2118,7 @@ impl App {
         }
     }
 
+    /// Route terminal input to the active UI, acting on key Press/Repeat but never Release.
     pub fn on_terminal(&mut self, event: TermEvent) {
         match event {
             // Windows reports Release events too; act on Press and Repeat only.
@@ -2395,6 +2431,10 @@ impl App {
                     .modal
                     .as_ref()
                     .is_some_and(|m| m.title == "Default role");
+                let was_connection = self
+                    .modal
+                    .as_ref()
+                    .is_some_and(|m| m.title.starts_with("Connection: "));
                 self.modal = None;
                 if was_default_role && self.default_picker_model.take().is_some() {
                     self.modal = Some(modal::models(
@@ -2404,6 +2444,8 @@ impl App {
                         self.write_scope,
                         &self.theme,
                     ));
+                } else if was_connection && let Some(id) = self.connection_picker_provider.take() {
+                    self.open_providers_selected(&id);
                 } else if self.signing_in.take().is_some() {
                     self.browser = None;
                     self.ops.push(Op::SignIn { id: None });
@@ -2424,10 +2466,7 @@ impl App {
                 self.execute(&text);
             }
             ModalOutcome::ToggleScope => {
-                self.write_scope = match self.write_scope {
-                    WriteScope::Project => WriteScope::User,
-                    WriteScope::User | WriteScope::Session => WriteScope::Project,
-                };
+                self.write_scope = toggle_write_scope(self.write_scope);
                 if let Some(old) = self.modal.take() {
                     self.refresh_scoped_modal(&old);
                 }
@@ -2584,7 +2623,7 @@ impl App {
 
     fn tool_mut(&mut self, id: &CallId) -> Option<&mut ToolEntry> {
         self.transcript.iter_mut().rev().find_map(|e| match e {
-            Entry::Tool(t) if &t.call_id == id => Some(t),
+            Entry::Tool(t) if &t.call_id == id => Some(t.as_mut()),
             _ => None,
         })
     }
@@ -2599,10 +2638,7 @@ impl App {
             )
             && let Some(a) = self.approval.as_mut().filter(|a| !a.always.is_empty())
         {
-            a.always_scope = match a.always_scope {
-                WriteScope::Project => WriteScope::User,
-                WriteScope::User | WriteScope::Session => WriteScope::Project,
-            };
+            a.always_scope = toggle_write_scope(a.always_scope);
             return;
         }
         let decision = match key.code {
@@ -2678,10 +2714,7 @@ impl App {
             KeyCode::Char('u') if ctrl => p.text.clear(),
             KeyCode::Char('l') if ctrl => {
                 if let Some(s) = &mut p.scope {
-                    *s = match *s {
-                        WriteScope::Project => WriteScope::User,
-                        WriteScope::User | WriteScope::Session => WriteScope::Project,
-                    };
+                    *s = toggle_write_scope(*s);
                 }
             }
             KeyCode::Char(c) if !ctrl => {
@@ -2878,10 +2911,9 @@ impl App {
 
     /// Redraw an open `/setup` with new findings, keeping the user's place.
     fn refresh_setup(&mut self) {
-        if self.modal.as_ref().is_some_and(|m| m.title == "Setup") {
-            self.modal =
-                Some(modal::setup(&self.setup, &self.theme).keep_place(self.modal.as_ref()));
-        }
+        self.refresh_modal("Setup", |app| {
+            modal::setup(&app.setup, &app.theme).keep_place(app.modal.as_ref())
+        });
     }
 
     fn on_asking_key(&mut self, key: KeyEvent) {
@@ -3480,10 +3512,7 @@ impl App {
             }
             "scope" => match args.trim() {
                 "" => {
-                    self.write_scope = match self.write_scope {
-                        WriteScope::Project => WriteScope::User,
-                        WriteScope::User | WriteScope::Session => WriteScope::Project,
-                    };
+                    self.write_scope = toggle_write_scope(self.write_scope);
                     self.note(self.scope_note());
                 }
                 "user" | "global" => {
@@ -3519,14 +3548,8 @@ impl App {
                 self.modal = None;
                 self.prompt = Some(Prompt::new_key(id, self.key_sources.get(id)));
             }
-            "providers" | "key" => {
-                self.modal = Some(modal::providers(
-                    None,
-                    self.info.model.as_deref(),
-                    &self.theme,
-                ));
-                self.ops.push(Op::ListModels);
-            }
+            "providers" if !args.is_empty() => self.provider_command(args),
+            "providers" | "key" => self.open_providers(),
             "mcp" => {
                 let (scope, mcp_args) = take_scope_flag(args, self.write_scope);
                 if mcp_args.is_empty() {
@@ -3653,22 +3676,12 @@ impl App {
                         .map(|r| split_scope_flag(r, scope))
                     {
                         Some((scope, id)) if self.info.bundles.iter().any(|b| b.id == id) => {
-                            let mut disabled = self.info.bundles_disabled.clone();
-                            let off = !disabled.iter().any(|d| d == id);
-                            if off {
-                                disabled.push(id.to_owned());
-                            } else {
-                                disabled.retain(|d| d != id);
-                            }
-                            let list = disabled
-                                .iter()
-                                .map(|d| toml_string(d))
-                                .collect::<Vec<_>>()
-                                .join(", ");
+                            let off = !self.info.bundles_disabled.iter().any(|d| d == id);
+                            let list = toggle_disabled(&self.info.bundles_disabled, id, off);
                             self.modal = None;
                             self.ops.push(Op::SaveSetting {
                                 key: "bundles.disabled".into(),
-                                value: format!("[{list}]"),
+                                value: list,
                                 scope,
                             });
                             self.ops.push(Op::ReloadConfig);
@@ -3870,16 +3883,10 @@ impl App {
                         && !self.info.hooks_disabled.iter().any(|d| d == id);
                     self.modal = None;
                     if on {
-                        let mut disabled = self.info.hooks_disabled.clone();
-                        disabled.push(id.to_owned());
-                        let list = disabled
-                            .iter()
-                            .map(|d| toml_string(d))
-                            .collect::<Vec<_>>()
-                            .join(", ");
+                        let list = toggle_disabled(&self.info.hooks_disabled, id, true);
                         self.ops.push(Op::SaveSetting {
                             key: "hooks.disabled".into(),
-                            value: format!("[{list}]"),
+                            value: list,
                             scope,
                         });
                         self.ops.push(Op::ReloadConfig);
@@ -3923,6 +3930,94 @@ impl App {
         }
         self.modal = Some(modal::rewind(None, &self.theme));
         self.ops.push(Op::ListRewindPoints);
+    }
+
+    fn open_providers(&mut self) {
+        self.connection_picker_provider = None;
+        self.modal = Some(modal::providers(
+            None,
+            None,
+            self.info.model.as_deref(),
+            &self.theme,
+        ));
+        self.ops.push(Op::ListModels);
+        self.ops.push(Op::ListProviderConnections);
+    }
+
+    fn open_providers_selected(&mut self, id: &str) {
+        self.modal = Some(
+            modal::providers(
+                self.catalog_loaded.then_some(self.catalog.as_slice()),
+                self.provider_connections.as_deref(),
+                self.info.model.as_deref(),
+                &self.theme,
+            )
+            .select_matching(|item| modal::provider_label_id(&item.label) == id),
+        );
+    }
+
+    fn refresh_providers(&mut self, current: Option<&str>) {
+        let selected_id = self
+            .modal
+            .as_ref()
+            .filter(|m| m.title == "Providers")
+            .and_then(|m| m.selected_item())
+            .map(|item| modal::provider_label_id(&item.label).to_owned());
+        self.refresh_modal("Providers", |app| {
+            let modal = modal::providers(
+                app.catalog_loaded.then_some(app.catalog.as_slice()),
+                app.provider_connections.as_deref(),
+                current,
+                &app.theme,
+            )
+            .keep_place(app.modal.as_ref());
+            match selected_id.as_deref() {
+                Some(id) => {
+                    modal.select_matching(|item| modal::provider_label_id(&item.label) == id)
+                }
+                None => modal,
+            }
+        });
+    }
+
+    fn provider_command(&mut self, args: &str) {
+        use quack_protocol::ProviderHttpVersion::*;
+        if matches!(args, "advanced" | "connection") {
+            self.open_providers();
+            return;
+        }
+        let (action, id) = args.split_once(' ').unwrap_or_default();
+        let id = id.trim();
+        let (http_version, no_proxy) = match action {
+            "advanced" | "connection" => {
+                if let Some(provider) = self
+                    .provider_connections
+                    .iter()
+                    .flatten()
+                    .find(|p| p.id == id)
+                    .cloned()
+                {
+                    self.connection_picker_provider = Some(provider.id.clone());
+                    self.modal = Some(modal::provider_connection(&provider, &self.theme));
+                } else {
+                    self.note("open /providers to choose a configured provider".into());
+                }
+                return;
+            }
+            "http-inherit" => (Some(Inherit), None),
+            "http-1" => (Some(Http1Only), None),
+            "http-negotiate" => (Some(Negotiate), None),
+            "proxy-inherit" => (None, Some(false)),
+            "proxy-direct" => (None, Some(true)),
+            _ => return self.note("open /providers to edit connection settings".into()),
+        };
+        self.connection_picker_provider = None;
+        self.open_providers_selected(id);
+        self.ops.push(Op::SaveProviderConnection {
+            id: id.into(),
+            http_version,
+            no_proxy,
+        });
     }
 
     fn open_thinking(&mut self) {
@@ -4211,6 +4306,14 @@ fn take_scope_flag(args: &str, default: WriteScope) -> (WriteScope, &str) {
     }
 }
 
+/// Flip between the user and project write targets; session scope switches to project.
+fn toggle_write_scope(scope: WriteScope) -> WriteScope {
+    match scope {
+        WriteScope::Project => WriteScope::User,
+        WriteScope::User | WriteScope::Session => WriteScope::Project,
+    }
+}
+
 fn split_scope_flag(args: &str, default: WriteScope) -> (WriteScope, &str) {
     let (scope, s) = take_scope_flag(args, default);
     if let Some(head) = s
@@ -4226,6 +4329,22 @@ fn split_scope_flag(args: &str, default: WriteScope) -> (WriteScope, &str) {
     } else {
         (scope, s)
     }
+}
+
+/// The TOML `disabled` array after adding or removing `id`.
+fn toggle_disabled(disabled: &[String], id: &str, disable: bool) -> String {
+    let mut disabled = disabled.to_vec();
+    if disable {
+        disabled.push(id.to_owned());
+    } else {
+        disabled.retain(|d| d != id);
+    }
+    let list = disabled
+        .iter()
+        .map(|d| toml_string(d))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{list}]")
 }
 
 /// A TOML string literal, so ids like `true` or `1.5` stay strings.
@@ -4964,6 +5083,136 @@ mod tests {
     }
 
     #[test]
+    fn providers_modal_edits_connection_settings_in_place() {
+        use quack_protocol::{KeySource, ProviderConnection, ProviderHttpVersion, ProviderModels};
+        let mut app = App::new(info());
+        app.execute("/providers");
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::ListModels, Op::ListProviderConnections]
+        );
+        // Connections arrive before network probing finishes: both providers are immediately
+        // visible and editable in the single list without switching tabs.
+        app.on_engine(Event::ProviderConnections {
+            connections: vec![
+                ProviderConnection {
+                    id: "openai".into(),
+                    http_version: ProviderHttpVersion::Inherit,
+                    no_proxy: false,
+                    inherited_http1_only: false,
+                },
+                ProviderConnection {
+                    id: "vllm".into(),
+                    http_version: ProviderHttpVersion::Inherit,
+                    no_proxy: false,
+                    inherited_http1_only: false,
+                },
+            ],
+        });
+        // Select vllm while catalog is still loading; when catalog arrives in a different order,
+        // vllm stays selected.
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            app.modal
+                .as_ref()
+                .and_then(|m| m.selected_item())
+                .map(|i| i.label.as_str()),
+            Some("vllm")
+        );
+        app.on_engine(Event::ModelCatalog {
+            providers: vec![
+                ProviderModels {
+                    id: "vllm".into(),
+                    available: false,
+                    note: "connection refused".into(),
+                    models: Vec::new(),
+                    bundled: false,
+                    key: None,
+                },
+                ProviderModels {
+                    id: "openai".into(),
+                    available: true,
+                    note: "1 model".into(),
+                    models: Vec::new(),
+                    bundled: false,
+                    key: Some(KeySource::Keyring {
+                        name: "openai".into(),
+                    }),
+                },
+            ],
+            current: None,
+        });
+        assert_eq!(
+            app.modal
+                .as_ref()
+                .and_then(|m| m.selected_item())
+                .map(|i| i.label.as_str()),
+            Some("vllm")
+        );
+        // Keyless provider: Enter opens its single-list connection editor directly.
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.modal.as_ref().map(|m| m.title.as_str()),
+            Some("Connection: vllm")
+        );
+        // Down 4 times reaches "Proxy: Direct connection" on the same screen.
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Down);
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::SaveProviderConnection {
+                id: "vllm".into(),
+                http_version: None,
+                no_proxy: Some(true),
+            }]
+        );
+        // Back on the single Providers list with vllm still selected.
+        assert_eq!(
+            app.modal.as_ref().map(|m| m.title.as_str()),
+            Some("Providers")
+        );
+        assert_eq!(
+            app.modal
+                .as_ref()
+                .and_then(|m| m.selected_item())
+                .map(|i| i.label.as_str()),
+            Some("vllm")
+        );
+
+        // Keyed provider: Ctrl-S opens its connection editor, and Esc returns to Providers on it.
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            app.modal
+                .as_ref()
+                .and_then(|m| m.selected_item())
+                .map(|i| i.label.as_str()),
+            Some("openai")
+        );
+        app.on_terminal(TermEvent::Key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(
+            app.modal.as_ref().map(|m| m.title.as_str()),
+            Some("Connection: openai")
+        );
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            app.modal.as_ref().map(|m| m.title.as_str()),
+            Some("Providers")
+        );
+        assert_eq!(
+            app.modal
+                .as_ref()
+                .and_then(|m| m.selected_item())
+                .map(|i| i.label.as_str()),
+            Some("openai")
+        );
+    }
+
+    #[test]
     fn models_modal_lists_catalog_and_switches() {
         use quack_protocol::{ModelInfo, ProviderModels};
         let mut app = App::new(info());
@@ -5055,14 +5304,14 @@ mod tests {
         // levels.
         assert!(app.modal.is_none());
         app.on_engine(Event::SessionConfigured {
-            session: SessionInfo {
+            session: Box::new(SessionInfo {
                 id: SessionId("test".into()),
                 cwd: String::new(),
                 model: Some("charm/glm-5.3".into()),
                 profile: "generic".into(),
                 reasoning_effort: Some("medium".into()),
                 reasoning_efforts: vec!["low".into(), "medium".into(), "high".into()],
-            },
+            }),
         });
         let thinking = app.modal.as_ref().expect("picker open");
         assert_eq!(thinking.title, "Thinking");
@@ -5075,14 +5324,14 @@ mod tests {
         );
         // The picker does not reopen on its own afterwards.
         app.on_engine(Event::SessionConfigured {
-            session: SessionInfo {
+            session: Box::new(SessionInfo {
                 id: SessionId("test".into()),
                 cwd: String::new(),
                 model: Some("charm/glm-5.3".into()),
                 profile: "generic".into(),
                 reasoning_effort: Some("medium".into()),
                 reasoning_efforts: vec!["low".into(), "medium".into(), "high".into()],
-            },
+            }),
         });
         assert!(app.modal.is_none());
     }
@@ -5258,17 +5507,18 @@ mod tests {
             }]
         );
         app.on_engine(Event::SessionResumed {
-            session: SessionInfo {
+            session: Box::new(SessionInfo {
                 id: SessionId("bbb".into()),
                 cwd: String::new(),
                 model: None,
                 profile: "generic".into(),
                 reasoning_effort: None,
                 reasoning_efforts: Vec::new(),
-            },
+            }),
             items: vec![ReplayItem::User {
                 text: "fix it".into(),
-            }],
+            }]
+            .into(),
         });
         assert!(!app.transcript.contains(&Entry::User("old".into())));
         assert!(app.transcript.contains(&Entry::User("fix it".into())));
@@ -5529,7 +5779,7 @@ mod tests {
         ));
         app.on_engine(Event::HookSetup {
             request: 1,
-            info: crate::hook_form::example(),
+            info: Box::new(crate::hook_form::example()),
         });
         assert!(app.hook_form.is_some());
         press(&mut app, KeyCode::Enter);
@@ -5651,7 +5901,7 @@ mod tests {
 
         let mut app = App::new(info());
         app.on_engine(Event::SessionConfigured {
-            session: session("0123456789ab"),
+            session: Box::new(session("0123456789ab")),
         });
         // No turn yet -> not saved on disk.
         assert_eq!(app.resume_id(), None);
@@ -5666,7 +5916,7 @@ mod tests {
 
         // `/fork` replaces the session id while staying saved.
         app.on_engine(Event::SessionConfigured {
-            session: session("fedcba987654"),
+            session: Box::new(session("fedcba987654")),
         });
         assert_eq!(app.resume_id().as_deref(), Some("fedcba987654"));
 
@@ -5674,24 +5924,24 @@ mod tests {
         type_str(&mut app, "/new ");
         press(&mut app, KeyCode::Enter);
         app.on_engine(Event::SessionConfigured {
-            session: session("aaaaaaaaaaaa"),
+            session: Box::new(session("aaaaaaaaaaaa")),
         });
         assert_eq!(app.resume_id(), None);
 
         // Resuming a saved session marks it saved immediately.
         app.on_engine(Event::SessionResumed {
-            session: session("bbbbbbbbbbbb"),
-            items: vec![],
+            session: Box::new(session("bbbbbbbbbbbb")),
+            items: Vec::new().into(),
         });
         assert_eq!(app.resume_id().as_deref(), Some("bbbbbbbbbbbb"));
 
         // A turn that aborts because no model is ready creates no session log on disk.
         let mut unconfigured = App::new(info());
         unconfigured.on_engine(Event::SessionConfigured {
-            session: quack_protocol::SessionInfo {
+            session: Box::new(quack_protocol::SessionInfo {
                 model: None,
                 ..session("cccccccccccc")
-            },
+            }),
         });
         unconfigured.on_engine(Event::TurnStarted { turn: TurnId(1) });
         unconfigured.on_engine(Event::TurnAborted {

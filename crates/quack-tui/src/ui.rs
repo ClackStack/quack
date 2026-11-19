@@ -1018,7 +1018,6 @@ fn draw_status(
             left.push(Span::styled(" · ", t.dim));
             if max > 0 {
                 let line = app.compact_at.unwrap_or(max).max(1);
-                #[allow(clippy::cast_precision_loss)]
                 let frac = used as f32 / line as f32;
                 let style = if frac >= 0.85 {
                     t.error
@@ -1667,7 +1666,6 @@ fn draw_plan(f: &mut Frame<'_>, app: &App, area: Rect) {
         .map(|(s, text)| (*s, text.as_str()))
         .unwrap_or((PlanState::Pending, ""));
     let (mark, mark_style) = plan_mark(app, state);
-    #[allow(clippy::cast_precision_loss)]
     let meter = crate::theme::meter(
         done as f32 / total.max(1) as f32,
         total.min(10),
@@ -2265,6 +2263,55 @@ mod tests {
     }
 
     #[test]
+    fn long_modal_list_shows_a_window_around_the_selection() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use quack_protocol::{ModelInfo, ProviderModels};
+        let mut app = started_app();
+        let models: Vec<_> = (0..60)
+            .map(|n| ModelInfo {
+                id: format!("m{n:02}"),
+                alias: None,
+                context_window: Some(1_000),
+                price: None,
+                reasoning_efforts: Vec::new(),
+            })
+            .collect();
+        let catalog = [ProviderModels {
+            bundled: false,
+            key: None,
+            id: "charm".into(),
+            available: true,
+            note: String::new(),
+            models,
+        }];
+        app.modal = Some(crate::modal::models(
+            Some(&catalog),
+            crate::modal::ModelRoles {
+                current: Some("charm/m00"),
+                ..app.model_roles()
+            },
+            false,
+            WriteScope::User,
+            &app.theme,
+        ));
+        // 40 downs is far past the list pane's height: the rendered window
+        // must follow the selection instead of starting at the top.
+        for _ in 0..40 {
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        }
+        let s = render(&app, 100, 30);
+        assert!(s.contains("charm/m40"), "{s}");
+        assert!(!s.contains("charm/m00"), "{s}");
+        // Holding Down past the end clamps to the last item, still visible.
+        for _ in 0..80 {
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        }
+        let s = render(&app, 100, 30);
+        assert!(s.contains("charm/m59"), "{s}");
+        assert!(!s.contains("charm/m00"), "{s}");
+    }
+
+    #[test]
     fn instructions_modal_100x30() {
         use quack_protocol::InstructionFile;
         let mut app = started_app();
@@ -2664,25 +2711,25 @@ mod tests {
         use crossterm::event::{Event as TerminalEvent, KeyCode, KeyEvent, KeyModifiers};
         let mut app = started_app();
         let path = "/home/developer/projects/a-long-workspace-name/.quack/config.toml";
+        let layer = |name: &str, status: &str, file: Option<&str>| crate::app::ConfigLayer {
+            layer: name.into(),
+            status: status.into(),
+            path: file.map(str::to_owned),
+        };
         let files = vec![
-            (
-                "defaults".into(),
-                "loaded\n/usr/share/quack/defaults/config.toml".into(),
+            layer(
+                "defaults",
+                "loaded",
+                Some("/usr/share/quack/defaults/config.toml"),
             ),
-            (
-                "system".into(),
-                "no config.toml\n/etc/quack/config.toml".into(),
+            layer("system", "no config.toml", Some("/etc/quack/config.toml")),
+            layer(
+                "user",
+                "failed to parse (see config check)",
+                Some("/home/developer/.config/quack/config.toml"),
             ),
-            (
-                "user".into(),
-                "failed to parse (see config check)\n/home/developer/.config/quack/config.toml"
-                    .into(),
-            ),
-            (
-                "project".into(),
-                format!("skipped: not trusted yet\n{path}"),
-            ),
-            ("env".into(), "loaded".into()),
+            layer("project", "skipped: not trusted yet", Some(path)),
+            layer("env", "loaded", None),
         ];
         app.modal = Some(
             crate::modal::config(
@@ -3327,14 +3374,14 @@ mod tests {
         let mut app = started_app();
         started(&mut app);
         let configured = |effort: Option<&str>, levels: &[&str]| Event::SessionConfigured {
-            session: SessionInfo {
+            session: Box::new(SessionInfo {
                 id: SessionId("test".into()),
                 cwd: String::new(),
                 model: Some("mock/tiny".into()),
                 profile: "generic".into(),
                 reasoning_effort: effort.map(str::to_owned),
                 reasoning_efforts: levels.iter().map(|s| (*s).to_owned()).collect(),
-            },
+            }),
         };
         app.on_engine(configured(Some("high"), &["low", "medium", "high"]));
         for (width, height) in [(80, 24), (100, 30), (140, 24)] {
@@ -3637,7 +3684,10 @@ mod tests {
         // /providers says where the key is read from; ⏎ asks for a new one.
         app.input.set("/providers");
         key(&mut app, KeyCode::Enter, none);
-        assert_eq!(app.take_ops(), vec![Op::ListModels]);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::ListModels, Op::ListProviderConnections]
+        );
         app.on_engine(Event::ModelCatalog {
             providers: vec![ProviderModels {
                 id: "example".into(),
@@ -3655,6 +3705,53 @@ mod tests {
         assert!(s.contains("OS credential store"), "{s}");
         assert!(s.contains("(`example`)"), "{s}");
         assert!(s.contains("replace its key"), "{s}");
+        assert!(!s.contains(" Advanced "), "{s}");
+        app.on_engine(Event::ProviderConnections {
+            connections: vec![quack_protocol::ProviderConnection {
+                id: "example".into(),
+                http_version: quack_protocol::ProviderHttpVersion::Http1Only,
+                no_proxy: true,
+                inherited_http1_only: false,
+            }],
+        });
+        let s = render(&app, 100, 30);
+        assert!(s.contains("HTTP      HTTP/1.1 only"), "{s}");
+        assert!(s.contains("proxy     Direct connection"), "{s}");
+        assert!(s.contains("^s connection settings"), "{s}");
+        assert!(s.contains("^s connection"), "{s}");
+        // Ctrl-S opens the grouped connection editor; Esc returns to Providers.
+        key(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let s = render(&app, 100, 30);
+        assert!(s.contains("Connection: example"), "{s}");
+        assert!(s.contains("HTTP version ─"), "{s}");
+        assert!(s.contains("HTTP/1.1 only"), "{s}");
+        assert!(s.contains("Proxy ─"), "{s}");
+        assert!(s.contains("Direct connection"), "{s}");
+        // Blank separator line between the last HTTP option and the Proxy header.
+        let lines: Vec<&str> = s.lines().collect();
+        let neg_row = lines
+            .iter()
+            .rposition(|l| l.contains("Negotiate"))
+            .expect("Negotiate row");
+        let proxy_row = lines
+            .iter()
+            .position(|l| l.contains("Proxy ─"))
+            .expect("Proxy header row");
+        assert_eq!(proxy_row, neg_row + 2, "{s}");
+        // Filtering by section name keeps only that section's items.
+        for c in "proxy".chars() {
+            key(&mut app, KeyCode::Char(c), none);
+        }
+        let filtered = render(&app, 100, 30);
+        assert!(filtered.contains("Proxy ─"), "{filtered}");
+        assert!(!filtered.contains("HTTP version ─"), "{filtered}");
+        assert!(filtered.contains("Direct connection"), "{filtered}");
+        // First Esc clears the filter; second Esc returns to Providers.
+        key(&mut app, KeyCode::Esc, none);
+        key(&mut app, KeyCode::Esc, none);
+        let s = render(&app, 100, 30);
+        assert!(s.contains("Providers"), "{s}");
+        assert!(s.contains("HTTP      HTTP/1.1 only"), "{s}");
         key(&mut app, KeyCode::Enter, none);
         assert!(app.modal.is_none());
         let s = render(&app, 100, 30);

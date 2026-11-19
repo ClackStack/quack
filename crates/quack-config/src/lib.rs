@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 pub mod agent;
+mod atomic;
 pub mod bundle;
 pub mod catalog;
 mod diagnostic;
@@ -32,6 +33,8 @@ mod secret;
 pub mod settings;
 pub mod sha256;
 mod state;
+#[cfg(test)]
+mod testing;
 mod trust;
 
 pub use agent::AgentFile;
@@ -47,7 +50,7 @@ pub use items::{
 };
 pub use load::{
     ConfigError, LayerReport, LayerStatus, LoadOptions, Loaded, Origin, ProjectStatus, load,
-    load_with,
+    load_with, load_workspace_with,
 };
 pub use lsp::LspServerFile;
 pub use mcp::{McpServerFile, McpTools};
@@ -292,60 +295,13 @@ fn model_ids(path: &std::path::Path) -> Option<ParsedIds> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::Fixture;
     use std::collections::HashMap;
     use std::ffi::OsString;
 
-    struct Fixture {
-        _tmp: tempfile::TempDir,
-        root: PathBuf,
-        vars: HashMap<String, OsString>,
-    }
-
-    impl Fixture {
-        fn new() -> Self {
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let root = tmp.path().to_path_buf();
-            let mut vars = HashMap::new();
-            for (k, sub) in [
-                ("QUACK_SYSTEM_DIR", "system"),
-                ("QUACK_CONFIG_DIR", "user"),
-                ("QUACK_DATA_DIR", "data"),
-                ("QUACK_CACHE_DIR", "cache"),
-            ] {
-                vars.insert(k.to_owned(), root.join(sub).into_os_string());
-            }
-            vars.insert(
-                "QUACK_DEFAULTS_DIR".into(),
-                root.join("defaults").into_os_string(),
-            );
-            std::fs::create_dir_all(root.join("repo").join(".git")).expect("mkdir");
-            Self {
-                _tmp: tmp,
-                root,
-                vars,
-            }
-        }
-
-        fn path(&self, rel: &str) -> PathBuf {
-            rel.split('/').fold(self.root.clone(), |p, seg| p.join(seg))
-        }
-
-        fn write(&self, rel: &str, text: &str) {
-            let path = self.path(rel);
-            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-            std::fs::write(path, text).expect("write");
-        }
-
-        fn load(&self) -> Loaded {
-            let o = LoadOptions::new(self.root.join("repo"));
-            let vars = self.vars.clone();
-            load_with(&move |k| vars.get(k).cloned(), &o).expect("load")
-        }
-    }
-
     #[test]
     fn a_pinned_model_list_that_moved_on_is_drift() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write(
             "defaults/providers.d/charm.toml",
             "base_url = \"https://hyper.example/v1\"\n\
@@ -384,7 +340,7 @@ mod tests {
 
     #[test]
     fn no_bundle_or_matching_list_is_no_drift() {
-        let f = Fixture::new();
+        let f = Fixture::with_defaults();
         f.write(
             "user/providers.d/own.toml",
             "base_url = \"https://api.example.org/v1\"\nmodels = [\"a\"]\n",

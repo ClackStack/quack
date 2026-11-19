@@ -131,6 +131,21 @@ Compaction prompts are profile-overridable templates (`compact.md` in a profile 
 - **Log:** `prune` records hold the replaced contents and `compaction` records hold the cut and the summary message. Replay applies them in order, and repairs dangling tool calls at each `resume` record, as the live session did. Resume therefore rebuilds the same history.
 - **Tested** with mock servers (threshold, overflow retry, `/compact`, resume after compaction) and locally with Qwen3.5-0.8B on llama.cpp with a 6k window: three turns, two compactions in one turn, and the facts from the first turn recalled after them.
 
+### Native Responses compaction (2026-11-18)
+
+- The bundled OpenAI and ChatGPT providers use native compaction at the threshold,
+  after an overflow, and for `/compact` without a focus. Automatic compaction sends
+  the older span before pruning can discard its reasoning. The `aggressive` cache
+  strategy still prunes first.
+- Quack replaces the older span with the server's returned input items in order and
+  appends the untouched recent tail. For threshold-based plan compaction, the newest
+  checkpoint subsumes the preceding items. The session log stores both the encrypted
+  checkpoint and a local text fallback. The native window is replayed after resume
+  when the provider, endpoint, model, system prompt and tools still match.
+- A focused `/compact`, a pre-compact hook that supplies summary instructions, or
+  an unavailable endpoint uses the text summarizer. When replay is incompatible
+  with the current setup, Quack uses the saved text fallback for that checkpoint.
+
 ### As implemented (2026-10-18): index and pruning rules
 
 - **Outlines** come from tree-sitter with each grammar crate's own `tags.scm` (plus `impl` blocks for Rust), for Rust, Python, JavaScript, TypeScript/TSX and Go, behind `lang-common`. C and C++ (added 2026-10-19) use queries of our own in `outline.rs`, since the grammars' `tags.scm` capture only a function's declarator line: whole definitions, structs, unions, enums, typedefs, function-like macros, and for C++ classes, namespaces, methods and prototypes. `.h` is parsed as C++, which reads C headers too. A C++ method defined outside its class keeps its qualified name (`Shape::area`), and `read symbol=` prefers the longest match, so a definition beats its prototype. A signature whose name is not on the definition's first line shows the lines up to it (`static int add(int a, int b)`) or `typedef struct { … } Name;`. Definitions are nested by their line ranges. Caching and incremental reparsing are still to do (files are parsed on demand, which is fast at these sizes). Shell scripts (`.sh`, `.bash`) outline their functions (added 2026-10-21).

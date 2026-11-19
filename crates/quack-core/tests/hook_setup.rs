@@ -69,7 +69,7 @@ async fn inspect(engine: &mut EngineHandle, request: u64) -> HookSetupInfo {
     )
     .await
     {
-        Event::HookSetup { info, .. } => info,
+        Event::HookSetup { info, .. } => *info,
         _ => unreachable!("matched event"),
     }
 }

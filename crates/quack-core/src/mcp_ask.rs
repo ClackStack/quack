@@ -122,6 +122,8 @@ pub(crate) struct Sampler {
     pub setup: Arc<Setup>,
     pub stats: Arc<Mutex<Stats>>,
     pub log: Option<SharedLog>,
+    /// The engine's, so its questions and a turn's never overlap.
+    pub prompt_lock: Arc<tokio::sync::Mutex<()>>,
     /// The running turn's, so an interrupt stops the request too.
     pub cancel: CancellationToken,
     pub call_id: CallId,
@@ -166,11 +168,7 @@ impl Sampler {
     }
 
     async fn approve(&self, server: &str, request: &SampleRequest) -> Option<ApprovalDecision> {
-        let (otx, orx) = oneshot::channel();
         let id = self.call_id.0.clone();
-        if let Ok(mut pending) = self.approvals.lock() {
-            pending.insert(id.clone(), otx);
-        }
         let last = request
             .messages
             .last()
@@ -181,28 +179,31 @@ impl Sampler {
         } else {
             last
         };
-        let _ = self.tx.send(Event::ApprovalRequest {
-            call_id: self.call_id.clone(),
-            request: ApprovalRequest::Tool {
-                name: format!("mcp:{server}/sampling"),
-                arguments: format!(
-                    "{server} asks {} for a reply of up to {} tokens to: {last}",
-                    self.setup.model_ref, request.max_tokens
-                ),
+        let answer = turn::wait_for_answer(
+            &self.prompt_lock,
+            &self.cancel,
+            &self.stats,
+            &self.approvals,
+            id.clone(),
+            Event::ApprovalRequest {
+                call_id: self.call_id.clone(),
+                request: ApprovalRequest::Tool {
+                    name: format!("mcp:{server}/sampling"),
+                    arguments: format!(
+                        "{server} asks {} for a reply of up to {} tokens to: {last}",
+                        self.setup.model_ref, request.max_tokens
+                    ),
+                },
+                always: Vec::new(),
             },
-            always: Vec::new(),
-        });
-        let asked = Instant::now();
-        let answer = tokio::select! {
-            () = self.cancel.cancelled() => None,
-            a = orx => a.ok(),
-        };
-        if let Ok(mut st) = self.stats.lock() {
-            st.waited(asked.elapsed());
-        }
-        if let Ok(mut pending) = self.approvals.lock() {
-            pending.remove(&id);
-        }
+            |e| {
+                if let Ok(mut s) = self.stats.lock() {
+                    s.observe(&e);
+                }
+                let _ = self.tx.send(e);
+            },
+        )
+        .await;
         session::record(
             self.log.as_ref(),
             "approval",

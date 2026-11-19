@@ -264,6 +264,6 @@ describe('SetupPanel expert accordion', () => {
 
 		const { body } = render(SetupPanel, { props: { session } });
 		expect(body).not.toContain('Expert Setup: Environment Variables');
-		expect(body).not.toMatch(/<details\b[^>]*class="[^"]*\baccordion\b/);
+		expect(body).not.toContain('aria-labelledby="expert-heading"');
 	});
 });

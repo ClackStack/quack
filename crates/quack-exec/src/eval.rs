@@ -5,8 +5,8 @@
 //! the model starts with, laid over a shared `base` project when the task names one). Each
 //! run gets a fresh copy and its own data directory, so sessions and memory never mix with
 //! the user's. `hidden/` (tests the model never sees) is copied in only once the model is
-//! done. The user's providers, settings and AGENTS.md still apply: that is the setup being
-//! measured.
+//! done. The task copy is the workspace root. System and user settings still apply: that
+//! is the setup being measured.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -14,10 +14,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use quack_config::{LoadOptions, load_with};
-use quack_core::Engine;
+use quack_config::settings::EditFormat;
+use quack_config::{LoadOptions, load_workspace_with};
+use quack_core::{Engine, EngineHandle};
 use quack_protocol::{
-    ApprovalDecision, Event, InputItem, Op, PermissionMode, StatsReport, TurnOverrides,
+    EngineErrorKind, Event, InputItem, LoadState, Op, PermissionMode, SessionInfo, StatsReport,
+    Subsystem, TurnOverrides,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
@@ -213,14 +215,21 @@ pub fn load_tasks(suite: &Path, only: &[String]) -> Result<Vec<Task>, String> {
 pub struct RunResult {
     pub task: String,
     pub category: String,
+    /// One-based trial number within this task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
     pub passed: bool,
     /// Set when the task could not run here (a missing program) or the run broke.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<RunErrorKind>,
+    #[serde(default)]
+    pub step_limited: bool,
     /// The checks that failed, as text.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_checks: Vec<String>,
     /// Why a failed run failed, as one label (see `Failure`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -247,16 +256,68 @@ pub struct RunResult {
     #[serde(default)]
     pub peak_prompt: u32,
     pub seconds: f64,
-    /// US dollars, when the model has a price (configured or listed by the provider).
+    /// Estimated US dollars, when all requests reported usable usage and prices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
+    /// Known subtotal for an incomplete trial. This is not the full cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreported_requests: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpriced_requests: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_reported_requests: Option<u32>,
     /// The model and profile the run used, as the engine reported them.
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub profile: String,
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sampling: Vec<(String, f64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<u32>,
+}
+
+impl RunResult {
+    /// Whether the run is unsuitable for unattended continuation in a paid pilot.
+    pub fn incomplete(&self) -> bool {
+        self.skipped.is_some()
+            || self.error.is_some()
+            || self.step_limited
+            || self.cost.is_none()
+            || self.model.is_empty()
+            || self.profile.is_empty()
+            || self.edit_format.is_none()
+    }
+}
+
+/// Where an execution error came from, independent of verifier outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunErrorKind {
+    Config,
+    Provider,
+    Tool,
+    Internal,
+    Aborted,
+    Timeout,
+    VerifierSetup,
+}
+
+impl From<EngineErrorKind> for RunErrorKind {
+    fn from(kind: EngineErrorKind) -> Self {
+        match kind {
+            EngineErrorKind::Config => Self::Config,
+            EngineErrorKind::Provider => Self::Provider,
+            EngineErrorKind::Tool => Self::Tool,
+            EngineErrorKind::Internal => Self::Internal,
+        }
+    }
 }
 
 /// The whole run: what was measured, and each task's result.
@@ -278,6 +339,12 @@ pub struct Report {
     /// The sampling settings sent (`temperature`, ...); empty: the server's defaults.
     #[serde(default)]
     pub sampling: serde_json::Map<String, serde_json::Value>,
+    /// Caller-supplied revision of the evaluated build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Includes skips. An interrupted run may have fewer result records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_trials: Option<usize>,
     pub results: Vec<RunResult>,
 }
 
@@ -628,31 +695,35 @@ pub fn classify(o: &Outcome<'_>) -> Failure {
     }
 }
 
-/// Run one task once.
-pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
-    let mut result = RunResult {
-        task: task.id.clone(),
-        category: task.file.category.clone(),
-        ..RunResult::default()
-    };
-    let programs = match requirements(&task.file) {
-        Ok(p) => p,
-        Err(why) => {
-            result.skipped = Some(why);
-            return result;
-        }
-    };
+/// One run's directories under `EvalOptions::scratch`.
+struct RunDirs {
+    /// Everything belonging to this run, removed after it unless `--keep` is set.
+    root: PathBuf,
+    /// The workspace the model works in; also the config's workspace root.
+    ws: PathBuf,
+    /// An untouched copy, to tell what the model changed.
+    start: PathBuf,
+}
+
+/// Wipe any earlier run's directory and lay out the task's files for this run.
+fn prepare_run_dirs(task: &Task, opts: &EvalOptions, run: u32) -> std::io::Result<RunDirs> {
     let root = opts.scratch.join(format!("{}-{run}", task.id));
     let _ = std::fs::remove_dir_all(&root);
-    let ws = root.join("ws");
-    // An untouched copy, to tell what the model changed.
-    let start = root.join("start");
-    if let Err(e) = task.prepare(&ws).and_then(|()| task.prepare(&start)) {
-        result.skipped = Some(format!("cannot copy the task's files: {e}"));
-        return result;
-    }
+    let dirs = RunDirs {
+        ws: root.join("ws"),
+        start: root.join("start"),
+        root,
+    };
+    task.prepare(&dirs.ws)
+        .and_then(|()| task.prepare(&dirs.start))?;
+    Ok(dirs)
+}
+
+/// Load the config for one run. System and user settings still apply: that is the
+/// setup being measured. Permissions are open and memory stays inside the run.
+fn load_run_config(opts: &EvalOptions, dirs: &RunDirs) -> Result<quack_config::Loaded, String> {
     let mut load = opts.load.clone();
-    load.cwd = ws.clone();
+    load.cwd = dirs.ws.clone();
     if let Some(p) = &opts.planner {
         load.overrides.push(format!(
             "model.planner={}",
@@ -662,41 +733,63 @@ pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
     load.overrides.extend([
         "permissions.mode=\"allow\"".to_owned(),
         "permissions.work_mode=\"edit\"".to_owned(),
-        // Memory stays inside the run.
         format!(
             "memory.path={}",
-            serde_json::Value::String(root.join("memory").display().to_string())
+            serde_json::Value::String(dirs.root.join("memory").display().to_string())
         ),
     ]);
-    let env = env_with_data(root.join("data"), &opts.env);
-    let loaded = match load_with(&env, &load) {
-        Ok(l) => l,
-        Err(e) => {
-            result.error = Some(format!("config: {e}"));
-            return result;
-        }
-    };
-    let started = Instant::now();
-    let mut engine = Engine::spawn(Arc::new(loaded));
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(task.file.timeout_secs);
+    let env = env_with_data(dirs.root.join("data"), &opts.env);
+    load_workspace_with(&env, &load).map_err(|e| format!("config: {e}"))
+}
+
+/// What the model did during the engine phase of a run.
+struct TurnTrace {
+    answer: String,
+    /// Internal tool names, for checks and failure classification.
+    tools: Vec<String>,
+    /// The task's deadline interrupted the turn.
+    interrupted: bool,
+}
+
+/// The feedback used when an unattended evaluation run denies an approval.
+const EVAL_DENIAL: &str = "this is an unattended evaluation run; nobody can approve this";
+
+/// Drive the engine from the first user turn to the end of the run, including a
+/// planning turn and its handoff when a planner is set. Measurements go into `result`.
+async fn drive_turn(
+    engine: &mut EngineHandle,
+    task: &Task,
+    planning: bool,
+    edit_format: EditFormat,
+    deadline: tokio::time::Instant,
+    result: &mut RunResult,
+) -> TurnTrace {
     let mut answer = String::new();
     let mut names: HashMap<String, String> = HashMap::new();
     let mut tools: Vec<String> = Vec::new();
     let mut sent = false;
+    let mut profile_ready = false;
+    let mut session: Option<SessionInfo> = None;
     // With a planner, the first turn is in plan mode and accepting it starts the second.
-    let mut planning = opts.planner.is_some();
+    let mut planning = planning;
     let mut interrupted = false;
     loop {
         let event = match tokio::time::timeout_at(deadline, engine.events.recv()).await {
             Ok(Ok(e)) => e,
             Ok(Err(RecvError::Lagged(_))) => continue,
             Ok(Err(RecvError::Closed)) => {
-                result.error = Some("the engine stopped".into());
+                if result.error.is_none() {
+                    result.error = Some("the engine stopped".into());
+                    result.error_kind = Some(RunErrorKind::Internal);
+                }
                 break;
             }
             Err(_) if !interrupted => {
                 interrupted = true;
-                result.error = Some(format!("timed out after {}s", task.file.timeout_secs));
+                if result.error.is_none() {
+                    result.error = Some(format!("timed out after {}s", task.file.timeout_secs));
+                    result.error_kind = Some(RunErrorKind::Timeout);
+                }
                 engine.submit(Op::Interrupt).await;
                 continue;
             }
@@ -705,6 +798,20 @@ pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
         match event {
             Event::StartupComplete if !sent => {
                 sent = true;
+                if let Some(session) = session.take().filter(|_| profile_ready) {
+                    result.model = session.model.unwrap_or_default();
+                    result.profile = session.profile;
+                    result.reasoning_effort = session.reasoning_effort;
+                    if edit_format != EditFormat::Auto {
+                        result.edit_format = serde_json::to_value(edit_format)
+                            .ok()
+                            .and_then(|value| value.as_str().map(str::to_owned));
+                    } else if result.profile == "empty" {
+                        result.edit_format = Some("str_replace".into());
+                    } else {
+                        result.edit_format = active_edit_format(engine, deadline).await;
+                    }
+                }
                 if planning {
                     engine
                         .submit(Op::SetPermissionMode {
@@ -718,13 +825,11 @@ pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
                 };
                 engine.submit(op).await;
             }
+            Event::SessionConfigured { session: info } if !sent => session = Some(*info),
             Event::StartupProgress {
-                subsystem: quack_protocol::Subsystem::Profile,
-                state: quack_protocol::LoadState::Ready { detail },
-            } if result.profile.is_empty() => {
-                // The session model's profile; a planner's comes later.
-                result.profile = detail.split(' ').next().unwrap_or_default().to_owned();
-            }
+                subsystem: Subsystem::Profile,
+                state: LoadState::Ready { .. },
+            } if !sent => profile_ready = true,
             Event::AssistantDelta { text } => answer.push_str(&text),
             // Text tool calls taken out of the reply: the rewrite is the whole reply.
             Event::AssistantRewrite { text } => answer = text,
@@ -749,17 +854,7 @@ pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
             Event::ApprovalRequest {
                 call_id, request, ..
             } => {
-                let decision = if matches!(
-                    request,
-                    quack_protocol::ApprovalRequest::EgressSecrets { .. }
-                ) {
-                    ApprovalDecision::RedactAndSend
-                } else {
-                    ApprovalDecision::DenyWithFeedback {
-                        feedback: "this is an unattended evaluation run; nobody can approve this"
-                            .into(),
-                    }
-                };
+                let decision = crate::headless_decision(&request, EVAL_DENIAL);
                 engine
                     .submit(Op::ApprovalResponse { call_id, decision })
                     .await;
@@ -773,6 +868,7 @@ pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
                 engine.submit(answer).await;
             }
             Event::StepLimitReached { turn, .. } => {
+                result.step_limited = true;
                 // Unattended run: stop at the limit and let the task fail on its files.
                 engine
                     .submit(Op::ContinueTurn {
@@ -782,6 +878,7 @@ pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
                     .await;
             }
             Event::Error { error } if result.error.is_none() => {
+                result.error_kind = Some(error.kind.into());
                 result.error = Some(error.message);
             }
             Event::TurnComplete { .. } if planning && !interrupted => {
@@ -790,29 +887,74 @@ pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
                 let mode = "full-auto".to_owned();
                 engine.submit(Op::AcceptPlan { mode }).await;
             }
-            Event::TurnComplete { .. } | Event::TurnAborted { .. } => break,
+            Event::TurnComplete { .. } => break,
+            Event::TurnAborted { reason, .. } => {
+                if result.error.is_none() && !result.step_limited {
+                    result.error = Some(reason);
+                    result.error_kind = Some(RunErrorKind::Aborted);
+                }
+                break;
+            }
             _ => {}
         }
     }
-    if let Some(stats) = stats(&mut engine).await {
-        result.model = stats.model;
-        result.steps = stats.requests;
-        result.prompt_tokens = stats.prompt_tokens;
-        result.cached_tokens = stats.cached_tokens;
-        result.completion_tokens = stats.completion_tokens;
-        result.compactions = stats.compactions;
-        result.pruned = stats.pruned;
-        result.peak_prompt = stats.history.iter().map(|r| r.prompt).max().unwrap_or(0);
-        result.cost = stats.cost;
-        result.sampling = stats.sampling;
+    TurnTrace {
+        answer,
+        tools,
+        interrupted,
     }
-    engine.shutdown().await;
-    result.seconds = started.elapsed().as_secs_f64();
-    result.changed = changed_files(&start, &ws);
-    let mut only_answer_failed = false;
-    if result.error.is_none() || interrupted {
-        if let Err(e) = task.reveal(&ws) {
-            result.error = Some(format!("cannot copy hidden/: {e}"));
+}
+
+/// Copy the engine's usage report into the result. Incomplete or errored runs keep their
+/// known subtotal separate so it is never presented as the full cost.
+fn record_stats(result: &mut RunResult, stats: StatsReport) {
+    result.steps = stats.requests;
+    result.prompt_tokens = stats.prompt_tokens;
+    result.cached_tokens = stats.cached_tokens;
+    result.completion_tokens = stats.completion_tokens;
+    result.compactions = stats.compactions;
+    result.pruned = stats.pruned;
+    result.peak_prompt = stats.history.iter().map(|r| r.prompt).max().unwrap_or(0);
+    result.unreported_requests = Some(stats.unreported);
+    result.unpriced_requests = Some(stats.unpriced);
+    result.cache_reported_requests = Some(stats.cache_reported);
+    if stats.unreported == 0 && stats.unpriced == 0 && result.error.is_none() {
+        result.cost = stats.cost;
+    } else {
+        result.observed_cost = stats.cost;
+    }
+    result.sampling = stats.sampling;
+}
+
+/// The workspace diff and checks, collected off the async runtime.
+#[derive(Default)]
+struct Verification {
+    changed: Vec<String>,
+    /// Only checks on the reply failed: a wrong answer.
+    only_answer_failed: bool,
+    /// Failed non-reply checks, followed by failed reply checks.
+    failed_checks: Vec<String>,
+    /// `hidden/` could not be copied in, as a sentence for `RunResult::error`.
+    reveal_error: Option<String>,
+}
+
+/// Diff the workspace against its starting copy. When `checks` is set, copy `hidden/`
+/// in and run the task's checks. Their commands may block on subprocesses.
+fn verify_run(
+    task: &Task,
+    dirs: &RunDirs,
+    answer: &str,
+    tools: &[String],
+    programs: &HashMap<String, String>,
+    checks: bool,
+) -> Verification {
+    let mut verification = Verification {
+        changed: changed_files(&dirs.start, &dirs.ws),
+        ..Verification::default()
+    };
+    if checks {
+        if let Err(e) = task.reveal(&dirs.ws) {
+            verification.reveal_error = Some(format!("cannot copy hidden/: {e}"));
         }
         let (answers, others): (Vec<Check>, Vec<Check>) = task
             .file
@@ -820,38 +962,156 @@ pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
             .iter()
             .cloned()
             .partition(|c| c.answer_contains.is_some());
-        let others = check(&others, &ws, &answer, &tools, &programs);
-        let answers = check(&answers, &ws, &answer, &tools, &programs);
-        only_answer_failed = others.is_empty() && !answers.is_empty();
-        result.failed_checks = others.into_iter().chain(answers).collect();
+        let others = check(&others, &dirs.ws, answer, tools, programs);
+        let answers = check(&answers, &dirs.ws, answer, tools, programs);
+        verification.only_answer_failed = others.is_empty() && !answers.is_empty();
+        verification.failed_checks = others.into_iter().chain(answers).collect();
+    }
+    verification
+}
+
+/// Remove the run's files unless the user asked to keep them for inspection.
+fn cleanup_run(dirs: &RunDirs, keep: bool) {
+    if !keep {
+        let _ = std::fs::remove_dir_all(&dirs.root);
+    }
+}
+
+/// Run one task once.
+pub async fn run_task(task: &Task, opts: &EvalOptions, run: u32) -> RunResult {
+    let mut result = RunResult {
+        task: task.id.clone(),
+        category: task.file.category.clone(),
+        attempt: Some(run + 1),
+        ..RunResult::default()
+    };
+    let programs = match requirements(&task.file) {
+        Ok(p) => p,
+        Err(why) => {
+            result.skipped = Some(why);
+            return result;
+        }
+    };
+    let dirs = match prepare_run_dirs(task, opts, run) {
+        Ok(dirs) => dirs,
+        Err(e) => {
+            result.skipped = Some(format!("cannot copy the task's files: {e}"));
+            return result;
+        }
+    };
+    let loaded = match load_run_config(opts, &dirs) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            result.error = Some(e);
+            result.error_kind = Some(RunErrorKind::Config);
+            result.failure = Some(Failure::Error);
+            cleanup_run(&dirs, opts.keep);
+            return result;
+        }
+    };
+    result.window = loaded.settings.context.window;
+    let edit_format = loaded.settings.tools.edit_format;
+    let started = Instant::now();
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(task.file.timeout_secs);
+    let trace = drive_turn(
+        &mut engine,
+        task,
+        opts.planner.is_some(),
+        edit_format,
+        deadline,
+        &mut result,
+    )
+    .await;
+    if let Some(stats) = stats(&mut engine).await {
+        record_stats(&mut result, stats);
+    }
+    engine.shutdown().await;
+    result.seconds = started.elapsed().as_secs_f64();
+
+    // Verify on the blocking pool: command checks block on subprocess output.
+    let checks = result.error.is_none() || trace.interrupted;
+    let ran_commands = trace.tools.iter().any(|t| t == "shell");
+    let verification = {
+        let task = task.clone();
+        let verify_dirs = RunDirs {
+            root: dirs.root.clone(),
+            ws: dirs.ws.clone(),
+            start: dirs.start.clone(),
+        };
+        let tools = trace.tools;
+        tokio::task::spawn_blocking(move || {
+            verify_run(
+                &task,
+                &verify_dirs,
+                &trace.answer,
+                &tools,
+                &programs,
+                checks,
+            )
+        })
+        .await
+        .expect("verification runs on Tokio's blocking pool")
+    };
+    result.changed = verification.changed;
+    if checks {
+        if let Some(e) = verification.reveal_error
+            && result.error.is_none()
+        {
+            result.error = Some(e);
+            result.error_kind = Some(RunErrorKind::VerifierSetup);
+        }
+        result.failed_checks = verification.failed_checks;
         result.passed = result.error.is_none() && result.failed_checks.is_empty();
     }
     if !result.passed {
         let solution = task.solution_paths();
         result.failure = Some(classify(&Outcome {
-            timed_out: interrupted,
+            timed_out: result.error_kind == Some(RunErrorKind::Timeout),
             error: result.error.is_some(),
             parse_failures: result.parse_failures,
             edit_failures: result.edit_failures,
             tool_calls: result.tool_calls,
             changed: &result.changed,
             solution: &solution,
-            only_answer_failed,
-            ran_commands: tools.iter().any(|t| t == "shell"),
+            only_answer_failed: verification.only_answer_failed,
+            ran_commands,
         }));
     }
-    if !opts.keep {
-        let _ = std::fs::remove_dir_all(&root);
-    }
+    cleanup_run(&dirs, opts.keep);
     result
 }
 
-async fn stats(engine: &mut quack_core::EngineHandle) -> Option<StatsReport> {
+async fn active_edit_format(
+    engine: &mut EngineHandle,
+    deadline: tokio::time::Instant,
+) -> Option<String> {
+    if !engine.submit(Op::ListProfiles).await {
+        return None;
+    }
+    let deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(5));
+    loop {
+        match tokio::time::timeout_at(deadline, engine.events.recv()).await {
+            Ok(Ok(Event::Profiles {
+                active, profiles, ..
+            })) => {
+                return profiles
+                    .into_iter()
+                    .find(|p| p.id == active)
+                    .map(|p| p.edit_format);
+            }
+            Ok(Ok(_) | Err(RecvError::Lagged(_))) => {}
+            _ => return None,
+        }
+    }
+}
+
+async fn stats(engine: &mut EngineHandle) -> Option<StatsReport> {
     engine.submit(Op::GetStats).await;
     let wait = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         match tokio::time::timeout_at(wait, engine.events.recv()).await {
-            Ok(Ok(Event::Stats { report })) => return Some(report),
+            Ok(Ok(Event::Stats { report })) => return Some(*report),
             Ok(Ok(_) | Err(RecvError::Lagged(_))) => {}
             _ => return None,
         }
@@ -861,7 +1121,7 @@ async fn stats(engine: &mut quack_core::EngineHandle) -> Option<StatsReport> {
 /// `path`, or `name-2.json`, `name-3.json`, ... beside it when it already exists, so a
 /// rerun never overwrites an earlier result.
 pub fn unused_path(path: &Path) -> PathBuf {
-    if !path.exists() {
+    if path.symlink_metadata().is_err() {
         return path.to_path_buf();
     }
     let stem = path
@@ -874,7 +1134,7 @@ pub fn unused_path(path: &Path) -> PathBuf {
         .unwrap_or_default();
     (2..)
         .map(|n| path.with_file_name(format!("{stem}-{n}{ext}")))
-        .find(|p| !p.exists())
+        .find(|p| p.symlink_metadata().is_err())
         .expect("some numbered name is free")
 }
 
@@ -923,8 +1183,11 @@ pub fn table(report: &Report) -> String {
             r.edit_failures,
             r.prompt_tokens + r.completion_tokens,
             r.cached_tokens,
-            r.cost
-                .map_or_else(|| "-".to_owned(), |c| format!("${c:.4}")),
+            match (r.cost, r.observed_cost) {
+                (Some(c), _) => format!("${c:.4}"),
+                (None, Some(c)) => format!("${c:.4} observed"),
+                _ => "-".into(),
+            },
             r.seconds
         ));
     }
@@ -939,10 +1202,12 @@ pub fn table(report: &Report) -> String {
             .collect();
         parts.join(", ")
     };
-    let cost = report
-        .cost()
-        .map(|c| format!(" · ${c:.4}"))
-        .unwrap_or_default();
+    let priced = report.results.iter().filter(|r| r.cost.is_some()).count();
+    let cost = match report.cost() {
+        Some(c) if priced == ran => format!(" · ${c:.4}"),
+        Some(c) => format!(" · ${c:.4} across {priced}/{ran} priced trials"),
+        None => String::new(),
+    };
     let planner = report
         .planner
         .as_ref()

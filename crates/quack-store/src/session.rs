@@ -388,11 +388,9 @@ impl SessionLog {
 /// `<last two path components>-<hash>`, safe on every filesystem.
 pub fn project_key(root: &Path) -> String {
     let full = root.to_string_lossy();
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in full.as_bytes() {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
+    // The persisted key truncates to the lower 32 bits so existing on-disk folders keep
+    // lining up; do not change the cast without migrating `~/.cache/quack/sessions/`.
+    let hash = crate::fnv1a(full.as_bytes()) as u32;
     let tail: Vec<String> = root
         .components()
         .rev()
@@ -413,7 +411,7 @@ pub fn project_key(root: &Path) -> String {
             }
         })
         .collect();
-    format!("{name}-{:08x}", hash as u32)
+    format!("{name}-{hash:08x}")
 }
 
 #[cfg(test)]

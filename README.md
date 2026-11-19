@@ -52,16 +52,25 @@ On first launch, the interactive `/setup` wizard helps you configure a model in 
 - **Subscriptions**: In **Hosted services**, choose **ChatGPT plan** to sign in through your browser, allow plan usage, and pick a model. This also works in `quack setup`; `quack login chatgpt` remains available for standalone sign-in.
 - **Custom endpoints**: Connect any OpenAI-compatible server URL.
 
-ChatGPT `chatgpt/sol` has been [evaluated live](evals/results/2026-11-11/README.md).
-The `codex` profile is selected automatically for Sol, Astra, Luna and Terra on ChatGPT
+ChatGPT `gpt-6.1-sol` has been [evaluated live](evals/results/2026-11-11/README.md).
+The `codex` profile is selected automatically for the current Sol, Astra, Luna and Terra
+model ids (6.2 and 6.1 generations) on ChatGPT
 and OpenAI providers; use `--profile generic` to override it. It includes tracked
 reads before patches, sub-agents and image viewing on vision-capable models.
 All shipped profiles have mock-tested tracked-read/edit workflows; incompatible
 exclusive-profile edit-format overrides report an actionable startup error.
 [An upstream Codex review](evals/results/2026-11-11/codex-comparison.md) informed
 compatibility fixes; Astra passed a [single smoke task](evals/results/2026-11-11/terra-astra.md),
-while Luna and Terra remain untested live.
-Evaluations consume plan allowance or API credit, depending on the provider.
+and Luna passed all four runs with `codex` in a [targeted profile comparison](docs/plan/roadmap.md#proprietary-model-apis-2026-10-19).
+Terra passed four tasks with each of three edit formats. `apply_patch` used the fewest model requests in that sample. [Terra comparison](evals/results/2026-11-18/terra-edit-formats/README.md).
+Evaluations consume plan allowance or API credit, depending on the provider. `quack eval`
+checkpoints its JSON after each trial; `--stop-on-incomplete` stops after a result with an
+execution error or missing accounting. See the [offline preflight and pilot checklist](evals/README.md#before-a-paid-profile-pilot).
+
+The bundled OpenAI and ChatGPT providers use native Responses compaction for long
+conversations. Quack replays the encrypted checkpoint after resume and uses a text
+summary for focused `/compact <focus>` requests or if the native endpoint fails.
+Set `native_compaction = false` in a provider override to select text compaction.
 
 ### 3. Common Commands
 
@@ -118,13 +127,14 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 - **Core tool suite**: `read`, `write`, `glob`, `grep`, `list_dir`, `shell`, `lsp`, and `index`.
 - **Intelligent code indexing**: `index` generates Tree-sitter symbol outlines (functions, types, methods, and line ranges) for Rust, Python, Go, TypeScript, JavaScript, C, C++, and Bash. Large file reads automatically return outlines so the model reads only relevant definition spans.
 - **Flexible edit formats**: Configurable via `[tools] edit_format`:
-  - `str_replace`: Fast, forgiving snippet replacement.
-  - `hashline`: Line-tagged content headers with function-level block targeting.
+  - `str_replace`: Forgiving single-snippet replacement, or batch independent exact replacements in one file with `edits`.
+  - `hashline`: File snapshot tags and numbered lines, with function-level block targeting.
   - `apply_patch`: Multi-file transactional patches.
   - `search_replace_blocks`: Multi-block SEARCH/REPLACE operations.
   - `whole_file`: Full file rewrites.
+- On OpenAI-compatible Responses and ChatGPT plan routes, optional tool arguments can be omitted. An `edit` batch can send just `path` and `edits`.
 - **Transactional guarantees**: Multi-file refactors check all changes before writing. If any single change fails, all touched files roll back to their original state.
-- **No blind edits**: Every changing tool refuses a file the model has not read (or written) yet, and one that changed on disk since it did; the refusal tells the model to read the file first.
+- `str_replace` and `apply_patch` require a prior read or write before changing an existing file and reject a stale read. Hashline tracks file versions and the numbered ranges shown to the model.
 - **Distilled test output**: Build and test outputs (Cargo, Pytest, unittest, Go test, Jest, TAP) fold passing tests (`[... 42 passed tests omitted ...]`), retaining all assertion failures and stack traces while preserving context space.
 
 ### Code Intelligence (LSP)
@@ -378,12 +388,26 @@ alias for Allow; existing flags and saved sessions still load without increasing
 |---|---|---|
 | `offline` | `false` | When true, restricts network access to local interfaces or `egress_allow` hosts |
 | `egress_allow` | `[]` | Allowed remote host globs when `offline = true` |
-| `proxy` | `""` | HTTP/HTTPS proxy URL (empty: `HTTPS_PROXY` or the system's). Hosts in `NO_PROXY` always go direct |
+| `proxy` | `""` | Proxy URL. When empty, each scheme uses `HTTP_PROXY` or `HTTPS_PROXY`, with `ALL_PROXY` as a fallback. System settings apply when no environment proxy is set. Hosts in `NO_PROXY` go direct |
 | `ca_bundle` | `""` | Path to custom PEM certificate bundle |
-| `http1_only` | `false` | Use HTTP/1.1 only, one connection per request, instead of one shared HTTP/2 connection. Try it if requests stall behind a VPN or proxy |
+| `http1_only` | `false` | Force HTTP/1.1. Try it if HTTP/2 requests stall behind a VPN or proxy |
 | `secret_guard` | `"ask"` | Pre-egress Secret Shield policy (`ask`, `redact`, `block`, or `off`) scanning prompts and tool outputs locally with `redact-secret` + resolved credentials before HTTP send |
 | `secret_guard_local` | `false` | When `true`, also applies Secret Shield to loopback destinations (`localhost`, `127.0.0.1`) |
 | `secret_allowlist` | `[]` | SHA-256 secret fingerprints explicitly allowlisted across sessions |
+
+For a single provider, select it in TUI `/providers` and press `Ctrl-S` (or `Enter`
+when it has no API key), or open **Advanced connection settings** on the desktop
+**Providers** screen. Choose an HTTP version and whether to use proxies. **Direct
+connection** sets `no_proxy = true` under `[http]` in the provider file. **HTTP/1.1
+only** sets `http1_only = true`, **Negotiate** sets it to `false`, and **Inherit**
+removes that file's override.
+
+For a vLLM server reached through a Windows VPN from WSL, run
+`getent ahosts HOST` and `curl --noproxy '*' -v http://HOST:5000/v1/models` inside WSL
+with the same hostname and API prefix as the provider URL. If direct HTTP reaches the
+server, try **Direct connection** for that provider or put the hostname in `NO_PROXY`.
+An address lookup error happens before HTTP version negotiation. If lookup fails inside
+WSL, try the full hostname and check [Microsoft's WSL VPN and DNS tunneling guidance](https://learn.microsoft.com/en-us/windows/wsl/troubleshooting#wsl-connectivity-issues-with-vpns-when-mirrored-networking-mode-is-on).
 
 **`[catalog]`**
 | Key | Default | Description |

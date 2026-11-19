@@ -14,6 +14,32 @@ use crate::paths::LayerKind;
 use crate::settings::Settings;
 use crate::trust::{self, TrustDecision};
 
+/// Which family of the settings tree a key belongs to. `[policy]` is only honoured in
+/// the system layer and `[keys]` holds key rebinds, so neither is a flat setting: the
+/// `/config` editor leaves both out and [`Loaded::save_setting`] refuses them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyFamily {
+    /// `[policy]`: only read from the system layer.
+    Policy,
+    /// `[keys]`: key rebinds, edited as their own thing.
+    Keys,
+    /// An ordinary setting.
+    Setting,
+}
+
+impl KeyFamily {
+    /// The one place a key's family is decided.
+    fn of(key: &str) -> Self {
+        if key == "policy" || key.starts_with("policy.") {
+            Self::Policy
+        } else if key == "keys" || key.starts_with("keys.") {
+            Self::Keys
+        } else {
+            Self::Setting
+        }
+    }
+}
+
 /// One effective setting, for the `/config` editor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingRow {
@@ -39,7 +65,7 @@ impl Loaded {
         let docs = descriptions();
         merge::leaves(&table)
             .into_iter()
-            .filter(|(k, _)| !k.starts_with("policy.") && !k.starts_with("keys."))
+            .filter(|(k, _)| KeyFamily::of(k) == KeyFamily::Setting)
             .map(|(key, v)| SettingRow {
                 value: v.to_string(),
                 origin: self.origin_of(&key).to_string(),
@@ -64,7 +90,7 @@ impl Loaded {
         key: &str,
         raw: &str,
     ) -> Result<(PathBuf, Option<String>), String> {
-        if key.starts_with("policy") || key == "keys" || key.starts_with("keys.") {
+        if KeyFamily::of(key) != KeyFamily::Setting {
             return Err(format!("`{key}` cannot be set as a flat setting"));
         }
         if self.settings.policy.locks(key) {
@@ -311,18 +337,15 @@ fn table_for<'a, 'k>(
     Ok((table, leaf))
 }
 
+/// Replace `file` with `text` atomically: a temporary file beside it, then a rename,
+/// creating parent directories as needed. See [`atomic::write_via_tmp`] for the
+/// mechanism.
 pub fn write_atomic(file: &Path, text: &str) -> Result<(), String> {
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
-    let tmp = file.with_extension("toml.tmp");
-    std::fs::write(&tmp, text)
-        .and_then(|()| std::fs::rename(&tmp, file))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("cannot write {}: {e}", file.display())
-        })
+    crate::atomic::write_via_tmp(file, text, "toml.tmp", true)
 }
 
 /// Set one dotted key in a `config.toml`, creating the file and tables as needed.
@@ -458,6 +481,7 @@ fn resolve<'a>(root: &'a Json, node: &'a Json) -> &'a Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::Fixture;
 
     #[test]
     fn edits_keep_comments_and_validate() {
@@ -557,33 +581,19 @@ mod tests {
         assert!(!out.contains("window"), "{out}");
         assert!(out.contains("budget_ratio = 0.85"), "{out}");
 
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path();
-        let proj = root.join("repo/.quack");
-        std::fs::create_dir_all(&proj).expect("mkdir");
-        std::fs::write(proj.join("config.toml"), "[context]\nwindow = 8192\n").expect("write");
+        let f = Fixture::new();
+        f.write("repo/.quack/config.toml", "[context]\nwindow = 8192\n");
 
-        let mut vars = std::collections::HashMap::new();
-        for (k, sub) in [
-            ("QUACK_SYSTEM_DIR", "system"),
-            ("QUACK_CONFIG_DIR", "user"),
-            ("QUACK_DATA_DIR", "data"),
-            ("QUACK_CACHE_DIR", "cache"),
-        ] {
-            vars.insert(k.to_owned(), std::ffi::OsString::from(root.join(sub)));
-        }
-        vars.insert("QUACK_DEFAULTS_DIR".into(), "none".into());
-        let opts = crate::load::LoadOptions::new(root.join("repo"));
-        let loaded = crate::load_with(&|k| vars.get(k).cloned(), &opts).expect("load");
+        let loaded = f.load();
         loaded.trust_project(TrustDecision::Trusted).expect("trust");
-        let loaded = crate::load_with(&|k| vars.get(k).cloned(), &opts).expect("load");
+        let loaded = f.load();
         assert_eq!(loaded.project, ProjectStatus::Trusted);
         assert_eq!(loaded.settings.context.window, Some(8192));
 
         loaded
             .save_setting(LayerKind::Project, "context.window", "null")
             .expect("unset");
-        let reloaded = crate::load_with(&|k| vars.get(k).cloned(), &opts).expect("reload");
+        let reloaded = f.load();
         assert_eq!(reloaded.project, ProjectStatus::Trusted);
         assert_eq!(reloaded.settings.context.window, None);
         assert!(
@@ -595,40 +605,25 @@ mod tests {
 
     #[test]
     fn project_save_setting_clean_repo_and_policy_guard() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path();
-        std::fs::create_dir_all(root.join("repo")).expect("repo");
-        let mut vars = std::collections::HashMap::new();
-        for (k, sub) in [
-            ("QUACK_SYSTEM_DIR", "system"),
-            ("QUACK_CONFIG_DIR", "user"),
-            ("QUACK_DATA_DIR", "data"),
-            ("QUACK_CACHE_DIR", "cache"),
-        ] {
-            vars.insert(k.to_owned(), std::ffi::OsString::from(root.join(sub)));
-        }
-        vars.insert("QUACK_DEFAULTS_DIR".into(), "none".into());
-        let opts = crate::load::LoadOptions::new(root.join("repo"));
+        let f = Fixture::new();
 
-        let clean = crate::load_with(&|k| vars.get(k).cloned(), &opts).expect("load");
+        let clean = f.load();
         assert_eq!(clean.project, ProjectStatus::None);
         let (path, note) = clean
             .save_setting(LayerKind::Project, "ui.theme", "\"light\"")
             .expect("save project setting on clean repo");
-        assert_eq!(path, root.join("repo/.quack/config.toml"));
+        assert_eq!(path, f.path("repo/.quack/config.toml"));
         assert_eq!(note, None);
 
-        let reloaded = crate::load_with(&|k| vars.get(k).cloned(), &opts).expect("reload");
+        let reloaded = f.load();
         assert_eq!(reloaded.project, ProjectStatus::SettingsOnly);
         assert_eq!(reloaded.settings.ui.theme, "light");
 
-        std::fs::create_dir_all(root.join("system")).expect("system");
-        std::fs::write(
-            root.join("system/config.toml"),
+        f.write(
+            "system/config.toml",
             "[policy]\nproject_config = \"never\"\n",
-        )
-        .expect("policy");
-        let locked = crate::load_with(&|k| vars.get(k).cloned(), &opts).expect("reload policy");
+        );
+        let locked = f.load();
         assert_eq!(locked.project, ProjectStatus::DisabledByPolicy);
         let err = locked
             .save_setting(LayerKind::Project, "ui.theme", "\"dark\"")

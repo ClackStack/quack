@@ -1,9 +1,9 @@
 use quack_core::protocol::{CheckStatus, DoctorCheck};
-use std::io::Read;
-use std::path::PathBuf;
+use std::io::{ErrorKind, Read, Result as IoResult, Write};
+use std::path::{Path, PathBuf};
 
 use quack_config::{ItemState, Loaded, load_providers, schema};
-use quack_exec::exit;
+use quack_exec::{eval, exit};
 
 use crate::errors;
 
@@ -439,7 +439,6 @@ pub(crate) async fn eval(
     load: quack_config::LoadOptions,
     args: crate::cli::EvalArgs,
 ) -> i32 {
-    use quack_exec::eval;
     let suite = loaded.dirs.cwd.join(&args.suite);
     let tasks = match eval::load_tasks(&suite, &args.tasks) {
         Ok(t) if t.is_empty() => {
@@ -464,8 +463,41 @@ pub(crate) async fn eval(
             .join(std::process::id().to_string()),
         env: Default::default(),
     };
-    let mut results = Vec::new();
-    for task in &tasks {
+    let mut report = eval::Report {
+        harness: concat!("quack ", env!("CARGO_PKG_VERSION")).into(),
+        date: eval::today(),
+        suite: suite
+            .file_name()
+            .map_or_else(|| "tasks".into(), |n| n.to_string_lossy().into_owned()),
+        model: "unknown".into(),
+        profile: "unknown".into(),
+        planner: args.planner,
+        window: loaded.settings.context.window,
+        sampling: Default::default(),
+        revision: args.revision,
+        planned_trials: Some(tasks.len().saturating_mul(opts.repeat as usize)),
+        results: Vec::new(),
+    };
+    let mut out = None;
+    // An explicit output can be created before any model request. With auto naming, check
+    // the directory now and choose the filename once the first trial reports its setup.
+    let initial = if let Some(path) = &args.out {
+        save_eval_report(path, &mut out, &report).map_err(|e| format!("{e:#}"))
+    } else {
+        let path = default_eval_out(&suite, &report);
+        eval_tempfile(&path)
+            .map(|_| ())
+            .map_err(|e| format!("{}: {e}", path.display()))
+    };
+    if let Err(e) = initial {
+        eprintln!("error: cannot write eval results: {e}");
+        return exit::CONFIG_ERROR;
+    }
+    if let Some(path) = &out {
+        eprintln!("checkpointing results to {}", path.display());
+    }
+    let mut incomplete = false;
+    'tasks: for task in &tasks {
         for run in 0..opts.repeat {
             eprint!("{} ({}/{})… ", task.id, run + 1, opts.repeat);
             let r = eval::run_task(task, &opts, run).await;
@@ -482,7 +514,32 @@ pub(crate) async fn eval(
                     ),
                 }
             );
-            results.push(r);
+            if report.model == "unknown" && !r.model.is_empty() {
+                report.model.clone_from(&r.model);
+                report.profile.clone_from(&r.profile);
+                report.window = r.window;
+                report.sampling = eval::Report::sampling_of(&r.sampling);
+            }
+            incomplete = args.stop_on_incomplete && r.incomplete();
+            report.results.push(r);
+            let requested = args
+                .out
+                .clone()
+                .unwrap_or_else(|| default_eval_out(&suite, &report));
+            let first_write = out.is_none();
+            if let Err(e) = save_eval_report(&requested, &mut out, &report) {
+                eprintln!("error: cannot checkpoint eval results: {e:#}");
+                return exit::AGENT_ERROR;
+            }
+            if first_write && let Some(path) = &out {
+                eprintln!("checkpointing results to {}", path.display());
+            }
+            if incomplete {
+                eprintln!(
+                    "stopped after an incomplete trial · inspect its result before continuing"
+                );
+                break 'tasks;
+            }
         }
     }
     if opts.keep {
@@ -490,77 +547,79 @@ pub(crate) async fn eval(
     } else {
         let _ = std::fs::remove_dir_all(&opts.scratch);
     }
-    let first = |f: fn(&eval::RunResult) -> &str| {
-        results
-            .iter()
-            .map(f)
-            .find(|s| !s.is_empty())
-            .unwrap_or("unknown")
-            .to_owned()
-    };
-    let report = eval::Report {
-        harness: concat!("quack ", env!("CARGO_PKG_VERSION")).into(),
-        date: eval::today(),
-        suite: suite
-            .file_name()
-            .map_or_else(|| "tasks".into(), |n| n.to_string_lossy().into_owned()),
-        model: first(|r| r.model.as_str()),
-        profile: first(|r| r.profile.as_str()),
-        planner: args.planner.clone(),
-        window: loaded.settings.context.window,
-        sampling: results
-            .iter()
-            .find(|r| r.skipped.is_none() && !r.model.is_empty())
-            .map(|r| eval::Report::sampling_of(&r.sampling))
-            .unwrap_or_default(),
-        results,
-    };
     println!("{}", eval::table(&report));
-    let out = args.out.unwrap_or_else(|| {
-        let planned = report
-            .planner
-            .as_ref()
-            .map(|p| format!("-planner-{p}"))
-            .unwrap_or_default();
-        // The default suite keeps its old names; another's results start with its name.
-        let prefix = match report.suite.as_str() {
-            "tasks" => String::new(),
-            s => format!("{s}-"),
-        };
-        let window = report
-            .window
-            .map(|w| format!("-{}k", w / 1024))
-            .unwrap_or_default();
-        let name = format!(
-            "{prefix}{}-{}{planned}{window}.json",
-            report.model, report.profile
-        )
-        .replace(['/', '\\', ':'], "_");
-        suite
-            .parent()
-            .unwrap_or(&suite)
-            .join("results")
-            .join(&report.date)
-            .join(name)
-    });
-    let out = eval::unused_path(&out);
-    let written = out
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| {
-            std::fs::write(
-                &out,
-                serde_json::to_string_pretty(&report).unwrap_or_default() + "\n",
-            )
-        });
-    match written {
-        Ok(()) => {
-            println!("results: {}", out.display());
-            exit::OK
-        }
-        Err(e) => {
-            eprintln!("error: writing {}: {e}", out.display());
-            exit::AGENT_ERROR
-        }
+    if let Some(path) = out {
+        println!("results: {}", path.display());
     }
+    if incomplete {
+        exit::AGENT_ERROR
+    } else {
+        exit::OK
+    }
+}
+
+fn default_eval_out(suite: &Path, report: &eval::Report) -> PathBuf {
+    let planned = report
+        .planner
+        .as_ref()
+        .map(|p| format!("-planner-{p}"))
+        .unwrap_or_default();
+    let prefix = match report.suite.as_str() {
+        "tasks" => String::new(),
+        s => format!("{s}-"),
+    };
+    let window = report
+        .window
+        .map(|w| format!("-{}k", w / 1024))
+        .unwrap_or_default();
+    let name = format!(
+        "{prefix}{}-{}{planned}{window}.json",
+        report.model, report.profile
+    )
+    .replace(['/', '\\', ':'], "_");
+    suite
+        .parent()
+        .unwrap_or(suite)
+        .join("results")
+        .join(&report.date)
+        .join(name)
+}
+
+fn eval_tempfile(path: &Path) -> IoResult<tempfile::NamedTempFile> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    tempfile::NamedTempFile::new_in(parent)
+}
+
+fn save_eval_report(
+    requested: &Path,
+    out: &mut Option<PathBuf>,
+    report: &eval::Report,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    let mut path = out.clone().unwrap_or_else(|| eval::unused_path(requested));
+    let mut temp = eval_tempfile(&path).with_context(|| path.display().to_string())?;
+    serde_json::to_writer_pretty(&mut temp, report)?;
+    writeln!(temp)?;
+    if out.is_some() {
+        temp.persist(&path)
+            .with_context(|| path.display().to_string())?;
+    } else {
+        loop {
+            match temp.persist_noclobber(&path) {
+                Ok(_) => break,
+                Err(e) if e.error.kind() == ErrorKind::AlreadyExists => {
+                    temp = e.file;
+                    path = eval::unused_path(requested);
+                }
+                Err(e) => return Err(e).with_context(|| path.display().to_string()),
+            }
+        }
+        *out = Some(path);
+    }
+    Ok(())
 }

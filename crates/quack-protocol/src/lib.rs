@@ -57,6 +57,8 @@ pub enum Op {
     /// configured default. Applies between turns, survives session resume, and is
     /// remembered for the next start.
     SetReasoningEffort {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         effort: Option<String>,
     },
     /// Ask for the model catalogue; answered with `Event::ModelCatalog`.
@@ -81,6 +83,8 @@ pub enum Op {
     /// Revert the files changed by the last edit call. `force` also overwrites files that
     /// changed again since.
     Undo {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         checkpoint: Option<CheckpointId>,
         #[serde(default)]
         force: bool,
@@ -205,6 +209,8 @@ pub enum Op {
     ListServices,
     /// Start a subscription sign-in, or cancel the pending sign-in with `id = None`.
     SignIn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         id: Option<String>,
     },
     /// Store a provider's API key: in the OS credential store when it is reachable,
@@ -226,6 +232,18 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "ts", ts(optional))]
         key: Option<SecretText>,
+    },
+    /// Read provider connection settings from disk without contacting the providers.
+    ListProviderConnections,
+    /// Update the supplied settings and reload the configuration.
+    SaveProviderConnection {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        http_version: Option<ProviderHttpVersion>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        no_proxy: Option<bool>,
     },
     /// Ask for the memory notes; answered with `Event::MemoryNotes`.
     ListMemory,
@@ -310,7 +328,11 @@ pub enum Op {
         revision: String,
         connections: Vec<HookConnectionDraft>,
         /// None keeps the current enabled state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         enable: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         replace_payload: Option<bool>,
     },
     CheckHookSetup {
@@ -356,11 +378,13 @@ pub enum Op {
 pub enum Event {
     HookSetup {
         request: u64,
-        info: HookSetupInfo,
+        info: Box<HookSetupInfo>,
     },
     HookSetupSaved {
         request: u64,
         info: HookSetupInfo,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         note: Option<String>,
     },
     HookSetupPending {
@@ -382,7 +406,8 @@ pub enum Event {
     },
     StartupComplete,
     SessionConfigured {
-        session: SessionInfo,
+        /// Boxed: `SessionInfo` is large, and every event clone would copy it.
+        session: Box<SessionInfo>,
     },
     /// The session's title changed: taken from the first prompt, set with `SetTitle`, or
     /// none for a new session.
@@ -395,6 +420,8 @@ pub enum Event {
     ModelCatalog {
         providers: Vec<ProviderModels>,
         /// `<provider>/<model>` in use, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         current: Option<String>,
     },
     /// The instruction files in the system prompt, then those attached to tool results
@@ -421,8 +448,14 @@ pub enum Event {
     },
     /// A saved session was loaded; `items` is its transcript for display.
     SessionResumed {
-        session: SessionInfo,
-        items: Vec<ReplayItem>,
+        /// Boxed: both fields are large, and every event clone would copy them.
+        session: Box<SessionInfo>,
+        items: Box<[ReplayItem]>,
+    },
+    /// A saved session was asked for but could not be loaded; `reason` is the sentence
+    /// to show. The session itself still starts, empty.
+    SessionResumeFailed {
+        reason: String,
     },
     /// This project's saved sessions, most recent first.
     SessionList {
@@ -534,6 +567,8 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "ts", ts(optional))]
         window: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         cache_hit_tokens: Option<u32>,
         /// Above this the next request is pruned, then compacted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -557,11 +592,11 @@ pub enum Event {
     },
     /// What is using the context, segment by segment.
     ContextReport {
-        report: ContextReport,
+        report: Box<ContextReport>,
     },
     /// This session's usage: tokens, cost, timings, tools.
     Stats {
-        report: StatsReport,
+        report: Box<StatsReport>,
     },
     MemoryNotes {
         notes: Vec<MemoryNote>,
@@ -596,6 +631,8 @@ pub enum Event {
     },
     SignInResult {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         error: Option<String>,
     },
     /// A provider file was written (`path`), or an existing one reused (`path` is `None`).
@@ -607,6 +644,13 @@ pub enum Event {
         path: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+    },
+    ProviderConnections {
+        connections: Vec<ProviderConnection>,
+    },
+    ProviderConnectionSaved {
+        connection: ProviderConnection,
+        path: String,
     },
     /// Skills the model can load, and the user can run as `/<name> [args]`.
     Skills {
@@ -709,9 +753,15 @@ pub enum Event {
     /// Result of an explicit [`Op::CheckUpdates`] release check.
     UpdateCheckResult {
         current: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         latest: Option<String>,
         update_available: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
         error: Option<String>,
     },
     Warning {
@@ -971,6 +1021,26 @@ pub struct ProviderModels {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub key: Option<KeySource>,
+}
+
+/// HTTP negotiation override for one provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub enum ProviderHttpVersion {
+    Inherit,
+    Http1Only,
+    Negotiate,
+}
+
+/// Provider connection settings that can be shown without resolving any secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ProviderConnection {
+    pub id: String,
+    pub http_version: ProviderHttpVersion,
+    pub no_proxy: bool,
+    pub inherited_http1_only: bool,
 }
 
 /// A language server from `lsp.d/` and its state (one per project folder it serves).
@@ -1599,6 +1669,8 @@ pub struct SessionInfo {
     pub id: SessionId,
     pub cwd: String,
     /// `<provider-id>/<model-id>`, if a model is selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub model: Option<String>,
     pub profile: String,
     /// Effective effort, when the model has an explicit default or session selection.
@@ -1803,3 +1875,5 @@ mod tests {
         );
     }
 }
+
+

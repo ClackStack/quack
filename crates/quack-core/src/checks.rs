@@ -81,7 +81,7 @@ pub async fn refresh_catalog(config: &Loaded, out: Option<&Path>) -> Result<Refr
     let Fetched::Body { bytes, etag } = got else {
         return Err("the catalog server sent no catalog".into());
     };
-    let written = store(config, &bytes, out)?;
+    let written = store(config, bytes, out).await?;
     if out.is_none() {
         let mut state = State::load(&config.dirs);
         state.catalog_checked = now();
@@ -107,19 +107,26 @@ async fn download(config: &Loaded, etag: Option<&str>) -> Result<Fetched, String
 }
 
 /// Check the download before it replaces anything: a bad one leaves the old file in place.
-fn store(config: &Loaded, bytes: &[u8], out: Option<&Path>) -> Result<Refreshed, String> {
-    let text = std::str::from_utf8(bytes).map_err(|e| format!("the catalog is not text: {e}"))?;
-    let mut catalog = Catalog::parse(text)?;
-    catalog.retain(&catalog_ids(config));
+/// The catalog is megabytes of JSON, so parsing stays off the async runtime.
+async fn store(config: &Loaded, bytes: Vec<u8>, out: Option<&Path>) -> Result<Refreshed, String> {
+    let ids = catalog_ids(config);
     let path = out.map_or_else(
         || quack_config::catalog::downloaded_path(&config.dirs),
         Path::to_path_buf,
     );
-    write_atomic(&path, &catalog.render())?;
-    Ok(Refreshed {
-        models: catalog.model_count(),
-        providers: catalog.provider_count(),
+    tokio::task::spawn_blocking(move || {
+        let text =
+            std::str::from_utf8(&bytes).map_err(|e| format!("the catalog is not text: {e}"))?;
+        let mut catalog = Catalog::parse(text)?;
+        catalog.retain(&ids);
+        write_atomic(&path, &catalog.render())?;
+        Ok(Refreshed {
+            models: catalog.model_count(),
+            providers: catalog.provider_count(),
+        })
     })
+    .await
+    .map_err(|e| format!("the catalog task failed: {e}"))?
 }
 
 fn catalog_ids(config: &Loaded) -> BTreeSet<String> {
@@ -262,7 +269,7 @@ async fn background_catalog(config: &Loaded, state: &mut State) {
     let have = quack_config::catalog::downloaded_path(&config.dirs).exists();
     let etag = state.catalog_etag.as_deref().filter(|_| have);
     match download(config, etag).await {
-        Ok(Fetched::Body { bytes, etag }) => match store(config, &bytes, None) {
+        Ok(Fetched::Body { bytes, etag }) => match store(config, bytes, None).await {
             Ok(_) => state.catalog_etag = etag,
             Err(e) => tracing::debug!("catalog refresh: {e}"),
         },

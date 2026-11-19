@@ -100,23 +100,25 @@ impl ToolSurface {
             .map(|t| t.name.as_str())
     }
 
-    /// Translate a model call into `(internal tool, internal arguments)`.
-    pub fn map_call(&self, name: &str, args: Value) -> Option<(String, Value)> {
+    /// Translate a model call into `(internal tool, internal arguments)`. The second
+    /// element is `None` when the arguments pass through untouched, so a caller holding
+    /// an owned copy does not have to clone it.
+    pub fn map_call(&self, name: &str, args: &Value) -> Option<(String, Option<Value>)> {
         let tool = self.tools.iter().find(|t| t.name == name)?;
         if tool.params.is_empty() && tool.fixed.is_empty() {
-            return Some((tool.internal.clone(), args));
+            return Some((tool.internal.clone(), None));
         }
         let Value::Object(map) = args else {
-            return Some((tool.internal.clone(), args));
+            return Some((tool.internal.clone(), None));
         };
         let mut out = serde_json::Map::new();
         for (k, v) in map {
-            match tool.params.get(&k) {
+            match tool.params.get(k) {
                 Some(p) => {
-                    out.insert(p.to.clone(), transform(v, p.transform));
+                    out.insert(p.to.clone(), transform(v.clone(), p.transform));
                 }
                 None => {
-                    out.insert(k, v);
+                    out.insert(k.clone(), v.clone());
                 }
             }
         }
@@ -128,7 +130,7 @@ impl ToolSurface {
         for (k, v) in &tool.fixed {
             out.insert(k.clone(), v.clone());
         }
-        Some((tool.internal.clone(), Value::Object(out)))
+        Some((tool.internal.clone(), Some(Value::Object(out))))
     }
 }
 
@@ -293,10 +295,10 @@ mod tests {
         assert_eq!(t.schema["required"][0], "absolute_path");
         assert!(t.schema["properties"].get("absolute_path").is_some());
         let (name, args) = surface
-            .map_call("read_file", json!({"absolute_path": "/r/a", "offset": 0}))
+            .map_call("read_file", &json!({"absolute_path": "/r/a", "offset": 0}))
             .expect("mapped");
         assert_eq!(name, "read");
-        assert_eq!(args, json!({"path": "/r/a", "offset": 1}));
+        assert_eq!(args, Some(json!({"path": "/r/a", "offset": 1})));
     }
 
     #[test]
@@ -349,11 +351,11 @@ mod tests {
         assert_eq!(w.schema["properties"]["lines"]["type"], "array");
         assert_eq!(w.schema["required"], json!(["path", "lines"]));
         let (_, args) = surface
-            .map_call("Write", json!({"path": "a", "lines": ["x", "y"]}))
+            .map_call("Write", &json!({"path": "a", "lines": ["x", "y"]}))
             .expect("mapped");
         assert_eq!(
             args,
-            json!({"path": "a", "content": "x\ny", "mode": "strict"})
+            Some(json!({"path": "a", "content": "x\ny", "mode": "strict"}))
         );
 
         p.file.exclusive = true;

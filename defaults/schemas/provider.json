@@ -88,11 +88,24 @@
     "Http": {
       "additionalProperties": false,
       "properties": {
+        "http1_only": {
+          "default": null,
+          "description": "Force HTTP/1.1 when true, or allow normal negotiation when false. Unset inherits\n`[network].http1_only`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "max_retries": {
           "default": 3,
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "no_proxy": {
+          "default": false,
+          "description": "Use a direct connection, bypassing configured, environment and system proxies.",
+          "type": "boolean"
         },
         "proxy": {
           "default": "",
@@ -602,7 +615,9 @@
     "http": {
       "$ref": "#/$defs/Http",
       "default": {
+        "http1_only": null,
         "max_retries": 3,
+        "no_proxy": false,
         "proxy": "",
         "timeout_connect_secs": 30,
         "timeout_first_byte_secs": 0,
@@ -629,6 +644,11 @@
       "default": "",
       "description": "Shown by setup and `/providers`; defaults to the id.",
       "type": "string"
+    },
+    "native_compaction": {
+      "default": false,
+      "description": "Use native Responses compaction for this provider's models.",
+      "type": "boolean"
     },
     "note": {
       "default": "",

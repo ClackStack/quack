@@ -74,12 +74,12 @@ impl Pool {
             && Arc::ptr_eq(&self.lsp, lsp)
     }
 
-    /// The agent's setup: built on first use from its model's setup.
+    /// The agent's setup: built on first use from its model's setup. The lock is not
+    /// held while another model loads, so sibling agents can start in parallel.
     async fn setup(&self, parent: &TurnCtx, id: &str, def: &AgentFile) -> Arc<Setup> {
         let p = &parent.setup;
         let key = (id.to_owned(), p.model_ref.clone(), p.profile.id.clone());
-        let mut setups = self.setups.lock().await;
-        if let Some(s) = setups.get(&key) {
+        if let Some(s) = self.setups.lock().await.get(&key) {
             return s.clone();
         }
         let wanted = match def.model.trim() {
@@ -130,8 +130,9 @@ impl Pool {
             }
         };
         let setup = Arc::new(derive(&base, def));
-        setups.insert(key, setup.clone());
-        setup
+        // Another task may have built the same setup while this one loaded.
+        let mut setups = self.setups.lock().await;
+        setups.entry(key).or_insert(setup).clone()
     }
 }
 

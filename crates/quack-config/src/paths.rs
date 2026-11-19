@@ -64,6 +64,10 @@ impl Dirs {
     }
 
     pub fn discover_with(env: Env<'_>, cwd: &Path) -> Self {
+        Self::discover_in(env, cwd, find_workspace_root(cwd))
+    }
+
+    pub(crate) fn discover_in(env: Env<'_>, cwd: &Path, workspace_root: PathBuf) -> Self {
         let var = |name: &str| env(&format!("{ENV_PREFIX}{name}")).filter(|v| !v.is_empty());
         let home = env(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
             .map(PathBuf::from)
@@ -78,7 +82,6 @@ impl Dirs {
                 .into_iter()
                 .find(|p| p.is_dir()),
         };
-        let workspace_root = find_workspace_root(cwd);
         let (system, ignored_system_dir) =
             system_dir(var("SYSTEM_DIR").map(PathBuf::from), platform.system);
         Self {

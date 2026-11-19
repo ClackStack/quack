@@ -11,11 +11,15 @@
 //! Everything else is optional and defaults to what works for OpenAI-compatible servers.
 
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::PathBuf;
 
+use quack_protocol::ProviderHttpVersion;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::secret::Secret;
+use crate::{LayerKind, Loaded, load_providers};
 
 type JsonMap = serde_json::Map<String, serde_json::Value>;
 
@@ -64,6 +68,9 @@ pub struct ProviderFile {
     /// the catalog.
     #[serde(default)]
     pub catalog: Option<String>,
+    /// Use native Responses compaction for this provider's models.
+    #[serde(default)]
+    pub native_compaction: bool,
     /// Merged into every request body, under each model's own `extra_body`.
     #[serde(default)]
     #[schemars(with = "JsonMap")]
@@ -142,6 +149,106 @@ pub fn with_file_key(text: &str, path: &str) -> Result<String, String> {
     Ok(doc.to_string())
 }
 
+/// Edit the provider's connection overrides while preserving its other settings.
+/// Bundled and system definitions are overridden from the user's config directory.
+pub fn save_connection(
+    config: &Loaded,
+    id: &str,
+    http_version: Option<ProviderHttpVersion>,
+    no_proxy: Option<bool>,
+) -> Result<PathBuf, String> {
+    let item = load_providers(config)
+        .into_iter()
+        .find(|i| i.id == id)
+        .ok_or_else(|| format!("provider `{id}` is not configured"))?;
+    let file = item
+        .loaded()
+        .ok_or_else(|| format!("provider `{id}` did not load · /providers says why"))?;
+    let layer = item.layer.max(LayerKind::User);
+    let trust = config.active_project_trust(layer);
+    let dir = config
+        .dirs
+        .layer_dir(layer)
+        .ok_or_else(|| format!("the {layer} layer has no directory"))?
+        .join("providers.d");
+    let existing = item.path.parent() == Some(dir.as_path());
+    let (path, text) = if existing {
+        let text = std::fs::read_to_string(&item.path)
+            .map_err(|e| format!("cannot read {}: {e}", item.path.display()))?;
+        (item.path.clone(), text)
+    } else {
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+        {
+            return Err(format!("cannot use `{id}` as a provider filename"));
+        }
+        let base_url = serde_json::Value::from(file.base_url.as_str());
+        let api = serde_json::Value::from(file.api.as_str());
+        (
+            dir.join(format!("{id}.toml")),
+            format!("base_url = {base_url}\napi = {api}\n"),
+        )
+    };
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{e}"))?;
+    let version = match http_version {
+        Some(ProviderHttpVersion::Http1Only) => Some(true),
+        Some(ProviderHttpVersion::Negotiate) => Some(false),
+        _ => None,
+    };
+    if !doc.contains_key("http") && (version.is_some() || no_proxy.is_some()) {
+        doc["http"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    if let Some(http) = doc
+        .get_mut("http")
+        .and_then(toml_edit::Item::as_table_like_mut)
+    {
+        let set = |table: &mut dyn toml_edit::TableLike, key: &str, enabled| {
+            if let Some(old) = table.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+                let decor = old.decor().clone();
+                *old = toml_edit::Value::from(enabled);
+                *old.decor_mut() = decor;
+            } else {
+                table.insert(key, toml_edit::value(enabled));
+            }
+        };
+        if let Some(version) = version {
+            set(http, "http1_only", version);
+        } else if http_version == Some(ProviderHttpVersion::Inherit) {
+            http.remove("http1_only");
+        }
+        if let Some(no_proxy) = no_proxy {
+            set(http, "no_proxy", no_proxy);
+        }
+    }
+
+    let updated = doc.to_string();
+    if updated == text {
+        return Ok(if existing { path } else { item.path });
+    }
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
+        if existing {
+            temp.as_file()
+                .set_permissions(std::fs::metadata(&path)?.permissions())?;
+        }
+        temp.write_all(updated.as_bytes())?;
+        if existing {
+            temp.persist(&path)?;
+        } else {
+            temp.persist_noclobber(&path)?;
+        }
+        Ok(())
+    };
+    write().map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    if let Some(trust) = trust {
+        config.trust_project(trust)?;
+    }
+    Ok(path)
+}
+
 impl ProviderFile {
     /// The id to look this provider up by in the model catalog. A server on this machine
     /// serves its own window at its own cost, so it needs asking for by name.
@@ -206,6 +313,11 @@ pub struct Http {
     pub max_retries: u32,
     /// Overrides `[network].proxy`.
     pub proxy: String,
+    /// Use a direct connection, bypassing configured, environment and system proxies.
+    pub no_proxy: bool,
+    /// Force HTTP/1.1 when true, or allow normal negotiation when false. Unset inherits
+    /// `[network].http1_only`.
+    pub http1_only: Option<bool>,
 }
 
 impl Default for Http {
@@ -216,6 +328,8 @@ impl Default for Http {
             timeout_first_byte_secs: 0,
             max_retries: 3,
             proxy: String::new(),
+            no_proxy: false,
+            http1_only: None,
         }
     }
 }

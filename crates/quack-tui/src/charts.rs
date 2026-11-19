@@ -2,11 +2,14 @@
 //! meters, figure tiles and a line over time. Each is built with its glyphs already
 //! chosen (`ascii`), so drawing needs only the area.
 
+use std::collections::VecDeque;
+
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::buffer::CellWidth;
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::symbols::{self, Marker};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, StyledGrapheme};
 use ratatui::widgets::{
     Axis, Bar, BarChart, Chart, Dataset, GraphType, LineGauge, Paragraph, Sparkline,
 };
@@ -225,7 +228,7 @@ fn draw_bars(
     f.render_widget(chart, area);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn draw_trend(
     f: &mut Frame<'_>,
     area: Rect,
@@ -285,18 +288,20 @@ pub(crate) fn draw_detail(
     charts: &[(usize, Visual)],
     theme: &Theme,
 ) {
-    let width = usize::from(area.width);
+    let width = area.width;
     let mut y = area.y;
     let mut start = 0;
     let text = |f: &mut Frame<'_>, from: usize, to: usize, y: &mut u16| {
-        let chunk = &lines[from..to];
-        let rows: usize = chunk.iter().map(|l| rows(l, width)).sum();
-        let h = u16::try_from(rows)
+        let wrapped: Vec<Line<'_>> = lines[from..to]
+            .iter()
+            .flat_map(|line| wrap_line(line, width))
+            .collect();
+        let h = u16::try_from(wrapped.len())
             .unwrap_or(u16::MAX)
             .min(area.bottom().saturating_sub(*y));
         if h > 0 {
             f.render_widget(
-                Paragraph::new(chunk.to_vec()).wrap(ratatui::widgets::Wrap { trim: false }),
+                Paragraph::new(wrapped),
                 Rect::new(area.x, *y, area.width, h),
             );
         }
@@ -315,8 +320,122 @@ pub(crate) fn draw_detail(
     text(f, start, lines.len(), &mut y);
 }
 
-/// Rows `line` takes when wrapped to `width`.
-fn rows(line: &Line<'_>, width: usize) -> usize {
-    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    crate::wrap::wrap(&text, width).len()
+/// Wrap one line exactly as a Paragraph with `Wrap { trim: false }`, returning its rows.
+///
+/// Paragraph does not expose its reflow output. Replaying its word-wrapping state machine here
+/// lets `draw_detail` use the same rows both for chart placement and the final draw, including
+/// symbols wider than one cell and styles on only part of a line.
+fn wrap_line<'a>(line: &'a Line<'a>, width: u16) -> Vec<Line<'a>> {
+    let mut rows: Vec<Vec<StyledGrapheme<'_>>> = Vec::new();
+    let mut pending_line: Vec<StyledGrapheme<'_>> = Vec::new();
+    let mut pending_word: Vec<StyledGrapheme<'_>> = Vec::new();
+    let mut pending_whitespace: VecDeque<StyledGrapheme<'_>> = VecDeque::new();
+    let mut line_width = 0_u16;
+    let mut word_width = 0_u16;
+    let mut whitespace_width = 0_u16;
+    let mut non_whitespace_previous = false;
+    let alignment = line.alignment.unwrap_or(Alignment::Left);
+
+    for grapheme in line.styled_graphemes(Style::default()) {
+        let is_whitespace = grapheme.is_whitespace();
+        let symbol_width = grapheme.symbol.cell_width();
+        // Ratatui ignores symbols wider than the whole line.
+        if symbol_width > width {
+            continue;
+        }
+        let word_found = non_whitespace_previous && is_whitespace;
+        let untrimmed_overflow =
+            pending_line.is_empty() && word_width + whitespace_width + symbol_width > width;
+        if word_found || untrimmed_overflow {
+            pending_line.extend(pending_whitespace.drain(..));
+            line_width += whitespace_width;
+            pending_line.append(&mut pending_word);
+            line_width += word_width;
+            pending_whitespace.clear();
+            whitespace_width = 0;
+            word_width = 0;
+        }
+        let line_full = line_width >= width;
+        let pending_word_overflow =
+            symbol_width > 0 && line_width + whitespace_width + word_width >= width;
+        if line_full || pending_word_overflow {
+            let mut remaining_width = width.saturating_sub(line_width);
+            rows.push(std::mem::take(&mut pending_line));
+            line_width = 0;
+            // Drop trailing whitespace that fits the just-closed row.
+            while let Some(grapheme) = pending_whitespace.front() {
+                let w = grapheme.symbol.cell_width();
+                if w > remaining_width {
+                    break;
+                }
+                whitespace_width -= w;
+                remaining_width -= w;
+                pending_whitespace.pop_front();
+            }
+            if is_whitespace && pending_whitespace.is_empty() {
+                continue;
+            }
+        }
+        if is_whitespace {
+            whitespace_width += symbol_width;
+            pending_whitespace.push_back(grapheme);
+        } else {
+            word_width += symbol_width;
+            pending_word.push(grapheme);
+        }
+        non_whitespace_previous = !is_whitespace;
+    }
+    pending_line.extend(pending_whitespace);
+    pending_line.append(&mut pending_word);
+    if !pending_line.is_empty() {
+        rows.push(pending_line);
+    }
+    if rows.is_empty() {
+        rows.push(Vec::new());
+    }
+    rows.into_iter()
+        .map(|row| Line {
+            spans: row
+                .into_iter()
+                .map(|g| Span::styled(g.symbol, g.style))
+                .collect(),
+            style: Style::default(),
+            alignment: Some(alignment),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+    use ratatui::widgets::{Widget, Wrap};
+
+    use super::*;
+
+    #[test]
+    fn prewrapped_lines_match_paragraph_trim_false() {
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("  alpha beta", Style::new().fg(Color::Red)),
+                Span::styled(" gamma abcdefghij δε", Style::new().fg(Color::Blue)),
+            ]),
+            Line::raw("界 x abc  ").style(Style::new().fg(Color::Green)),
+            Line::raw("   "),
+            Line::raw(""),
+            Line::raw("한n tune word").right_aligned(),
+        ];
+        for width in 1..=16 {
+            let area = Rect::new(0, 0, width, 64);
+            let mut expected = Buffer::empty(area);
+            Paragraph::new(lines.clone())
+                .wrap(Wrap { trim: false })
+                .render(area, &mut expected);
+            let wrapped: Vec<_> = lines.iter().flat_map(|l| wrap_line(l, width)).collect();
+            let mut actual = Buffer::empty(area);
+            Paragraph::new(wrapped).render(area, &mut actual);
+            assert_eq!(actual, expected, "width {width}");
+        }
+    }
 }

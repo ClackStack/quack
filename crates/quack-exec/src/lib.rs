@@ -32,6 +32,24 @@ const HEADLESS_DENIAL: &str = "this run is headless and nobody can approve actio
 Continue without it if you can; otherwise explain what you would run. \
 (For eligible actions, the user can use --approvals allow or a [permissions] allow rule.)";
 
+/// Answer an approval request without a user: redact possible secrets rather than
+/// blocking the turn, and deny everything else with feedback explaining why.
+pub(crate) fn headless_decision(
+    request: &quack_protocol::ApprovalRequest,
+    feedback: &str,
+) -> ApprovalDecision {
+    if matches!(
+        request,
+        quack_protocol::ApprovalRequest::EgressSecrets { .. }
+    ) {
+        ApprovalDecision::RedactAndSend
+    } else {
+        ApprovalDecision::DenyWithFeedback {
+            feedback: feedback.to_owned(),
+        }
+    }
+}
+
 /// Run a single prompt to completion. Returns the process exit code.
 pub async fn run(mut engine: EngineHandle, prompt: String, format: OutputFormat) -> i32 {
     // A headless run is one turn, so wait for MCP servers to connect (each within its
@@ -60,7 +78,7 @@ pub async fn run(mut engine: EngineHandle, prompt: String, format: OutputFormat)
             subsystem: Subsystem::Mcp,
             state,
         } = &event
-            && !matches!(state, LoadState::Pending | LoadState::Running { .. })
+            && state.is_settled()
             && let Some(prompt) = prompt.take()
         {
             if let LoadState::NeedsAttention { detail } = state
@@ -104,24 +122,15 @@ pub async fn run(mut engine: EngineHandle, prompt: String, format: OutputFormat)
             Event::ApprovalRequest {
                 call_id, request, ..
             } => {
-                let is_egress = matches!(
-                    request,
-                    quack_protocol::ApprovalRequest::EgressSecrets { .. }
-                );
-                let decision = if is_egress {
-                    ApprovalDecision::RedactAndSend
-                } else {
-                    ApprovalDecision::DenyWithFeedback {
-                        feedback: HEADLESS_DENIAL.into(),
-                    }
-                };
+                let decision = headless_decision(&request, HEADLESS_DENIAL);
+                let redacted = matches!(decision, ApprovalDecision::RedactAndSend);
                 let _ = engine
                     .ops
                     .send(Op::ApprovalResponse { call_id, decision })
                     .await;
-                if text_mode && !is_egress {
+                if text_mode && !redacted {
                     let _ = writeln!(stderr, "  ✗ denied: needs approval (see --approvals)");
-                } else if text_mode && is_egress {
+                } else if text_mode && redacted {
                     let _ = writeln!(stderr, "  › redacted potential secret(s) before sending");
                 }
             }
@@ -163,6 +172,11 @@ pub async fn run(mut engine: EngineHandle, prompt: String, format: OutputFormat)
             Event::Warning { message } => {
                 if text_mode {
                     let _ = writeln!(stderr, "warning: {message}");
+                }
+            }
+            Event::SessionResumeFailed { reason } => {
+                if text_mode {
+                    let _ = writeln!(stderr, "warning: {reason}");
                 }
             }
             Event::Notice { message } => {

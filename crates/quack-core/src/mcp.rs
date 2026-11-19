@@ -46,6 +46,29 @@ pub(crate) struct Mcp {
     pub manager: Arc<McpManager>,
     /// Model names of deferred tools `tool_search` turned on, in that order.
     activated: Mutex<Vec<String>>,
+    /// What [`Mcp::offered`] last returned, with the inputs it was built from: requests
+    /// ask for the offered set on every model call and every tool dispatch, and
+    /// rebuilding it clones every ready server's tool list.
+    cache: Mutex<OfferCache>,
+}
+
+#[derive(Default)]
+struct OfferCache {
+    revision: u64,
+    activated: Vec<String>,
+    budget: Option<u32>,
+    tools: Vec<Arc<dyn Tool>>,
+}
+
+impl std::fmt::Debug for OfferCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OfferCache")
+            .field("revision", &self.revision)
+            .field("activated", &self.activated)
+            .field("budget", &self.budget)
+            .field("tools", &self.tools.len())
+            .finish()
+    }
 }
 
 impl Mcp {
@@ -53,6 +76,7 @@ impl Mcp {
         Arc::new(Self {
             manager,
             activated: Mutex::new(Vec::new()),
+            cache: Mutex::new(OfferCache::default()),
         })
     }
 
@@ -76,19 +100,45 @@ impl Mcp {
 
     /// The MCP tools to offer with the next request: the servers' tools (or
     /// `tool_search` and what it turned on), then the resource tools when any ready
-    /// server lists resources.
+    /// server lists resources. Cached until the servers, the turned-on tools or the
+    /// budget change.
     pub fn offered(self: &Arc<Self>, budget: Option<u32>) -> Vec<Arc<dyn Tool>> {
+        let revision = self.manager.revision();
+        let activated = self
+            .activated
+            .lock()
+            .map(|a| a.clone())
+            .unwrap_or_default();
+        if let Ok(cache) = self.cache.lock()
+            && cache.revision == revision
+            && cache.budget == budget
+            && cache.activated == activated
+        {
+            return cache.tools.clone();
+        }
+        let tools = self.build_offered(budget, &activated);
+        if let Ok(mut cache) = self.cache.lock() {
+            *cache = OfferCache {
+                revision,
+                activated,
+                budget,
+                tools: tools.clone(),
+            };
+        }
+        tools
+    }
+
+    fn build_offered(self: &Arc<Self>, budget: Option<u32>, activated: &[String]) -> Vec<Arc<dyn Tool>> {
         let tools = self.adapters();
         let mut out: Vec<Arc<dyn Tool>> = Vec::new();
         if !Self::deferred(&tools, budget) {
             out.extend(tools.into_iter().map(|t| Arc::new(t) as Arc<dyn Tool>));
         } else {
-            let active = self.activated.lock().map(|a| a.clone()).unwrap_or_default();
             out.push(Arc::new(ToolSearch {
                 mcp: Arc::clone(self),
             }));
-            for name in active {
-                if let Some(t) = tools.iter().find(|t| t.name == name) {
+            for name in activated {
+                if let Some(t) = tools.iter().find(|t| t.name == *name) {
                     out.push(Arc::new(t.clone()));
                 }
             }

@@ -1,7 +1,9 @@
-//! `edit` (internal `edit.str_replace`): replace a unique snippet, with fuzzy fallbacks.
+//! `edit` (internal `edit.str_replace`): replace one snippet or batch independent exact edits.
 //!
 //! Tried in order: exact → trailing whitespace ignored → indentation ignored (replacement
 //! re-indented) → blank lines ignored. A non-exact match is reported to the model.
+
+use std::borrow::Cow;
 
 use futures::future::BoxFuture;
 use quack_config::settings::EditFormat;
@@ -15,6 +17,7 @@ use crate::text::{TextFile, io_msg, unified_diff};
 const PATH: &[&str] = &["path", "file_path", "filename", "file"];
 const OLD: &[&str] = &["old_string", "old_str", "old", "search"];
 const NEW: &[&str] = &["new_string", "new_str", "new", "replace"];
+const ALL: &[&str] = &["replace_all", "all", "expected_replacements", "count"];
 
 #[derive(Debug)]
 pub struct StrReplace;
@@ -31,8 +34,34 @@ struct Plan {
 fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, String> {
     let path = paths::resolve(&ctx.root, arg_str(args, PATH)?);
     let shown = paths::display(&ctx.root, &path);
-    let old = arg_str(args, OLD)?.replace("\r\n", "\n");
-    let new = arg_str(args, NEW)?.replace("\r\n", "\n");
+    if let Some(edits) = args.get("edits") {
+        if [OLD, NEW, ALL]
+            .into_iter()
+            .flatten()
+            .any(|key| args.get(key).is_some())
+        {
+            return Err(
+                "Give either `edits` or a single `old_string`/`new_string` pair, not both.".into(),
+            );
+        }
+        let edits = edits
+            .as_array()
+            .filter(|edits| !edits.is_empty())
+            .ok_or("`edits` must be a non-empty array of replacement pairs.")?;
+        let file = TextFile::load(&path)?;
+        ctx.reads.editable(&path, &shown)?;
+        let after = replace_batch(&file.text, edits).map_err(|e| format!("{e} (in {shown})"))?;
+        return Ok(Plan {
+            path,
+            shown,
+            file,
+            after,
+            note: None,
+            count: edits.len(),
+        });
+    }
+    let old = normalized_arg(args, OLD)?;
+    let new = normalized_arg(args, NEW)?;
     // Some harnesses count the replacements instead (`expected_replacements: 3`).
     let all = opt_bool(args, &["replace_all", "all"])
         || opt_u64(args, &["expected_replacements", "count"]).is_some_and(|n| n > 1);
@@ -54,7 +83,7 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, String> {
                 path,
                 shown,
                 file,
-                after: new,
+                after: new.into_owned(),
                 note: None,
                 count: 1,
             });
@@ -71,6 +100,79 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, String> {
         note,
         count,
     })
+}
+
+fn normalized_arg<'a>(args: &'a Value, keys: &[&str]) -> Result<Cow<'a, str>, String> {
+    let text = arg_str(args, keys)?;
+    if text.contains("\r\n") {
+        Ok(Cow::Owned(text.replace("\r\n", "\n")))
+    } else {
+        Ok(Cow::Borrowed(text))
+    }
+}
+
+/// Resolve all spans before assembling the result, so no edit can match another's output.
+fn replace_batch(text: &str, edits: &[Value]) -> Result<String, String> {
+    let mut spans = Vec::with_capacity(edits.len());
+    for (i, edit) in edits.iter().enumerate() {
+        let entry = i + 1;
+        let pair = |key| normalized_arg(edit, &[key]).map_err(|e| format!("Edit {entry}: {e}"));
+        let old = pair("old_string")?;
+        let new = pair("new_string")?;
+        if edit.as_object().is_some_and(|fields| {
+            fields
+                .keys()
+                .any(|k| !matches!(k.as_str(), "old_string" | "new_string"))
+        }) {
+            return Err(format!(
+                "Edit {entry}: give only `old_string` and `new_string` in a batch entry."
+            ));
+        }
+        let Some(first) = old.chars().next() else {
+            return Err(format!(
+                "Edit {entry}: `old_string` is empty; give the exact text to replace."
+            ));
+        };
+        if old == new {
+            return Err(format!(
+                "Edit {entry}: `old_string` and `new_string` are identical."
+            ));
+        }
+        let Some(start) = text.find(old.as_ref()) else {
+            return Err(format!(
+                "Edit {entry}: `old_string` was not found; copy the exact text from the file or use a single edit for fuzzy matching."
+            ));
+        };
+        // Start one character later to detect matches that overlap this one as well.
+        let next = start + first.len_utf8();
+        if let Some(second) = text[next..].find(old.as_ref()) {
+            let (a, b) = (line_of(text, start), line_of(text, next + second));
+            return Err(format!(
+                "Edit {entry}: `old_string` is not unique (matches at lines {a} and {b}); include more surrounding text."
+            ));
+        }
+        spans.push((start, start + old.len(), entry, new));
+    }
+    spans.sort_unstable_by_key(|span| span.0);
+    let mut after = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let mut previous = 0;
+    for (start, end, entry, new) in spans {
+        if start < cursor {
+            return Err(format!(
+                "Edits {previous} and {entry} overlap; combine them into one replacement."
+            ));
+        }
+        after.push_str(&text[cursor..start]);
+        after.push_str(&new);
+        cursor = end;
+        previous = entry;
+    }
+    after.push_str(&text[cursor..]);
+    if after == text {
+        return Err("The batch changes nothing.".into());
+    }
+    Ok(after)
 }
 
 /// Apply the replacement; returns the new text, a note for fuzzy matches, and the count.
@@ -346,7 +448,10 @@ impl Tool for StrReplace {
     fn description(&self, _ctx: &ToolCtx) -> String {
         "Replace text in a file. `old_string` must match the file exactly (including indentation) \
          and be unique unless `replace_all` is true; include a few surrounding lines to make it \
-         unique. Read the file first; a file that was never read refuses the edit."
+         unique. For several independent exact replacements in one file, pass `edits` instead \
+         of the top-level pair. Every `edits` entry must match exactly once in the original file; \
+         overlapping matches are refused and nothing is written unless the whole batch matches. \
+         Read the file first; a file that was never read refuses the edit."
             .into()
     }
 
@@ -355,11 +460,25 @@ impl Tool for StrReplace {
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "File path, relative to the workspace root or absolute" },
-                "old_string": { "type": "string", "description": "Exact text to replace" },
-                "new_string": { "type": "string", "description": "Replacement text" },
-                "replace_all": { "type": "boolean", "description": "Replace every occurrence (default false)" }
+                "old_string": { "type": "string", "description": "Text to replace when making a single edit" },
+                "new_string": { "type": "string", "description": "Replacement text when making a single edit" },
+                "replace_all": { "type": "boolean", "description": "Replace every occurrence for a single edit (default false)" },
+                "edits": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "Instead of the top-level pair, give independent exact replacements against the original file",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": { "type": "string", "description": "Exact text occurring once in the original file" },
+                            "new_string": { "type": "string", "description": "Replacement text; empty deletes the match" }
+                        },
+                        "required": ["old_string", "new_string"],
+                        "additionalProperties": false
+                    }
+                }
             },
-            "required": ["path", "old_string", "new_string"]
+            "required": ["path"]
         })
     }
 
@@ -397,7 +516,7 @@ impl Tool for StrReplace {
                 Some(&p.file.text),
                 &p.after,
                 "edit",
-                false,
+                crate::text::NamedFile::No,
             );
             let mut msg = format!("Edited {}", p.shown);
             if p.count > 1 {
@@ -419,6 +538,41 @@ impl Tool for StrReplace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_matches_the_original_regardless_of_entry_order() {
+        let swap = [
+            json!({"old_string": "right", "new_string": "left"}),
+            json!({"old_string": "left", "new_string": "right"}),
+            json!({"old_string": "!", "new_string": ""}),
+        ];
+        assert_eq!(
+            replace_batch("left + right!", &swap),
+            Ok("right + left".into())
+        );
+    }
+
+    #[test]
+    fn batch_refuses_missing_ambiguous_and_overlapping_matches() {
+        let first = json!({"old_string": "left", "new_string": "inserted"});
+        for (old, reason) in [
+            ("inserted", "was not found"),
+            ("right\nright", "was not found"), // No fuzzy fallback for a batch.
+            ("right", "not unique"),
+            ("left\n", "overlap"),
+            ("éé", "not unique"), // Both matches in ééé overlap.
+        ] {
+            let err = replace_batch(
+                "left\nright\n\nright\nééé\n",
+                &[
+                    first.clone(),
+                    json!({"old_string": old, "new_string": "done"}),
+                ],
+            )
+            .expect_err("batch must fail");
+            assert!(err.contains(reason), "{old:?}: {err}");
+        }
+    }
 
     #[test]
     fn exact_and_ambiguous() {

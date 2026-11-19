@@ -16,7 +16,7 @@ use quack_providers::{
     StreamEvent, ToolCall, ToolSpec, tokens, toolparse,
 };
 use quack_store::checkpoint::Checkpoints;
-use quack_tools::{Answers, Decision, Permissions, Subject, ToolOutput};
+use quack_tools::{Answers, Decision, Permissions, Subject, Tool, ToolCtx, ToolOutput};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -185,6 +185,26 @@ impl TurnCtx {
         let _ = self.tx.send(e);
     }
 
+    /// Park a reply channel under `key`, show `request`, and wait for the answer or
+    /// the turn's end; see [`wait_for_answer`].
+    pub(crate) async fn wait_for_answer<T, K: Clone + Eq + Hash>(
+        &self,
+        pending: &Mutex<HashMap<K, oneshot::Sender<T>>>,
+        key: K,
+        request: Event,
+    ) -> Option<T> {
+        wait_for_answer(
+            &self.prompt_lock,
+            &self.cancel,
+            &self.stats,
+            pending,
+            key,
+            request,
+            |e| self.emit(e),
+        )
+        .await
+    }
+
     /// A call id as clients and the approval table see it. A sub-agent's model numbers its
     /// calls from scratch, so its ids get the run's id in front.
     fn key(&self, id: &str) -> String {
@@ -303,31 +323,21 @@ impl TurnCtx {
                 Ok(report.redacted)
             }
             SecretGuardMode::Ask => {
-                let _one_at_a_time = self.prompt_lock.lock().await;
-                let (otx, orx) = oneshot::channel();
-                if let Ok(mut pending) = self.approvals.lock() {
-                    pending.insert(ask_id.to_owned(), otx);
-                }
-                self.emit(Event::ApprovalRequest {
-                    call_id: CallId(ask_id.to_owned()),
-                    request: ApprovalRequest::EgressSecrets {
-                        provider: self.setup.provider.id.clone(),
-                        host: crate::secrets::host_of(self.setup.provider.base_url()),
-                        findings: report.findings.clone(),
-                    },
-                    always: Vec::new(),
-                });
-                let asked = std::time::Instant::now();
-                let answer = tokio::select! {
-                    () = self.cancel.cancelled() => None,
-                    a = orx => a.ok(),
-                };
-                if let Ok(mut st) = self.stats.lock() {
-                    st.waited(asked.elapsed());
-                }
-                if let Ok(mut pending) = self.approvals.lock() {
-                    pending.remove(ask_id);
-                }
+                let answer = self
+                    .wait_for_answer(
+                        &self.approvals,
+                        ask_id.to_owned(),
+                        Event::ApprovalRequest {
+                            call_id: CallId(ask_id.to_owned()),
+                            request: ApprovalRequest::EgressSecrets {
+                                provider: self.setup.provider.id.clone(),
+                                host: crate::secrets::host_of(self.setup.provider.base_url()),
+                                findings: report.findings.clone(),
+                            },
+                            always: Vec::new(),
+                        },
+                    )
+                    .await;
                 session::record(
                     self.log.as_ref(),
                     "approval",
@@ -355,16 +365,14 @@ impl TurnCtx {
                     None
                     | Some(ApprovalDecision::Deny)
                     | Some(ApprovalDecision::DenyWithFeedback { .. }) => {
-                        self.ledger.record(EgressDraft {
-                            kind: EgressKind::BlockedEgress,
-                            url: self.setup.provider.base_url().to_owned(),
-                            protocol: "secret-guard".into(),
-                            bytes_sent: 0,
-                            bytes_received: 0,
-                            status: None,
-                            redactions: 0,
-                            blocked_reason: Some(format!("blocked by secret_guard in {location}")),
-                        });
+                        self.ledger.record(
+                            EgressDraft::new(
+                                EgressKind::BlockedEgress,
+                                self.setup.provider.base_url(),
+                                "secret-guard",
+                            )
+                            .blocked(format!("blocked by secret_guard in {location}")),
+                        );
                         Err(())
                     }
                 }
@@ -412,7 +420,10 @@ const MAX_DROPPED_RETRIES: u32 = 2;
 pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt) -> Vec<Message> {
     ctx.emit(Event::TurnStarted { turn: ctx.turn });
     let mut extra = match prompt.start {
-        Some(start) => start.await.unwrap_or_default(),
+        Some(start) => start.await.unwrap_or_else(|e| {
+            tracing::error!("the session-start hooks task failed: {e}");
+            Vec::new()
+        }),
         None => Vec::new(),
     };
     // A sub-agent's prompt comes from the model, not the user.
@@ -498,8 +509,7 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                 }
             }
             steps += 1;
-            crate::context::fit(&ctx, &mut history).await;
-            let estimated = raw_estimate(&ctx.setup, &history);
+            let estimated = crate::context::fit(&ctx, &mut history).await;
             let (msg, usage) = match stream_step(&ctx, &history).await {
                 Ok(r) => {
                     dropped = 0;
@@ -613,7 +623,6 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                 Some(Message::Assistant { tool_calls, .. }) => std::mem::take(tool_calls),
                 _ => Vec::new(),
             };
-            let mut interrupted = false;
             if calls.is_empty() {
                 if empty {
                     ctx.emit(Event::Warning {
@@ -622,80 +631,7 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                 }
                 break 'steps StepEnd::Done;
             }
-            let mut i = 0;
-            while i < calls.len() {
-                if ctx.cancel.is_cancelled() {
-                    // Every tool call needs a result, or the next request is invalid.
-                    for c in &calls[i..] {
-                        ctx.push(
-                            &mut history,
-                            Message::Tool {
-                                call_id: c.id.clone(),
-                                content: "Not run: interrupted by the user.".into(),
-                                images: Vec::new(),
-                            },
-                        );
-                    }
-                    interrupted = true;
-                    break;
-                }
-                // Read-only sub-agents started together run side by side.
-                let together = calls[i..].iter().take_while(|c| parallel(&ctx, c)).count();
-                if together > 1 {
-                    let batch = &calls[i..i + together];
-                    let outs =
-                        futures::future::join_all(batch.iter().map(|c| run_call(&ctx, c))).await;
-                    let end = i + together == calls.len();
-                    for (n, (call, out)) in batch.iter().zip(outs).enumerate() {
-                        let ToolOutput {
-                            model: mut content,
-                            images,
-                            ..
-                        } = out;
-                        content = apply_tool_guard(&ctx, call, content).await;
-                        ctx.keep_plan(&mut content, end && n + 1 == together);
-                        ctx.push(
-                            &mut history,
-                            Message::Tool {
-                                call_id: call.id.clone(),
-                                content,
-                                images,
-                            },
-                        );
-                    }
-                    i += together;
-                    continue;
-                }
-                let call = &calls[i];
-                i += 1;
-                let (repeats, same_count) = recent.record(&call.name, &call.arguments);
-                let mut out = run_call(&ctx, call).await;
-                if repeats >= REPEAT_LIMIT {
-                    out.model.push_str(&format!(
-                        "\n\nNote: this exact call has now been made {repeats} times in a row. \
-                         Try a different approach."
-                    ));
-                } else if same_count >= 2 && edits(&ctx.setup, call) {
-                    out.model.push_str(&format!(
-                        "\n\nNote: this exact edit has already been attempted in this turn ({same_count} times total). \
-                         Repeating identical changes without modifying arguments will not fix the problem. \
-                         Read the file to check its actual state or try a different fix."
-                    ));
-                }
-                out.model = apply_tool_guard(&ctx, call, out.model).await;
-                ctx.keep_plan(&mut out.model, i == calls.len());
-                ctx.push(
-                    &mut history,
-                    Message::Tool {
-                        call_id: call.id.clone(),
-                        content: out.model,
-                        images: out.images,
-                    },
-                );
-            }
-            if let Some(Message::Assistant { tool_calls, .. }) = history.get_mut(at) {
-                *tool_calls = calls;
-            }
+            let interrupted = run_tool_calls(&ctx, &mut history, &mut recent, calls, at).await;
             if interrupted {
                 break 'steps StepEnd::Aborted("interrupted".into());
             }
@@ -724,33 +660,132 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
     history
 }
 
+/// Run one step's tool calls in order, putting each result into the history as it
+/// finishes, then put the calls back into the assistant message they were taken from
+/// (`at`), so the history is unchanged. Read-only sub-agents that start together run
+/// side by side. Returns whether the turn was interrupted; every call still gets a
+/// result, so the next request stays valid.
+async fn run_tool_calls(
+    ctx: &TurnCtx,
+    history: &mut Vec<Message>,
+    recent: &mut RecentCalls,
+    calls: Vec<ToolCall>,
+    at: usize,
+) -> bool {
+    let mut interrupted = false;
+    let mut i = 0;
+    // Which calls start a read-only sub-agent, decided once: the scan below would
+    // otherwise re-parse each call's arguments every time a batch is measured.
+    let side_by_side: Vec<bool> = calls.iter().map(|c| parallel(ctx, c)).collect();
+    while i < calls.len() {
+        if ctx.cancel.is_cancelled() {
+            // Every tool call needs a result, or the next request is invalid.
+            for c in &calls[i..] {
+                ctx.push(
+                    history,
+                    Message::Tool {
+                        call_id: c.id.clone(),
+                        content: "Not run: interrupted by the user.".into(),
+                        images: Vec::new(),
+                    },
+                );
+            }
+            interrupted = true;
+            break;
+        }
+        // Read-only sub-agents started together run side by side.
+        let together = side_by_side[i..].iter().take_while(|p| **p).count();
+        if together > 1 {
+            let batch = &calls[i..i + together];
+            let outs = futures::future::join_all(batch.iter().map(|c| run_call(ctx, c))).await;
+            let end = i + together == calls.len();
+            for (n, (call, out)) in batch.iter().zip(outs).enumerate() {
+                let ToolOutput {
+                    model: mut content,
+                    images,
+                    ..
+                } = out;
+                content = apply_tool_guard(ctx, call, content).await;
+                ctx.keep_plan(&mut content, end && n + 1 == together);
+                ctx.push(
+                    history,
+                    Message::Tool {
+                        call_id: call.id.clone(),
+                        content,
+                        images,
+                    },
+                );
+            }
+            i += together;
+            continue;
+        }
+        let call = &calls[i];
+        i += 1;
+        let (repeats, same_count) = recent.record(&call.name, &call.arguments);
+        let mut out = run_call(ctx, call).await;
+        if repeats >= REPEAT_LIMIT {
+            out.model.push_str(&format!(
+                "\n\nNote: this exact call has now been made {repeats} times in a row. \
+                 Try a different approach."
+            ));
+        } else if same_count >= 2 && edits(&ctx.setup, call) {
+            out.model.push_str(&format!(
+                "\n\nNote: this exact edit has already been attempted in this turn ({same_count} times total). \
+                 Repeating identical changes without modifying arguments will not fix the problem. \
+                 Read the file to check its actual state or try a different fix."
+            ));
+        }
+        out.model = apply_tool_guard(ctx, call, out.model).await;
+        ctx.keep_plan(&mut out.model, i == calls.len());
+        ctx.push(
+            history,
+            Message::Tool {
+                call_id: call.id.clone(),
+                content: out.model,
+                images: out.images,
+            },
+        );
+    }
+    if let Some(Message::Assistant { tool_calls, .. }) = history.get_mut(at) {
+        *tool_calls = calls;
+    }
+    interrupted
+}
+
 /// The next request's prompt tokens: the byte estimate corrected by reported usage.
 pub(crate) fn estimate(s: &Setup, history: &[Message]) -> u32 {
-    let raw = raw_estimate(s, history);
+    scale(s, raw_estimate(s, history))
+}
+
+/// The estimator's correction of a raw byte estimate, when one has been fitted.
+pub(crate) fn scale(s: &Setup, raw: u32) -> u32 {
     s.estimator.lock().map_or(raw, |e| e.scale(raw))
+}
+
+/// Rough token count of `bytes` of text or JSON: about 3.5 bytes per token.
+pub(crate) fn bytes_to_tokens(bytes: usize) -> u32 {
+    u32::try_from(bytes * 2 / 7).unwrap_or(u32::MAX)
+}
+
+/// Rough byte size of `tokens`: about 3.5 bytes per token.
+pub(crate) fn tokens_to_bytes(tokens: usize) -> usize {
+    tokens * 7 / 2
 }
 
 /// Uncorrected estimate of a request's prompt: system prompt, history and tool definitions.
 /// Image payloads are counted as their rough token cost, not their base64 bytes, which
 /// would count a screenshot as tens of thousands of tokens.
-fn raw_estimate(s: &Setup, history: &[Message]) -> u32 {
+pub(crate) fn raw_estimate(s: &Setup, history: &[Message]) -> u32 {
     let json = serde_json::to_string(history).unwrap_or_default();
-    let image_bytes: usize = history
-        .iter()
-        .flat_map(|m| match m {
-            Message::User { images, .. } | Message::Tool { images, .. } => images.as_slice(),
-            _ => &[],
-        })
-        .map(|i| i.data.len())
-        .sum();
-    let image_tokens: u32 = history
-        .iter()
-        .flat_map(|m| match m {
-            Message::User { images, .. } | Message::Tool { images, .. } => images.as_slice(),
-            _ => &[],
-        })
-        .map(quack_protocol::Image::tokens)
-        .sum();
+    let mut image_bytes = 0usize;
+    let mut image_tokens = 0u32;
+    for image in history.iter().flat_map(|m| match m {
+        Message::User { images, .. } | Message::Tool { images, .. } => images.as_slice(),
+        _ => &[],
+    }) {
+        image_bytes += image.data.len();
+        image_tokens = image_tokens.saturating_add(quack_protocol::Image::tokens(image));
+    }
     let history = tokens::estimate(&json[..json.len().saturating_sub(image_bytes)])
         .saturating_add(image_tokens);
     // The tool block is constant for the setup, so its byte size is computed once.
@@ -763,7 +798,7 @@ fn raw_estimate(s: &Setup, history: &[Message]) -> u32 {
     tokens::estimate(&s.system)
         .saturating_add(tokens::estimate(&s.session_context))
         .saturating_add(history)
-        .saturating_add(u32::try_from(tools * 2 / 7).unwrap_or(u32::MAX))
+        .saturating_add(bytes_to_tokens(tools))
 }
 
 /// The model entry's sampling settings over the profile's defaults.
@@ -883,9 +918,9 @@ pub(crate) fn with_session_context(s: &Setup, messages: &mut [Message]) {
     if s.session_context.is_empty() {
         return;
     }
-    if let Some(Message::User { content, .. }) = messages
+    if let Some(Message::User { content, .. } | Message::Compaction { content, .. }) = messages
         .iter_mut()
-        .find(|m| matches!(m, Message::User { .. }))
+        .find(|m| matches!(m, Message::User { .. } | Message::Compaction { .. }))
     {
         *content = format!("{}\n\n{content}", s.session_context);
     }
@@ -914,12 +949,7 @@ fn working_files_reminder(ctx: &TurnCtx) -> Option<String> {
     ))
 }
 
-/// One model call. Streams deltas to clients and returns the assembled message.
-async fn stream_step(
-    ctx: &TurnCtx,
-    history: &[Message],
-) -> Result<(Message, Option<Usage>), StepEnd> {
-    let s = &ctx.setup;
+pub(crate) fn history_messages(s: &Setup, history: &[Message]) -> Vec<Message> {
     let mut messages = Vec::with_capacity(history.len() + 1);
     if !s.system.is_empty() {
         messages.push(Message::System {
@@ -928,6 +958,23 @@ async fn stream_step(
     }
     messages.extend_from_slice(history);
     with_session_context(s, &mut messages);
+    messages
+}
+
+pub(crate) fn cache_key(ctx: &TurnCtx) -> String {
+    match &ctx.agent {
+        Some(agent) => format!("{}/{agent}", ctx.session),
+        None => ctx.session.clone(),
+    }
+}
+
+/// One model call. Streams deltas to clients and returns the assembled message.
+async fn stream_step(
+    ctx: &TurnCtx,
+    history: &[Message],
+) -> Result<(Message, Option<Usage>), StepEnd> {
+    let s = &ctx.setup;
+    let mut messages = history_messages(s, history);
     // The plan and modified-files reminders ride on the last message of this request only,
     // so the history (and the cached prefix before it) stays the same. An append-only provider
     // has it in the history already (`TurnCtx::keep_plan`).
@@ -949,10 +996,7 @@ async fn stream_step(
     }
     let mut req = request(s, messages, true);
     // Sub-agents have their own prefix, so their own key.
-    req.cache_key = Some(match &ctx.agent {
-        Some(agent) => format!("{}/{agent}", ctx.session),
-        None => ctx.session.clone(),
-    });
+    req.cache_key = Some(cache_key(ctx));
     let fingerprint = quack_providers::fingerprint(&req);
     ctx.start_request();
     let mut rx = s
@@ -1111,7 +1155,7 @@ fn emit_speed(
                 let calls: usize = tool_calls.iter().map(|c| c.arguments.len()).sum();
                 tokens::estimate(content)
                     + reasoning.as_deref().map_or(0, tokens::estimate)
-                    + u32::try_from(calls * 2 / 7).unwrap_or(0)
+                    + bytes_to_tokens(calls)
             }
             _ => 0,
         });
@@ -1216,26 +1260,16 @@ async fn continue_at_limit(ctx: &TurnCtx) -> Continue {
     if ctx.agent.is_some() {
         return Continue::Stop;
     }
-    let _one_at_a_time = ctx.prompt_lock.lock().await;
-    let (otx, orx) = oneshot::channel();
-    if let Ok(mut pending) = ctx.continues.lock() {
-        pending.insert(ctx.turn, otx);
-    }
-    ctx.emit(Event::StepLimitReached {
-        turn: ctx.turn,
-        limit: u32::try_from(ctx.max_steps).unwrap_or(u32::MAX),
-    });
-    let asked = std::time::Instant::now();
-    let answer = tokio::select! {
-        () = ctx.cancel.cancelled() => None,
-        a = orx => a.ok(),
-    };
-    if let Ok(mut st) = ctx.stats.lock() {
-        st.waited(asked.elapsed());
-    }
-    if let Ok(mut pending) = ctx.continues.lock() {
-        pending.remove(&ctx.turn);
-    }
+    let answer = ctx
+        .wait_for_answer(
+            &ctx.continues,
+            ctx.turn,
+            Event::StepLimitReached {
+                turn: ctx.turn,
+                limit: u32::try_from(ctx.max_steps).unwrap_or(u32::MAX),
+            },
+        )
+        .await;
     session::record(
         ctx.log.as_ref(),
         "step_limit",
@@ -1255,26 +1289,16 @@ async fn continue_at_limit(ctx: &TurnCtx) -> Continue {
 /// Show the user an `ask_user` call's questions and wait for the answers; `None` when
 /// the turn is interrupted.
 async fn ask(ctx: &TurnCtx, call_id: &CallId, questions: Vec<Question>) -> Option<Answers> {
-    let _one_at_a_time = ctx.prompt_lock.lock().await;
-    let (otx, orx) = oneshot::channel();
-    if let Ok(mut pending) = ctx.questions.lock() {
-        pending.insert(call_id.0.clone(), otx);
-    }
-    ctx.emit(Event::Questions {
-        call_id: call_id.clone(),
-        questions: questions.clone(),
-    });
-    let asked = std::time::Instant::now();
-    let answer = tokio::select! {
-        () = ctx.cancel.cancelled() => None,
-        a = orx => a.ok(),
-    };
-    if let Ok(mut st) = ctx.stats.lock() {
-        st.waited(asked.elapsed());
-    }
-    if let Ok(mut pending) = ctx.questions.lock() {
-        pending.remove(&call_id.0);
-    }
+    let answer = ctx
+        .wait_for_answer(
+            &ctx.questions,
+            call_id.0.clone(),
+            Event::Questions {
+                call_id: call_id.clone(),
+                questions: questions.clone(),
+            },
+        )
+        .await;
     session::record(
         ctx.log.as_ref(),
         "questions",
@@ -1288,11 +1312,44 @@ async fn ask(ctx: &TurnCtx, call_id: &CallId, questions: Vec<Question>) -> Optio
     answer
 }
 
+/// The shared half of asking the user something: one question at a time through
+/// `prompt_lock`, the reply channel parked under `key` before the request is shown,
+/// the wait counted in the stats, and the parked channel removed again either way.
+/// `None` when the asking side was interrupted.
+pub(crate) async fn wait_for_answer<T, K: Clone + Eq + Hash>(
+    prompt_lock: &tokio::sync::Mutex<()>,
+    cancel: &CancellationToken,
+    stats: &Mutex<Stats>,
+    pending: &Mutex<HashMap<K, oneshot::Sender<T>>>,
+    key: K,
+    request: Event,
+    emit: impl Fn(Event),
+) -> Option<T> {
+    let _one_at_a_time = prompt_lock.lock().await;
+    let (otx, orx) = oneshot::channel();
+    if let Ok(mut pending) = pending.lock() {
+        pending.insert(key.clone(), otx);
+    }
+    emit(request);
+    let asked = std::time::Instant::now();
+    let answer = tokio::select! {
+        () = cancel.cancelled() => None,
+        a = orx => a.ok(),
+    };
+    if let Ok(mut st) = stats.lock() {
+        st.waited(asked.elapsed());
+    }
+    if let Ok(mut pending) = pending.lock() {
+        pending.remove(&key);
+    }
+    answer
+}
+
 /// The internal tool and arguments behind a call, through the profile's names.
 pub(crate) fn internal_call(s: &Setup, call: &ToolCall) -> Option<(String, Value)> {
-    parse_args(&call.arguments)
-        .ok()
-        .and_then(|a| s.surface.map_call(&call.name, a))
+    let args = parse_args(&call.arguments).ok()?;
+    let (internal, mapped) = s.surface.map_call(&call.name, &args)?;
+    Some((internal, mapped.unwrap_or(args)))
 }
 
 /// Whether a call changes files, whatever the profile calls the tool.
@@ -1320,29 +1377,9 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
     let s = &ctx.setup;
     let call_id = CallId(ctx.key(&call.id));
     let plan_version = s.tool_ctx.plan.version();
-    let args = match parse_args(&call.arguments) {
-        Ok(a) => a,
+    let (tool, mut args) = match map_and_find_tool(s, call) {
+        Ok(found) => found,
         Err(e) => return reject(ctx, call, e),
-    };
-    let (tool, mut args) = match s.surface.map_call(&call.name, args.clone()) {
-        Some((internal, args)) => match s.registry.get(&internal) {
-            Some(tool) => (tool, args),
-            None => return reject(ctx, call, format!("tool `{internal}` is not available")),
-        },
-        None => match s.mcp.find(&call.name, s.budget).filter(|_| s.mcp_tools) {
-            Some(tool) => (tool, args),
-            None => {
-                return reject(
-                    ctx,
-                    call,
-                    format!(
-                        "unknown tool `{}`; available tools: {}",
-                        call.name,
-                        tool_names(s).join(", ")
-                    ),
-                );
-            }
-        },
     };
 
     let mut tctx = s.tool_ctx.clone();
@@ -1363,11 +1400,32 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
         Ok(a) => a,
         Err(e) => return done(ToolOutput::error(e)),
     };
-    let mut subject = match tool.subject(&args, &tctx) {
+    let subject = match tool.subject(&args, &tctx) {
         Ok(sub) => sub,
         Err(e) => return done(ToolOutput::error(e)),
     };
-    let root = &s.tool_ctx.root;
+    let (args, subject) = match permit(ctx, &tool, call, &call_id, &tctx, args, subject).await {
+        Ok(passed) => passed,
+        Err(e) => return done(ToolOutput::error(e)),
+    };
+    done(execute(ctx, &tool, &call_id, tctx, args, subject, plan_version).await)
+}
+
+/// The permission side of a call: the pre-tool hook (which can deny the call or
+/// rewrite its arguments), the permission decision, the approval ask when the rules
+/// say `Ask`, and the recheck for plan mode entered while the ask was on screen.
+/// `Ok` carries the arguments and subject to run with; `Err` is the message the call
+/// ends with.
+async fn permit(
+    ctx: &TurnCtx,
+    tool: &Arc<dyn Tool>,
+    call: &ToolCall,
+    call_id: &CallId,
+    tctx: &ToolCtx,
+    mut args: Value,
+    mut subject: Subject,
+) -> Result<(Value, Subject), String> {
+    let root = &ctx.setup.tool_ctx.root;
     let mut hooked = None;
     if ctx.hooks.any(HookEvent::PreTool) {
         let target = hooks::call_target(&subject, &args, root);
@@ -1387,19 +1445,11 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
             } else {
                 reason
             };
-            return done(ToolOutput::error(format!(
-                "blocked by hook `{id}`: {reason}"
-            )));
+            return Err(format!("blocked by hook `{id}`: {reason}"));
         }
         if let Some(updated) = h.updated_args.clone() {
-            args = match prepare(tool.as_ref(), updated, &tctx).await {
-                Ok(a) => a,
-                Err(e) => return done(ToolOutput::error(e)),
-            };
-            subject = match tool.subject(&args, &tctx) {
-                Ok(sub) => sub,
-                Err(e) => return done(ToolOutput::error(e)),
-            };
+            args = prepare(tool.as_ref(), updated, tctx).await?;
+            subject = tool.subject(&args, tctx)?;
         }
         hooked = h.verdict.map(|(v, _)| v);
     }
@@ -1421,48 +1471,33 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
     };
     match decision {
         Decision::Allow => {}
-        Decision::Deny(reason) => {
-            return done(ToolOutput::error(format!("permission denied: {reason}")));
-        }
+        Decision::Deny(reason) => return Err(format!("permission denied: {reason}")),
         Decision::Ask => {
             // If the call would fail anyway (e.g. old_string not found), skip asking.
-            let request = match tool.preview(&args, &tctx) {
-                Ok(r) => r,
-                Err(e) => return done(ToolOutput::error(e)),
-            };
+            let request = tool.preview(&args, tctx)?;
             let always = ctx
                 .perms
                 .lock()
                 .map(|p| p.rules_for(&subject))
                 .unwrap_or_default();
-            let _one_at_a_time = ctx.prompt_lock.lock().await;
-            let (otx, orx) = oneshot::channel();
-            if let Ok(mut pending) = ctx.approvals.lock() {
-                pending.insert(call_id.0.clone(), otx);
-            }
-            ctx.emit(Event::ApprovalRequest {
-                call_id: call_id.clone(),
-                request,
-                always: always.clone(),
-            });
-            let asked = std::time::Instant::now();
-            let answer = tokio::select! {
-                () = ctx.cancel.cancelled() => None,
-                a = orx => a.ok(),
-            };
-            if let Ok(mut st) = ctx.stats.lock() {
-                st.waited(asked.elapsed());
-            }
-            if let Ok(mut pending) = ctx.approvals.lock() {
-                pending.remove(&call_id.0);
-            }
+            let answer = ctx
+                .wait_for_answer(
+                    &ctx.approvals,
+                    call_id.0.clone(),
+                    Event::ApprovalRequest {
+                        call_id: call_id.clone(),
+                        request,
+                        always: always.clone(),
+                    },
+                )
+                .await;
             session::record(
                 ctx.log.as_ref(),
                 "approval",
                 serde_json::json!({ "call_id": call.id, "decision": answer }),
             );
             match answer {
-                None => return done(ToolOutput::error("interrupted by the user")),
+                None => return Err("interrupted by the user".into()),
                 Some(ApprovalDecision::AllowOnce | ApprovalDecision::RedactAndSend) => {}
                 Some(ApprovalDecision::AllowSession) => {
                     if let Ok(mut p) = ctx.perms.lock() {
@@ -1476,14 +1511,14 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
                     save_always(ctx, &scope, &always);
                 }
                 Some(ApprovalDecision::Deny) => {
-                    return done(ToolOutput::error(
-                        "the user declined this action. Ask them how to proceed if unsure.",
-                    ));
+                    return Err(
+                        "the user declined this action. Ask them how to proceed if unsure.".into(),
+                    );
                 }
                 Some(ApprovalDecision::DenyWithFeedback { feedback }) => {
-                    return done(ToolOutput::error(format!(
+                    return Err(format!(
                         "the user declined this action and said: {feedback}"
-                    )));
+                    ));
                 }
             }
         }
@@ -1494,9 +1529,26 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
     if let Ok(p) = ctx.perms.lock()
         && let Decision::Deny(reason) = p.check(&subject)
     {
-        return done(ToolOutput::error(format!("permission denied: {reason}")));
+        return Err(format!("permission denied: {reason}"));
     }
+    Ok((args, subject))
+}
 
+/// The execution side of a call: undo points and diagnostics before the run, the run
+/// itself — with the questions it asks and the sub-agents it starts answered along
+/// the way — then the undo records, post-edit diagnostics, nested AGENTS.md context
+/// and the post-tool hook. Returns the raw output; the caller finishes it.
+async fn execute(
+    ctx: &TurnCtx,
+    tool: &Arc<dyn Tool>,
+    call_id: &CallId,
+    mut tctx: ToolCtx,
+    args: Value,
+    subject: Subject,
+    plan_version: u64,
+) -> ToolOutput {
+    let s = &ctx.setup;
+    let root = &s.tool_ctx.root;
     let (otx, mut orx) = mpsc::unbounded_channel::<String>();
     tctx.on_output = Some(otx);
     let tx = ctx.tx.clone();
@@ -1545,7 +1597,7 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
                 o = &mut run => break o,
                 Some((questions, reply)) = arx.recv() => {
                     // Dropping `reply` when interrupted lets the call see the cancellation.
-                    if let Some(a) = ask(ctx, &call_id, questions).await {
+                    if let Some(a) = ask(ctx, call_id, questions).await {
                         let _ = reply.send(a);
                     }
                 }
@@ -1639,15 +1691,31 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
             out.model.push_str(&text);
         }
     }
-    done(out)
+    out
+}
+
+/// Parse a call's arguments and find the tool behind its name: the surface's mapped
+/// internal tool, or an offered MCP tool. `Err` is the message the call is rejected with.
+fn map_and_find_tool(s: &Setup, call: &ToolCall) -> Result<(Arc<dyn Tool>, Value), String> {
+    let args = parse_args(&call.arguments)?;
+    match s.surface.map_call(&call.name, &args) {
+        Some((internal, mapped)) => match s.registry.get(&internal) {
+            Some(tool) => Ok((tool, mapped.unwrap_or(args))),
+            None => Err(format!("tool `{internal}` is not available")),
+        },
+        None => match s.mcp.find(&call.name, s.budget).filter(|_| s.mcp_tools) {
+            Some(tool) => Ok((tool, args)),
+            None => Err(format!(
+                "unknown tool `{}`; available tools: {}",
+                call.name,
+                tool_names(s).join(", ")
+            )),
+        },
+    }
 }
 
 /// A tool's work before the permission check, stopped by an interrupt.
-async fn prepare(
-    tool: &dyn quack_tools::Tool,
-    args: Value,
-    tctx: &quack_tools::ToolCtx,
-) -> Result<Value, String> {
+async fn prepare(tool: &dyn Tool, args: Value, tctx: &ToolCtx) -> Result<Value, String> {
     tokio::select! {
         r = tool.prepare(args, tctx) => r,
         () = tctx.cancel.cancelled() => Err("interrupted by the user".into()),

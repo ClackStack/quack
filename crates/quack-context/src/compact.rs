@@ -54,6 +54,12 @@ pub fn cut_point(
     keep_tokens: u32,
     estimate: impl Fn(&[Message]) -> u32,
 ) -> Option<usize> {
+    // A native checkpoint alone has already been compacted.
+    let min_cut = if matches!(history.first(), Some(Message::Compaction { .. })) {
+        2
+    } else {
+        1
+    };
     let turns: Vec<usize> = history
         .iter()
         .enumerate()
@@ -62,7 +68,7 @@ pub fn cut_point(
         .collect();
     for k in (1..=keep_turns.max(1).min(turns.len())).rev() {
         let cut = turns[turns.len() - k];
-        if cut > 0 && estimate(&history[cut..]) <= keep_tokens {
+        if cut >= min_cut && estimate(&history[cut..]) <= keep_tokens {
             return Some(cut);
         }
     }
@@ -76,7 +82,7 @@ pub fn cut_point(
     // The current turn alone is too big: keep its most recent steps that fit, at least one.
     let after = turns.last().map_or(0, |t| t + 1);
     let steps: Vec<usize> = crate::boundaries(history)
-        .filter(|&i| i >= after && i > 0)
+        .filter(|&i| i >= after && i >= min_cut)
         .collect();
     steps
         .iter()
@@ -86,7 +92,8 @@ pub fn cut_point(
 }
 
 pub fn is_summary(m: &Message) -> bool {
-    matches!(m, Message::User { content, .. } if content.starts_with(SUMMARY_MARKER))
+    matches!(m, Message::Compaction { .. })
+        || matches!(m, Message::User { content, .. } if content.starts_with(SUMMARY_MARKER))
 }
 
 /// The part being summarized as plain text, which any model can read regardless of its
@@ -113,10 +120,13 @@ pub fn transcript(history: &[Message], max_chars: usize) -> String {
 fn render(m: &Message) -> String {
     match m {
         Message::System { content } => format!("### System\n{content}"),
-        Message::User { content, .. } if is_summary(m) => {
-            format!("### Summary of the session before this point\n{content}")
+        Message::User { content, .. } | Message::Compaction { content, .. } => {
+            if is_summary(m) {
+                format!("### Summary of the session before this point\n{content}")
+            } else {
+                format!("### User\n{content}")
+            }
         }
-        Message::User { content, .. } => format!("### User\n{content}"),
         Message::Assistant {
             content,
             tool_calls,
@@ -166,6 +176,12 @@ pub fn fallback_summary(history: &[Message]) -> String {
     let mut lines: Vec<String> = Vec::new();
     for m in history {
         match m {
+            Message::Compaction { content, .. } => {
+                lines.push(format!(
+                    "- earlier summary:\n{}",
+                    clip(summary_body(content), 6_000)
+                ));
+            }
             Message::User { content, .. } if is_summary(m) => {
                 // A model wrote it, so it says more than this list can; keep it whole.
                 lines.push(format!("- earlier summary:\n{}", summary_body(content)));
@@ -243,9 +259,11 @@ pub fn carried_request(history: &[Message], cut: usize) -> Option<&str> {
         return None;
     }
     history[..cut].iter().rev().find_map(|m| match m {
-        Message::User { content, .. } if is_summary(m) => content
-            .split_once(&format!("\n\n{REQUEST_HEADING}\n"))
-            .map(|(_, request)| request),
+        Message::User { content, .. } | Message::Compaction { content, .. } if is_summary(m) => {
+            content
+                .split_once(&format!("\n\n{REQUEST_HEADING}\n"))
+                .map(|(_, request)| request)
+        }
         Message::User { content, .. } => Some(content.as_str()),
         _ => None,
     })
@@ -293,9 +311,13 @@ pub fn unusable_summary(text: &str) -> Option<&'static str> {
 /// Replace `history[..cut]` with `summary`.
 pub fn apply(history: &mut Vec<Message>, cut: usize, summary: Message) {
     let cut = cut.min(history.len());
+    let native = matches!(summary, Message::Compaction { .. });
     history.splice(..cut, [summary]);
     // The kept turns' signed reasoning was made after the summarized ones.
-    quack_providers::unseal(history);
+    // A native checkpoint lets Responses retain reasoning from those turns.
+    if !native {
+        quack_providers::unseal(history);
+    }
 }
 
 #[cfg(test)]
@@ -320,6 +342,7 @@ mod tests {
         h.iter()
             .map(|m| match m {
                 Message::User { content, .. }
+                | Message::Compaction { content, .. }
                 | Message::Assistant { content, .. }
                 | Message::Tool { content, .. }
                 | Message::System { content } => content.len() as u32,

@@ -61,20 +61,13 @@ pub async fn get_observed(
     for hop in 0..=MAX_REDIRECTS {
         if let Err(why) = settings.check_fetch(url.as_str()) {
             if let Some(ledger) = ledger {
-                ledger.record(EgressDraft {
-                    kind: if hop == 0 {
-                        EgressKind::BlockedEgress
-                    } else {
-                        EgressKind::BlockedRedirect
-                    },
-                    url: url.to_string(),
-                    protocol: "fetch".into(),
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    status: None,
-                    redactions: 0,
-                    blocked_reason: Some(why.clone()),
-                });
+                let kind = if hop == 0 {
+                    EgressKind::BlockedEgress
+                } else {
+                    EgressKind::BlockedRedirect
+                };
+                ledger
+                    .record(EgressDraft::new(kind, url.to_string(), "fetch").blocked(why.clone()));
             }
             return Err(why);
         }
@@ -86,16 +79,10 @@ pub async fn get_observed(
         let status = resp.status();
         if status == StatusCode::NOT_MODIFIED {
             if let Some(ledger) = ledger {
-                ledger.record(EgressDraft {
-                    kind: EgressKind::Fetch,
-                    url: url.to_string(),
-                    protocol: "fetch".into(),
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    status: Some(status.as_u16()),
-                    redactions: 0,
-                    blocked_reason: None,
-                });
+                ledger.record(
+                    EgressDraft::new(EgressKind::Fetch, url.to_string(), "fetch")
+                        .status(Some(status.as_u16())),
+                );
             }
             return Ok(Fetched::NotModified);
         }
@@ -107,16 +94,10 @@ pub async fn get_observed(
                 .and_then(|l| url.join(l).ok())
                 .ok_or_else(|| format!("{url} redirected without saying where"))?;
             if let Some(ledger) = ledger {
-                ledger.record(EgressDraft {
-                    kind: EgressKind::Fetch,
-                    url: url.to_string(),
-                    protocol: "fetch".into(),
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    status: Some(status.as_u16()),
-                    redactions: 0,
-                    blocked_reason: None,
-                });
+                ledger.record(
+                    EgressDraft::new(EgressKind::Fetch, url.to_string(), "fetch")
+                        .status(Some(status.as_u16())),
+                );
             }
             if !req.follow {
                 return Ok(Fetched::Moved(target.into()));
@@ -126,16 +107,11 @@ pub async fn get_observed(
         }
         if !status.is_success() {
             if let Some(ledger) = ledger {
-                ledger.record(EgressDraft {
-                    kind: EgressKind::Fetch,
-                    url: url.to_string(),
-                    protocol: "fetch".into(),
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    status: Some(status.as_u16()),
-                    redactions: 0,
-                    blocked_reason: Some(format!("HTTP {status}")),
-                });
+                ledger.record(
+                    EgressDraft::new(EgressKind::Fetch, url.to_string(), "fetch")
+                        .status(Some(status.as_u16()))
+                        .blocked(format!("HTTP {status}")),
+                );
             }
             return Err(format!("{url} answered {status}"));
         }
@@ -152,16 +128,11 @@ pub async fn get_observed(
             bytes.extend_from_slice(&chunk);
         }
         if let Some(ledger) = ledger {
-            ledger.record(EgressDraft {
-                kind: EgressKind::Fetch,
-                url: url.to_string(),
-                protocol: "fetch".into(),
-                bytes_sent: 0,
-                bytes_received: bytes.len() as u64,
-                status: Some(status.as_u16()),
-                redactions: 0,
-                blocked_reason: None,
-            });
+            ledger.record(
+                EgressDraft::new(EgressKind::Fetch, url.to_string(), "fetch")
+                    .received(bytes.len() as u64)
+                    .status(Some(status.as_u16())),
+            );
         }
         return Ok(Fetched::Body { bytes, etag });
     }

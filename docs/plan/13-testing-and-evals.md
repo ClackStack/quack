@@ -72,6 +72,18 @@ The compatibility table is a headline feature, not an internal report: it answer
 - **Comparing setups**: `scripts/eval-compare.py A.json[,...] B.json[,...]` pairs two setups task by task (each task counts once however many runs it had) and gives each difference (pass rate, steps, cost, prompt tokens) with a 95% paired-bootstrap interval, marked "clear" only when the interval excludes zero. `scripts/eval-table.py` gained the suite and the failure labels.
 - Not yet: `--submit-file`, `docs/compat.md` (needs real runs), LSP tasks, external suites.
 
+### Offline eval readiness (2026-11-18)
+
+Task copies are explicit workspace roots, including when the cache lives in a checkout.
+The legacy Harbor adapter's loopback fixture also checks the retained session's root
+against the verifier's. The local runner checkpoints JSON after each trial, keeping
+earlier results intact, and records effective setup, usage coverage and execution error
+kinds. `--revision` records the evaluated build; `--stop-on-incomplete` stops after an
+incomplete trial, not at a dollar limit. Paired dollar comparisons exclude tasks with
+incomplete pricing and report coverage. Mock tests exercise generic, explicit ZCode
+and automatic ZCode selection and pin their outgoing tool schemas. See the
+[pilot checklist](../../evals/README.md#before-a-paid-profile-pilot).
+
 ## CI
 
 - PR: fmt, clippy (`-D warnings`), unit + snapshot + integration on Linux x64, macOS ARM64, Windows x64 and **Windows ARM64** (GitHub-hosted `windows-11-arm` runner), plus `cargo-deny`, invariant tests and the startup budget.

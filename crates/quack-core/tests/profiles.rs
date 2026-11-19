@@ -199,9 +199,23 @@ fn codex_matches_only_the_current_openai_model_ids() {
     assert_eq!(codex.file.matching.priority, 50);
     assert_eq!(
         codex.file.matching.model,
-        ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna", "gpt-6.1-terra"]
+        [
+            "gpt-6.2-sol",
+            "gpt-6.2-astra",
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-6.1-terra"
+        ]
     );
-    for model in ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna", "gpt-6.1-terra"] {
+    for model in [
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6-luna",
+        "gpt-6.1-terra",
+    ] {
         assert_eq!(
             quack_profiles::select(&profiles, "auto", &[model])
                 .expect("selection")
@@ -228,6 +242,7 @@ fn codex_matches_only_the_current_openai_model_ids() {
         "gpt-5.6-terra",
         "gpt-6.1-terra-extra",
         "gpt-6.1-sol-extra",
+        "gpt-6.2-sol-extra",
     ] {
         assert_eq!(
             quack_profiles::select(&profiles, "auto", &[model])
@@ -347,12 +362,13 @@ fn current_openai_provider_models_have_conservative_context_and_vision() {
         let file: quack_config::provider::ProviderFile =
             toml::from_str(&std::fs::read_to_string(path).expect("provider file"))
                 .expect("provider TOML");
-        assert_eq!(file.models.len(), 4, "{provider}");
+        assert_eq!(file.models.len(), 6, "{provider}");
         for model in file.models {
-            let window = if model.id == "gpt-6.1-terra" {
-                500000
-            } else {
-                272000
+            // Sol (both generations) and Terra get the catalog's 500k budget; the
+            // rest stay at the conservative 272k default.
+            let window = match model.id.as_str() {
+                "gpt-6.2-sol" | "gpt-6.1-sol" | "gpt-6.1-terra" => 500000,
+                _ => 272000,
             };
             assert_eq!(
                 model.context_window,
@@ -399,7 +415,14 @@ fn removing_codex_leaves_the_generic_fallback() {
     std::fs::remove_dir_all(codex).expect("remove Codex");
     let (profiles, warnings) = quack_profiles::load_profiles(&loaded);
     assert!(warnings.is_empty(), "{warnings:?}");
-    for model in ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna", "gpt-6.1-terra"] {
+    for model in [
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6-luna",
+        "gpt-6.1-terra",
+    ] {
         assert_eq!(
             quack_profiles::select(&profiles, "auto", &[model])
                 .expect("fallback")

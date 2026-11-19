@@ -203,6 +203,12 @@ pub(crate) struct EvalArgs {
     /// `evals/results/<date>/<model>-<profile>.json` next to the suite.
     #[arg(long)]
     pub out: Option<PathBuf>,
+    /// Record the source revision of the binary and defaults used for the run.
+    #[arg(long)]
+    pub revision: Option<String>,
+    /// Checkpoint and stop on an error, skip, step limit, unknown setup or unknown trial cost.
+    #[arg(long)]
+    pub stop_on_incomplete: bool,
     /// Keep each run's workspace (under the cache directory) to look at afterwards.
     #[arg(long)]
     pub keep: bool,

@@ -308,7 +308,7 @@
         },
         "http1_only": {
           "default": false,
-          "description": "Speak HTTP/1.1 only, one connection per request, instead of sharing one HTTP/2\nconnection. Try it when a VPN or proxy leaves connections stale.",
+          "description": "Force HTTP/1.1. Try it when a VPN or proxy leaves HTTP/2 connections stale.",
           "type": "boolean"
         },
         "offline": {
@@ -318,7 +318,7 @@
         },
         "proxy": {
           "default": "",
-          "description": "Empty: `HTTPS_PROXY` / system. Hosts in `NO_PROXY` always go direct.",
+          "description": "Empty uses scheme-specific environment proxies, `ALL_PROXY`, or system settings.\nHosts in `NO_PROXY` go direct.",
           "type": "string"
         },
         "secret_allowlist": {

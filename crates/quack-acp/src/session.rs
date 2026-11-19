@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use quack_core::EngineHandle;
 use quack_protocol::{
-    ApprovalDecision, ApprovalPolicy, ApprovalRequest, CallId, Event, InputItem, LoadState,
-    ModelId, Op, PermissionMode, ProviderId, ProviderModels, Subsystem, TurnOverrides, WriteScope,
+    ApprovalDecision, ApprovalPolicy, ApprovalRequest, CallId, Event, InputItem, ModelId, Op,
+    PermissionMode, ProviderId, ProviderModels, Subsystem, TurnOverrides, WriteScope,
 };
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
@@ -107,8 +107,7 @@ pub(crate) async fn wait_for<T>(
 }
 
 fn mcp_settled(e: &Event) -> bool {
-    matches!(e, Event::StartupProgress { subsystem: Subsystem::Mcp, state }
-        if !matches!(state, LoadState::Pending | LoadState::Running { .. }))
+    matches!(e, Event::StartupProgress { subsystem: Subsystem::Mcp, state } if state.is_settled())
 }
 
 /// The modes, with `current` selected (`SessionModeState`).

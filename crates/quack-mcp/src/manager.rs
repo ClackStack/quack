@@ -376,6 +376,12 @@ impl McpManager {
         self.changed.subscribe()
     }
 
+    /// The current revision; changes whenever a server's state or tools do
+    /// ([`Self::subscribe`]). Cheap to read, so callers can use it as a cache key.
+    pub fn revision(&self) -> u64 {
+        *self.changed.borrow()
+    }
+
     fn bump(&self) {
         self.changed.send_modify(|n| *n += 1);
     }
@@ -589,16 +595,10 @@ impl McpManager {
         let conn = match file.transport()? {
             "http" => {
                 if let Err(why) = self.check_egress(&file.url) {
-                    self.record_ledger(EgressDraft {
-                        kind: EgressKind::BlockedEgress,
-                        url: file.url.clone(),
-                        protocol: "mcp-http".into(),
-                        bytes_sent: 0,
-                        bytes_received: 0,
-                        status: None,
-                        redactions: 0,
-                        blocked_reason: Some(why.clone()),
-                    });
+                    self.record_ledger(
+                        EgressDraft::new(EgressKind::BlockedEgress, &file.url, "mcp-http")
+                            .blocked(why.clone()),
+                    );
                     return Err(why);
                 }
                 let (client, headers, secrets) =
@@ -620,30 +620,18 @@ impl McpManager {
                         .await
                     {
                         Ok(s) => {
-                            self.record_ledger(EgressDraft {
-                                kind: EgressKind::McpHttp,
-                                url: file.url.clone(),
-                                protocol: "mcp-http".into(),
-                                bytes_sent: 0,
-                                bytes_received: 0,
-                                status: Some(200),
-                                redactions: 0,
-                                blocked_reason: None,
-                            });
+                            self.record_ledger(
+                                EgressDraft::new(EgressKind::McpHttp, &file.url, "mcp-http")
+                                    .status(Some(200)),
+                            );
                             s
                         }
                         Err(e) => {
                             let msg = e.to_string();
-                            self.record_ledger(EgressDraft {
-                                kind: EgressKind::McpHttp,
-                                url: file.url.clone(),
-                                protocol: "mcp-http".into(),
-                                bytes_sent: 0,
-                                bytes_received: 0,
-                                status: None,
-                                redactions: 0,
-                                blocked_reason: Some(msg.clone()),
-                            });
+                            self.record_ledger(
+                                EgressDraft::new(EgressKind::McpHttp, &file.url, "mcp-http")
+                                    .blocked(msg.clone()),
+                            );
                             return Err(msg);
                         }
                     };
@@ -797,16 +785,14 @@ impl McpManager {
                 let value = serde_json::to_value(&r).unwrap_or_default();
                 let (is_error, text) = crate::output::render(&value, max_chars);
                 if is_http {
-                    self.record_ledger(EgressDraft {
-                        kind: EgressKind::McpHttp,
-                        url: s.spec.file.url.clone(),
-                        protocol: "mcp-http".into(),
-                        bytes_sent,
-                        bytes_received: text.len() as u64,
-                        status: Some(200),
-                        redactions: 0,
-                        blocked_reason: is_error.then(|| "MCP tool returned error".into()),
-                    });
+                    let mut draft = EgressDraft::new(EgressKind::McpHttp, &s.spec.file.url, "mcp-http")
+                        .sent(bytes_sent)
+                        .received(text.len() as u64)
+                        .status(Some(200));
+                    if is_error {
+                        draft = draft.blocked("MCP tool returned error");
+                    }
+                    self.record_ledger(draft);
                 }
                 CallOutput {
                     ok: !is_error,
@@ -816,31 +802,21 @@ impl McpManager {
             Ok(Err(e)) => {
                 let msg = format!("MCP error: {e}");
                 if is_http {
-                    self.record_ledger(EgressDraft {
-                        kind: EgressKind::McpHttp,
-                        url: s.spec.file.url.clone(),
-                        protocol: "mcp-http".into(),
-                        bytes_sent,
-                        bytes_received: 0,
-                        status: None,
-                        redactions: 0,
-                        blocked_reason: Some(msg.clone()),
-                    });
+                    self.record_ledger(
+                        EgressDraft::new(EgressKind::McpHttp, &s.spec.file.url, "mcp-http")
+                            .sent(bytes_sent)
+                            .blocked(msg.clone()),
+                    );
                 }
                 fail(msg)
             }
             Err(e) => {
                 if is_http {
-                    self.record_ledger(EgressDraft {
-                        kind: EgressKind::McpHttp,
-                        url: s.spec.file.url.clone(),
-                        protocol: "mcp-http".into(),
-                        bytes_sent,
-                        bytes_received: 0,
-                        status: None,
-                        redactions: 0,
-                        blocked_reason: Some(e.clone()),
-                    });
+                    self.record_ledger(
+                        EgressDraft::new(EgressKind::McpHttp, &s.spec.file.url, "mcp-http")
+                            .sent(bytes_sent)
+                            .blocked(e.clone()),
+                    );
                 }
                 fail(e)
             }

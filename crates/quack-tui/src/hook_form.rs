@@ -160,17 +160,25 @@ impl HookForm {
         if matches!(self.page, Page::Input | Page::Sample) {
             return self.input_key(key);
         }
-        if self.page == Page::Discard {
-            match key.code {
+        if matches!(self.page, Page::Discard | Page::Remove | Page::Help) {
+            return self.confirmation_key(key.code);
+        }
+        if ctrl {
+            return self.control_key(key.code);
+        }
+        self.navigation_key(key.code)
+    }
+
+    /// Keys for the discard/remove confirmations and the scrolling help page.
+    fn confirmation_key(&mut self, code: KeyCode) -> Action {
+        match self.page {
+            Page::Discard => match code {
                 KeyCode::Char('d') => return Action::Close,
                 KeyCode::Char('r') => return Action::Reload,
                 KeyCode::Esc | KeyCode::Enter => self.page = Page::Connections,
                 _ => {}
-            }
-            return Action::None;
-        }
-        if self.page == Page::Remove {
-            match key.code {
+            },
+            Page::Remove => match code {
                 KeyCode::Char('d') => {
                     self.drafts.remove(self.selected);
                     self.selected = self.selected.min(self.drafts.len().saturating_sub(1));
@@ -179,11 +187,8 @@ impl HookForm {
                 }
                 KeyCode::Esc | KeyCode::Enter => self.page = Page::Connections,
                 _ => {}
-            }
-            return Action::None;
-        }
-        if self.page == Page::Help {
-            match key.code {
+            },
+            Page::Help => match code {
                 KeyCode::Esc => self.page = Page::Fields,
                 KeyCode::Down | KeyCode::PageDown => {
                     self.help_scroll = self.help_scroll.saturating_add(1)
@@ -193,60 +198,67 @@ impl HookForm {
                 }
                 KeyCode::Home => self.help_scroll = 0,
                 _ => {}
-            }
-            return Action::None;
+            },
+            _ => {}
         }
-        if ctrl {
-            match key.code {
-                KeyCode::Char('s') if self.info.writable => {
-                    return Action::Save {
-                        enable: None,
-                        replace_payload: self.replace_payload,
-                    };
-                }
-                KeyCode::Char('e') if self.info.writable => {
-                    return Action::Save {
-                        enable: Some(true),
-                        replace_payload: self.replace_payload,
-                    };
-                }
-                KeyCode::Char('t') if self.selected < self.drafts.len() => {
-                    self.page = Page::Sample;
-                    self.buffer.clear();
-                }
-                KeyCode::Char('a') if self.info.writable => {
-                    self.page = Page::Presets;
-                    self.preset = 0;
-                }
-                KeyCode::Char('d') if self.info.writable && self.selected < self.drafts.len() => {
-                    self.drafts[self.selected].connection.enabled =
-                        !self.drafts[self.selected].connection.enabled;
+        Action::None
+    }
+
+    /// Global Ctrl shortcuts for saving, access checks and connection settings.
+    fn control_key(&mut self, code: KeyCode) -> Action {
+        match code {
+            KeyCode::Char('s') if self.info.writable => {
+                return Action::Save {
+                    enable: None,
+                    replace_payload: self.replace_payload,
+                };
+            }
+            KeyCode::Char('e') if self.info.writable => {
+                return Action::Save {
+                    enable: Some(true),
+                    replace_payload: self.replace_payload,
+                };
+            }
+            KeyCode::Char('t') if self.selected < self.drafts.len() => {
+                self.page = Page::Sample;
+                self.buffer.clear();
+            }
+            KeyCode::Char('a') if self.info.writable => {
+                self.page = Page::Presets;
+                self.preset = 0;
+            }
+            KeyCode::Char('d') if self.info.writable && self.selected < self.drafts.len() => {
+                self.drafts[self.selected].connection.enabled =
+                    !self.drafts[self.selected].connection.enabled;
+                self.changed();
+            }
+            KeyCode::Char('r')
+                if self.page == Page::Fields
+                    && self.current_field().is_some_and(|f| f.kind == "secret") =>
+            {
+                if let Some(field) = self.current_field().map(|f| f.id.clone()) {
+                    self.drafts[self.selected]
+                        .credentials
+                        .insert(field, HookCredentialChange::Remove);
                     self.changed();
                 }
-                KeyCode::Char('r')
-                    if self.page == Page::Fields
-                        && self.current_field().is_some_and(|f| f.kind == "secret") =>
-                {
-                    if let Some(field) = self.current_field().map(|f| f.id.clone()) {
-                        self.drafts[self.selected]
-                            .credentials
-                            .insert(field, HookCredentialChange::Remove);
-                        self.changed();
-                    }
-                }
-                KeyCode::Char('x')
-                    if self.page == Page::Fields
-                        && self.current_field().is_some_and(|f| f.kind == "secret") =>
-                {
-                    self.source_input = true;
-                    self.buffer = "env:".into();
-                    self.page = Page::Input;
-                }
-                _ => {}
             }
-            return Action::None;
+            KeyCode::Char('x')
+                if self.page == Page::Fields
+                    && self.current_field().is_some_and(|f| f.kind == "secret") =>
+            {
+                self.source_input = true;
+                self.buffer = "env:".into();
+                self.page = Page::Input;
+            }
+            _ => {}
         }
-        match key.code {
+        Action::None
+    }
+
+    /// Plain-key navigation, editing and page-local actions.
+    fn navigation_key(&mut self, code: KeyCode) -> Action {
+        match code {
             KeyCode::Esc if self.page == Page::Connections => {
                 if self.dirty {
                     self.page = Page::Discard;
@@ -294,7 +306,7 @@ impl HookForm {
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
                 if self.page == Page::Fields && self.info.writable =>
             {
-                self.cycle(key.code != KeyCode::Left)
+                self.cycle(code != KeyCode::Left)
             }
             KeyCode::Enter => match self.page {
                 Page::Connections if self.selected < self.drafts.len() => {
@@ -567,6 +579,212 @@ impl HookForm {
         }
     }
 
+    fn connection_name(draft: &HookConnectionDraft) -> String {
+        draft
+            .connection
+            .values
+            .get("label")
+            .cloned()
+            .unwrap_or_else(|| draft.connection.id.clone())
+    }
+
+    fn connections_lines(&self, height: u16, theme: &Theme) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        lines.push(Line::styled(
+            format!(
+                "{} · {} connection(s)",
+                if self.info.enabled {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                },
+                self.drafts.len()
+            ),
+            theme.accent,
+        ));
+        lines.push(Line::raw(
+            "Enter edits a connection. A adds another service.",
+        ));
+        if self.drafts.is_empty() {
+            lines.push(Line::raw(
+                "No connections yet. Press A to choose a service.",
+            ));
+        }
+        let room = usize::from(height.saturating_sub(4)).max(1);
+        let start = self.selected.saturating_sub(room - 1);
+        for (index, draft) in self.drafts.iter().enumerate().skip(start).take(room) {
+            lines.push(Line::styled(
+                format!(
+                    "{} {} [{}]",
+                    if index == self.selected { ">" } else { " " },
+                    Self::connection_name(draft),
+                    if draft.connection.enabled {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+                if index == self.selected {
+                    theme.selected
+                } else {
+                    theme.dim
+                },
+            ));
+        }
+        if self.replace_payload.is_some() {
+            lines.push(Line::styled(
+                "K keeps the existing payload; P replaces it on save.",
+                theme.dim,
+            ));
+        }
+        lines
+    }
+
+    fn presets_lines(&self, height: u16, theme: &Theme) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::styled("Choose a service", theme.accent)];
+        let room = usize::from(height.saturating_sub(4)).max(1);
+        let start = self.preset.saturating_sub(room - 1);
+        for (index, preset) in self
+            .info
+            .descriptor
+            .presets
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(room)
+        {
+            lines.push(Line::styled(
+                format!(
+                    "{} {}",
+                    if index == self.preset { ">" } else { " " },
+                    preset.label
+                ),
+                if index == self.preset {
+                    theme.selected
+                } else {
+                    theme.dim
+                },
+            ));
+        }
+        lines
+    }
+
+    /// The field editor's lines and its input cursor, when editing a value.
+    fn fields_lines(
+        &self,
+        body: Rect,
+        theme: &Theme,
+        ascii: bool,
+    ) -> (Vec<Line<'static>>, Option<(u16, u16)>) {
+        let mut lines = Vec::new();
+        let mut cursor = None;
+        if let Some(draft) = self.drafts.get(self.selected) {
+            lines.push(Line::styled(Self::connection_name(draft), theme.accent));
+            if let Some(field) = self.current_field() {
+                lines.push(Line::styled(
+                    format!(
+                        "Field {} of {} · {}",
+                        self.field + 1,
+                        self.fields().len(),
+                        if self.advanced {
+                            "all settings"
+                        } else {
+                            "basic settings"
+                        }
+                    ),
+                    theme.dim,
+                ));
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(field.label.clone(), theme.accent));
+                let mut value = if self.page == Page::Input {
+                    if field.kind == "secret" {
+                        if ascii { "*" } else { "•" }.repeat(self.buffer.chars().count())
+                    } else {
+                        self.buffer.clone()
+                    }
+                } else {
+                    self.shown(field)
+                };
+                if self.page == Page::Input {
+                    let room = usize::from(body.width.saturating_sub(3));
+                    value = value
+                        .chars()
+                        .rev()
+                        .take(room)
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect();
+                    cursor = Some((
+                        body.x + 2 + u16::try_from(value.width()).unwrap_or(0),
+                        body.y + 4,
+                    ));
+                }
+                lines.push(Line::raw(format!("> {value}")));
+                lines.push(Line::raw(""));
+                if self.source_input && self.page == Page::Input {
+                    lines.push(Line::raw(
+                        "env:VARIABLE, file:PATH, keyring:NAME, cmd:[\"program\",\"arg\"]",
+                    ));
+                } else {
+                    lines.push(Line::raw(field.help.clone()));
+                }
+                if field.kind == "secret" {
+                    lines.push(Line::styled("Empty keeps the saved credential. Ctrl-R removes it; Ctrl-X selects an external source.", theme.dim));
+                }
+                if let Some(preset) = self
+                    .info
+                    .descriptor
+                    .presets
+                    .iter()
+                    .find(|p| p.id == draft.connection.preset)
+                {
+                    lines.push(Line::styled(preset.help.clone(), theme.dim));
+                }
+            }
+        }
+        (lines, cursor)
+    }
+
+    fn sample_lines(&self, body: Rect, theme: &Theme) -> (Vec<Line<'static>>, Option<(u16, u16)>) {
+        let lines = vec![
+            Line::styled("Check access using these unsaved settings", theme.accent),
+            Line::raw("Paste a review or issue URL on this connection's server."),
+            Line::raw(format!("> {}", self.buffer)),
+            Line::raw("Checks do not save credentials, enable hooks, or call a model."),
+        ];
+        let cursor = Some((
+            body.x + 2 + u16::try_from(self.buffer.width()).unwrap_or(0),
+            body.y + 2,
+        ));
+        (lines, cursor)
+    }
+
+    fn help_lines(&self, theme: &Theme) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        if let Some(field) = self.current_field() {
+            lines.push(Line::styled(field.label.clone(), theme.accent));
+            lines.push(Line::raw(field.help.clone()));
+            if let Some(preset) = self.drafts.get(self.selected).and_then(|d| {
+                self.info
+                    .descriptor
+                    .presets
+                    .iter()
+                    .find(|p| p.id == d.connection.preset)
+            }) {
+                lines.push(Line::raw(""));
+                lines.push(Line::raw(preset.help.clone()));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(format!(
+                "Configuration file: {}",
+                self.info.source
+            )));
+            lines.push(Line::raw("Credentials are saved in your user credential store. Editing a project hook writes credential references to the trusted project file."));
+        }
+        lines
+    }
+
     pub fn draw(&self, frame: &mut Frame<'_>, theme: &Theme, glyphs: &Glyphs, ascii: bool) {
         let screen = frame.area();
         let width = screen.width.min(86);
@@ -588,214 +806,29 @@ impl HookForm {
             Constraint::Length(4),
         ])
         .areas(inner);
-        let mut lines = Vec::new();
-        let mut cursor = None;
-        let name = |d: &HookConnectionDraft| {
-            d.connection
-                .values
-                .get("label")
-                .cloned()
-                .unwrap_or_else(|| d.connection.id.clone())
-        };
-        match self.page {
-            Page::Connections => {
-                lines.push(Line::styled(
-                    format!(
-                        "{} · {} connection(s)",
-                        if self.info.enabled {
-                            "Enabled"
-                        } else {
-                            "Disabled"
-                        },
-                        self.drafts.len()
+        let (lines, cursor) = match self.page {
+            Page::Connections => (self.connections_lines(body.height, theme), None),
+            Page::Presets => (self.presets_lines(body.height, theme), None),
+            Page::Fields | Page::Input => self.fields_lines(body, theme, ascii),
+            Page::Sample => self.sample_lines(body, theme),
+            Page::Discard => (
+                vec![
+                    Line::styled("Discard unsaved changes?", theme.warn),
+                    Line::raw(
+                        "D discards and closes. R reloads saved settings. Enter or Escape keeps editing.",
                     ),
-                    theme.accent,
-                ));
-                lines.push(Line::raw(
-                    "Enter edits a connection. A adds another service.",
-                ));
-                if self.drafts.is_empty() {
-                    lines.push(Line::raw(
-                        "No connections yet. Press A to choose a service.",
-                    ));
-                }
-                let room = usize::from(body.height.saturating_sub(4)).max(1);
-                let start = self.selected.saturating_sub(room - 1);
-                for (index, draft) in self.drafts.iter().enumerate().skip(start).take(room) {
-                    lines.push(Line::styled(
-                        format!(
-                            "{} {} [{}]",
-                            if index == self.selected { ">" } else { " " },
-                            name(draft),
-                            if draft.connection.enabled {
-                                "on"
-                            } else {
-                                "off"
-                            }
-                        ),
-                        if index == self.selected {
-                            theme.selected
-                        } else {
-                            theme.dim
-                        },
-                    ));
-                }
-                if self.status.contains("payload") {
-                    lines.push(Line::styled(
-                        "K keeps the existing payload; P replaces it on save.",
-                        theme.dim,
-                    ));
-                }
-            }
-            Page::Presets => {
-                lines.push(Line::styled("Choose a service", theme.accent));
-                let room = usize::from(body.height.saturating_sub(4)).max(1);
-                let start = self.preset.saturating_sub(room - 1);
-                for (index, preset) in self
-                    .info
-                    .descriptor
-                    .presets
-                    .iter()
-                    .enumerate()
-                    .skip(start)
-                    .take(room)
-                {
-                    lines.push(Line::styled(
-                        format!(
-                            "{} {}",
-                            if index == self.preset { ">" } else { " " },
-                            preset.label
-                        ),
-                        if index == self.preset {
-                            theme.selected
-                        } else {
-                            theme.dim
-                        },
-                    ));
-                }
-            }
-            Page::Fields | Page::Input => {
-                if let Some(draft) = self.drafts.get(self.selected) {
-                    lines.push(Line::styled(name(draft), theme.accent));
-                    if let Some(field) = self.current_field() {
-                        lines.push(Line::styled(
-                            format!(
-                                "Field {} of {} · {}",
-                                self.field + 1,
-                                self.fields().len(),
-                                if self.advanced {
-                                    "all settings"
-                                } else {
-                                    "basic settings"
-                                }
-                            ),
-                            theme.dim,
-                        ));
-                        lines.push(Line::raw(""));
-                        lines.push(Line::styled(field.label.clone(), theme.accent));
-                        let mut value = if self.page == Page::Input {
-                            if field.kind == "secret" {
-                                if ascii { "*" } else { "•" }.repeat(self.buffer.chars().count())
-                            } else {
-                                self.buffer.clone()
-                            }
-                        } else {
-                            self.shown(field)
-                        };
-                        if self.page == Page::Input {
-                            let room = usize::from(body.width.saturating_sub(3));
-                            value = value
-                                .chars()
-                                .rev()
-                                .take(room)
-                                .collect::<String>()
-                                .chars()
-                                .rev()
-                                .collect();
-                            cursor = Some((
-                                body.x + 2 + u16::try_from(value.width()).unwrap_or(0),
-                                body.y + 4,
-                            ));
-                        }
-                        lines.push(Line::raw(format!("> {value}")));
-                        lines.push(Line::raw(""));
-                        if self.source_input && self.page == Page::Input {
-                            lines.push(Line::raw(
-                                "env:VARIABLE, file:PATH, keyring:NAME, cmd:[\"program\",\"arg\"]",
-                            ));
-                        } else {
-                            lines.push(Line::raw(field.help.clone()));
-                        }
-                        if field.kind == "secret" {
-                            lines.push(Line::styled("Empty keeps the saved credential. Ctrl-R removes it; Ctrl-X selects an external source.", theme.dim));
-                        }
-                        if let Some(preset) = self
-                            .info
-                            .descriptor
-                            .presets
-                            .iter()
-                            .find(|p| p.id == draft.connection.preset)
-                        {
-                            lines.push(Line::styled(preset.help.clone(), theme.dim));
-                        }
-                    }
-                }
-            }
-            Page::Sample => {
-                lines.push(Line::styled(
-                    "Check access using these unsaved settings",
-                    theme.accent,
-                ));
-                lines.push(Line::raw(
-                    "Paste a review or issue URL on this connection's server.",
-                ));
-                lines.push(Line::raw(format!("> {}", self.buffer)));
-                cursor = Some((
-                    body.x + 2 + u16::try_from(self.buffer.width()).unwrap_or(0),
-                    body.y + 2,
-                ));
-                lines.push(Line::raw(
-                    "Checks do not save credentials, enable hooks, or call a model.",
-                ));
-            }
-            Page::Discard => {
-                lines.push(Line::styled("Discard unsaved changes?", theme.warn));
-                lines.push(Line::raw(
-                    "D discards and closes. R reloads saved settings. Enter or Escape keeps editing.",
-                ));
-            }
-            Page::Remove => {
-                lines.push(Line::styled(
-                    "Remove this connection from the draft?",
-                    theme.warn,
-                ));
-                lines.push(Line::raw(
-                    "D removes it; save to apply. Enter or Escape keeps it.",
-                ));
-            }
-            Page::Help => {
-                if let Some(field) = self.current_field() {
-                    lines.push(Line::styled(field.label.clone(), theme.accent));
-                    lines.push(Line::raw(field.help.clone()));
-                    if let Some(preset) = self.drafts.get(self.selected).and_then(|d| {
-                        self.info
-                            .descriptor
-                            .presets
-                            .iter()
-                            .find(|p| p.id == d.connection.preset)
-                    }) {
-                        lines.push(Line::raw(""));
-                        lines.push(Line::raw(preset.help.clone()));
-                    }
-                    lines.push(Line::raw(""));
-                    lines.push(Line::raw(format!(
-                        "Configuration file: {}",
-                        self.info.source
-                    )));
-                    lines.push(Line::raw("Credentials are saved in your user credential store. Editing a project hook writes credential references to the trusted project file."));
-                }
-            }
-        }
+                ],
+                None,
+            ),
+            Page::Remove => (
+                vec![
+                    Line::styled("Remove this connection from the draft?", theme.warn),
+                    Line::raw("D removes it; save to apply. Enter or Escape keeps it."),
+                ],
+                None,
+            ),
+            Page::Help => (self.help_lines(theme), None),
+        };
         frame.render_widget(
             Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((
                 if self.page == Page::Help {
@@ -965,6 +998,25 @@ mod tests {
         form.key(key(KeyCode::Enter));
         form.key(key(KeyCode::BackTab));
         assert_eq!(form.current_field().expect("field").id, "label");
+    }
+
+    #[test]
+    fn payload_hints_follow_the_choice_not_unrelated_status_text() {
+        let mut form = HookForm::new(example());
+        let theme = Theme::resolve("dark", false);
+        let body = |form: &HookForm| {
+            form.connections_lines(24, &theme)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        form.status = "The payload example is only informational.".into();
+        assert!(!body(&form).contains("K keeps"));
+        assert!(matches!(form.key(key(KeyCode::Char('k'))), Action::None));
+        assert!(body(&form).contains("K keeps the existing payload; P replaces it on save."));
+        form.key(key(KeyCode::Char('p')));
+        assert!(body(&form).contains("K keeps the existing payload; P replaces it on save."));
     }
 
     #[test]

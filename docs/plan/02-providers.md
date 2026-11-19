@@ -78,7 +78,7 @@ Both APIs return reasoning that must go back unchanged for the model to keep it:
 
 - A sealed reply goes back only to the provider that made it, under the same system prompt and tools (`fingerprint`, FNV-1a of both), and for OpenAI the same model. Otherwise it is sent rebuilt from `content` and `tool_calls`. Anthropic's API itself drops thinking another Claude model can't read.
 - A reply whose text or calls the engine changed (a text tool call promoted to a real one) loses its seal.
-- Pruning and compaction (`prune::apply`, `compact::apply`) remove every seal: signed thinking after an edited message no longer verifies, and dropping all of it at that one point is what Anthropic recommends.
+- Pruning and text compaction (`prune::apply`, `compact::apply`) remove every seal: signed thinking after an edited message no longer verifies, and dropping all of it at that one point is what Anthropic recommends.
 - **Append-only history for `anthropic-messages`** (`Provider::append_only`). Claude's newer models check that a thinking block's history is unchanged (preserved thinking). The plan reminder, which rides on the newest message of each request for other providers, is instead written into the step's last tool result and stays there. `core/tests/anthropic.rs` checks that every request extends the one before it, across a resume.
 - `anthropic.toml` sends `thinking.block_binding.prefix_mismatch_behavior = "drop_block"` (beta `thinking-binding-controls-2026-08-01`), so an edit we missed costs that reasoning rather than failing the request.
 
@@ -96,6 +96,7 @@ Both APIs return reasoning that must go back unchanged for the model to keep it:
 - `quack login [provider] [--new] [--no-browser]` (`quack_providers::login`): PKCE (S256), a callback on `127.0.0.1:1455` (any free port if taken), `ext_agent_host_id` (a `urn:uuid:` made once, kept in `<data>/auth/host-id`), `client_id = dynamic_agent_client` plus `agent_name_hint = "quack"` on first sign-in, then the issued client id, `id_token_hint` and `login_hint`. The ID token's RS256 signature is checked against the issuer's JWKS (endpoints on another host are refused), then `iss`, `aud`, `exp` and `nonce`. A sign-in without `chatgpt.tokens.use.direct` is saved but not used. `--new` registers again to switch accounts.
 - Credentials: `<data>/auth/<provider>.json`, written whole with mode 0600 on Unix. The provider sends `Authorization: Bearer` and renews the token two minutes before it expires; a lock file serializes renewals across processes, because each refresh replaces the refresh token. Terminal refresh errors (`invalid_grant`, `refresh_token_reused`, ...) clear the tokens and ask for `quack login`; network failures keep them.
 - The plan route (`responses::Route::ChatgptPlan`): no `max_output_tokens`, `temperature` or `top_p`; function tools go in one `namespace` (`workspace`), and calls and results carry it. `subscription_sharing_usage_limit_exceeded` is reported as the plan's limit and not retried.
+- Both Responses routes send `strict: false` on function tools to preserve optional arguments. When Responses normalized the `edit` schema, Terra sent the `edits` array alongside empty single-edit fields and Quack rejected the call. With explicit non-strict tools, Terra sent `path` and `edits` and the batch applied. [Responses function calling](https://developers.openai.com/api/docs/guides/function-calling#strict-mode).
 - `quack logout` revokes the refresh token at the issuer's `revocation_endpoint` and clears the tokens, keeping the registration.
 - Until signed in, `/models` and `doctor` show "run `quack login chatgpt`", and nothing is sent: the token is looked up before any request (`tests/login.rs`).
 - No new crates: the SHA-256, RSA and random number generator come from `aws-lc-rs`, already built for reqwest's TLS on every OS. Base64url and form encoding are a few lines each.
@@ -120,7 +121,18 @@ their existing setup flow. Tests use mock issuers and callback clients, with no 
 
 - Live `chatgpt/sol` plan validation on 2026-11-11 passed a smoke task and, after fixing the Codex profile's missing tracked `read`, all 12 saved comparison runs across four hard tasks. Both `generic` and `codex` passed 6/6; only CSV had three repeats each. After reviewing upstream Codex, the user approved automatic `codex` selection for all three current model IDs as an explicit exception to the normal repeat-based promotion rule. Multi-step turns accepted the configured request fields and replayed sealed replies without observed protocol errors. This does not validate other OpenAI models, the API-key route, live resume or long-window behavior; Claude remains mock-only. [Full evidence and limitations](../../evals/results/2026-11-11/README.md).
 - Astra smoke (2026-11-11): one `fix-typo` task using `chatgpt/astra --profile auto` resolved to `codex` and passed in 5 requests / 15 seconds, with no parse or edit failures. No API-key calls, repeats or hard tasks. Terra was added as `gpt-6.1-terra` (`terra`) to both providers with upstream's 500k budget and vision support; Luna/Terra remain untested live. [Details](../../evals/results/2026-11-11/terra-astra.md).
+- GPT-6.2 (2026-11-17, data-only): `gpt-6.2-sol` (500k) and `gpt-6.2-astra` (272k) added to both providers, `gpt-6.1-sol` bumped to 500k per the same upstream commit, and both 6.2 ids added to the exact `codex` `[match]` list. Wire efforts remain `low`–`max` (the 6.2 models reject `none`); Codex's `ultra` picker level is client-side multi-agent delegation, not a wire effort, and is not offered. Not validated live.
 - Server tools (web search) and Anthropic's mid-conversation system messages are not used. Images are: see [Vision](#vision-2026-10-24).
+
+### Native Responses compaction (2026-11-18)
+
+The bundled `openai` and `chatgpt` provider files set `native_compaction = true`.
+Both use the existing stateless Responses transport, credentials and network policy.
+The API-key route uses `compaction_trigger`. The ChatGPT plan uses threshold-based
+`context_management` because its subscription token rejects the explicit trigger
+and the standalone compaction endpoint. The flag defaults to `false` for custom
+providers. Focused summaries and endpoint failures use Quack's text compaction.
+See [how compaction is applied and replayed](05-context-management.md#native-responses-compaction-2026-11-18).
 
 ## Provider file schema
 
@@ -173,6 +185,8 @@ timeout_idle_secs = 300                # long prefill on big contexts can be slo
 timeout_first_byte_secs = 0            # wait for headers, then retry (doubling each time); 0 = idle
 max_retries = 3                        # 429/5xx/connection reset, exponential backoff + jitter
 proxy = ""                             # override [network].proxy
+no_proxy = false                       # true: use a direct connection
+# http1_only = true                    # false: negotiate, unset: inherit [network].http1_only
 
 [discovery]
 enabled = true                         # GET /models at startup (async), merge with [[models]]
@@ -228,16 +242,16 @@ Unknown keys are an error (`deny_unknown_fields`), except inside `extra_body` an
 
 Startup lists models when `enabled` is set, when no models are listed, or when the model to use is not listed or lacks `context_window` or `cost` (2026-10-24: before, an unlisted model in a provider with any `[[models]]` got neither, so evals on it went unpriced). A failed listing warns unless only the price was missing. The `/models` picker always lists. When discovery is enabled, `/models` results are merged with `[[models]]`. Declared entries win per field. Discovered-only models get `context_window` from the response when the server reports it (vLLM reports `max_model_len`, llama.cpp reports `n_ctx` via `/props`). Otherwise they are marked *unknown context*, and the UI asks for a value the first time the model is used, then writes it back into the TOML with `toml_edit`.
 
-### Model catalog (updated 2026-11-14)
+### Model catalog (updated 2026-11-17)
 
-For prices and context windows nothing else reports. Precedence per field: the provider file, the models endpoint, the downloaded catalog, the bundle's snapshot (`quack_config::catalog`). `/models` shows the result, with a `price` line.
+For prices, context windows and thinking levels nothing else reports. Precedence per field: the provider file, the models endpoint, the downloaded catalog, the bundle's snapshot (`quack_config::catalog`). `/models` shows the result, with a `price` line.
 
-- The snapshot is `defaults/catalog.json`, a cut-down copy of models.dev (MIT) for the bundle's providers: 1,809 models across 33 catalog providers in 187 KB on 2026-11-14. `scripts/update-catalog.sh` regenerates it; run it before a release and read the diff. It is data in the bundle, not compiled in and not fetched by `build.rs`, so air-gapped builds and the no-built-ins rule hold.
+- The snapshot is `defaults/catalog.json`, a cut-down copy of models.dev (MIT) for the bundle's providers: 1,818 models across 33 catalog providers in 257 KB on 2026-11-17. `scripts/update-catalog.sh` regenerates it; run it before a release and read the diff. It is data in the bundle, not compiled in and not fetched by `build.rs`, so air-gapped builds and the no-built-ins rule hold.
 - models.dev rather than Catwalk: it covers 33 of the 35 hosted providers in the bundle under one schema to read.
 - `quack catalog refresh` downloads `catalog.url` to the cache directory, keeping the configured providers; `catalog.refresh = true` does this in the background at most once a day, with the ETag. A new catalog applies from the next session. A bad download leaves the old file.
 - Entries the parser can't use are skipped, so one odd model doesn't lose the feed. Model ids match exactly, because a wrong price is worse than none.
 - `catalog` in a provider file names its catalog id where it differs (`fireworks-ai`); unset means the provider's id, except for a server on this machine, which serves its own window. `catalog = ""` turns it off.
-- The catalog fills numbers only. Capability flags aren't used: `vision` turns on tools and attachments, and an unset flag can't be told from `false`, so a user couldn't turn it off.
+- The catalog fills numbers, and since 2026-11-17 thinking levels too: models.dev's `reasoning_options` widen the picker for models the provider file leaves silent, so a model released after this bundle is steerable once `quack catalog refresh` runs. An effort name never overrides the file, and the default `effort` stays file-only. Capability flags aren't used: `vision` turns on tools and attachments, and an unset flag can't be told from `false`, so a user couldn't turn it off.
 
 
 ## Tool-call normalization
@@ -329,7 +343,20 @@ Stale connections (2026-11-13). Over a VPN, requests timed out in quack while op
 - **A fresh client after a `Timeout` or `Network` error.** reqwest can't empty its pool, so `Provider::renew_client` builds a new client from the `ClientSpec` (proxy, roots, identity, resolved once in `Provider::new`) and every clone uses it from then on. This is a browser's refresh. A generation number makes several requests failing at once replace the client only once.
 - **`[network] http1_only`** behaves like opencode, for networks where HTTP/2 still misbehaves.
 
-Two more were found at the same time. An `HTTPS_PROXY` from the environment ignored `NO_PROXY`: quack hands reqwest the proxy itself, which turns off reqwest's own lookup and with it `NO_PROXY`, so the VPN's internal hosts went through the proxy. `ClientSpec::resolve` now reads `NO_PROXY` itself. And `timeout_connect_secs` went from 10 to 30: it covers TCP, the proxy's `CONNECT` and TLS, and hyper-util splits it across the host's addresses, so a lossy VPN ran out of it after a couple of resent SYNs. `timeout_first_byte_secs` stays at the idle timeout, so a slow local prefill isn't cut off; PINGs now find a dead HTTP/2 connection long before then. `provider::tests` puts a TCP relay in front of the mock server that can make its first connection go dead with both sockets open, and checks that the retry opens a second one.
+The 30-second `timeout_connect_secs` covers TCP, the proxy's `CONNECT`, and TLS.
+Hyper-util shares it across the host's addresses. `timeout_first_byte_secs` defaults to
+the idle timeout to accommodate slow prefill. The provider tests put a relay in front
+of a mock server, let its first connection go dead with both sockets open, and check
+that a retry opens a second connection.
+
+Environment proxies apply to their URL scheme, with `ALL_PROXY` as a fallback and
+`NO_PROXY` exclusions. An explicit provider `[http].proxy` takes precedence over
+`[network].proxy` and environment or system proxies. `[http].no_proxy = true` bypasses
+proxies for the provider. `[http].http1_only` can override the global setting in either
+direction. Both overrides are shown and editable per provider in TUI `/providers`
+and in the Advanced section of desktop Providers. Opening the editor reads config from disk, so the controls work during
+provider connection failures. The connection uses the platform resolver and reports DNS
+lookup failures with a hint to check both DNS and proxy settings.
 
 ## Vision (2026-10-24)
 

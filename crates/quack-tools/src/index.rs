@@ -44,7 +44,8 @@ impl Tool for Index {
         "Outline a source file: its functions, types, methods and modules with their line \
          ranges, nested. On a directory, lists each source file with its top-level \
          definitions. Use it to find your way before reading, then `read` the lines you need \
-         (or `read` with `symbol`). Supports Rust, Python, JavaScript, TypeScript and Go."
+         (or `read` with `symbol`). Supports Rust, Python, JavaScript, TypeScript, TSX, Go, \
+         C, C++ and Bash."
             .into()
     }
 

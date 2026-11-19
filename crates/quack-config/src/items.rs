@@ -112,13 +112,16 @@ fn parse_file(layer: LayerKind, path: PathBuf) -> Parsed {
             };
         }
     };
-    // toml is built on toml_edit's parser, so what validates here parses there too; the
-    // toml pass runs first only because its errors carry spans for diagnostics.
-    let doc = match toml::from_str::<Table>(&text) {
-        Err(e) => Err(FileDiagnostic::from_toml(&path, &text, &e)),
-        Ok(_) => text
-            .parse::<toml_edit::DocumentMut>()
-            .map_err(|e| FileDiagnostic::new(&path, &text, e.message().trim(), None)),
+    // One parse. toml and toml_edit share one parser, and its errors carry spans, so the
+    // document that drives the merge is also the validation pass.
+    let doc = match text.parse::<toml_edit::DocumentMut>() {
+        Ok(doc) => Ok(doc),
+        Err(e) => Err(FileDiagnostic::new(
+            &path,
+            &text,
+            e.message().trim(),
+            e.span(),
+        )),
     };
     let id = doc
         .as_ref()
@@ -175,19 +178,30 @@ fn merged_state<T: DeserializeOwned>(top: &Parsed, lower: &[Parsed]) -> ItemStat
         Ok(d) => d,
         Err(d) => return ItemState::Failed(d.clone()),
     };
+    let enabled =
+        |doc: &toml_edit::DocumentMut| doc.get("enabled").and_then(toml_edit::Item::as_bool);
     if lower.is_empty() {
-        // A single file: deserialize it from its own text, so diagnostics keep their
-        // exact spans, exactly as `load_one` reports them.
-        return match load_one::<T>(&top.path, String::new()) {
-            (_, Some(state)) => state,
-            (_, None) => ItemState::Disabled(format!("disabled by {}", top.path.display())),
+        // A single file: deserialize it from the text already read, so diagnostics keep
+        // their exact spans, exactly as `load_one` reports them.
+        if enabled(top_doc) == Some(false)
+            && top_doc
+                .as_table()
+                .iter()
+                .all(|(k, _)| k == "enabled" || k == "id")
+        {
+            return ItemState::Disabled(format!("disabled by {}", top.path.display()));
+        }
+        return match toml::from_str::<T>(&top.text) {
+            Ok(_) if enabled(top_doc) == Some(false) => {
+                ItemState::Disabled("enabled = false".into())
+            }
+            Ok(item) => ItemState::Loaded(item),
+            Err(e) => ItemState::Failed(FileDiagnostic::from_toml(&top.path, &top.text, &e)),
         };
     }
     if let Some(d) = lower.iter().find_map(|f| f.doc.as_ref().err()) {
         return ItemState::Failed(d.clone());
     }
-    let enabled =
-        |doc: &toml_edit::DocumentMut| doc.get("enabled").and_then(toml_edit::Item::as_bool);
     if enabled(top_doc) == Some(false)
         && top_doc
             .as_table()

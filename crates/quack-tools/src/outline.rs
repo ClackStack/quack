@@ -77,26 +77,36 @@ impl Outline {
     pub fn find(&self, query: &str) -> Option<&Symbol> {
         let parts: Vec<&str> = query.split([':', '.']).filter(|p| !p.is_empty()).collect();
         let (last, parents) = parts.split_last()?;
-        self.symbols
-            .iter()
-            .enumerate()
-            .filter(|(i, s)| {
-                // Its path: the names of what encloses it, outermost first, then its own.
-                let mut path: Vec<&str> = self.symbols[..*i]
-                    .iter()
-                    .filter(|p| p.start <= s.start && p.end >= s.end)
-                    .flat_map(|p| p.name.split([':', '.']))
-                    .collect();
-                path.extend(s.name.split([':', '.']));
-                let Some((own, above)) = path.split_last() else {
-                    return false;
-                };
-                // Each named parent must be on the path, in order.
-                let mut above = above.iter();
-                own == last && parents.iter().all(|p| above.any(|a| a == p))
-            })
-            .map(|(_, s)| s)
-            .max_by_key(|s| (s.end - s.start, s.depth))
+        // Symbols are sorted by range start (longest first on a tie), so every encloser
+        // of `s` is already on `open`, outermost first. One sweep gives every symbol
+        // O(depth) containment instead of an O(n) scan.
+        let mut open: Vec<&Symbol> = Vec::new();
+        let mut best: Option<&Symbol> = None;
+        for s in &self.symbols {
+            while open.last().is_some_and(|p| p.end < s.end) {
+                open.pop();
+            }
+            // Its path, minus the last token (`own`): the names of every encloser,
+            // outermost first, then the leading tokens of `s.name`.
+            let mut s_parts = s.name.split([':', '.']);
+            let own = s_parts
+                .next_back()
+                .expect("str::split yields at least one element");
+            let mut above = open
+                .iter()
+                .flat_map(|p| p.name.split([':', '.']))
+                .chain(s_parts);
+            if own == *last && parents.iter().all(|p| above.any(|a| a == *p)) {
+                let key = (s.end - s.start, s.depth);
+                match best {
+                    None => best = Some(s),
+                    Some(b) if (b.end - b.start, b.depth) < key => best = Some(s),
+                    Some(_) => {}
+                }
+            }
+            open.push(s);
+        }
+        best
     }
 }
 

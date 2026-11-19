@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{sse_text, turn};
-use quack_core::protocol::{Event, Op};
+use quack_core::protocol::{Event, Op, ProviderHttpVersion};
 use quack_core::setup::{Candidate, detect_in};
 use quack_core::{Engine, EngineHandle};
 use wiremock::matchers::{method, path};
@@ -25,6 +25,66 @@ async fn next_matching(engine: &mut EngineHandle, want: impl Fn(&Event) -> bool)
             return e;
         }
     }
+}
+
+#[tokio::test]
+async fn provider_connection_settings_apply_to_the_next_turn() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse_text("hello"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    let user = config.dirs.user_config.clone();
+    let file = user.join("providers.d").join("mock.toml");
+    let original = std::fs::read_to_string(&file).expect("provider")
+        + "http = { max_retries = 0 } # Preserve this comment.\n";
+    std::fs::write(&file, original).expect("inline HTTP settings");
+    std::fs::write(
+        user.join("config.toml"),
+        "[model]\ndefault = \"mock/tiny\"\n[network]\nhttp1_only = true\nproxy = \"http://127.0.0.1:1\"\n",
+    )
+    .expect("global network settings");
+    let config = config.reload_with(&|_| None).expect("reload");
+    let mut engine = Engine::spawn(Arc::new(config));
+    next_matching(&mut engine, |e| matches!(e, Event::StartupComplete)).await;
+
+    engine.submit(Op::ListProviderConnections).await;
+    let listed = next_matching(&mut engine, |e| {
+        matches!(e, Event::ProviderConnections { .. })
+    })
+    .await;
+    assert!(matches!(listed, Event::ProviderConnections { connections }
+        if connections.len() == 1
+            && connections[0].http_version == ProviderHttpVersion::Inherit
+            && connections[0].inherited_http1_only));
+
+    for version in [ProviderHttpVersion::Negotiate, ProviderHttpVersion::Inherit] {
+        engine
+            .submit(Op::SaveProviderConnection {
+                id: "mock".into(),
+                http_version: Some(version),
+                no_proxy: (version == ProviderHttpVersion::Negotiate).then_some(true),
+            })
+            .await;
+        let saved = next_matching(&mut engine, |e| {
+            matches!(e, Event::ProviderConnectionSaved { .. })
+        })
+        .await;
+        assert!(
+            matches!(saved, Event::ProviderConnectionSaved { connection, .. }
+            if connection.http_version == version && connection.no_proxy)
+        );
+        next_matching(&mut engine, |e| matches!(e, Event::ConfigReloaded)).await;
+        next_matching(&mut engine, |e| matches!(e, Event::StartupComplete)).await;
+    }
+    let text = std::fs::read_to_string(file).expect("provider");
+    assert!(text.contains("# Preserve this comment.") && text.contains("max_retries = 0"));
+    assert!(!text.contains("http1_only"), "{text}");
+    turn(&mut engine, "hi").await;
+    engine.shutdown().await;
 }
 
 #[tokio::test]

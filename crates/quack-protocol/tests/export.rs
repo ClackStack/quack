@@ -15,11 +15,11 @@ use quack_protocol::{
     HookCredentialChange, HookDescriptor, HookField, HookOutcome, HookPreset, HookSetupInfo, Image,
     InputItem, InstructionFile, KeySource, LoadState, LspDiagnosticItem, LspServerInfo,
     LspServerState, McpSecretValue, McpServerInfo, McpServerState, MemoryNote, ModelId, ModelInfo,
-    Op, PermissionMode, ProfileInfo, ProviderId, ProviderModels, PruneReport, Question,
-    QuestionOption, ReplayItem, RequestStat, RewindPoint, SecretFinding, SecretText, ServiceInfo,
-    SessionId, SessionInfo, SessionSummary, SkillInfo, StatsReport, Subsystem, ToolCallInfo,
-    ToolProbeCase, ToolProbeReport, ToolResultSummary, ToolStat, TurnId, TurnOverrides, Usage,
-    WorkMode, WriteScope,
+    Op, PermissionMode, ProfileInfo, ProviderConnection, ProviderHttpVersion, ProviderId,
+    ProviderModels, PruneReport, Question, QuestionOption, ReplayItem, RequestStat, RewindPoint,
+    SecretFinding, SecretText, ServiceInfo, SessionId, SessionInfo, SessionSummary, SkillInfo,
+    StatsReport, Subsystem, ToolCallInfo, ToolProbeCase, ToolProbeReport, ToolResultSummary,
+    ToolStat, TurnId, TurnOverrides, Usage, WorkMode, WriteScope,
 };
 use ts_rs::TS;
 
@@ -307,6 +307,16 @@ fn export_protocol_ts() {
             "ProviderModels",
             ProviderModels::docs().unwrap_or_default(),
             ProviderModels::decl(&cfg),
+        ),
+        (
+            "ProviderHttpVersion",
+            ProviderHttpVersion::docs().unwrap_or_default(),
+            ProviderHttpVersion::decl(&cfg),
+        ),
+        (
+            "ProviderConnection",
+            ProviderConnection::docs().unwrap_or_default(),
+            ProviderConnection::decl(&cfg),
         ),
         (
             "LspServerInfo",

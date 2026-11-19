@@ -21,8 +21,9 @@ impl SseDecoder {
             if end > pos && self.buf[end - 1] == b'\r' {
                 end -= 1;
             }
-            let line = String::from_utf8_lossy(&self.buf[pos..end]).into_owned();
-            self.line(&line, out);
+            // The line is scanned in place; only a kept `data:` payload is copied out.
+            let Self { buf, data } = self;
+            line(data, &buf[pos..end], out);
             pos = nl + 1;
         }
         self.buf.drain(..pos);
@@ -30,26 +31,36 @@ impl SseDecoder {
 
     /// Collect an event left unterminated at end of stream into `out`.
     pub fn finish(&mut self, out: &mut Vec<String>) {
-        if !self.buf.is_empty() {
-            let rest = String::from_utf8_lossy(&std::mem::take(&mut self.buf)).into_owned();
-            self.line(rest.trim_end_matches('\r'), out);
+        let rest = std::mem::take(&mut self.buf);
+        if !rest.is_empty() {
+            line(&mut self.data, trim_cr(&rest), out);
         }
-        self.line("", out);
+        line(&mut self.data, &[], out);
     }
+}
 
-    fn line(&mut self, line: &str, out: &mut Vec<String>) {
-        if line.is_empty() {
-            if !self.data.is_empty() {
-                out.push(std::mem::take(&mut self.data).join("\n"));
-            }
-            return;
-        }
-        if let Some(rest) = line.strip_prefix("data:") {
-            self.data
-                .push(rest.strip_prefix(' ').unwrap_or(rest).to_owned());
-        }
-        // `event:`, `id:`, `retry:` and `:` comments are not used by the chat protocols.
+/// A trailing partial line's `\r` characters, as `str::trim_end_matches('\r')` trims.
+fn trim_cr(mut line: &[u8]) -> &[u8] {
+    while line.last() == Some(&b'\r') {
+        line = &line[..line.len() - 1];
     }
+    line
+}
+
+/// One SSE line, borrowed straight out of the receive buffer: a blank line dispatches
+/// the event, a `data:` line accumulates its payload, everything else is ignored.
+fn line(data: &mut Vec<String>, line: &[u8], out: &mut Vec<String>) {
+    if line.is_empty() {
+        if !data.is_empty() {
+            out.push(std::mem::take(data).join("\n"));
+        }
+        return;
+    }
+    if let Some(rest) = line.strip_prefix(b"data:".as_slice()) {
+        let rest = rest.strip_prefix(b" ".as_slice()).unwrap_or(rest);
+        data.push(String::from_utf8_lossy(rest).into_owned());
+    }
+    // `event:`, `id:`, `retry:` and `:` comments are not used by the chat protocols.
 }
 
 #[cfg(test)]
@@ -84,5 +95,22 @@ mod tests {
         let (a, b) = s.split_at(8);
         assert!(feed(&mut d, a).is_empty());
         assert_eq!(feed(&mut d, b), vec!["héllo"]);
+    }
+
+    #[test]
+    fn ignored_lines_and_trailing_carriage_return() {
+        let mut d = SseDecoder::default();
+        assert_eq!(
+            feed(
+                &mut d,
+                b"event: message\nid: 7\nretry: 10\n: comment\ndata: a\ndata: b\n\n"
+            ),
+            vec!["a\nb"]
+        );
+        // An unterminated line with a `\r` still dispatches at end of stream.
+        assert!(feed(&mut d, b"data: rest\r").is_empty());
+        let mut out = Vec::new();
+        d.finish(&mut out);
+        assert_eq!(out, vec!["rest"]);
     }
 }

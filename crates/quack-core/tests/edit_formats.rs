@@ -8,11 +8,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{bodies, sse_call, sse_text, turn};
-use quack_core::protocol::{Event, LoadState, Op, Subsystem};
+use quack_core::protocol::{
+    ApprovalDecision, ApprovalRequest, Event, InputItem, LoadState, Op, Subsystem, TurnOverrides,
+};
 use quack_core::{Engine, EngineHandle};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer};
+
+fn workspace_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Root discovery must stop here even when TMPDIR is inside the checkout.
+    std::fs::create_dir_all(tmp.path().join("ws").join(".git")).expect("isolated workspace");
+    tmp
+}
 
 async fn engine(root: &Path, server: &MockServer, format: &str) -> EngineHandle {
     std::fs::create_dir_all(root.join("user")).expect("mkdir");
@@ -26,7 +35,7 @@ async fn engine(root: &Path, server: &MockServer, format: &str) -> EngineHandle 
 }
 
 async fn profile_startup(profile: &str, format: &str, mode: &str) -> LoadState {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = workspace_dir();
     let server = MockServer::start().await;
     let user = tmp.path().join("user");
     std::fs::create_dir_all(&user).expect("mkdir");
@@ -167,6 +176,122 @@ fn tool_names(body: &str) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn exact_edit_batch_is_advertised_approved_and_undone_as_one_change() {
+    let server = MockServer::start().await;
+    reply_with_calls(
+        &server,
+        &[
+            ("read", json!({"path": "a.txt"})),
+            (
+                "edit",
+                json!({"path": "a.txt", "edits": [
+                    {"old_string": "two\r\n", "new_string": "TWO\r\n"},
+                    {"old_string": "one", "new_string": "ONE"}
+                ]}),
+            ),
+        ],
+    )
+    .await;
+    let tmp = workspace_dir();
+    let loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    let file = loaded.dirs.workspace_root.join("a.txt");
+    let before = "\u{feff}one\r\ntwo\r\n";
+    std::fs::write(&file, before).expect("write fixture");
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    engine
+        .submit(Op::UserTurn {
+            items: vec![InputItem::text("Change both lines")],
+            overrides: TurnOverrides::default(),
+        })
+        .await;
+
+    let mut approvals = 0;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), engine.events.recv())
+            .await
+            .expect("event")
+            .expect("open")
+        {
+            Event::ApprovalRequest {
+                call_id, request, ..
+            } => {
+                let ApprovalRequest::Edit { path, diff } = request else {
+                    panic!("expected edit approval: {request:?}");
+                };
+                assert_eq!(path, "a.txt");
+                assert!(diff.contains("+ONE\n+TWO"), "{diff}");
+                assert_eq!(
+                    std::fs::read_to_string(&file).expect("unchanged file"),
+                    before
+                );
+                approvals += 1;
+                engine
+                    .submit(Op::ApprovalResponse {
+                        call_id,
+                        decision: ApprovalDecision::AllowOnce,
+                    })
+                    .await;
+            }
+            Event::Error { error } => panic!("engine error: {}", error.message),
+            Event::TurnAborted { reason, .. } => panic!("aborted: {reason}"),
+            Event::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(approvals, 1);
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("updated file"),
+        "\u{feff}ONE\r\nTWO\r\n"
+    );
+    let requests = bodies(&server).await;
+    let first: Value = serde_json::from_str(&requests[0]).expect("request JSON");
+    let tool = first["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|t| t["function"]["name"] == "edit")
+        .expect("edit tool");
+    let schema = &tool["function"]["parameters"];
+    assert_eq!(schema["required"], json!(["path"]));
+    assert_eq!(
+        schema["properties"]["edits"]["items"]["required"],
+        json!(["old_string", "new_string"])
+    );
+    assert!(
+        requests
+            .last()
+            .expect("tool result")
+            .contains("Edited a.txt (2 replacements)")
+    );
+
+    engine
+        .submit(Op::Undo {
+            checkpoint: None,
+            force: false,
+        })
+        .await;
+    loop {
+        if let Event::FilesRestored {
+            restored,
+            conflicts,
+        } = tokio::time::timeout(Duration::from_secs(10), engine.events.recv())
+            .await
+            .expect("undo event")
+            .expect("open")
+        {
+            assert!(conflicts.is_empty(), "{conflicts:?}");
+            assert_eq!(restored, ["a.txt"]);
+            break;
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("restored file"),
+        before
+    );
+    engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn apply_patch_changes_several_files_and_undo_restores_them() {
     let server = MockServer::start().await;
     let patch = "*** Begin Patch\n*** Update File: a.txt\n one\n-two\n+TWO\n three\n\
@@ -180,7 +305,7 @@ async fn apply_patch_changes_several_files_and_undo_restores_them() {
         ],
     )
     .await;
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = workspace_dir();
     let ws = tmp.path().join("ws");
     let mut engine = engine(tmp.path(), &server, "apply_patch").await;
     std::fs::write(ws.join("a.txt"), "one\r\ntwo\r\nthree\r\n").expect("a");
@@ -252,7 +377,7 @@ async fn edit_blocks_edit_two_files_in_one_call() {
         ],
     )
     .await;
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = workspace_dir();
     let ws = tmp.path().join("ws");
     let mut engine = engine(tmp.path(), &server, "search_replace_blocks").await;
     std::fs::write(ws.join("a.txt"), "one\ntwo\n").expect("a");
@@ -280,7 +405,7 @@ async fn whole_file_offers_only_write() {
         .respond_with(sse_text("ok"))
         .mount(&server)
         .await;
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = workspace_dir();
     let mut engine = engine(tmp.path(), &server, "whole_file").await;
     turn(&mut engine, "hi").await;
     let body = bodies(&server).await.remove(0);
@@ -308,7 +433,7 @@ async fn blind_edit_is_refused_until_the_file_is_read() {
         ],
     )
     .await;
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = workspace_dir();
     let ws = tmp.path().join("ws");
     let mut engine = engine(tmp.path(), &server, "str_replace").await;
     std::fs::write(ws.join("a.txt"), "one\ntwo\n").expect("a");
@@ -338,7 +463,7 @@ async fn overwriting_an_unread_file_is_refused() {
         ],
     )
     .await;
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = workspace_dir();
     let ws = tmp.path().join("ws");
     let mut engine = engine(tmp.path(), &server, "str_replace").await;
     std::fs::write(ws.join("a.txt"), "old\n").expect("a");

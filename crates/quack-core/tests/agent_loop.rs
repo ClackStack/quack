@@ -73,6 +73,7 @@ async fn collect_startup(mut loaded: Loaded, resume: Resume) -> (bool, Vec<Strin
                 configured = true;
             }
             Event::Warning { message } => warnings.push(message),
+            Event::SessionResumeFailed { reason } => warnings.push(reason),
             Event::Error { error } => panic!("unexpected error: {}", error.message),
             Event::StartupComplete => break,
             _ => {}
@@ -466,9 +467,7 @@ async fn new_list_resume_title_and_save_setting() {
     let items = loop {
         match next(&mut resumed.events).await {
             Event::SessionResumed { items, .. } => break items,
-            Event::Warning { message } if message.starts_with("cannot re") => {
-                panic!("unexpected resume warning: {message}")
-            }
+            Event::SessionResumeFailed { reason } => panic!("unexpected resume failure: {reason}"),
             Event::StartupComplete => panic!("startup completed without resuming session"),
             _ => {}
         }

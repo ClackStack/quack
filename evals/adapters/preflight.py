@@ -13,7 +13,23 @@ from pathlib import Path
 from unittest.mock import patch
 
 import quack_adapter as adapter
-from quack_usage import session_usage
+from quack_usage import session_usage, sessions
+
+
+def init_worktree(work: Path) -> None:
+    # A TMPDIR inside the checkout must not make Quack use the enclosing Git root.
+    work.mkdir()
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=str(work / ".gitconfig"))
+    subprocess.run(["git", "init", "--quiet", "--template="], cwd=work, env=env, check=True)
+
+
+def verify_session_cwd(logs: Path, work: Path) -> None:
+    expected = str(work.resolve())
+    cwds = [record.get("cwd") for events in sessions(logs) for record in events
+            if record.get("t") == "session_start"]
+    if not cwds or any(cwd != expected for cwd in cwds):
+        raise RuntimeError(f"Expected session cwd {expected}; retained logs recorded {cwds!r}")
 
 
 def preflight(binary: Path, defaults: Path) -> dict:
@@ -55,9 +71,9 @@ def preflight(binary: Path, defaults: Path) -> dict:
             self.wfile.write(response)
 
     with tempfile.TemporaryDirectory(prefix="quack-preflight-") as directory:
-        root = Path(directory)
+        root = Path(directory).resolve()
         work = root / "work"
-        work.mkdir()
+        init_worktree(work)
         (work / "input.txt").write_text("read verified\n")
         (work / "image.png").write_bytes(base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aU/8AAAAASUVORK5CYII="))
@@ -69,9 +85,9 @@ def preflight(binary: Path, defaults: Path) -> dict:
         try:
             with patch.multiple(adapter, BIN=str(binary.resolve()), DEFAULTS=str(defaults.resolve()),
                                 AGENT_LOGS=root / "logs", PROMPT=str(prompt)):
-                env = dict(os.environ)
-                for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "QUACK_MODEL", "QUACK_OFFLINE"):
-                    env.pop(key, None)
+                # Inherit executable lookup, not credentials, proxies, or other Quack overrides.
+                env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL") if key in os.environ}
+                env["HOME"] = str(root)
                 env.update(adapter.quack_env("kimi-k3", {"FIREWORKS_API_KEY": "synthetic-key"}))
                 env["QUACK_SYSTEM_DIR"] = str(root / "system")
                 provider_dir = Path(env["QUACK_CONFIG_DIR"]) / "providers.d"
@@ -85,6 +101,7 @@ def preflight(binary: Path, defaults: Path) -> dict:
                                         cwd=work, env=env, capture_output=True, text=True, timeout=60)
             if result.returncode:
                 raise RuntimeError(f"Preflight command exited {result.returncode}:\n{result.stdout}\n{result.stderr}")
+            verify_session_cwd(root / "logs", work)
             if (work / "output.txt").read_text() != "verified\n":
                 raise RuntimeError("Native write did not produce the expected file")
             serialized = json.dumps(requests)

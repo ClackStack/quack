@@ -97,12 +97,11 @@ Internal tools have stable internal names and schemas. Profiles map onto them ([
 | `grep` | ReadOnly | ripgrep library. Results capped, grouped by file, with context lines |
 | `list_dir` | ReadOnly | Shallow tree, capped |
 | `write` | Mutating | Create or overwrite a file |
-| `edit.str_replace` | Mutating | Exact-match replace, with fuzzy fallback (below) |
-| `edit.multi` | Mutating | Several str_replace edits on one file, applied atomically |
+| `edit.str_replace` | Mutating | Single replacement with fuzzy fallback, or a batch of exact replacements |
 | `edit.apply_patch` | Mutating | Codex `apply_patch` format (ported, Apache-2.0) |
 | `edit.whole_file` | Mutating | Model sends the full new content. The diff is shown for approval |
 | `edit.search_replace_blocks` | Mutating | Aider-style `<<<<<<< SEARCH / ======= / >>>>>>> REPLACE` blocks, for text mode |
-| `edit.hashline` | Mutating | Hash-anchored edits: `read` tags each line with a short content hash, and edits name lines by hash instead of retyping old text (below) |
+| `edit.hashline` | Mutating | Snapshot-anchored edits: `read` tags the file version, and edits name lines by number instead of retyping old text (below) |
 | `shell` | Mutating | Run a command (see below) |
 | `shell.background` | Mutating | Start a long-running process (dev servers, watchers). Tools `shell.output` / `shell.kill` read and stop it |
 | `lsp.*` | ReadOnly/Mutating | definition, references, hover, symbols, diagnostics, rename ([10](10-lsp.md)) |
@@ -142,18 +141,17 @@ These are the main source of failures with open models, so they get the most har
 - **Line endings and encoding**: detect CRLF/LF and the BOM per file and preserve them. Treat the model's `\n` as the file's newline. Refuse non-UTF-8 files unless forced.
 - **Checkpoint before write**: store the pre-image ([07](07-sessions-memory-checkpoints.md)).
 - **Post-edit feedback**: return a compact diff summary. When an edit introduces a syntax error into a file that previously parsed cleanly, Tree-sitter adds an immediate soft warning in the tool return pointing to the broken line. When an LSP server is running, also return new diagnostics for the edited file, if any arrive within the settle window ([10](10-lsp.md)).
-- **Hash-anchored edits (`edit.hashline`, M2)**: when a profile selects this format, `read` returns lines as `<line>:<hash>| <text>`, where the hash is a few characters derived from the line's content. Edits reference a range by its start and end hashes (`replace`, `insert_after`, `delete`). The model never has to reproduce old text exactly, which is where small models fail. A hash that no longer matches is rejected with a fresh tagged snippet of that region, so retries converge. Hashes survive line drift from earlier edits. One 2026 harness benchmark (by an implementer, so treat it with care) found it beat patch-style edits for 14 of 16 models; open-model evidence is thin and mixed, and `insert_after` is reported to invite duplicated lines. It ships as an option, and the eval decides which profiles default to it.
 - **Hashline as implemented (2026-10-18; rebuilt 2026-10-21)**: `[tools] edit_format = "hashline"` turns it on for the session, and `edit_hashline` replaces `edit`. No profile defaults to it: `generic` did for a day, and the measurements below put it back on `str_replace`. The first version tagged every line (`<line>:<hash>|<text>`); on the hard suite that cost 30-50% more prompt tokens than `str_replace`, and models made up tags for lines they had seen only in `grep`. It now follows oh-my-pi's hashline mode (MIT):
   - `read` and `grep` put `[path#tag]` above a file's lines, where the tag is 4 hex characters of FNV-1a over the whole LF-normalized file, and number lines as a plain `read` does. Every version the model was shown, with the lines shown of it, is kept in `ReadTracker::views` (eight per file; versions only edit results showed go first, so the read the numbers come from stays). `write` counts as showing the whole file.
   - An edit is `start`/`end` (inclusive) with `content`, `after` (0 for the top, `end` for the bottom) or `before` with `content`, or `delete`. Several go in `edits`, numbered against the same version and applied bottom-up; overlaps are refused. Numbers may come as strings, ranges (`"12-14"`, `[12, 14]`) or older `12:k3x` tags; the action may be the key (`{"insert_after": 12}`); `path` and `tag` may sit inside the edit; `edits` may be a JSON string, even with the line folded into the action; an empty insert is a blank line.
   - `block` edits (2026-10-21, oh-my-pi's `PUT N*:`) name a line, not a range: `block`: N with `content` (or `delete`) replaces the innermost definition around that line (a function, class or method from the file's outline, with decorator lines above pulled in), and `after_block`: N inserts after it at sibling depth. No `end` to count, which is where number edits go wrong most. `end: "block"` and `"action": "replace_block"` spell it too. Resolved against the numbered version before anything else, so its lines remap like any others; with no outline (no `lang-common`, unknown language) the edit is refused with what to send instead.
   - The version the numbers come from is the `tag` given (also accepted as `path#tag`). Without a known tag it is the newest view that showed all the lines named, else the newest that showed any. With no views (after a resume) the numbers are read against the file as it is. A file changed outside the edit tools since its last view is refused unless a tag says which version the numbers are from. Numbers past the end of the tagged version but not of the file (worked out after the model's own inserts, sent with the old tag) are read against the file as it is, with a note.
   - Numbers from an older version are moved through a line diff (patience). The lines replaced must all be unchanged and still together, and a line beside them (or the start or end of the file, in both versions) must have moved with them; otherwise the edit is refused with the current lines there under the new tag, which become a view for the retry.
-  - Lines an edit replaces must have been shown in the output its numbers come from (2026-10-21, oh-my-pi's unseen-lines rule): a range over an elided middle, a folded outline or numbers from memory is refused with the actual lines, which are recorded as seen, so the same edit again goes through. A file no output ever showed is refused the same way ("read it first"); `force` skips the check, and numbers re-read against the current file (the past-the-end case) are exempt, since no output could have shown those.
+  - The unseen-lines check (2026-10-21) compares replacement ranges with the stored view. A refusal returns the actual lines and records them as seen for a retry. `force` and ranges re-read against the current file bypass that check. Outline-only reads currently record the entire file as seen, and insertions are exempt from the visibility check. Both gaps were reproduced in the [Terra edit-format review](../../evals/results/2026-11-18/terra-edit-formats/README.md#targeting-defects-reproduced-locally).
   - `content` loses line numbers copied from `read` (only when every line has one and they count up by one) and repeats of the lines just outside the range (only distinctive lines, and only when what is left still fills the range, so a body that ends in `}` keeps it). Each repair is reported in a note.
   - With `lang-common`, an edit that leaves a parse error in a file that parsed cleanly before is first mended (2026-10-21, oh-my-pi's syntax probe): a lone replace whose range stopped short of the closers it orphaned takes up to three closer-only lines below it (or opener lines above it) in, when exactly that restores the parse, with a note saying so. Unmendable breaks are refused, showing the lines as they would read; `"force": true` makes them anyway. tree-sitter-python accepts unexpected indentation, so that slip still gets through.
   - The result is one line, like `edit`'s: what each edit did, the new lines' numbers and the file's new tag (`Edited a.py, now [a.py#1c76]: replaced line 5 with 2 lines (now lines 6-7)`). Showing the changed lines cost prompt tokens on every later step; showing nothing made models guess new numbers.
-  - Measured on the hard suite (2026-10-21, `--repeat 3`, deepseek-v4.1-flash and glm-5.3-flash against `str_replace`; roadmap): edit failures fell from 34 and 47 to 0-14, but steps and prompt tokens stayed higher, clearly so for glm. Edits by number that apply cleanly but to a range one line off are the remaining cost, which `str_replace` can't make: its old text must match.
+  - Measured on the hard suite (2026-10-21, `--repeat 3`, deepseek-v4.1-flash and glm-5.3-flash against `str_replace`; roadmap): edit failures fell from 34 and 47 to 0-14. Steps and prompt tokens stayed higher, clearly so for glm. A number one line off can still select different text and produce valid syntax. String replacement checks the old text at the match.
 - **Format selection**: `config [tools].edit_format` overrides the model TOML, which overrides the profile default. `auto` uses the profile default.
 
 ### As implemented (2026-10-18)
@@ -162,13 +160,33 @@ These are the main source of failures with open models, so they get the most har
 
 | Format | Tool | Notes |
 |---|---|---|
-| `str_replace` (default) | `edit` | Exact, then fuzzy matching. `expected_replacements > 1` counts as `replace_all` |
+| `str_replace` (default) | `edit` | One exact or fuzzy replacement, or a batch of exact replacements in one file |
 | `hashline` | `edit_hashline` | `read` and `grep` show a `[path#tag]` header per file |
 | `apply_patch` | `apply_patch` | Codex format: Add/Delete/Update/Move, `@@` anchors, `*** End of File`. Hunks are found exactly, then ignoring trailing whitespace, then indentation |
 | `search_replace_blocks` | `edit_blocks` | SEARCH/REPLACE blocks under each file's path; each SEARCH is matched like `old_string`; an empty SEARCH creates a file |
 | `whole_file` | none | `write` alone, described as rewriting the whole file |
 
-`write`'s description names whichever edit tool is offered. A call that changes several files is planned completely before anything is written, so a hunk that does not match leaves every file as it was. It is one permission subject (`Subject::Edits`): the strictest answer for any of its files, and "allow for the session" covers each file. Each file gets its own undo point under the call, so `/undo` restores all of them. Line endings and BOMs are kept. `core/tests/edit_formats.rs` covers the three new formats through the engine.
+`write`'s description names whichever edit tool is offered. A call that changes several files is planned completely before anything is written, so a hunk that does not match leaves every file as it was. It is one permission subject (`Subject::Edits`): the strictest answer for any of its files, and "allow for the session" covers each file. Each file gets its own undo point under the call, so `/undo` restores all of them. Line endings and BOMs are kept. `core/tests/edit_formats.rs` covers the edit formats through the engine.
+
+### Batched exact replacements (2026-11-18)
+
+For several independent changes to one file, use `edit` with one `path` and an `edits`
+array instead of the top-level `old_string` and `new_string`:
+
+```json
+{"path":"src/options.rs","edits":[
+  {"old_string":"const RETRIES: u8 = 2;","new_string":"const RETRIES: u8 = 3;"},
+  {"old_string":"const TIMEOUT: u64 = 5;","new_string":"const TIMEOUT: u64 = 10;"}
+]}
+```
+
+Each old snippet must appear exactly once in the original file. Unlike oh-my-pi's
+[replace mode](https://github.com/can1357/oh-my-pi/blob/e1ae2cc998efd1ca151b46ebefc0e0dab6c23c63/crates/pi-edit/src/modes/replace.rs#L177),
+entries cannot match text introduced by another entry; order does not matter and overlaps
+are refused. An empty `new_string` deletes its match. A rejected entry leaves the file
+unchanged. A successful batch uses one diff, approval (when required), and undo point.
+The existing single-edit form still supports fuzzy fallbacks and `replace_all` (including
+the compatibility alias `expected_replacements > 1`).
 
 `index` outlines a file or a directory (see [05](05-context-management.md#as-implemented-2026-10-18-index-and-pruning-rules)).
 

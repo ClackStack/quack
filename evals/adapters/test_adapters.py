@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import preflight
 import quack_adapter as adapter
 import quack_usage as usage
 
@@ -73,6 +74,32 @@ class AdapterTests(unittest.TestCase):
         with patch.dict(os.environ, {"QUACK_EVAL_MAX_STEPS": "0"}):
             with self.assertRaises(ValueError):
                 adapter.quack_command("kimi-k3")
+
+
+class PreflightTests(unittest.TestCase):
+    def test_worktree_shadows_an_enclosing_git_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory).resolve() / "checkout"
+            preflight.init_worktree(outer)
+            work = outer / "work"
+            preflight.init_worktree(work)
+            root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], cwd=work, text=True)
+            self.assertEqual(Path(root.strip()), work)
+
+    def test_session_cwd_must_match_the_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            work = root / "work"
+            logs = root / "logs"
+            log = logs / "quack-data/sessions/project/session/events.jsonl"
+            log.parent.mkdir(parents=True)
+            with self.assertRaisesRegex(RuntimeError, "Expected session cwd"):
+                preflight.verify_session_cwd(logs, work)
+            log.write_text(json.dumps({"t": "session_start", "cwd": str(root)}) + "\n")
+            with self.assertRaisesRegex(RuntimeError, "Expected session cwd"):
+                preflight.verify_session_cwd(logs, work)
+            log.write_text(json.dumps({"t": "session_start", "cwd": str(work)}) + "\n")
+            preflight.verify_session_cwd(logs, work)
 
 
 class UsageTests(unittest.TestCase):

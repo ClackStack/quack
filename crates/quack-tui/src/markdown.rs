@@ -638,74 +638,24 @@ pub(crate) fn render(
     rows
 }
 
-fn trim_end_spans(spans: &mut Vec<(String, Style)>) {
-    while let Some((text, _)) = spans.last_mut() {
-        let trimmed = text.trim_end();
-        if trimmed.is_empty() {
-            spans.pop();
-        } else {
-            if trimmed.len() != text.len() {
-                *text = trimmed.to_owned();
-            }
-            break;
-        }
-    }
-}
-
 fn wrap_cell_spans(spans: &[(String, Style)], width: usize) -> Vec<Vec<(String, Style)>> {
-    let width = width.max(1);
-    if spans.is_empty() {
-        return vec![Vec::new()];
-    }
-    let mut lines: Vec<Vec<(String, Style)>> = Vec::new();
-    let mut cur_line: Vec<(String, Style)> = Vec::new();
-    let mut cur_w = 0;
-
-    for (text, style) in spans {
-        for word in text.split_inclusive(' ') {
-            let w = word.width();
-            let visible = w - usize::from(word.ends_with(' '));
-            if cur_w + visible > width && !cur_line.is_empty() {
-                trim_end_spans(&mut cur_line);
-                lines.push(std::mem::take(&mut cur_line));
-                cur_w = 0;
-            }
-            let word = if cur_line.is_empty() {
-                word.trim_start()
-            } else {
-                word
-            };
-            if word.is_empty() {
-                continue;
-            }
-            if cur_w + word.width() > width && cur_line.is_empty() {
-                let mut chunk = String::new();
-                for ch in word.chars() {
-                    let cw = ch.width().unwrap_or(0);
-                    if cur_w + cw > width && !chunk.is_empty() {
-                        cur_line.push((std::mem::take(&mut chunk), *style));
-                        trim_end_spans(&mut cur_line);
-                        lines.push(std::mem::take(&mut cur_line));
-                        cur_w = 0;
-                    }
-                    chunk.push(ch);
-                    cur_w += cw;
-                }
-                if !chunk.is_empty() {
-                    cur_w += chunk.width();
-                    cur_line.push((chunk, *style));
-                }
-            } else {
-                cur_w += word.width();
-                cur_line.push((word.to_owned(), *style));
-            }
-        }
-    }
-    trim_end_spans(&mut cur_line);
-    if !cur_line.is_empty() || lines.is_empty() {
-        lines.push(cur_line);
-    }
-    lines
+    crate::wrap::wrap_styled(
+        spans,
+        width,
+        crate::wrap::WrapSpec {
+            first: "",
+            rest: "",
+            prefix_style: Style::new(),
+            trim_leading: true,
+            trim_wrapped: true,
+            trim_broken: true,
+            trim_final: true,
+            keep_empty_final: false,
+            break_long_words_anywhere: false,
+            allow_empty_break: false,
+            count_chunk_twice: true,
+        },
+    )
 }
 
 fn cell_width(spans: &[(String, Style)]) -> usize {
@@ -809,50 +759,30 @@ fn wrap_logical(l: &Logical, width: usize, theme: &Theme, rows: &mut Vec<Vec<Spa
         rows.push(row);
         return;
     }
-    let mut row: Vec<Span<'static>> = vec![Span::styled(l.first.clone(), prefix_style)];
-    let mut used = l.first.width();
-    let mut row_has_text = false;
-    for (text, style) in &l.spans {
-        for word in text.split_inclusive(' ') {
-            let w = word.width();
-            let visible = w - usize::from(word.ends_with(' '));
-            if used + visible > width && row_has_text {
-                rows.push(std::mem::take(&mut row));
-                row.push(Span::styled(l.rest.clone(), prefix_style));
-                used = l.rest.width();
-                row_has_text = false;
-            }
-            let word = if row_has_text {
-                word
-            } else {
-                word.trim_start()
-            };
-            if word.is_empty() {
-                continue;
-            }
-            if used + word.width() > width && !row_has_text {
-                // A word longer than the row: hard-break it.
-                let mut chunk = String::new();
-                for ch in word.chars() {
-                    let cw = ch.width().unwrap_or(0);
-                    if used + cw > width && !chunk.is_empty() {
-                        row.push(Span::styled(std::mem::take(&mut chunk), *style));
-                        rows.push(std::mem::take(&mut row));
-                        row.push(Span::styled(l.rest.clone(), prefix_style));
-                        used = l.rest.width();
-                    }
-                    chunk.push(ch);
-                    used += cw;
-                }
-                row.push(Span::styled(chunk, *style));
-            } else {
-                row.push(Span::styled(word.to_owned(), *style));
-                used += word.width();
-            }
-            row_has_text = true;
-        }
+    let wrapped = crate::wrap::wrap_styled(
+        &l.spans,
+        width,
+        crate::wrap::WrapSpec {
+            first: &l.first,
+            rest: &l.rest,
+            prefix_style,
+            trim_leading: true,
+            trim_wrapped: false,
+            trim_broken: false,
+            trim_final: false,
+            keep_empty_final: true,
+            break_long_words_anywhere: false,
+            allow_empty_break: false,
+            count_chunk_twice: false,
+        },
+    );
+    for row in wrapped {
+        rows.push(
+            row.into_iter()
+                .map(|(text, style)| Span::styled(text, style))
+                .collect(),
+        );
     }
-    rows.push(row);
 }
 
 #[cfg(test)]

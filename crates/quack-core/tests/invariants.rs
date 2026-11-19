@@ -231,6 +231,23 @@ fn bundled_reasoning_efforts_are_consistent() {
     );
 }
 
+/// The bundled catalog snapshot ships thinking levels, so a model released after this
+/// bundle is steerable once `quack catalog refresh` runs. Guards both a hand-edit and a
+/// parser regression silently dropping them.
+#[test]
+fn the_bundled_catalog_carries_thinking_levels() {
+    let text = std::fs::read_to_string(defaults_bundle().join("catalog.json")).expect("catalog");
+    let catalog = quack_config::Catalog::parse(&text).expect("the bundle's catalog parses");
+    let with_levels = catalog
+        .entries()
+        .filter(|(_, _, facts)| !facts.efforts.is_empty())
+        .count();
+    assert!(
+        with_levels > 100,
+        "expected models.dev's thinking levels in the snapshot, got {with_levels}"
+    );
+}
+
 /// Everything in the defaults bundle a user or company might delete, relative to it.
 fn removable(defaults: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();

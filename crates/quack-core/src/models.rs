@@ -180,8 +180,8 @@ async fn probe(
                 alias: None,
                 context_window: d.context_window,
                 price: d.cost.as_ref().map(price),
-                // The models endpoint cannot say which efforts a model supports; only the
-                // provider file can.
+                // The models endpoint cannot say which efforts a model supports; the catalog
+                // fills them in below, and only the provider file can override either.
                 reasoning_efforts: Vec::new(),
             }),
         }
@@ -190,6 +190,9 @@ async fn probe(
         let facts = catalogs.facts(id, &described, &m.id);
         m.context_window = m.context_window.or(facts.context_window);
         m.price = m.price.take().or(facts.cost.as_ref().map(price));
+        if m.reasoning_efforts.is_empty() {
+            m.reasoning_efforts = facts.efforts;
+        }
     }
     let available = !models.is_empty();
     let note = match (available, note.is_empty()) {

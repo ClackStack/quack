@@ -101,6 +101,9 @@ pub fn plan(history: &[Message], protect_from: usize, hooks: &Hooks<'_>) -> Vec<
         .filter_map(|c| Some((*results.get(c.id.as_str())?, c, (hooks.classify)(c))))
         .collect();
     let accesses: Vec<(usize, Access)> = calls.iter().map(|(i, _, a)| (*i, a.clone())).collect();
+    // Rule 5 compares a failed call against every later one, so a naive walk re-parses
+    // the same JSON arguments once per comparison. Parse each call's aim at most once.
+    let mut aim_cache: Vec<Option<Option<(String, &'static str)>>> = vec![None; calls.len()];
 
     let mut ops = Vec::new();
     for (n, (index, call, access)) in calls.iter().enumerate() {
@@ -116,17 +119,19 @@ pub fn plan(history: &[Message], protect_from: usize, hooks: &Hooks<'_>) -> Vec<
         // Rule 5, for short results too: a failure fixed by a later call.
         if content.len() >= MIN_FAILED_CHARS
             && failed(content)
-            && let Some(aim) = aim(call)
-            && calls[n + 1..]
-                .iter()
-                .any(|(j, c, _)| aim_matches(c, &aim) && content_ok(content_of(history, *j)))
+            && let Some(my_aim) = aim_cache[n].get_or_insert_with(|| aim(call)).clone()
+            && calls[n + 1..].iter().enumerate().any(|(off, (j, c, _))| {
+                let later_aim = aim_cache[n + 1 + off].get_or_insert_with(|| aim(c));
+                later_aim.as_ref().is_some_and(|a| a.0 == my_aim.0)
+                    && content_ok(content_of(history, *j))
+            })
         {
             ops.push(PruneOp {
                 index: *index,
                 rule: Rule::FailedAttempt,
                 content: format!(
                     "{MARKER}: this `{}` call failed; a later one on the same {} succeeded.]",
-                    call.name, aim.1
+                    call.name, my_aim.1
                 ),
             });
             continue;
@@ -221,10 +226,6 @@ fn aim(call: &ToolCall) -> Option<(String, &'static str)> {
         .iter()
         .find_map(|k| text(k))
         .map(|p| (format!("{}:{}", call.name, p.trim()), "file"))
-}
-
-fn aim_matches(call: &ToolCall, want: &(String, &'static str)) -> bool {
-    aim(call).is_some_and(|a| a.0 == want.0)
 }
 
 /// File text from a `read` result: line numbers (`  12\t`, or the older hashline `12:ab|`)
