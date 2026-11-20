@@ -26,6 +26,11 @@ vision = true
 reasoning = { effort = "max", efforts = ["none", "low", "high", "max"] }
 
 [[models]]
+id = "kimi-for-coding-highspeed"
+vision = true
+reasoning = { effort = "max", efforts = ["none", "low", "high", "max"] }
+
+[[models]]
 id = "k3.1-pro"
 vision = true
 reasoning = { effort = "max", efforts = ["low", "high", "max"] }

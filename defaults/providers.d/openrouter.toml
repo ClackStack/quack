@@ -25,7 +25,7 @@ context_window = 1048576
 max_output = 943718
 vision = true
 reasoning = { effort = "max", efforts = ["low", "high", "max"] }
-cost = { input = 0.047, output = 0.12, cached_input = 0.006 }
+cost = { input = 0.15, output = 0.5, cached_input = 0.03 }
 
 [[models]]
 id = "deepseek/deepseek-v4.1-flash-1017"
@@ -33,7 +33,7 @@ context_window = 1048576
 max_output = 393216
 vision = true
 reasoning = { effort = "high", efforts = ["none", "low", "high", "max"] }
-cost = { input = 0.3, output = 1.2, cached_input = 0.006 }
+cost = { input = 0.036, output = 0.5, cached_input = 0.01 }
 
 [[models]]
 id = "mistralai/mistral-large-4-0"
@@ -41,7 +41,7 @@ context_window = 1048576
 max_output = 262144
 vision = true
 reasoning = { efforts = ["low", "medium", "high"] }
-cost = { input = 1.36, output = 4.18, cached_input = 0.14 }
+cost = { input = 0.7, output = 2.1, cached_input = 0.07 }
 
 # Muse Spark's model card recommends temperature 1.0, top_p 1.0, top_k off,
 # reasoning effort high or xhigh (the server default) for coding and agents.

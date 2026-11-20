@@ -20,5 +20,10 @@ id = "deepseek-v4-flash"
 reasoning = { effort = "high", efforts = ["low", "high", "max"], preserve_in_history = "current_turn" }
 
 [[models]]
+id = "deepseek-v4-flash-vision-exp"
+vision = true
+reasoning = { effort = "high", efforts = ["low", "high", "max"], preserve_in_history = "current_turn" }
+
+[[models]]
 id = "deepseek-v4-pro"
 reasoning = { effort = "high", efforts = ["low", "high", "max"], preserve_in_history = "current_turn" }

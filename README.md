@@ -99,7 +99,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 
 - **Open-weight first**: Built from the ground up for open models with family profiles (Qwen, DeepSeek, GLM, Kimi, Mistral), grammar-guided decoding, and reasoning preservation.
 - **Fast and lightweight**: Native Rust binary, sub-10ms startup, low memory footprint, and zero telemetry or implicit network egress.
-- **Sandboxed by default**: Commands run in an OS-level sandbox (Landlock and seccomp on Linux, Seatbelt on macOS, Restricted Token + Low Integrity + Job Objects on Windows) restricted to workspace writes with no network access.
+- **Sandboxed by default**: Commands run in an OS-level sandbox (Landlock and seccomp on Linux, Seatbelt on macOS, Restricted Token + Low Integrity + Job Objects on Windows) restricted to workspace writes with no network access (on Windows, writes only: the network is not restricted).
 - **AST-aware command security**: Tree-sitter parses Bash and PowerShell commands down to AST nodes, ensuring compound commands, subshells, and aliases cannot bypass deny rules.
 - **Compiler and syntax aware**: Immediate Tree-sitter syntax validation on edits and background LSP diagnostics that guide the model to fix type or compile errors immediately.
 - **Smart context distillation**: Automatically folds passing test sequences (Cargo, Pytest, Go, Jest) and verbose build logs, keeping context compact and prompt caches warm.
@@ -150,7 +150,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 ### Safety & Sandboxing
 
 - **Independent work mode and approvals**: choose **Plan / Edit** and **Ask / Allow** separately. Plan reads and searches; Edit may change files and run tests. Ask prompts for unapproved actions; Allow runs them within the configured sandbox. `/yolo` or `--yolo` explicitly disables approvals and sandboxing.
-- **OS-level sandboxing**: Shell commands (and opt-in `sandbox = true` MCP/LSP servers) execute in an isolated sandbox (Landlock + seccomp on Linux, Seatbelt on macOS, Restricted Token + Low Integrity + Job Objects on Windows) with workspace-only write access and network access disabled.
+- **OS-level sandboxing**: Shell commands (and opt-in `sandbox = true` MCP/LSP servers) execute in an isolated sandbox (Landlock + seccomp on Linux, Seatbelt on macOS, Restricted Token + Low Integrity + Job Objects on Windows) with workspace-only write access and network access disabled (Windows restricts writes but not the network).
 - **AST-aware command verification**: Tree-sitter parses shell commands to verify that compound expressions (`&&`, `||`, subshells, command substitutions, aliases) do not violate deny rules.
 - **Transparent approvals**: When an edit needs approval, the prompt shows a diff preview with options to allow once (`y`), allow for session (`a`), permanently allow rule (`A`), or deny (`n`).
 - **Project trust**: Untrusted cloned repositories execute no `.quack/` configurations until explicitly trusted via `/trust`.

@@ -26,3 +26,28 @@ vision = true
 [[models]]
 id = "accounts/fireworks/models/kimi-k3p1-pro"
 vision = true
+
+# Multimodal flagships; the catalog fills in prices, windows and thinking levels.
+[[models]]
+id = "accounts/fireworks/models/glm-5p3-flash"
+vision = true
+
+[[models]]
+id = "accounts/fireworks/models/deepseek-v4p1-flash-1017"
+vision = true
+
+[[models]]
+id = "accounts/fireworks/models/ember-1"
+vision = true
+
+[[models]]
+id = "accounts/fireworks/models/muse-spark-open"
+vision = true
+
+[[models]]
+id = "accounts/fireworks/models/qwen3p8-max"
+vision = true
+
+[[models]]
+id = "accounts/fireworks/models/minimax-m3p1-flash"
+vision = true

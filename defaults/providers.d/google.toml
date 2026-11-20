@@ -8,7 +8,7 @@ catalog = "google"
 api_key = { env = "GEMINI_API_KEY" }
 
 # Gemini 3/4 models always think (`none` is not accepted) and support
-# `low`/`medium`/`high`, with `xhigh` on Hydrogen. Prices and windows also come
+# `low`/`medium`/`high`, with `xhigh` on Hydrogen and Neon. Prices and windows also come
 # from the `google` catalog.
 [[models]]
 id = "gemini-4-carbon"
@@ -36,6 +36,15 @@ compact_at = 200000
 max_output = 65536
 vision = true
 reasoning = { effort = "high", efforts = ["low", "medium", "high", "xhigh"] }
+
+[[models]]
+id = "gemini-4-neon"
+alias = "neon"
+context_window = 1048576
+compact_at = 200000
+max_output = 65536
+vision = true
+reasoning = { efforts = ["low", "medium", "high", "xhigh"] }
 
 [[models]]
 id = "gemini-3.8-flash"

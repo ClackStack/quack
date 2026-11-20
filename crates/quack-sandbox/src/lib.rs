@@ -10,7 +10,9 @@
 //! - macOS: the program runs under `sandbox-exec` with a generated Seatbelt profile.
 //! - Windows: Restricted Token (`DISABLE_MAX_PRIVILEGE` + Low Integrity `S-1-16-4096`,
 //!   `NO_WRITE_UP`) combined with Low-Integrity labels on [`Policy::writable`] and a Job
-//!   Object with UI/clipboard restrictions and kill-on-close.
+//!   Object with UI/clipboard restrictions and kill-on-close. The temp folder is replaced
+//!   by a `quack-sandbox` folder inside it (and `TEMP`/`TMP` point there), so the user's
+//!   temp folder itself is never relabelled. The network is not restricted.
 
 use std::ffi::OsStr;
 use std::io;
@@ -130,10 +132,66 @@ where
     S: AsRef<OsStr>,
 {
     let mut cmd = tokio::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        let args: Vec<std::ffi::OsString> = args
+            .into_iter()
+            .map(|a| a.as_ref().to_os_string())
+            .collect();
+        if let Some((switches, script)) = cmd_script(program, &args) {
+            let mut raw = std::ffi::OsString::from("\"");
+            raw.push(&script);
+            raw.push("\"");
+            cmd.args(switches).raw_arg(raw);
+        } else {
+            cmd.args(args);
+        }
+    }
+    #[cfg(not(windows))]
     cmd.args(args);
     Command {
         inner: CommandInner::Tokio(cmd),
     }
+}
+
+/// `cmd.exe` doesn't split its command line the way C programs do: after `/S /C` it drops
+/// the first and last quote and runs the rest as written, so a script whose quotes were
+/// escaped as `\"` (the usual Windows quoting) breaks. For a `cmd` call this returns the
+/// switches up to `/C` (or `/K`), with `/S` added, and the script to append unescaped
+/// inside one pair of quotes. A script given as several arguments is joined with spaces,
+/// quoting the ones that hold whitespace.
+#[cfg(any(windows, test))]
+fn cmd_script(
+    program: &OsStr,
+    args: &[std::ffi::OsString],
+) -> Option<(Vec<std::ffi::OsString>, std::ffi::OsString)> {
+    let stem = Path::new(program).file_stem()?;
+    if !stem.eq_ignore_ascii_case("cmd") {
+        return None;
+    }
+    let at = args
+        .iter()
+        .position(|a| a.eq_ignore_ascii_case("/c") || a.eq_ignore_ascii_case("/k"))?;
+    let mut switches = args[..=at].to_vec();
+    if !switches.iter().any(|a| a.eq_ignore_ascii_case("/s")) {
+        switches.insert(at, "/S".into());
+    }
+    let rest = &args[at + 1..];
+    let mut script = std::ffi::OsString::new();
+    for (i, arg) in rest.iter().enumerate() {
+        if i > 0 {
+            script.push(" ");
+        }
+        let spaced = arg.to_string_lossy().contains(char::is_whitespace);
+        if rest.len() > 1 && spaced {
+            script.push("\"");
+            script.push(arg);
+            script.push("\"");
+        } else {
+            script.push(arg);
+        }
+    }
+    Some((switches, script))
 }
 
 impl Command {
@@ -468,4 +526,34 @@ pub fn looks_blocked(output: &str) -> bool {
         "dial tcp",
     ];
     SIGNS.iter().any(|s| output.contains(s))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<OsString> {
+        v.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn cmd_scripts_go_after_s_c_unescaped() {
+        let (switches, script) = cmd_script(
+            "cmd.exe".as_ref(),
+            &args(&["/D", "/C", r#"echo "hi" > "a b.txt""#]),
+        )
+        .expect("a cmd call");
+        assert_eq!(switches, args(&["/D", "/S", "/C"]));
+        assert_eq!(script, r#"echo "hi" > "a b.txt""#);
+
+        let (switches, script) =
+            cmd_script("CMD".as_ref(), &args(&["/s", "/c", "npx", "-y", "a b"])).expect("cmd");
+        assert_eq!(switches, args(&["/s", "/c"]));
+        assert_eq!(script, r#"npx -y "a b""#);
+
+        assert!(cmd_script("pwsh.exe".as_ref(), &args(&["-Command", "x"])).is_none());
+        assert!(cmd_script("cmd.exe".as_ref(), &args(&["/D"])).is_none());
+    }
 }

@@ -32,8 +32,26 @@ id = "glm-5.3-flash"
 vision = true
 reasoning = { effort = "max", efforts = ["low", "high", "max"] }
 
+# Prism is Charm's multimodal analysis family: images in, no thinking levels.
+[[models]]
+id = "prism"
+vision = true
+
+[[models]]
+id = "prism-core"
+vision = true
+
+[[models]]
+id = "prism-flash"
+vision = true
+
 [[models]]
 id = "deepseek-v4.1-flash-1017"
+vision = true
+reasoning = { effort = "high", efforts = ["low", "high", "max"] }
+
+[[models]]
+id = "deepseek-v4.1-flash-1017-economy"
 vision = true
 reasoning = { effort = "high", efforts = ["low", "high", "max"] }
 
@@ -57,6 +75,16 @@ reasoning = { efforts = ["low", "medium", "high"] }
 [[models]]
 id = "muse-spark-open"
 reasoning = { effort = "xhigh", efforts = ["low", "medium", "high", "xhigh"] }
+
+[[models]]
+id = "qwen4-max"
+vision = true
+reasoning = { efforts = ["none", "minimal", "low", "medium", "high"] }
+
+[[models]]
+id = "qwen3.8-max"
+vision = true
+reasoning = { efforts = ["none", "minimal", "low", "medium", "high"] }
 
 [[models]]
 id = "qwen3.8-2.4t-a95b"
