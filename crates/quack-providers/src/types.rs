@@ -1,6 +1,6 @@
 //! Provider-neutral request and stream types. Adapters translate these to and from the wire.
 
-use quack_config::provider::{Cost, Sampling};
+use quack_config::provider::{Cost, PromptCache, ReasoningHistory, ReasoningWire, Sampling};
 use quack_protocol::{Image, Usage};
 use serde::{Deserialize, Serialize};
 
@@ -15,9 +15,19 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     pub sampling: Sampling,
     pub reasoning_effort: Option<String>,
-    /// Send earlier reasoning back with each assistant message, where the server takes it
-    /// (Mistral). `None`: the server's convention.
-    pub preserve_reasoning: Option<bool>,
+    /// Send earlier reasoning back with each assistant message: never, only within the
+    /// current turn, or across all turns. `None`: the server's convention (`all_turns`).
+    pub preserve_reasoning: Option<ReasoningHistory>,
+    /// How `reasoning_effort` is placed on the wire for `openai-chat` providers.
+    pub reasoning_wire: ReasoningWire,
+    /// Whether the model may emit parallel tool calls (`Some(false)` sends
+    /// `parallel_tool_calls: false` where supported).
+    pub parallel_tool_calls: Option<bool>,
+    /// Prompt-caching wire options (`openai-responses`).
+    pub prompt_cache: PromptCache,
+    /// Previous response id for Responses `prompt_cache_options.comparison_response_id`
+    /// diagnostics when `prompt_cache.diagnostics` is enabled.
+    pub comparison_response_id: Option<String>,
     /// Merged into the request body last; objects merge key by key.
     pub extra_body: serde_json::Map<String, serde_json::Value>,
     /// A stable id for the conversation, for servers that route by it to keep their prompt
@@ -44,6 +54,11 @@ pub enum Message {
     Compaction {
         content: String,
         sealed: Sealed,
+        /// Per-session context (`context.md`: workspace, AGENTS.md, skills, memory) kept
+        /// verbatim alongside the encrypted compaction window so rules never degrade
+        /// across compactions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_context: Option<String>,
     },
     Assistant {
         #[serde(default)]
@@ -171,6 +186,8 @@ pub enum StreamEvent {
     },
     Usage(Usage),
     Finish(FinishReason),
+    /// The server's response id, when reported (e.g. OpenAI Responses `response.id`).
+    ResponseId(String),
     /// The reply's layout and opaque reasoning, sent before `Finish`.
     Sealed(Vec<serde_json::Value>),
 }
@@ -205,6 +222,7 @@ pub struct ResponseBuilder {
     sealed: Vec<serde_json::Value>,
     pub usage: Option<Usage>,
     pub finish: Option<FinishReason>,
+    pub response_id: Option<String>,
 }
 
 impl ResponseBuilder {
@@ -230,6 +248,7 @@ impl ResponseBuilder {
             }
             StreamEvent::Usage(u) => self.usage = Some(*u),
             StreamEvent::Finish(f) => self.finish = Some(f.clone()),
+            StreamEvent::ResponseId(id) => self.response_id = Some(id.clone()),
             StreamEvent::Sealed(items) => self.sealed.clone_from(items),
         }
     }

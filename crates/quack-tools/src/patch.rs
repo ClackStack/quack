@@ -300,14 +300,15 @@ fn parse(patch: &str) -> Result<Vec<Op>, String> {
     Ok(ops)
 }
 
-/// Find `old` in `lines` at or after `from`: exactly, then ignoring trailing whitespace,
-/// then ignoring indentation. Returns the start index.
-fn seek(lines: &[String], old: &[String], from: usize, eof: bool) -> Option<usize> {
+/// Find all positions of `old` in `lines` at or after `from`, using the most exact
+/// comparison tier that yields at least one match: exact, then trailing whitespace
+/// ignored, then indentation ignored.
+fn seek_all(lines: &[String], old: &[String], from: usize, eof: bool) -> Vec<usize> {
     if old.is_empty() {
-        return Some(if eof { lines.len() } else { from });
+        return vec![if eof { lines.len() } else { from }];
     }
-    if old.len() > lines.len() {
-        return None;
+    if old.len() > lines.len() || from > lines.len() - old.len() {
+        return Vec::new();
     }
     let eqs: [fn(&str, &str) -> bool; 3] = [
         |a, b| a == b,
@@ -319,14 +320,22 @@ fn seek(lines: &[String], old: &[String], from: usize, eof: bool) -> Option<usiz
         if eof {
             let i = lines.len() - old.len();
             if i >= from && fits(i) {
-                return Some(i);
+                return vec![i];
             }
         }
-        if let Some(i) = (from..=lines.len() - old.len()).find(|&i| fits(i)) {
-            return Some(i);
+        let hits: Vec<usize> = (from..=lines.len() - old.len())
+            .filter(|&i| fits(i))
+            .collect();
+        if !hits.is_empty() {
+            return hits;
         }
     }
-    None
+    Vec::new()
+}
+
+/// Find `old` in `lines` at or after `from`: returns the first matching start index.
+fn seek(lines: &[String], old: &[String], from: usize, eof: bool) -> Option<usize> {
+    seek_all(lines, old, from, eof).into_iter().next()
 }
 
 fn apply_hunks(text: &str, hunks: &[Hunk], shown: &str) -> Result<String, String> {
@@ -334,26 +343,55 @@ fn apply_hunks(text: &str, hunks: &[Hunk], shown: &str) -> Result<String, String
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     let mut at = 0;
     for (n, h) in hunks.iter().enumerate() {
+        let mut anchored = false;
+        let mut missing_anchor = None;
         if let Some(anchor) = &h.anchor {
             match lines[at.min(lines.len())..]
                 .iter()
                 .position(|l| l.trim() == anchor.trim())
             {
-                Some(i) => at += i + 1,
+                Some(i) => {
+                    at += i + 1;
+                    anchored = true;
+                }
                 // The anchor is only a hint (`@@ -1,3 +1,4 @@` headers end up here too).
-                None => tracing::debug!(anchor, "patch anchor not found"),
+                None => {
+                    tracing::debug!(anchor, "patch anchor not found");
+                    missing_anchor = Some(anchor.as_str());
+                }
             }
         }
-        let start = seek(&lines, &h.old, at, h.eof)
-            .or_else(|| seek(&lines, &h.old, 0, h.eof))
-            .ok_or_else(|| {
-                format!(
-                    "hunk {} of {shown} does not match the file: these lines were not found:\n{}\n\
-                     Read the file again and copy the context lines exactly",
-                    n + 1,
-                    h.old.join("\n")
-                )
-            })?;
+        let start = if anchored && let Some(i) = seek(&lines, &h.old, at, h.eof) {
+            i
+        } else {
+            // Without a matched anchor (or on whole-file fallback), require a unique match
+            // so duplicate contexts in different functions are never patched silently.
+            let hits = seek_all(&lines, &h.old, 0, h.eof);
+            match hits.as_slice() {
+                [only] => *only,
+                [] => {
+                    return Err(format!(
+                        "hunk {} of {shown} does not match the file: these lines were not found:\n{}\n\
+                         Read the file again and copy the context lines exactly",
+                        n + 1,
+                        h.old.join("\n")
+                    ));
+                }
+                many => {
+                    let places: Vec<String> = many.iter().map(|i| (i + 1).to_string()).collect();
+                    let note = match missing_anchor {
+                        Some(a) => format!(" (anchor `{a}` was not found)"),
+                        None => String::new(),
+                    };
+                    return Err(format!(
+                        "hunk {} of {shown} is ambiguous{note}: matches lines {}; \
+                         add an exact `@@ <context>` header or more surrounding lines",
+                        n + 1,
+                        places.join(", ")
+                    ));
+                }
+            }
+        };
         let end = start + h.old.len();
         lines.splice(start..end, h.new.iter().cloned());
         at = start + h.new.len();
@@ -603,5 +641,23 @@ mod tests {
     fn rejects_garbage() {
         assert!(parse("just some text").is_err());
         assert!(parse("*** Begin Patch\nhello\n*** End Patch").is_err());
+    }
+
+    #[test]
+    fn rejects_ambiguous_hunk_when_anchor_is_missing_or_not_found() {
+        let file = "fn a() {\n    x();\n}\n\nfn b() {\n    x();\n}\n";
+        let missing =
+            hunks("*** Begin Patch\n*** Update File: f\n@@\n-    x();\n+    y();\n*** End Patch");
+        let err = apply_hunks(file, &missing, "f").expect_err("ambiguous without anchor");
+        assert!(err.contains("ambiguous") && err.contains("2, 6"), "{err}");
+
+        let wrong_anchor = hunks(
+            "*** Begin Patch\n*** Update File: f\n@@ fn missing() {\n-    x();\n+    y();\n*** End Patch",
+        );
+        let err = apply_hunks(file, &wrong_anchor, "f").expect_err("ambiguous on missing anchor");
+        assert!(
+            err.contains("ambiguous") && err.contains("fn missing() {") && err.contains("2, 6"),
+            "{err}"
+        );
     }
 }

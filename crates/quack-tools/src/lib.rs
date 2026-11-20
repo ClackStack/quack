@@ -28,7 +28,7 @@ mod todo;
 mod write;
 
 pub use ask::{Answers, AskRequest, Asker};
-pub use permissions::{Decision, Permissions};
+pub use permissions::{Decision, Permissions, is_read_only_shell};
 pub use registry::{
     ReadTracker, Registry, SandboxState, Subject, Tool, ToolCtx, ToolKind, ToolOutput,
 };

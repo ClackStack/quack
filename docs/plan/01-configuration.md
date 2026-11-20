@@ -201,6 +201,8 @@ As implemented (2026-10-18): `/reload` (`Op::ReloadConfig`) re-reads every layer
 
 Folder watching, first step (2026-10-25): `quack-core/src/watch.rs` stamps the files in the system, user and project config folders (path, size and modification time; not `memory/`, `worktrees/`, `schemas/`, hidden or `.tmp` files) every 2 s, on a blocking thread. A change that is still there at the next check gives one notice, "config files changed · /reload to apply them". A reload makes the current files the new baseline. This uses polling, so no new crates. It doesn't reload by itself yet, because a reload restarts every MCP server and drops session approvals. Automatic reload waits for the selective restart below.
 
+Scoped auto-reload (2026-11-19): `quack-core/src/watch.rs` now fingerprints per subsystem (`core`, `skills`, `commands`, `hooks`, `profiles`, `agents`, `themes`, `grammars`, and individual `mcp.d/<id>.toml` / `lsp.d/<id>.toml` files). Pure-data extensions (`skills`, `commands`, `hooks`, `profiles`, `agents`, `themes`, `grammars`) auto hot-reload in place without dropping session approvals or restarting servers; per-server `mcp.d` or `lsp.d` edits restart or stop only the affected server(s); changes to `config.toml`, `providers.d`, or `bundles` still emit the `/reload` notice.
+
 The plan: `notify` (or the poller above) watches all layer directories. On change, a debounced `Op::ReloadConfig`:
 - reloads settings and item files,
 - adds, removes or restarts only the MCP/LSP servers whose files changed,

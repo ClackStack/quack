@@ -8,7 +8,7 @@ use crate::paths;
 use crate::registry::{Subject, Tool, ToolCtx, ToolKind, ToolOutput, arg_str, opt_str, opt_u64};
 use crate::text::{MAX_EDIT_BYTES, TextFile, io_msg, looks_binary};
 
-const DEFAULT_LIMIT: usize = 2000;
+const DEFAULT_LIMIT: usize = 500;
 const MAX_LINE_CHARS: usize = 2000;
 const MAX_READ_BYTES: u64 = MAX_EDIT_BYTES;
 const PATH: &[&str] = &["path", "file_path", "filename", "file"];
@@ -139,7 +139,7 @@ fn read(args: &Value, ctx: &ToolCtx) -> Result<ToolOutput, String> {
     {
         if ctx.hashline() {
             let tag = crate::hashline::file_tag(&file.text);
-            ctx.reads.saw(&path, &tag, &file.text, (1, total.max(1)));
+            ctx.reads.saw_outline(&path, &tag, &file.text);
         }
         let tokens = file.text.len() * 2 / 7;
         let mut out = o.render(&shown);

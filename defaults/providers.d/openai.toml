@@ -14,8 +14,12 @@ extra_body = { reasoning = { summary = "auto", context = "all_turns" } }
 
 # Default context budgets (Astra/Luna 272k, Sol and Terra 500k) and image input follow the
 # Codex catalog reviewed 2026-11-17; larger account/route-specific windows require an
-# explicit override. The catalog's `ultra` picker level is Codex-side multi-agent
-# delegation, not a wire effort, so it is not offered here.
+# explicit override. 500k models set `compact_at = 250000` to compact before the 272k
+# long-context pricing cliff. GPT-6.2 entries enable `prompt_cache` (`developer_instructions`
+# + `explicit_breakpoints`) per model so reusable system instructions stay inside the cached
+# `input` prefix without sending `prompt_cache_options` to models (such as `gpt-6-luna`) that
+# reject it. The catalog's `ultra` picker level is Codex-side multi-agent delegation, not a
+# wire effort, so it is not offered here.
 # Prices: US dollars per million tokens, for prompts up to 272k tokens. Longer prompts
 # cost about twice as much.
 # Supported reasoning efforts: https://developers.openai.com/api/docs/guides/reasoning
@@ -23,7 +27,9 @@ extra_body = { reasoning = { summary = "auto", context = "all_turns" } }
 id = "gpt-6.2-sol"
 alias = "sol"
 context_window = 500000
+compact_at = 250000
 vision = true
+prompt_cache = { developer_instructions = true, explicit_breakpoints = true }
 reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
 cost = { input = 2.0, output = 10.0, cached_input = 0.1, cache_write = 2.5 }
 
@@ -32,12 +38,14 @@ id = "gpt-6.2-astra"
 alias = "astra"
 context_window = 272000
 vision = true
+prompt_cache = { developer_instructions = true, explicit_breakpoints = true }
 reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
 cost = { input = 8.0, output = 40.0, cached_input = 0.4, cache_write = 10.0 }
 
 [[models]]
 id = "gpt-6.1-sol"
 context_window = 500000
+compact_at = 250000
 vision = true
 reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
 cost = { input = 2.0, output = 10.0, cached_input = 0.1, cache_write = 2.5 }
@@ -61,6 +69,7 @@ cost = { input = 0.1, output = 0.5, cached_input = 0.01, cache_write = 0.125 }
 id = "gpt-6.1-terra"
 alias = "terra"
 context_window = 500000
+compact_at = 250000
 vision = true
 reasoning = { effort = "medium", efforts = ["none", "low", "medium", "high", "xhigh", "max"] }
 cost = { input = 1.0, output = 5.0, cached_input = 0.05, cache_write = 1.25 }

@@ -201,6 +201,12 @@ impl ReadTracker {
         self.note(path, tag, text, &[lines], false);
     }
 
+    /// Note that the model only saw a structural outline of `text` under `tag`, without
+    /// marking body lines as shown so `edit_hashline` still requires reading lines first.
+    pub fn saw_outline(&self, path: &Path, tag: &str, text: &str) {
+        self.note(path, tag, text, &[], false);
+    }
+
     /// Note the version an edit made, of which its result gave `lines` (the new ones).
     pub fn edited(&self, path: &Path, tag: &str, text: &str, lines: &[(usize, usize)]) {
         self.note(path, tag, text, lines, true);
@@ -276,6 +282,8 @@ pub struct ToolCtx {
     pub outline_above: usize,
     /// Grammars and their `grammars/` query overrides, for outlines.
     pub grammars: Arc<crate::grammar::Grammars>,
+    /// Managed background shell jobs for this session; killed automatically on drop.
+    pub bg: Arc<quack_shell::BackgroundManager>,
 }
 
 impl ToolCtx {
@@ -393,6 +401,7 @@ pub(crate) fn test_ctx() -> ToolCtx {
         vision: false,
         outline_above: 0,
         grammars: crate::grammar::Grammars::builtin(),
+        bg: Arc::default(),
     }
 }
 

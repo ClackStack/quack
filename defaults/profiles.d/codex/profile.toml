@@ -16,7 +16,7 @@ edit_format = "apply_patch"
 [[tools]]
 name = "shell"
 maps_to = "shell"
-description = "Runs one command to completion in the workspace and returns its exit code and output. `command` is an argument list, for example [\"bash\", \"-lc\", \"rg -n parse src\"]. Each call is a fresh process, with no stdin or persistent session; use non-interactive flags. `timeout_secs` sets the timeout within configured limits. Commands use the configured sandbox; only retry with `sandbox: false` after a sandbox denial, subject to user approval."
+description = "Runs a command in the workspace and returns its exit code and output. `command` is an argument list, for example [\"bash\", \"-lc\", \"rg -n parse src\"]. Each call is a fresh process, with no stdin or persistent session; use non-interactive flags. `timeout_secs` sets the timeout within configured limits. Pass `background: true` to start a long-running server or watcher (returns a `job_id`), then inspect or stop it with `job_action: \"output\" | \"stop\" | \"list\"` and `job_id`. Commands use the configured sandbox; only retry with `sandbox: false` after a sandbox denial, subject to user approval."
 [tools.params]
 command = { to = "command", transform = "argv" }
 

@@ -1,0 +1,32 @@
+{
+  "harness": "quack 0.0.0",
+  "date": "2026-11-18",
+  "suite": "hard",
+  "model": "chatgpt/terra",
+  "profile": "generic",
+  "sampling": {},
+  "results": [
+    {
+      "task": "cancel-restock",
+      "category": "fix-symptom",
+      "passed": true,
+      "changed": [
+        "orderly/inventory.py",
+        "orderly/shop.py",
+        "tests/test_shop.py"
+      ],
+      "steps": 10,
+      "tool_calls": 11,
+      "tool_errors": 0,
+      "parse_failures": 0,
+      "edit_failures": 0,
+      "prompt_tokens": 69058,
+      "cached_tokens": 0,
+      "completion_tokens": 1460,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 9446,
+      "seconds": 52.157563354
+    }
+  ]
+}

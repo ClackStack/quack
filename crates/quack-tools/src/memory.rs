@@ -305,6 +305,7 @@ mod tests {
             vision: false,
             outline_above: 0,
             grammars: crate::grammar::Grammars::builtin(),
+            bg: Arc::default(),
         }
     }
 

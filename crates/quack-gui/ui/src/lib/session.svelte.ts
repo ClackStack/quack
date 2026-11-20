@@ -1362,7 +1362,7 @@ export class Session {
 	/** Picks a thinking level for the current model; `null` restores its default. */
 	async setReasoningEffort(effort: string | null) {
 		this.thinkingOpen = false;
-		return this.#send({ op: 'set_reasoning_effort', effort });
+		return this.#send({ op: 'set_reasoning_effort', effort: effort ?? undefined });
 	}
 
 	async setWorkMode(mode: WorkMode) {
@@ -1384,7 +1384,7 @@ export class Session {
 		} else {
 			this.signingIn = null; // the engine aborts silently on cancel
 		}
-		const sent = await this.#send({ op: 'sign_in', id });
+		const sent = await this.#send({ op: 'sign_in', id: id ?? undefined });
 		if (!sent) this.signingIn = before;
 		return sent;
 	}
@@ -1498,7 +1498,7 @@ export class Session {
 		return true;
 	}
 	async undo() {
-		return this.#send({ op: 'undo', checkpoint: null, force: false });
+		return this.#send({ op: 'undo', checkpoint: undefined, force: false });
 	}
 
 	async listRewindPoints() {
@@ -2005,8 +2005,8 @@ export class Session {
 			request,
 			revision: args.revision,
 			connections: args.connections,
-			enable: args.enable ?? null,
-			replace_payload: args.replacePayload ?? null
+			enable: args.enable ?? undefined,
+			replace_payload: args.replacePayload ?? undefined
 		});
 		if (!sent) {
 			this.#activeHookSaveRequest = null;

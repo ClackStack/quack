@@ -767,12 +767,15 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, Refused> {
     };
     let specs = resolve_blocks(&block_ctx, specs, &mut notes)?;
 
-    // Ranges the model wrote out itself (post-`block` resolution): the ones whose lines
-    // must have been shown.
+    // Ranges and anchor lines the model wrote out itself (post-`block` resolution):
+    // every targeted line must have been shown before modifying or inserting after it.
     let written: Vec<(usize, usize)> = specs
         .iter()
         .filter_map(|s| match s {
             Spec::Replace { start, end, .. } => Some((*start, *end)),
+            Spec::Insert {
+                at: Gap::After(n), ..
+            } if *n > 0 => Some((*n, *n)),
             _ => None,
         })
         .collect();

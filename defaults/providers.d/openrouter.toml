@@ -6,6 +6,12 @@ group = "Open-model services"
 base_url = "https://openrouter.ai/api/v1"
 api_key = { env = "OPENROUTER_API_KEY" }
 
+# Sticky routing activates immediately from the first request when `x-session-id` is sent;
+# without it OpenRouter waits for a cache hit before pinning an upstream provider. Kept in
+# the header (not body `prompt_cache_key`) so non-OpenAI upstream endpoints never reject it.
+[prompt_cache]
+affinity_header = "x-session-id"
+
 # Prices: US dollars per million tokens. The rest of the catalog also arrives
 # through /models discovery; entries here pin context limits and the prices
 # quack costs evals with (DeepSeek's is the peak weekday rate; OpenRouter

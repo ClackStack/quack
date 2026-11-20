@@ -306,6 +306,7 @@ fn kimi_code_matches_the_kimi_k3_family_and_the_plan_models() {
     for model in [
         "moonshotai/kimi-k3",
         "kimi-k3.1-pro",
+        "accounts/fireworks/models/kimi-k3p1-pro",
         "accounts/fireworks/routers/kimi-k3-fast",
         "kimi-for-coding",
     ] {

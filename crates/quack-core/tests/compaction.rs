@@ -80,7 +80,7 @@ async fn native_compaction_replays_the_window_and_kept_reasoning_after_resume() 
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
         .respond_with(responses_reply("reply"))
-        .expect(4)
+        .expect(5)
         .mount(&server)
         .await;
 
@@ -101,6 +101,7 @@ async fn native_compaction_replays_the_window_and_kept_reasoning_after_resume() 
         }
     }
     turn(&mut engine, "THIRD").await;
+    turn(&mut engine, "FOURTH").await;
     engine.shutdown().await;
 
     let path = loaded
@@ -115,7 +116,7 @@ async fn native_compaction_replays_the_window_and_kept_reasoning_after_resume() 
     )
     .expect("disable native compaction");
     let mut engine = Engine::spawn_with(loaded, Resume::Latest);
-    turn(&mut engine, "FOURTH").await;
+    turn(&mut engine, "FIFTH").await;
     engine.shutdown().await;
 
     let requests = server.received_requests().await.expect("recorded requests");
@@ -138,11 +139,40 @@ async fn native_compaction_replays_the_window_and_kept_reasoning_after_resume() 
     let resumed: serde_json::Value = requests[3].body_json().expect("resumed body");
     let input = resumed["input"].as_array().expect("input array");
     assert_eq!(&input[..2], output.as_array().expect("compacted output"));
-    assert_eq!(input[2]["content"], "SECOND");
-    assert_eq!(input[3]["encrypted_content"], "reasoning-for-replay");
+    assert_eq!(input[2]["role"], "developer");
+    assert!(
+        input[2]["content"]
+            .as_str()
+            .is_some_and(|c| c.contains("<context>") && c.contains("Workspace root")),
+        "session context must survive native compaction: {}",
+        input[2]
+    );
+    assert_eq!(input[3]["content"], "SECOND");
+    // The pre-compaction reply for SECOND was produced before the prefix was rewritten, so
+    // its stale encrypted reasoning is unsealed rather than replayed behind the new checkpoint.
+    assert_eq!(input[4]["role"], "assistant");
+    assert_eq!(input[4]["content"], "reply");
+    assert!(
+        !resumed["input"]
+            .to_string()
+            .contains("reasoning-for-replay"),
+        "stale pre-compaction reasoning must not replay after rewritten prefix: {resumed}"
+    );
     assert_eq!(input.last().expect("new message")["content"], "THIRD");
-    let portable = String::from_utf8_lossy(&requests[4].body);
-    assert!(portable.contains("[compaction summary]") && portable.contains("FOURTH"));
+
+    // Post-compaction replies (THIRD) bind to the compacted prefix and replay their reasoning.
+    let followup: serde_json::Value = requests[4].body_json().expect("followup body");
+    let followup_input = followup["input"].as_array().expect("followup input");
+    assert!(
+        followup_input
+            .iter()
+            .any(|item| item["encrypted_content"] == "reasoning-for-replay"),
+        "fresh post-compaction reasoning should replay on later turns: {followup}"
+    );
+    assert_eq!(followup_input.last().expect("fourth")["content"], "FOURTH");
+
+    let portable = String::from_utf8_lossy(&requests[5].body);
+    assert!(portable.contains("[compaction summary]") && portable.contains("FIFTH"));
     assert!(!portable.contains("sealed-window") && !portable.contains("reasoning-for-replay"));
 }
 
@@ -521,4 +551,105 @@ async fn a_context_window_setting_caps_the_models_window() {
     ));
     assert!(compacted(&turn(&mut engine, &format!("THIRD {big}")).await));
     engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn compact_at_triggers_before_long_context_cliff() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains(SUMMARIZER))
+        .respond_with(sse("SUMMARY-TEXT"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(sse("ok"))
+        .mount(&server)
+        .await;
+
+    // Model claims a 500k context window, but compact_at = 13_600 forces compaction well
+    // before the 500k * 0.80 threshold (same turn sizes as the 20k threshold test).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = Arc::new(workspace(
+        tmp.path(),
+        &server.uri(),
+        r#"[{ id = "huge", context_window = 500000, compact_at = 13600 }]"#,
+    ));
+    let big = "x".repeat(17_000);
+    let mut engine = Engine::spawn(loaded);
+    assert!(!compacted(
+        &turn(&mut engine, &format!("FIRST {big}")).await
+    ));
+    assert!(!compacted(
+        &turn(&mut engine, &format!("SECOND {big}")).await
+    ));
+    assert!(compacted(&turn(&mut engine, &format!("THIRD {big}")).await));
+    // `keep` must scale with `compact_at` (13_600 * 0.35 = 4_760), not the 500k window
+    // (425_000 * 0.35 = 148_750), so SECOND is compacted away rather than kept verbatim.
+    let last = bodies(&server).await.pop().expect("request");
+    assert!(last.contains("SUMMARY-TEXT") && last.contains("THIRD"));
+    assert!(!last.contains("FIRST") && !last.contains("SECOND"));
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn text_compaction_uses_small_model_with_minimal_reasoning_effort() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains(SUMMARIZER))
+        .respond_with(sse("SMALL-SUMMARY"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(sse("ok"))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join("user")).expect("mkdir");
+    std::fs::write(
+        tmp.path().join("user").join("config.toml"),
+        "[model]\ndefault = \"mock/big\"\nsmall = \"mock/mini\"\n",
+    )
+    .expect("config");
+    let loaded = Arc::new(workspace(
+        tmp.path(),
+        &server.uri(),
+        r#"[
+            { id = "big", context_window = 20000, reasoning = { efforts = ["none", "low", "high"], effort = "high" } },
+            { id = "mini", context_window = 20000, reasoning = { efforts = ["none", "low", "high"], effort = "high" } }
+        ]"#,
+    ));
+    let mut engine = Engine::spawn(loaded);
+    turn(&mut engine, "FIRST").await;
+    turn(&mut engine, "SECOND").await;
+    engine.submit(Op::Compact { focus: None }).await;
+    assert!(compacted(&until_done(&mut engine).await));
+    engine.shutdown().await;
+
+    let reqs: Vec<serde_json::Value> = bodies(&server)
+        .await
+        .iter()
+        .map(|b| serde_json::from_str(b).expect("json"))
+        .collect();
+    let chat = reqs
+        .iter()
+        .find(|r| r.to_string().contains("FIRST") && !r.to_string().contains(SUMMARIZER))
+        .expect("chat request");
+    assert_eq!(chat["model"], "big");
+    assert_eq!(chat["reasoning_effort"], "high");
+
+    let summary = reqs
+        .iter()
+        .find(|r| r.to_string().contains(SUMMARIZER))
+        .expect("summary request");
+    assert_eq!(
+        summary["model"], "mini",
+        "text compaction should use [model] small"
+    );
+    assert_eq!(
+        summary["reasoning_effort"], "none",
+        "utility compaction call should drop to the lowest reasoning effort"
+    );
 }

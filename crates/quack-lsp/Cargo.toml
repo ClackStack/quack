@@ -17,6 +17,7 @@ doc = false
 
 [dependencies]
 quack-config.workspace = true
+quack-sandbox.workspace = true
 quack-shell.workspace = true
 futures.workspace = true
 serde_json.workspace = true

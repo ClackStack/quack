@@ -55,7 +55,7 @@ describe('workspace lifecycle', () => {
 			receive({ tab: 3, info });
 			receive({ tab: 3, event: {
 				event: 'session_resumed',
-				session: { id: 'saved', cwd: '/workspace', model: null, profile: 'generic' },
+				session: { id: 'saved', cwd: '/workspace', model: undefined, profile: 'generic' },
 				items: [{ kind: 'assistant', text: 'Saved response' }]
 			} });
 			receive({ tab: 3, event: { event: 'mode_changed', work_mode: 'edit', approvals: 'read-only' } });

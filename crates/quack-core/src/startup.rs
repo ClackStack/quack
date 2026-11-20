@@ -741,10 +741,13 @@ async fn build_setup(
         spawn: None,
         edit_format: EditFormat::StrReplace,
         vision: false,
-        outline_above: crate::turn::tokens_to_bytes(config.settings.tools.read_outline_tokens as usize),
+        outline_above: crate::turn::tokens_to_bytes(
+            config.settings.tools.read_outline_tokens as usize,
+        ),
         grammars: Arc::new(quack_tools::grammar::Grammars::from_layers(
             config.item_layers().iter().map(|(_, d)| d.as_path()),
         )),
+        bg: Arc::default(),
     };
     let registry = Arc::new(Registry::builtin());
     let vars = PromptVars {
@@ -844,6 +847,98 @@ async fn build_setup(
         agents: Arc::new(agents),
         mcp_tools: true,
     })
+}
+
+/// Hot-reload pure-data extensions (skills, custom commands, agents, grammars, profiles)
+/// onto a fresh `Setup` clone while keeping the live provider, model, approvals, MCP/LSP
+/// managers, read-tracker, plan checklist, and background jobs intact.
+pub(crate) fn refresh_extensions(
+    old: &Setup,
+    config: &Loaded,
+    tx: &broadcast::Sender<Event>,
+) -> Setup {
+    let found = env::skills(config);
+    report_skills(tx, &found);
+    let (commands, cmd_warnings) = env::commands(config);
+    report_commands(tx, &commands, &cmd_warnings);
+    let (agents, _) = env::agents(config);
+    let grammars = Arc::new(quack_tools::grammar::Grammars::from_layers(
+        config.item_layers().iter().map(|(_, d)| d.as_path()),
+    ));
+    let mut tool_ctx = old.tool_ctx.clone();
+    tool_ctx.skills = Arc::new(found.skills);
+    tool_ctx.agents = Arc::new(
+        agents
+            .iter()
+            .map(|(id, a)| quack_tools::AgentInfo {
+                id: id.clone(),
+                description: a.description.trim().to_owned(),
+                read_only: a.read_only,
+            })
+            .collect(),
+    );
+    tool_ctx.grammars = grammars;
+
+    let mut vars = old.vars.clone();
+    vars.skills = skills::index(
+        &tool_ctx.skills,
+        config.settings.skills.index_max_tokens as usize * 7 / 2,
+    );
+
+    let (profiles, _) = load_profiles(config);
+    let mut names = vec![old.model.id.as_str()];
+    names.extend(old.model.alias.as_deref());
+    let requested = match config.settings.model.profile.as_str() {
+        "" => old.model.profile.as_str(),
+        forced => forced,
+    };
+    let profile = select(&profiles, requested, &names).unwrap_or_else(|_| old.profile.clone());
+    let shaped = shape(
+        &profile,
+        config.settings.tools.edit_format,
+        &old.registry,
+        &tool_ctx,
+        &vars,
+    );
+    let valid_surface = validate_edit_surface(&profile, &shaped).is_ok();
+    let (system, session_context, surface) = match (valid_surface, shaped.system, shaped.context) {
+        (true, Ok(s), Ok(c)) => {
+            tool_ctx.edit_format = shaped.edit_format;
+            (s, c, shaped.surface)
+        }
+        _ => (
+            old.system.clone(),
+            old.session_context.clone(),
+            old.surface.clone(),
+        ),
+    };
+
+    let effort = old.reasoning_effort.read().ok().and_then(|e| e.clone());
+    let estimator = old.estimator.lock().map(|e| *e).unwrap_or_default();
+
+    Setup {
+        provider: old.provider.clone(),
+        model: old.model.clone(),
+        reasoning_effort: std::sync::RwLock::new(effort),
+        model_ref: old.model_ref.clone(),
+        profile,
+        system,
+        session_context,
+        surface,
+        registry: old.registry.clone(),
+        tool_ctx,
+        permissions: old.permissions.clone(),
+        budget: old.budget,
+        estimator: std::sync::Mutex::new(estimator),
+        tool_block_bytes: std::sync::OnceLock::new(),
+        context: old.context.clone(),
+        instruction_dirs: old.instruction_dirs.clone(),
+        mcp: old.mcp.clone(),
+        vars,
+        commands: Arc::new(commands),
+        agents: Arc::new(agents),
+        mcp_tools: old.mcp_tools,
+    }
 }
 
 /// `/profiles`: every installed profile, previewed for the session's model.

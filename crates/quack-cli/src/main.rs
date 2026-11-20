@@ -25,13 +25,24 @@ use cli::{CatalogCmd, Cli, Cmd, ConfigCmd, KeyringCmd};
 fn main() -> ExitCode {
     let started = Instant::now();
     let cli = Cli::parse();
-    let cwd = match cli.global.cd.clone().map_or_else(std::env::current_dir, Ok) {
+    let mut cwd = match cli.global.cd.clone().map_or_else(std::env::current_dir, Ok) {
         Ok(dir) => dir,
         Err(e) => {
             eprintln!("error: cannot determine working directory: {e}");
             return code(exit::CONFIG_ERROR);
         }
     };
+    if let Some(name) = &cli.global.worktree {
+        match quack_store::worktree::create_or_open(&cwd, name, true) {
+            Ok(wt) => {
+                cwd = wt.path;
+            }
+            Err(e) => {
+                eprintln!("error: --worktree {name}: {e}");
+                return code(exit::CONFIG_ERROR);
+            }
+        }
+    }
     let mut overrides = cli.global.overrides.clone();
     if let Some(p) = &cli.global.profile {
         overrides.push(format!("model.profile={}", toml_string(p)));

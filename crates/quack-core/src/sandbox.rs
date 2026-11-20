@@ -81,12 +81,10 @@ pub(crate) fn server_wrapper(config: &Loaded) -> Option<Prepare> {
             let policy = policy
                 .as_ref()
                 .ok_or("the file sets `sandbox = true`, but the sandbox is not available")?;
-            quack_sandbox::command(policy, program.as_os_str(), args)
+            quack_sandbox::sandboxed(policy, program.as_os_str(), args)
                 .map_err(|e| format!("{} must run in the sandbox, but {e}", spec.id))
         } else {
-            let mut cmd = tokio::process::Command::new(program);
-            cmd.args(args);
-            Ok(cmd)
+            Ok(quack_sandbox::unsandboxed(program.as_os_str(), args))
         }
     }))
 }

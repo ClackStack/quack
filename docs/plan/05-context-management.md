@@ -131,17 +131,29 @@ Compaction prompts are profile-overridable templates (`compact.md` in a profile 
 - **Log:** `prune` records hold the replaced contents and `compaction` records hold the cut and the summary message. Replay applies them in order, and repairs dangling tool calls at each `resume` record, as the live session did. Resume therefore rebuilds the same history.
 - **Tested** with mock servers (threshold, overflow retry, `/compact`, resume after compaction) and locally with Qwen3.5-0.8B on llama.cpp with a 6k window: three turns, two compactions in one turn, and the facts from the first turn recalled after them.
 
-### Native Responses compaction (2026-11-18)
+### Native Responses compaction (2026-11-18, hardened 2026-11-19)
 
 - The bundled OpenAI and ChatGPT providers use native compaction at the threshold,
   after an overflow, and for `/compact` without a focus. Automatic compaction sends
   the older span before pruning can discard its reasoning. The `aggressive` cache
-  strategy still prunes first.
-- Quack replaces the older span with the server's returned input items in order and
-  appends the untouched recent tail. For threshold-based plan compaction, the newest
-  checkpoint subsumes the preceding items. The session log stores both the encrypted
-  checkpoint and a local text fallback. The native window is replayed after resume
-  when the provider, endpoint, model, system prompt and tools still match.
+  strategy still prunes first. Models with `compact_at` scale both the trigger
+  threshold and the 35% kept-tail budget to `compact_at` so large-window models
+  don't keep an oversized tail past their soft ceiling.
+- Quack replaces the older span with the server's returned input items in order,
+  re-injects `<context>` as a `developer` item so workspace rules survive, appends
+  the untouched recent tail, and unseals kept pre-compaction `Assistant` replies so
+  stale encrypted reasoning isn't replayed behind a rewritten prefix (new replies
+  after compaction seal normally). For threshold-based plan compaction, the newest
+  checkpoint subsumes the preceding items, reasoning effort drops to the model's
+  lowest level without `reasoning.summary`, and a produced checkpoint is retained
+  even if the discarded post-compaction reply hits `max_output_tokens`.
+- Token estimation (`raw_estimate`, compaction sizing, and `/context`) counts each
+  message directly from its wire payload, skipping `Assistant.sealed` ciphertext
+  and unsent `Compaction.content` fallback text so encrypted reasoning blobs do not
+  trigger premature compaction.
+- The session log stores both the encrypted checkpoint and a local text fallback.
+  The native window is replayed after resume when the provider, endpoint, model,
+  system prompt and tools still match.
 - A focused `/compact`, a pre-compact hook that supplies summary instructions, or
   an unavailable endpoint uses the text summarizer. When replay is incompatible
   with the current setup, Quack uses the saved text fallback for that checkpoint.

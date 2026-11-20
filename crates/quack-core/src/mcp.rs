@@ -104,11 +104,7 @@ impl Mcp {
     /// budget change.
     pub fn offered(self: &Arc<Self>, budget: Option<u32>) -> Vec<Arc<dyn Tool>> {
         let revision = self.manager.revision();
-        let activated = self
-            .activated
-            .lock()
-            .map(|a| a.clone())
-            .unwrap_or_default();
+        let activated = self.activated.lock().map(|a| a.clone()).unwrap_or_default();
         if let Ok(cache) = self.cache.lock()
             && cache.revision == revision
             && cache.budget == budget
@@ -128,7 +124,11 @@ impl Mcp {
         tools
     }
 
-    fn build_offered(self: &Arc<Self>, budget: Option<u32>, activated: &[String]) -> Vec<Arc<dyn Tool>> {
+    fn build_offered(
+        self: &Arc<Self>,
+        budget: Option<u32>,
+        activated: &[String],
+    ) -> Vec<Arc<dyn Tool>> {
         let tools = self.adapters();
         let mut out: Vec<Arc<dyn Tool>> = Vec::new();
         if !Self::deferred(&tools, budget) {

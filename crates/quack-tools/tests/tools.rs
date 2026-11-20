@@ -29,6 +29,7 @@ fn ctx(root: &std::path::Path) -> ToolCtx {
         vision: false,
         outline_above: 0,
         grammars: quack_tools::grammar::Grammars::builtin(),
+        bg: Arc::default(),
     }
 }
 
@@ -250,9 +251,23 @@ async fn index_and_outlined_reads() {
         d.model
     );
 
-    // Off: the whole file. On: the outline, unless a range or symbol is asked for.
+    // Off: plain lines, capped at the default 500-line chunk so non-outlined files don't
+    // dump thousands of lines at once. On: the outline, unless a range or symbol is asked for.
     let whole = call(&reg, &c, "read", json!({"path": "src/big.rs"})).await;
-    assert!(whole.model.contains("pub fn f199"), "{}", whole.summary);
+    assert!(whole.model.contains("pub fn f48"), "{}", whole.summary);
+    assert!(
+        whole.model.contains("lines 1-500 of 2004"),
+        "{}",
+        whole.model
+    );
+    let tail = call(
+        &reg,
+        &c,
+        "read",
+        json!({"path": "src/big.rs", "offset": 1990, "limit": 20}),
+    )
+    .await;
+    assert!(tail.model.contains("pub fn f199"), "{}", tail.summary);
     c.outline_above = 2000;
     let o = call(&reg, &c, "read", json!({"path": "src/big.rs"})).await;
     assert!(o.model.contains("so this is its outline"), "{}", o.model);
@@ -323,4 +338,173 @@ async fn view_image_needs_vision_and_sends_the_pixels() {
     let bad = call(&reg, &c, "view_image", json!({"path": "not.txt"})).await;
     assert!(!bad.ok && bad.model.contains("not.txt"), "{bad:?}");
     assert!(bad.images.is_empty());
+}
+
+#[tokio::test]
+async fn grep_supports_files_count_context_and_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = Registry::builtin();
+    let c = ctx(dir.path());
+    std::fs::write(
+        dir.path().join("a.txt"),
+        "alpha\nMATCH one\nbeta\ngamma\ndelta\nMATCH two\nepsilon\n",
+    )
+    .expect("a");
+    std::fs::write(dir.path().join("b.txt"), "MATCH three\n").expect("b");
+
+    let files = call(
+        &reg,
+        &c,
+        "grep",
+        json!({"pattern": "MATCH", "output_mode": "files"}),
+    )
+    .await;
+    assert!(files.ok, "{files:?}");
+    assert_eq!(files.model, "a.txt\nb.txt\n");
+
+    let counts = call(
+        &reg,
+        &c,
+        "grep",
+        json!({"pattern": "MATCH", "output_mode": "count"}),
+    )
+    .await;
+    assert!(counts.ok, "{counts:?}");
+    assert_eq!(counts.model, "a.txt: 2\nb.txt: 1\n");
+
+    let with_ctx = call(
+        &reg,
+        &c,
+        "grep",
+        json!({"pattern": "MATCH", "path": "a.txt", "context": 1}),
+    )
+    .await;
+    assert!(with_ctx.ok, "{with_ctx:?}");
+    assert!(
+        with_ctx.model.contains("a.txt-1- alpha\n")
+            && with_ctx.model.contains("a.txt:2: MATCH one\n")
+            && with_ctx.model.contains("a.txt-3- beta\n")
+            && with_ctx.model.contains("--\n")
+            && with_ctx.model.contains("a.txt:6: MATCH two\n"),
+        "{}",
+        with_ctx.model
+    );
+
+    let limited = call(&reg, &c, "grep", json!({"pattern": "MATCH", "limit": 1})).await;
+    assert!(limited.ok, "{limited:?}");
+    assert!(
+        limited.model.contains("2 more matches"),
+        "{}",
+        limited.model
+    );
+}
+
+#[cfg(feature = "lang-common")]
+#[tokio::test]
+async fn edit_symbol_scoping_and_hashline_outline_insert_guards() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = Registry::builtin();
+    let mut c = ctx(dir.path());
+    let src = "fn first() -> i32 {\n    let x = 1;\n    x\n}\n\nfn second() -> i32 {\n    let x = 1;\n    x\n}\n";
+    std::fs::write(dir.path().join("dup.rs"), src).expect("dup.rs");
+
+    assert!(call(&reg, &c, "read", json!({"path": "dup.rs"})).await.ok);
+    // Duplicate snippet fails without symbol, succeeds when scoped to `second`.
+    let ambig = call(
+        &reg,
+        &c,
+        "edit",
+        json!({"path": "dup.rs", "old_string": "    let x = 1;", "new_string": "    let x = 2;"}),
+    )
+    .await;
+    assert!(!ambig.ok && ambig.model.contains("2 places"), "{ambig:?}");
+    let scoped = call(
+        &reg,
+        &c,
+        "edit",
+        json!({"path": "dup.rs", "symbol": "second", "old_string": "    let x = 1;", "new_string": "    let x = 2;"}),
+    )
+    .await;
+    assert!(scoped.ok, "{scoped:?}");
+    let after = std::fs::read_to_string(dir.path().join("dup.rs")).expect("read");
+    assert!(
+        after.contains("fn first() -> i32 {\n    let x = 1;")
+            && after.contains("fn second() -> i32 {\n    let x = 2;"),
+        "{after}"
+    );
+
+    // Hashline mode: outline-only read must NOT mark unseen body lines as shown, and
+    // blind inserts after unseen lines must also be refused before editing.
+    c.edit_format = quack_config::settings::EditFormat::Hashline;
+    c.outline_above = 10;
+    let outlined = call(&reg, &c, "read", json!({"path": "dup.rs"})).await;
+    assert!(
+        outlined.ok && outlined.model.contains("so this is its outline"),
+        "{outlined:?}"
+    );
+    let blind_replace = call(
+        &reg,
+        &c,
+        "edit_hashline",
+        json!({"path": "dup.rs", "edits": [{"start": 2, "end": 2, "content": "    let x = 9;"}]}),
+    )
+    .await;
+    assert!(
+        !blind_replace.ok && blind_replace.model.contains("did not show"),
+        "{blind_replace:?}"
+    );
+    let blind_insert = call(
+        &reg,
+        &c,
+        "edit_hashline",
+        json!({"path": "dup.rs", "edits": [{"action": "insert", "after": 7, "content": "    let y = 3;"}]}),
+    )
+    .await;
+    assert!(
+        !blind_insert.ok && blind_insert.model.contains("did not show"),
+        "{blind_insert:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_background_start_output_list_and_stop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let c = ctx(dir.path());
+    let reg = Registry::builtin();
+
+    let started = call(
+        &reg,
+        &c,
+        "shell",
+        json!({"command": "echo server_up; sleep 30", "background": true}),
+    )
+    .await;
+    assert!(started.ok, "{started:?}");
+    assert!(started.model.contains("job bg-1"), "{}", started.model);
+    assert!(started.model.contains("server_up"), "{}", started.model);
+
+    let listed = call(&reg, &c, "shell", json!({"job_action": "list"})).await;
+    assert!(listed.ok && listed.model.contains("bg-1"), "{listed:?}");
+
+    let output = call(
+        &reg,
+        &c,
+        "shell",
+        json!({"job_action": "output", "job_id": "bg-1"}),
+    )
+    .await;
+    assert!(output.ok && output.model.contains("running"), "{output:?}");
+
+    let stopped = call(
+        &reg,
+        &c,
+        "shell",
+        json!({"job_action": "stop", "job_id": "bg-1"}),
+    )
+    .await;
+    assert!(
+        stopped.ok && stopped.model.contains("stopped"),
+        "{stopped:?}"
+    );
 }

@@ -1,8 +1,9 @@
 //! Prefix stability (docs/plan/13-testing-and-evals.md#invariant-tests-must-never-regress):
 //! for every shipped profile, the system prompt and tool block are byte-identical across
-//! the requests of a session, and each request extends the one before it, so server KV
-//! caches stay warm. Only the extras that ride on the last message (the plan) may differ,
-//! and only compaction (an epoch boundary) may rewrite the history.
+//! the requests of a session, and each request strictly extends the one before it without
+//! mutating earlier messages, so server KV caches stay warm. Plan and working-file
+//! reminders are written into history only when they change, and only compaction (an epoch
+//! boundary) may rewrite the history.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
@@ -158,27 +159,10 @@ async fn mode(engine: &mut EngineHandle, mode: &str) {
     }
 }
 
-/// A message without what may ride on the last message of a request: the plan reminder
-/// appended to its text.
-fn base(m: &Value, last: &Value) -> bool {
-    if m == last {
-        return true;
-    }
-    let (Some(a), Some(b)) = (m["content"].as_str(), last["content"].as_str()) else {
-        return false;
-    };
-    let mut m = m.clone();
-    let mut l = last.clone();
-    m["content"] = Value::Null;
-    l["content"] = Value::Null;
-    m == l && b.starts_with(a)
-}
-
-/// Every request after the first extends the one before it: the same system prompt,
-/// tools and parameters, and the earlier messages unchanged. The one before's last
-/// message may have carried an extra (the plan) that is gone once it is not the last.
-/// Returns whether the last message carried such an extra.
-fn assert_extends(profile: &str, i: usize, before: &Value, after: &Value) -> bool {
+/// Every request after the first strictly extends the one before it: the same system
+/// prompt, tools and parameters, and every earlier message (including the previous
+/// request's last message) byte-identical.
+fn assert_extends(profile: &str, i: usize, before: &Value, after: &Value) {
     let strip = |b: &Value| {
         let mut b = b.clone();
         b["messages"] = Value::Null;
@@ -192,19 +176,9 @@ fn assert_extends(profile: &str, i: usize, before: &Value, after: &Value) -> boo
     let a = before["messages"].as_array().expect("messages");
     let b = after["messages"].as_array().expect("messages");
     assert!(b.len() > a.len(), "{profile}: request {i} dropped messages");
-    let (last, earlier) = a.split_last().expect("a message");
-    for (k, m) in earlier.iter().enumerate() {
-        assert_eq!(
-            m, &b[k],
-            "{profile}: request {i} changed message {k}, before the newest"
-        );
+    for (k, m) in a.iter().enumerate() {
+        assert_eq!(m, &b[k], "{profile}: request {i} changed message {k}");
     }
-    assert!(
-        base(&b[earlier.len()], last),
-        "{profile}: request {i} changed the newest message beyond its reminder:\n{last:#}\n{:#}",
-        b[earlier.len()]
-    );
-    &b[earlier.len()] != last
 }
 
 async fn session(profile: &str, config: &str) {
@@ -278,12 +252,26 @@ async fn session(profile: &str, config: &str) {
         .collect();
     assert_eq!(bodies.len(), 12, "{profile}: {} requests", bodies.len());
     let (live, compacted) = bodies.split_at(11);
-    let mut extras = 0;
     for (i, pair) in live.windows(2).enumerate() {
-        extras += usize::from(assert_extends(profile, i + 1, &pair[0], &pair[1]));
+        assert_extends(profile, i + 1, &pair[0], &pair[1]);
     }
-    // The plan rode on some requests' last message and was gone from the next.
-    assert!(extras > 0, "{profile}: no reminder was exercised");
+    // Plan (and modified-files when the profile exposes `write`) reminders were written
+    // into history on state changes and not duplicated on later unchanged tool steps.
+    let final_live = live.last().expect("live").to_string();
+    assert_eq!(
+        final_live.matches("[Your plan").count(),
+        1,
+        "{profile}: plan reminder should be emitted once when changed"
+    );
+    if tmp.path().join("ws").join("notes.txt").exists() {
+        assert_eq!(
+            final_live
+                .matches("[Modified files in this session:")
+                .count(),
+            1,
+            "{profile}: modified-files reminder should be emitted once when changed"
+        );
+    }
     let system = |b: &Value| b["messages"][0].clone();
     let tools = |b: &Value| b["tools"].clone();
     assert_eq!(system(&live[0])["role"], "system", "{profile}");
@@ -386,5 +374,600 @@ async fn system_prompt_and_tools_are_the_same_in_every_workspace() {
             assert!(first.contains(&format!("{project}.py")), "{profile}");
             assert!(!first.contains("{{") && !first.contains("{%"), "{profile}");
         }
+    }
+}
+
+/// Responses API sessions are strictly append-only (no trailing reminder stripped from prior
+/// messages) and emit reminders only when the plan or working-file set actually changes.
+#[tokio::test]
+async fn responses_session_is_strictly_append_only_with_delta_reminders() {
+    if !quack_providers::supports("openai-responses") {
+        return;
+    }
+    let resp_call = |id: &str, name: &str, args: Value| {
+        let events = [
+            json!({"type": "response.created", "response": {"id": format!("resp_{id}")}}),
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": name,
+                }
+            }),
+            json!({
+                "type": "response.function_call_arguments.done",
+                "output_index": 0,
+                "arguments": args.to_string(),
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": name,
+                    "arguments": args.to_string(),
+                }
+            }),
+            json!({"type": "response.completed", "response": {"id": format!("resp_{id}")}}),
+        ];
+        let body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(body)
+    };
+    let resp_text = |id: &str, t: &str| {
+        let events = [
+            json!({"type": "response.created", "response": {"id": id}}),
+            json!({"type": "response.output_text.delta", "output_index": 0, "delta": t}),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": t}]
+                }
+            }),
+            json!({"type": "response.completed", "response": {"id": id}}),
+        ];
+        let body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(body)
+    };
+
+    let server = MockServer::start().await;
+    let script = [
+        resp_call(
+            "c1",
+            "write",
+            json!({"path": "notes.txt", "content": "one\ntwo\n"}),
+        ),
+        resp_call("c2", "read", json!({"path": "notes.txt"})),
+        resp_call(
+            "c3",
+            "todo",
+            json!({"items": [{"text": "edit notes", "status": "in_progress"}]}),
+        ),
+        // Same read again: neither plan nor working files changed, so no duplicate reminder.
+        resp_call("c4", "read", json!({"path": "notes.txt"})),
+        resp_call(
+            "c5",
+            "edit",
+            json!({"path": "notes.txt", "old_string": "two", "new_string": "three"}),
+        ),
+        resp_text("resp_done", "All done."),
+    ];
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(Script(Mutex::new(script.into())))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = configure(
+        tmp.path(),
+        &server.uri(),
+        "generic",
+        "[permissions]\nmode = \"full-auto\"\n",
+    );
+    let provider_path = loaded
+        .dirs
+        .user_config
+        .join("providers.d")
+        .join("mock.toml");
+    std::fs::write(
+        provider_path,
+        format!(
+            "api = \"openai-responses\"\n\
+             base_url = \"{}/v1\"\n\
+             models = [{{ id = \"tiny\", profile = \"generic\" }}]\n\
+             [prompt_cache]\n\
+             developer_instructions = true\n\
+             explicit_breakpoints = true\n",
+            server.uri()
+        ),
+    )
+    .expect("provider");
+    // Reload with the updated Responses provider file.
+    let mut vars: HashMap<String, OsString> = HashMap::new();
+    vars.insert(
+        "QUACK_CONFIG_DIR".into(),
+        tmp.path().join("user").into_os_string(),
+    );
+    for (k, sub) in [
+        ("QUACK_SYSTEM_DIR", "system"),
+        ("QUACK_DATA_DIR", "data"),
+        ("QUACK_CACHE_DIR", "cache"),
+    ] {
+        vars.insert(k.into(), tmp.path().join(sub).into_os_string());
+    }
+    vars.insert(
+        "QUACK_DEFAULTS_DIR".into(),
+        defaults_bundle().into_os_string(),
+    );
+    let loaded = load_with(
+        &move |k| vars.get(k).cloned(),
+        &LoadOptions::new(tmp.path().join("ws")),
+    )
+    .expect("reload");
+
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    turn(&mut engine, "update notes").await;
+    engine.shutdown().await;
+
+    let bodies: Vec<Value> = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == "/v1/responses")
+        .map(|r| serde_json::from_slice(&r.body).expect("json body"))
+        .collect();
+    assert_eq!(bodies.len(), 6, "expected 6 responses steps");
+
+    for (i, pair) in bodies.windows(2).enumerate() {
+        assert_eq!(pair[0]["tools"], pair[1]["tools"], "step {i} changed tools");
+        assert_eq!(
+            pair[0]["prompt_cache_key"], pair[1]["prompt_cache_key"],
+            "step {i} changed prompt_cache_key"
+        );
+        assert_eq!(
+            pair[0]["prompt_cache_options"], pair[1]["prompt_cache_options"],
+            "step {i} changed prompt_cache_options"
+        );
+        assert!(
+            pair[0].get("instructions").is_none(),
+            "developer_instructions moves system prompt into input"
+        );
+        let before = pair[0]["input"].as_array().expect("before input");
+        let after = pair[1]["input"].as_array().expect("after input");
+        assert!(after.len() > before.len(), "step {i} did not grow");
+        assert_eq!(
+            before.as_slice(),
+            &after[..before.len()],
+            "step {i} mutated an earlier Responses input item (breaks KV prefix cache)"
+        );
+    }
+
+    // Request 3 carries the todo tool output with the plan reminder.
+    let after_todo = bodies[3]["input"]
+        .as_array()
+        .expect("input")
+        .last()
+        .expect("todo output")["output"]
+        .as_str()
+        .expect("output text");
+    assert!(
+        after_todo.contains("[Your plan"),
+        "plan reminder missing after todo: {after_todo}"
+    );
+    // Request 4 carries the repeated read output: neither plan nor working files changed,
+    // so the plan reminder must NOT be appended a second time.
+    let after_unchanged_read = bodies[4]["input"]
+        .as_array()
+        .expect("input")
+        .last()
+        .expect("read output")["output"]
+        .as_str()
+        .expect("output text");
+    assert!(
+        !after_unchanged_read.contains("[Your plan"),
+        "duplicate plan reminder appended when unchanged: {after_unchanged_read}"
+    );
+}
+
+#[tokio::test]
+async fn per_model_prompt_cache_and_session_or_model_switch_reset_diagnostics() {
+    if !quack_providers::supports("openai-responses") {
+        return;
+    }
+    let resp = |id: &str, text: &str| {
+        let events = [
+            json!({"type": "response.created", "response": {"id": id}}),
+            json!({"type": "response.output_text.delta", "output_index": 0, "delta": text}),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}]
+                }
+            }),
+            json!({"type": "response.completed", "response": {"id": id}}),
+        ];
+        let body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(body)
+    };
+    let server = MockServer::start().await;
+    let script = [
+        resp("resp_1", "one"),
+        resp("resp_2", "two"),
+        resp("resp_3", "three"),
+        resp("resp_4", "four"),
+    ];
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(Script(Mutex::new(script.into())))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = configure(tmp.path(), &server.uri(), "generic", "");
+    let provider_path = loaded
+        .dirs
+        .user_config
+        .join("providers.d")
+        .join("mock.toml");
+    std::fs::write(
+        provider_path,
+        format!(
+            "api = \"openai-responses\"\n\
+             base_url = \"{}/v1\"\n\
+             [[models]]\n\
+             id = \"m_62\"\n\
+             profile = \"generic\"\n\
+             prompt_cache = {{ developer_instructions = true, explicit_breakpoints = true, diagnostics = true }}\n\
+             [[models]]\n\
+             id = \"m_60\"\n\
+             profile = \"generic\"\n",
+            server.uri()
+        ),
+    )
+    .expect("provider");
+    let mut vars: HashMap<String, OsString> = HashMap::new();
+    vars.insert(
+        "QUACK_CONFIG_DIR".into(),
+        tmp.path().join("user").into_os_string(),
+    );
+    for (k, sub) in [
+        ("QUACK_SYSTEM_DIR", "system"),
+        ("QUACK_DATA_DIR", "data"),
+        ("QUACK_CACHE_DIR", "cache"),
+    ] {
+        vars.insert(k.into(), tmp.path().join(sub).into_os_string());
+    }
+    vars.insert(
+        "QUACK_DEFAULTS_DIR".into(),
+        defaults_bundle().into_os_string(),
+    );
+    let loaded = load_with(
+        &move |k| vars.get(k).cloned(),
+        &LoadOptions::new(tmp.path().join("ws")),
+    )
+    .expect("reload");
+
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    turn(&mut engine, "first").await;
+    turn(&mut engine, "second").await;
+    // Start a brand new session: comparison_response_id must NOT carry over from the old session.
+    engine.submit(Op::NewSession).await;
+    loop {
+        if matches!(
+            engine.events.recv().await.expect("event"),
+            Event::SessionConfigured { .. }
+        ) {
+            break;
+        }
+    }
+    turn(&mut engine, "third").await;
+    // Switch to m_60 (which has no prompt_cache options): must NOT send prompt_cache_options
+    // and must keep instructions top-level.
+    engine
+        .submit(Op::SetModel {
+            provider: quack_core::protocol::ProviderId("mock".into()),
+            model: quack_core::protocol::ModelId("m_60".into()),
+        })
+        .await;
+    loop {
+        if matches!(
+            engine.events.recv().await.expect("event"),
+            Event::SessionConfigured { .. }
+        ) {
+            break;
+        }
+    }
+    turn(&mut engine, "fourth").await;
+    engine.shutdown().await;
+
+    let bodies: Vec<Value> = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == "/v1/responses")
+        .map(|r| serde_json::from_slice(&r.body).expect("json body"))
+        .collect();
+    assert_eq!(bodies.len(), 4);
+
+    // Step 1 on m_62: developer_instructions + explicit_breakpoints, no prior response id.
+    assert!(bodies[0].get("instructions").is_none());
+    assert_eq!(
+        bodies[0]["prompt_cache_options"],
+        json!({ "mode": "implicit" })
+    );
+    // Step 2 on m_62: compares against resp_1.
+    assert_eq!(
+        bodies[1]["prompt_cache_options"]["comparison_response_id"],
+        "resp_1"
+    );
+    // Step 3 after /new: comparison_response_id must be cleared!
+    assert!(
+        bodies[2]["prompt_cache_options"]
+            .get("comparison_response_id")
+            .is_none(),
+        "new session leaked previous session's comparison_response_id: {}",
+        bodies[2]
+    );
+    // Step 4 after /models mock/m_60: no prompt_cache_options and top-level instructions.
+    assert!(
+        bodies[3].get("prompt_cache_options").is_none(),
+        "m_60 must not inherit m_62's prompt_cache_options: {}",
+        bodies[3]
+    );
+    assert!(bodies[3].get("instructions").is_some());
+}
+
+#[tokio::test]
+async fn openai_chat_prompt_cache_key_and_affinity_header_stay_stable_across_turns_and_resume() {
+    let server = MockServer::start().await;
+    let script = [
+        call(
+            "c1",
+            "TodoList",
+            json!({"todos":[{"text":"check","status":"in_progress"}]}),
+        ),
+        text("Turn 1 done."),
+        text("Turn 2 done."),
+        text("Resumed turn done."),
+        text("Fresh session done."),
+    ];
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(Script(Mutex::new(script.into())))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = configure(tmp.path(), &server.uri(), "kimi-code", "");
+    std::fs::write(
+        loaded
+            .dirs
+            .user_config
+            .join("providers.d")
+            .join("mock.toml"),
+        format!(
+            "base_url = \"{}/v1\"\n\
+             [prompt_cache]\n\
+             cache_key = true\n\
+             affinity_header = \"x-session-affinity\"\n\
+             [[models]]\n\
+             id = \"accounts/fireworks/models/kimi-k3p1-pro\"\n\
+             profile = \"kimi-code\"\n",
+            server.uri()
+        ),
+    )
+    .expect("provider");
+    let reload = || {
+        let mut vars: HashMap<String, OsString> = HashMap::new();
+        vars.insert(
+            "QUACK_CONFIG_DIR".into(),
+            tmp.path().join("user").into_os_string(),
+        );
+        for (k, sub) in [
+            ("QUACK_SYSTEM_DIR", "system"),
+            ("QUACK_DATA_DIR", "data"),
+            ("QUACK_CACHE_DIR", "cache"),
+        ] {
+            vars.insert(k.into(), tmp.path().join(sub).into_os_string());
+        }
+        vars.insert(
+            "QUACK_DEFAULTS_DIR".into(),
+            defaults_bundle().into_os_string(),
+        );
+        load_with(
+            &move |k| vars.get(k).cloned(),
+            &LoadOptions::new(tmp.path().join("ws")),
+        )
+        .expect("reload")
+    };
+
+    let mut engine = Engine::spawn(Arc::new(reload()));
+    turn(&mut engine, "first").await;
+    turn(&mut engine, "second").await;
+    engine.shutdown().await;
+
+    let mut resumed = Engine::spawn_with(Arc::new(reload()), quack_core::Resume::Latest);
+    turn(&mut resumed, "third").await;
+    resumed.submit(Op::NewSession).await;
+    loop {
+        if matches!(
+            resumed.events.recv().await.expect("event"),
+            Event::SessionConfigured { .. }
+        ) {
+            break;
+        }
+    }
+    turn(&mut resumed, "fresh").await;
+    resumed.shutdown().await;
+
+    let reqs: Vec<_> = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.url.path() == "/v1/chat/completions")
+        .collect();
+    assert_eq!(reqs.len(), 5);
+    let bodies: Vec<Value> = reqs
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).expect("json"))
+        .collect();
+    let affinities: Vec<String> = reqs
+        .iter()
+        .map(|r| {
+            r.headers
+                .get("x-session-affinity")
+                .and_then(|v| v.to_str().ok())
+                .expect("x-session-affinity header")
+                .to_owned()
+        })
+        .collect();
+
+    // First 4 requests (2 steps in turn 1, turn 2, resumed turn 3) share one session key.
+    let key = bodies[0]["prompt_cache_key"].as_str().expect("cache key");
+    assert!(!key.is_empty());
+    for i in 0..4 {
+        assert_eq!(bodies[i]["prompt_cache_key"], key, "request {i}");
+        assert_eq!(affinities[i], key, "affinity header {i}");
+    }
+    // Strictly append-only across tool step, turn 2, and resumed turn 3.
+    for (i, pair) in bodies[..4].windows(2).enumerate() {
+        assert_extends("kimi-code", i + 1, &pair[0], &pair[1]);
+    }
+    // `/new` starts a fresh session key for both body and affinity header.
+    let fresh_key = bodies[4]["prompt_cache_key"]
+        .as_str()
+        .expect("fresh cache key");
+    assert_ne!(fresh_key, key);
+    assert_eq!(affinities[4], fresh_key);
+}
+
+/// Providers like OpenRouter use an affinity header (`x-session-id`) without emitting body
+/// `prompt_cache_key` (which non-OpenAI upstream endpoints may reject), and text compaction
+/// carries the same session header so all calls in a session stay grouped.
+#[tokio::test]
+async fn affinity_header_only_omits_body_cache_key_and_tags_text_compaction() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(text("Turn 1 complete."))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(text("Turn 2 complete."))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(text(
+            "## Goal\nKeep session sticky.\n\n## Done so far\nCompleted turn 1 and verified header.",
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let user = tmp.path().join("user");
+    std::fs::create_dir_all(user.join("providers.d")).expect("mkdir");
+    std::fs::create_dir_all(tmp.path().join("ws")).expect("mkdir");
+    std::fs::write(
+        user.join("providers.d/router.toml"),
+        format!(
+            "base_url = \"{}/v1\"\n\
+             [prompt_cache]\n\
+             affinity_header = \"x-session-id\"\n\
+             [[models]]\n\
+             id = \"m\"\n",
+            server.uri()
+        ),
+    )
+    .expect("provider");
+    std::fs::write(
+        user.join("config.toml"),
+        "[model]\ndefault = \"router/m\"\n",
+    )
+    .expect("cfg");
+
+    let mut vars = HashMap::<String, OsString>::new();
+    vars.insert("QUACK_CONFIG_DIR".into(), user.into_os_string());
+    for (k, sub) in [
+        ("QUACK_SYSTEM_DIR", "system"),
+        ("QUACK_DATA_DIR", "data"),
+        ("QUACK_CACHE_DIR", "cache"),
+    ] {
+        vars.insert(k.into(), tmp.path().join(sub).into_os_string());
+    }
+    vars.insert(
+        "QUACK_DEFAULTS_DIR".into(),
+        defaults_bundle().into_os_string(),
+    );
+    let loaded = load_with(
+        &move |k| vars.get(k).cloned(),
+        &LoadOptions::new(tmp.path().join("ws")),
+    )
+    .expect("load");
+
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    turn(&mut engine, "first").await;
+    turn(&mut engine, "second").await;
+    engine.submit(Op::Compact { focus: None }).await;
+    loop {
+        if matches!(
+            engine.events.recv().await.expect("event"),
+            Event::Compacted { .. }
+        ) {
+            break;
+        }
+    }
+    engine.shutdown().await;
+
+    let reqs: Vec<_> = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.url.path() == "/v1/chat/completions")
+        .collect();
+    assert_eq!(reqs.len(), 3, "two turns plus one text compaction summary");
+    let first_id = reqs[0]
+        .headers
+        .get("x-session-id")
+        .and_then(|v| v.to_str().ok())
+        .expect("x-session-id header")
+        .to_owned();
+    assert!(!first_id.is_empty());
+    for (i, req) in reqs.iter().enumerate() {
+        let got = req
+            .headers
+            .get("x-session-id")
+            .and_then(|v| v.to_str().ok())
+            .expect("x-session-id header");
+        assert_eq!(got, first_id, "request {i} keeps same x-session-id");
+        let body: Value = serde_json::from_slice(&req.body).expect("json");
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "request {i} should not send body prompt_cache_key when cache_key is false"
+        );
     }
 }

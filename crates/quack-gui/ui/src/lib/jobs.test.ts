@@ -56,7 +56,7 @@ function makeSession(
 		listen: () => () => {}
 	};
 	const session = new Session(transport, tab, info, cwd);
-	session.onEvent({ event: 'session_configured', session: { id: `s-${tab}`, cwd, model, profile: 'generic' } });
+	session.onEvent({ event: 'session_configured', session: { id: `s-${tab}`, cwd, model: model ?? undefined, profile: 'generic' } });
 	session.onEvent({ event: 'startup_complete' });
 	return session;
 }
@@ -159,7 +159,7 @@ describe('describeJob', () => {
 			used: 500,
 			budget: 1000,
 			window: 2000,
-			cache_hit_tokens: null
+			cache_hit_tokens: undefined
 		});
 
 		const w = describeJob(working);

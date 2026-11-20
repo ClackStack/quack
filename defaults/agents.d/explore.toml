@@ -4,6 +4,8 @@ read_only = true
 tools = ["read", "list_dir", "glob", "grep", "index", "lsp", "shell"]
 # The `[model] small` model when one is set, else the model running the turn.
 model = "small"
+# Keep exploration light even when the parent session is set to high/xhigh/max thinking.
+reasoning_effort = "low"
 max_steps = 40
 prompt = """
 You are a sub-agent that explores a codebase for another agent. You cannot change files; \

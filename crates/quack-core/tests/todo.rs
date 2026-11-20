@@ -52,7 +52,7 @@ async fn the_plan_rides_along_with_each_step() {
         content.ends_with("[Your plan; update it with the todo tool as you go]\n[x] read the code\n[~] fix the bug"),
         "{content}"
     );
-    // The next turn still shows it, but only once: it isn't stored in the history.
+    // The next turn still sees it in the tool result without duplicating it on the user turn.
     let step3 = &sent[2];
     assert_eq!(step3.matches("[~] fix the bug").count(), 2, "{step3}");
     engine.shutdown().await;

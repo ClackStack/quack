@@ -1,0 +1,51 @@
+{
+  "harness": "quack 0.0.0",
+  "date": "2026-11-18",
+  "suite": "hard",
+  "model": "chatgpt/terra",
+  "profile": "generic",
+  "sampling": {},
+  "results": [
+    {
+      "task": "csv-export",
+      "category": "fix-symptom",
+      "passed": true,
+      "changed": [
+        "orderly/reports.py",
+        "tests/test_reports.py"
+      ],
+      "steps": 9,
+      "tool_calls": 9,
+      "tool_errors": 0,
+      "parse_failures": 0,
+      "edit_failures": 0,
+      "prompt_tokens": 49419,
+      "cached_tokens": 0,
+      "completion_tokens": 1277,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 7544,
+      "seconds": 44.608436647
+    },
+    {
+      "task": "log-parser",
+      "category": "fix-test",
+      "passed": true,
+      "changed": [
+        "logsum/parse.py"
+      ],
+      "steps": 5,
+      "tool_calls": 6,
+      "tool_errors": 0,
+      "parse_failures": 0,
+      "edit_failures": 0,
+      "prompt_tokens": 28106,
+      "cached_tokens": 4096,
+      "completion_tokens": 686,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 6482,
+      "seconds": 27.292280565
+    }
+  ]
+}

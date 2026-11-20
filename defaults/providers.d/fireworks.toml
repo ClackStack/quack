@@ -13,10 +13,16 @@ api_key = { env = "FIREWORKS_API_KEY" }
 [http]
 timeout_first_byte_secs = 30
 
+# Serverless prompt caching is per replica; pinning sequential turns with both
+# `x-session-affinity` and `prompt_cache_key` keeps KV blocks warm across reconnects.
+[prompt_cache]
+cache_key = true
+affinity_header = "x-session-affinity"
+
 [[models]]
 id = "accounts/fireworks/models/kimi-k3"
 vision = true
 
 [[models]]
-id = "accounts/fireworks/models/kimi-k3.1-pro"
+id = "accounts/fireworks/models/kimi-k3p1-pro"
 vision = true

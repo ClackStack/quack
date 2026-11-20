@@ -79,7 +79,7 @@ Both APIs return reasoning that must go back unchanged for the model to keep it:
 - A sealed reply goes back only to the provider that made it, under the same system prompt and tools (`fingerprint`, FNV-1a of both), and for OpenAI the same model. Otherwise it is sent rebuilt from `content` and `tool_calls`. Anthropic's API itself drops thinking another Claude model can't read.
 - A reply whose text or calls the engine changed (a text tool call promoted to a real one) loses its seal.
 - Pruning and text compaction (`prune::apply`, `compact::apply`) remove every seal: signed thinking after an edited message no longer verifies, and dropping all of it at that one point is what Anthropic recommends.
-- **Append-only history for `anthropic-messages`** (`Provider::append_only`). Claude's newer models check that a thinking block's history is unchanged (preserved thinking). The plan reminder, which rides on the newest message of each request for other providers, is instead written into the step's last tool result and stays there. `core/tests/anthropic.rs` checks that every request extends the one before it, across a resume.
+- **Append-only history** (`Provider::append_only`). Every adapter keeps the history strictly append-only across steps: plan and working-file reminders are written into the step's last tool result only when they change (`TurnCtx::keep_plan`) instead of being appended and stripped on the last message each step. That preserves Anthropic's signed thinking, OpenAI Responses breakpoint caches, Fireworks' 4,096-token KV blocks, and prefix caches on other hosted and local servers. `core/tests/anthropic.rs` and `core/tests/prefix.rs` check that every request strictly extends the one before it, including across resumes.
 - `anthropic.toml` sends `thinking.block_binding.prefix_mismatch_behavior = "drop_block"` (beta `thinking-binding-controls-2026-08-01`), so an edit we missed costs that reasoning rather than failing the request.
 
 ### The provider files
@@ -124,14 +124,29 @@ their existing setup flow. Tests use mock issuers and callback clients, with no 
 - GPT-6.2 (2026-11-17, data-only): `gpt-6.2-sol` (500k) and `gpt-6.2-astra` (272k) added to both providers, `gpt-6.1-sol` bumped to 500k per the same upstream commit, and both 6.2 ids added to the exact `codex` `[match]` list. Wire efforts remain `low`–`max` (the 6.2 models reject `none`); Codex's `ultra` picker level is client-side multi-agent delegation, not a wire effort, and is not offered. Not validated live.
 - Server tools (web search) and Anthropic's mid-conversation system messages are not used. Images are: see [Vision](#vision-2026-10-24).
 
-### Native Responses compaction (2026-11-18)
+### Native Responses compaction (2026-11-18, hardened 2026-11-19)
 
 The bundled `openai` and `chatgpt` provider files set `native_compaction = true`.
 Both use the existing stateless Responses transport, credentials and network policy.
 The API-key route uses `compaction_trigger`. The ChatGPT plan uses threshold-based
 `context_management` because its subscription token rejects the explicit trigger
-and the standalone compaction endpoint. The flag defaults to `false` for custom
-providers. Focused summaries and endpoint failures use Quack's text compaction.
+and the standalone compaction endpoint; because the plan route generates a reply
+after compacting that Quack discards, plan-route compaction drops to the model's
+lowest supported `reasoning.effort`, strips `reasoning.summary`, and still keeps a
+produced encrypted checkpoint if the discarded reply hits `max_output_tokens`.
+`prompt_cache` (`developer_instructions`, `explicit_breakpoints`, `ttl`, `diagnostics`
+for `openai-responses`; `cache_key` and `affinity_header` for `openai-chat`)
+is supported at both provider and per-model scope: `openai.toml` enables
+`developer_instructions` + `explicit_breakpoints` on GPT-6.2 entries only (live
+probing on `chatgpt/luna` confirmed `gpt-6-luna` returns HTTP 400 on
+`prompt_cache_options`), `chatgpt.toml` enables `developer_instructions` on GPT-6.2 entries,
+`fireworks.toml` enables `cache_key = true` with
+`affinity_header = "x-session-affinity"` so serverless turns stay pinned to one
+cache-warmed replica, and `openrouter.toml` sets `affinity_header = "x-session-id"`
+(without body `prompt_cache_key`, so non-OpenAI upstream endpoints never reject it)
+so sticky routing activates from the first request. The flags default to off/unset
+for custom providers. Focused summaries and endpoint failures use Quack's text
+compaction.
 See [how compaction is applied and replayed](05-context-management.md#native-responses-compaction-2026-11-18).
 
 ## Provider file schema

@@ -131,6 +131,54 @@ impl Checkpoints {
         })
     }
 
+    /// Record a change discovered via a shadow snapshot (e.g. a `shell` command that
+    /// created, modified, or deleted `path`). `before` holds the exact pre-command bytes,
+    /// or `None` when the file did not exist before the call.
+    pub fn record_snapshot(
+        &self,
+        turn: u64,
+        call_id: &str,
+        path: &Path,
+        before: Option<&[u8]>,
+    ) -> std::io::Result<u64> {
+        let seq = {
+            let mut n = self
+                .next
+                .lock()
+                .map_err(|_| std::io::Error::other("poisoned"))?;
+            let seq = *n;
+            *n += 1;
+            seq
+        };
+        let existed = match before {
+            Some(bytes) => {
+                std::fs::create_dir_all(&self.dir)?;
+                std::fs::write(self.blob(seq), bytes)?;
+                true
+            }
+            None => false,
+        };
+        self.append(&Line::Pre {
+            seq,
+            turn,
+            call_id: call_id.to_owned(),
+            path: path.to_path_buf(),
+            existed,
+        })?;
+        self.append(&Line::Post {
+            seq,
+            ok: true,
+            hash: hash_file(path),
+        })?;
+        Ok(seq)
+    }
+
+    /// The session directory's private shadow git repo path (sibling to `checkpoints/` so
+    /// `/fork` copies only `checkpoints/` pre-images, not the shadow object store).
+    pub fn shadow_git_dir(&self) -> PathBuf {
+        self.dir.parent().unwrap_or(&self.dir).join("shadow.git")
+    }
+
     /// Changes not undone yet, oldest first. Calls that failed are left out.
     pub fn changes(&self) -> Vec<Change> {
         let lines = read_lines(&self.dir);

@@ -43,6 +43,14 @@
       "description": "The agent changes nothing: edits are refused and only commands that read run, as in\nplan mode. Read-only agents may run in plan mode, and several started in one reply\nrun at the same time.",
       "type": "boolean"
     },
+    "reasoning_effort": {
+      "default": null,
+      "description": "Optional reasoning effort override for this agent (`\"none\"`, `\"low\"`, `\"medium\"`, ...),\napplied when the chosen model declares selectable efforts (or mapped to its lowest\ndeclared level if unavailable). Unset inherits the parent turn's effort.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "tools": {
       "default": [],
       "description": "Internal tool names the agent may use (`read`, `grep`, `shell`, ...); `mcp` adds the\nMCP servers' tools. Empty: every tool the session has. Sub-agents never get `task`\nor `ask_user`.",

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::session;
 use crate::startup::Setup;
-use crate::turn::{self, raw_estimate, TurnCtx};
+use crate::turn::{self, TurnCtx, raw_estimate};
 
 /// Share of the budget that history kept verbatim may use after a compaction.
 const KEEP_RATIO: f64 = 0.35;
@@ -21,23 +21,42 @@ const PROTECT_MESSAGES: usize = 8;
 /// Assumed budget when the model's window is unknown.
 const FALLBACK_BUDGET: u32 = 32_000;
 
+/// Prefill speed (tokens/s) below which `cache_strategy = "auto"` prunes superseded
+/// tool results eagerly rather than re-prefilling stale reads on every step.
+const SLOW_PREFILL_TPS: u32 = 400;
+
+/// Whether `fit` should prune superseded reads/writes eagerly before reaching `threshold`.
+fn eager_prune(s: &Setup) -> bool {
+    match s.context.cache_strategy {
+        CacheStrategy::Aggressive => true,
+        CacheStrategy::Preserve => false,
+        CacheStrategy::Auto => {
+            !s.model.serving.prefix_cache
+                || s.model
+                    .serving
+                    .prefill_tps
+                    .is_some_and(|tps| tps > 0 && tps < SLOW_PREFILL_TPS)
+        }
+    }
+}
+
 /// Fit each request to the window. Native compaction keeps the prefix intact until it
-/// reaches the server, unless the user explicitly selected aggressive pruning. Returns
-/// the post-fit raw estimate so the caller does not have to recompute it.
+/// reaches the server, unless eager pruning is active (`aggressive`, or `auto` on a
+/// server without prefix caching or with slow prefill). Returns the post-fit raw estimate
+/// so the caller does not have to recompute it.
 pub(crate) async fn fit(ctx: &TurnCtx, history: &mut Vec<Message>) -> u32 {
     let s = &ctx.setup;
-    let Some(budget) = s.budget else {
+    let Some(threshold) = threshold(s) else {
         return raw_estimate(s, history);
     };
-    let threshold = (f64::from(budget) * s.context.compaction_threshold.clamp(0.1, 1.0)) as u32;
-    let aggressive = s.context.cache_strategy == CacheStrategy::Aggressive;
-    if !aggressive {
+    let eager = eager_prune(s);
+    if !eager {
         let raw = raw_estimate(s, history);
         if turn::scale(s, raw) <= threshold {
             return raw;
         }
     }
-    if aggressive || !s.provider.native_compaction() {
+    if eager || !s.provider.native_compaction() {
         prune_now(ctx, history);
     }
     let mut raw = raw_estimate(s, history);
@@ -196,6 +215,17 @@ fn read_lines(args: &Value) -> Option<(u64, u64)> {
     }
 }
 
+/// Effective token budget for compaction sizing: capped by `model.compact_at` when a
+/// model compacts earlier than its full window (for example below a pricing cliff).
+fn compaction_budget(s: &Setup) -> u32 {
+    match (s.budget, s.model.compact_at) {
+        (Some(budget), Some(cap)) => budget.min(cap),
+        (Some(budget), None) => budget,
+        (None, Some(cap)) => cap,
+        (None, None) => FALLBACK_BUDGET,
+    }
+}
+
 /// Summarize history before the cut point with the session's model and splice the summary
 /// in. `keep_turns` recent turns stay verbatim when they fit.
 pub(crate) async fn compact_now(
@@ -206,12 +236,10 @@ pub(crate) async fn compact_now(
     reason: &str,
 ) -> Result<(), String> {
     let s = &ctx.setup;
-    let budget = s.budget.unwrap_or(FALLBACK_BUDGET);
+    let budget = compaction_budget(s);
     let keep = (f64::from(budget) * KEEP_RATIO) as u32;
-    let scale = |h: &[Message]| {
-        let raw = tokens::estimate(&serde_json::to_string(h).unwrap_or_default());
-        s.estimator.lock().map_or(raw, |e| e.scale(raw))
-    };
+    let native = s.provider.native_compaction();
+    let scale = |h: &[Message]| turn::scale(s, turn::history_tokens(h, native));
     let cut = compact::cut_point(history, keep_turns, keep, scale)
         .ok_or("nothing to compact yet: the conversation is only the current turn")?;
     let hooked = ctx
@@ -253,8 +281,14 @@ pub(crate) async fn compact_now(
         prompt.push_str("\n\n");
         prompt.push_str(&extra);
     }
+    let sum_setup = ctx
+        .pool
+        .small_setup(ctx)
+        .await
+        .unwrap_or_else(|| ctx.setup.clone());
+    let sum_budget = sum_setup.budget.unwrap_or(budget).min(budget);
     // About 60% of the budget in characters, leaving room for the prompt and the reply.
-    let text = compact::transcript(&history[..cut], budget as usize * 2);
+    let text = compact::transcript(&history[..cut], sum_budget as usize * 2);
     let messages = vec![
         Message::System { content: prompt },
         Message::User {
@@ -262,11 +296,12 @@ pub(crate) async fn compact_now(
             images: Vec::new(),
         },
     ];
-    let mut req = turn::request(s, messages, false);
+    let mut req = turn::utility_request(&sum_setup, messages);
+    req.cache_key = Some(turn::cache_key(ctx));
     // A looping model (small ones sometimes think forever) fails fast instead.
-    let cap = (budget / 4).clamp(1_024, 8_192);
-    req.max_tokens = Some(s.model.max_output.map_or(cap, |m| m.min(cap)));
-    let mut result = summarize(ctx, req.clone()).await;
+    let cap = (sum_budget / 4).clamp(1_024, 8_192);
+    req.max_tokens = Some(sum_setup.model.max_output.map_or(cap, |m| m.min(cap)));
+    let mut result = summarize(ctx, &sum_setup, req.clone()).await;
     if let Ok(text) = &result
         && let Some(why) = compact::unusable_summary(text)
     {
@@ -277,7 +312,7 @@ pub(crate) async fn compact_now(
             );
         }
         result =
-            summarize(ctx, req)
+            summarize(ctx, &sum_setup, req)
                 .await
                 .and_then(|text| match compact::unusable_summary(&text) {
                     Some(again) => Err(format!("{why}, twice ({again})")),
@@ -306,6 +341,13 @@ async fn compact_native(ctx: &TurnCtx, prefix: &[Message]) -> Result<Sealed, Str
     let s = &ctx.setup;
     let mut req = turn::request(s, turn::history_messages(s, prefix), true);
     req.cache_key = Some(turn::cache_key(ctx));
+    // Threshold-based plan compaction generates a reply after compacting that Quack discards;
+    // drop to the model's lowest supported effort so we don't waste high thinking on it.
+    if s.provider.is_chatgpt_plan()
+        && let Some(effort) = turn::lowest_effort(&s.model)
+    {
+        req.reasoning_effort = Some(effort);
+    }
     ctx.start_request();
     let sent = std::time::Instant::now();
     let result = tokio::select! {
@@ -332,7 +374,7 @@ fn finish_compaction(
     let message = compact::summary_message(summary, request, &turn::changed_files(ctx));
     let summary_tokens = native.as_ref().map_or_else(
         || tokens::estimate(summary),
-        |sealed| tokens::estimate(&serde_json::to_string(&sealed.items).unwrap_or_default()),
+        |sealed| turn::sealed_compaction_tokens(&sealed.items),
     );
     session::record(
         ctx.log.as_ref(),
@@ -340,6 +382,8 @@ fn finish_compaction(
         json!({ "cut": cut, "message": message, "reason": reason, "native": native }),
     );
     session::apply_compaction(history, cut, message, native);
+    // Earlier reminder messages may have been compacted away; let the next step refresh them.
+    ctx.reset_reminders();
     ctx.emit(Event::Compacted {
         summary_tokens,
         replaced: u32::try_from(cut).unwrap_or(u32::MAX),
@@ -348,8 +392,11 @@ fn finish_compaction(
 }
 
 /// Stream a request with no tools and return its text.
-async fn summarize(ctx: &TurnCtx, req: quack_providers::ChatRequest) -> Result<String, String> {
-    let s = &ctx.setup;
+async fn summarize(
+    ctx: &TurnCtx,
+    s: &Setup,
+    req: quack_providers::ChatRequest,
+) -> Result<String, String> {
     ctx.start_request();
     let mut rx = s
         .provider
@@ -371,7 +418,7 @@ async fn summarize(ctx: &TurnCtx, req: quack_providers::ChatRequest) -> Result<S
         Ok(())
     }
     .await;
-    ctx.record_request(response.usage.as_ref(), sent.elapsed());
+    ctx.record_request_for(s, response.usage.as_ref(), sent.elapsed());
     result?;
     match &response.finish {
         Some(FinishReason::Stop) => {}
@@ -388,10 +435,18 @@ async fn summarize(ctx: &TurnCtx, req: quack_providers::ChatRequest) -> Result<S
     Ok(text.to_owned())
 }
 
-/// Requests estimated above this get pruned, then compacted.
+/// Requests estimated above this get pruned, then compacted. Honors a model's `compact_at`
+/// soft ceiling (e.g. below a long-context pricing cliff) when lower than the budget ratio.
 pub(crate) fn threshold(s: &Setup) -> Option<u32> {
-    s.budget
-        .map(|b| (f64::from(b) * s.context.compaction_threshold.clamp(0.1, 1.0)) as u32)
+    let by_ratio = s
+        .budget
+        .map(|b| (f64::from(b) * s.context.compaction_threshold.clamp(0.1, 1.0)) as u32);
+    match (by_ratio, s.model.compact_at) {
+        (Some(limit), Some(cap)) => Some(limit.min(cap)),
+        (Some(limit), None) => Some(limit),
+        (None, Some(cap)) => Some(cap),
+        (None, None) => None,
+    }
 }
 
 /// What is using the context. `history` is `None` while a turn holds it.
@@ -458,6 +513,7 @@ pub(crate) fn report(s: &Setup, history: Option<&[Message]>) -> ContextReport {
                 GroupAcc::new("Model replies and tool calls"),
                 GroupAcc::new("Tool results"),
             ];
+            let native = s.provider.native_compaction();
             for (idx, m) in history.iter().enumerate() {
                 let g = match m {
                     _ if compact::is_summary(m) => 0,
@@ -465,7 +521,8 @@ pub(crate) fn report(s: &Setup, history: Option<&[Message]>) -> ContextReport {
                     Message::Assistant { .. } => 2,
                     Message::Tool { .. } => 3,
                 };
-                let msg_tokens = tok(&serde_json::to_string(m).unwrap_or_default());
+                let msg_tokens =
+                    (f64::from(turn::message_tokens(m, native)) * ratio).round() as u32;
                 let pruned = matches!(m, Message::Tool { content, .. } if content.starts_with(prune::MARKER));
                 let prunable = matches!(m, Message::Tool { .. }) && !pruned;
                 let cached = idx < uncached_from;

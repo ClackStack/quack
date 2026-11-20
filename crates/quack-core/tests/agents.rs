@@ -464,3 +464,153 @@ async fn an_agents_usage_survives_a_resume() {
     assert!((a - b).abs() < 1e-12, "{a} vs {b}");
     engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn explore_agent_shares_cache_key_and_applies_reasoning_effort() {
+    use serde_json::json;
+    if !quack_providers::supports("openai-responses") {
+        return;
+    }
+    let resp_call = |id: &str, args: serde_json::Value| {
+        sse_raw(&[
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": "task",
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response.function_call_arguments.done",
+                "output_index": 0,
+                "arguments": args.to_string(),
+            })
+            .to_string(),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": "task",
+                    "arguments": args.to_string(),
+                }
+            })
+            .to_string(),
+            json!({"type": "response.completed", "response": {}}).to_string(),
+        ])
+    };
+    let resp_text = |text: &str| {
+        sse_raw(&[
+            json!({"type": "response.output_text.delta", "output_index": 0, "delta": text})
+                .to_string(),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": text}]
+                }
+            })
+            .to_string(),
+            json!({"type": "response.completed", "response": {}}).to_string(),
+        ])
+    };
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("SUBAGENT explore"))
+        .respond_with(resp_text("found it"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("second look"))
+        .and(body_string_contains("Report from the explore agent"))
+        .respond_with(resp_text("All done."))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("Report from the explore agent"))
+        .respond_with(resp_call(
+            "t2",
+            json!({"agent": "explore", "prompt": "second look"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(resp_call(
+            "t1",
+            json!({"agent": "explore", "prompt": "first look"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("user").join("agents.d");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("explore.toml"),
+        "description = \"Finds things\"\n\
+         read_only = true\n\
+         reasoning_effort = \"low\"\n\
+         tools = [\"read\", \"grep\"]\n\
+         prompt = \"SUBAGENT explore\"\n",
+    )
+    .expect("explore");
+
+    let models = r#"[{ id = "gpt-6-luna", reasoning = { efforts = ["none", "low", "medium", "high"], effort = "high" } }]"#;
+    let loaded = common::workspace(
+        tmp.path(),
+        &server.uri(),
+        &format!("{models}\napi = \"openai-responses\""),
+        "",
+    );
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    submit(&engine, "run two explores").await;
+    run_approving(&mut engine).await;
+    engine.shutdown().await;
+
+    let all: Vec<serde_json::Value> = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.url.path() == "/v1/responses")
+        .map(|r| serde_json::from_slice(&r.body).expect("json"))
+        .collect();
+    let parents: Vec<&serde_json::Value> = all
+        .iter()
+        .filter(|b| !b.to_string().contains("SUBAGENT explore"))
+        .collect();
+    let subs: Vec<&serde_json::Value> = all
+        .iter()
+        .filter(|b| b.to_string().contains("SUBAGENT explore"))
+        .collect();
+    assert_eq!(subs.len(), 2, "expected 2 explore runs");
+    assert!(!parents.is_empty());
+
+    let parent_key = parents[0]["prompt_cache_key"]
+        .as_str()
+        .expect("parent cache key");
+    assert_eq!(parents[0]["reasoning"]["effort"], "high");
+
+    let expected_sub_key = format!("{parent_key}/explore");
+    for sub in &subs {
+        assert_eq!(
+            sub["prompt_cache_key"].as_str(),
+            Some(expected_sub_key.as_str()),
+            "explore runs must share cache key by agent type, not run id"
+        );
+        assert_eq!(
+            sub["reasoning"]["effort"], "low",
+            "explore agent should use its own reasoning_effort = low"
+        );
+    }
+}

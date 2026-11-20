@@ -71,6 +71,9 @@ pub struct ProviderFile {
     /// Use native Responses compaction for this provider's models.
     #[serde(default)]
     pub native_compaction: bool,
+    /// Prompt-caching wire options (`openai-responses` and `openai-chat`).
+    #[serde(default)]
+    pub prompt_cache: PromptCache,
     /// Merged into every request body, under each model's own `extra_body`.
     #[serde(default)]
     #[schemars(with = "JsonMap")]
@@ -266,6 +269,14 @@ impl ProviderFile {
             .iter()
             .find(|m| m.id == name || m.alias.as_deref() == Some(name))
     }
+
+    /// Prompt-cache options for `model`, preferring any per-model override over the provider default.
+    pub fn prompt_cache_for(&self, model: &ModelEntry) -> PromptCache {
+        model
+            .prompt_cache
+            .clone()
+            .unwrap_or_else(|| self.prompt_cache.clone())
+    }
 }
 
 /// A sign-in that gives the provider its tokens.
@@ -365,6 +376,10 @@ pub struct ModelEntry {
     pub alias: Option<String>,
     #[serde(default)]
     pub context_window: Option<u32>,
+    /// Soft prompt-token ceiling for automatic compaction, lower than `context_window`
+    /// (for example below a long-context pricing cliff such as 272k on 500k models).
+    #[serde(default)]
+    pub compact_at: Option<u32>,
     #[serde(default)]
     pub max_output: Option<u32>,
     /// `auto` or a profile id.
@@ -384,6 +399,10 @@ pub struct ModelEntry {
     #[serde(default)]
     #[schemars(with = "JsonMap")]
     pub extra_body: toml::Table,
+    /// Per-model prompt-caching override (`openai-responses` and `openai-chat`); replaces
+    /// the provider's `prompt_cache` table when set.
+    #[serde(default)]
+    pub prompt_cache: Option<PromptCache>,
     #[serde(default)]
     pub cost: Option<Cost>,
     #[serde(default)]
@@ -401,6 +420,7 @@ impl ModelEntry {
             id: id.into(),
             alias: None,
             context_window: None,
+            compact_at: None,
             max_output: None,
             profile: auto(),
             vision: false,
@@ -409,6 +429,7 @@ impl ModelEntry {
             tokenizer: Tokenizer::default(),
             sampling: Sampling::default(),
             extra_body: toml::Table::new(),
+            prompt_cache: None,
             cost: None,
             serving: Serving::default(),
         }
@@ -448,14 +469,128 @@ pub enum ToolCallMode {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+pub struct PromptCache {
+    /// Place explicit `prompt_cache_breakpoint` markers on the stable prefix and recent
+    /// conversation boundary (`openai-responses`).
+    pub explicit_breakpoints: bool,
+    /// Send the system prompt as a leading `role: "developer"` input item instead of
+    /// top-level `instructions` (`openai-responses`), keeping it inside the cached prefix
+    /// on models that append `instructions` outside the cache.
+    pub developer_instructions: bool,
+    /// Optional cache retention TTL (`"30m"`, `"12h"` on `openai-responses`).
+    pub ttl: Option<String>,
+    /// Attach `prompt_cache_options.comparison_response_id` on follow-up requests so the
+    /// server returns `prompt_cache_diagnostics` for debug logs (`openai-responses`).
+    pub diagnostics: bool,
+    /// Send the session's cache key as `prompt_cache_key` in the request body on
+    /// `openai-chat` providers that support it (such as Fireworks AI).
+    /// (`openai-responses` always sends `prompt_cache_key` when a cache key is set.)
+    pub cache_key: bool,
+    /// Optional HTTP request header name to carry the session's cache key for sticky
+    /// replica routing (for example `"x-session-affinity"` on Fireworks AI).
+    pub affinity_header: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct Reasoning {
     pub format: ReasoningFormat,
-    /// Default comes from the profile.
-    pub preserve_in_history: Option<bool>,
+    /// How earlier reasoning is replayed in history: `false`/`"never"`, `"current_turn"`,
+    /// or `true`/`"all_turns"`. Default comes from the adapter (`"all_turns"`).
+    pub preserve_in_history: Option<ReasoningHistory>,
+    /// How `effort` is placed on the wire for `openai-chat` providers.
+    pub wire: ReasoningWire,
     pub effort: String,
     /// Supported effort values, in picker order. Empty means no selectable levels.
     /// `effort` remains the model's default when the user resets their selection.
     pub efforts: Vec<String>,
+}
+
+/// How earlier assistant reasoning is echoed back on subsequent requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningHistory {
+    /// Never echo earlier reasoning text.
+    Never,
+    /// Echo reasoning only within the current user turn's tool-call chain; strip it from
+    /// earlier completed user turns.
+    CurrentTurn,
+    /// Echo reasoning on all assistant turns.
+    AllTurns,
+}
+
+#[derive(JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+enum ReasoningHistorySchema {
+    Bool(bool),
+    Mode(ReasoningHistoryMode),
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+enum ReasoningHistoryMode {
+    Never,
+    CurrentTurn,
+    AllTurns,
+}
+
+impl JsonSchema for ReasoningHistory {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ReasoningHistory".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        ReasoningHistorySchema::json_schema(generator)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReasoningHistory {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = ReasoningHistory;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a boolean or one of \"never\", \"current_turn\", \"all_turns\"")
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(if v {
+                    ReasoningHistory::AllTurns
+                } else {
+                    ReasoningHistory::Never
+                })
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v.trim().to_ascii_lowercase().as_str() {
+                    "never" | "false" | "off" | "none" => Ok(ReasoningHistory::Never),
+                    "current_turn" | "current-turn" => Ok(ReasoningHistory::CurrentTurn),
+                    "all_turns" | "all-turns" | "true" | "all" => Ok(ReasoningHistory::AllTurns),
+                    other => Err(E::unknown_variant(
+                        other,
+                        &["never", "current_turn", "all_turns"],
+                    )),
+                }
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// How `reasoning.effort` is serialized on `openai-chat` requests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReasoningWire {
+    /// Send `reasoning_effort` (the OpenAI-compatible default).
+    #[default]
+    Effort,
+    /// Set `chat_template_kwargs.enable_thinking` to a boolean (`false` for `none`/`off`).
+    EnableThinking,
+    /// Do not send a wire reasoning-effort field (rely on `extra_body` or server defaults).
+    None,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -608,5 +743,64 @@ mod tests {
         )
         .expect_err("typo");
         assert!(err.to_string().contains("context_windw"), "{err}");
+    }
+
+    #[test]
+    fn reasoning_history_prompt_cache_and_compact_at_parse() {
+        let p: ProviderFile = toml::from_str(
+            r#"
+            base_url = "https://api.example.com/v1"
+            prompt_cache = { developer_instructions = true, explicit_breakpoints = true, ttl = "12h", diagnostics = true, cache_key = true, affinity_header = "x-session-affinity" }
+            [[models]]
+            id = "a"
+            context_window = 500000
+            compact_at = 250000
+            reasoning = { preserve_in_history = false, wire = "enable-thinking" }
+            [[models]]
+            id = "b"
+            reasoning = { preserve_in_history = "current_turn", wire = "none" }
+            [[models]]
+            id = "c"
+            reasoning = { preserve_in_history = true }
+            prompt_cache = { developer_instructions = true, explicit_breakpoints = false }
+            "#,
+        )
+        .expect("parses");
+        assert!(p.prompt_cache.developer_instructions);
+        assert!(p.prompt_cache.explicit_breakpoints);
+        assert_eq!(p.prompt_cache.ttl.as_deref(), Some("12h"));
+        assert!(p.prompt_cache.diagnostics);
+        assert!(p.prompt_cache.cache_key);
+        assert_eq!(
+            p.prompt_cache.affinity_header.as_deref(),
+            Some("x-session-affinity")
+        );
+        assert_eq!(p.models[0].compact_at, Some(250_000));
+        assert_eq!(p.prompt_cache_for(&p.models[0]), p.prompt_cache);
+        assert_eq!(
+            p.prompt_cache_for(&p.models[2]),
+            PromptCache {
+                developer_instructions: true,
+                explicit_breakpoints: false,
+                ttl: None,
+                diagnostics: false,
+                cache_key: false,
+                affinity_header: None,
+            }
+        );
+        assert_eq!(
+            p.models[0].reasoning.preserve_in_history,
+            Some(ReasoningHistory::Never)
+        );
+        assert_eq!(p.models[0].reasoning.wire, ReasoningWire::EnableThinking);
+        assert_eq!(
+            p.models[1].reasoning.preserve_in_history,
+            Some(ReasoningHistory::CurrentTurn)
+        );
+        assert_eq!(p.models[1].reasoning.wire, ReasoningWire::None);
+        assert_eq!(
+            p.models[2].reasoning.preserve_in_history,
+            Some(ReasoningHistory::AllTurns)
+        );
     }
 }

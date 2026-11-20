@@ -137,6 +137,18 @@ impl Loaded {
         load_in(self.found.clone(), env, &self.opts)
     }
 
+    /// Reload configuration rooted in a new working directory (for example a freshly created
+    /// git worktree), preserving the discovered user/system/data/cache/defaults directories.
+    pub fn reload_in_cwd(&self, cwd: PathBuf) -> Result<Loaded, ConfigError> {
+        let mut found = self.found.clone();
+        found.cwd = cwd.clone();
+        found.workspace_root = cwd.clone();
+        found.project = cwd.join(".quack");
+        let mut opts = self.opts.clone();
+        opts.cwd = cwd;
+        load_in(found, &|k| std::env::var_os(k), &opts)
+    }
+
     /// What the project's `.quack/` holds, for the trust prompt.
     pub fn project_summary(&self) -> ProjectSummary {
         ProjectSummary::read(&self.dirs.project)

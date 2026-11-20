@@ -182,10 +182,10 @@ pub fn extract(
         return None;
     }
     if format == F::JsonBlock {
-        return json_block(content, tools);
+        return json_block(content, tools).or_else(|| grammar_turn(content, tools));
     }
     if !MARKERS.iter().any(|m| content.contains(m)) {
-        return None;
+        return grammar_turn(content, tools);
     }
     let tries: [(TextFormat, Parser); 5] = [
         (F::Qwen3Xml, qwen),
@@ -198,6 +198,44 @@ pub fn extract(
         .iter()
         .filter(|(f, _)| format == F::Auto || format == *f)
         .find_map(|(_, parse)| parse(content, tools))
+        .or_else(|| grammar_turn(content, tools))
+}
+
+/// Extract structured `ToolCallMode::Grammar` responses shaped as
+/// `{"content": "...", "tool_calls": [{"name": "...", "arguments": {...}}]}`.
+/// Only fires when the entire reply is a JSON object with a non-empty `tool_calls` array
+/// naming offered tools, so normal prose or code blocks are never misread.
+fn grammar_turn(content: &str, tools: &[&str]) -> Option<(String, Vec<ToolCall>)> {
+    let trimmed = content.trim();
+    if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
+        return None;
+    }
+    let v: Value = serde_json::from_str(trimmed).ok()?;
+    let obj = v.as_object()?;
+    let arr = obj.get("tool_calls")?.as_array()?;
+    let mut calls = Vec::new();
+    for item in arr {
+        let name = item.get("name")?.as_str()?;
+        if !tools.contains(&name) {
+            return None;
+        }
+        let args = item
+            .get("arguments")
+            .cloned()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        calls.push(call(calls.len(), name, &args));
+    }
+    if calls.is_empty() {
+        return None;
+    }
+    let text = obj
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    Some((text, calls))
 }
 
 type Parser = fn(&str, &[&str]) -> Option<(String, Vec<ToolCall>)>;

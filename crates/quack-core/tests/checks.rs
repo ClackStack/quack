@@ -121,7 +121,7 @@ async fn configured(engine: &mut EngineHandle) -> SessionInfo {
             .expect("event within 10s")
             .expect("channel open");
         match e {
-            Event::SessionConfigured { session: s } => session = Some(s),
+            Event::SessionConfigured { session: s } => session = Some(*s),
             Event::StartupComplete => return session.expect("configured at startup"),
             _ => {}
         }

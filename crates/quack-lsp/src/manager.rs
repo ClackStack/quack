@@ -8,11 +8,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use quack_config::LspServerFile;
+use quack_sandbox::Command;
 use serde_json::Value;
-use tokio::process::Command;
 use tokio::sync::{OnceCell, watch};
 
-use crate::client::{Client, Launch};
+use crate::client::{Client, Launch, WatchChangeType};
 use crate::diag::{self, Diagnostic, Limits, Severity, Snapshot};
 
 pub const MAX_RESTARTS: u32 = 3;
@@ -124,9 +124,7 @@ impl LspManager {
             changed: Arc::new(watch::channel(0).0),
             prepare: prepare.unwrap_or_else(|| {
                 Arc::new(|_, program, args| {
-                    let mut cmd = Command::new(program);
-                    cmd.args(args);
-                    Ok(cmd)
+                    Ok(quack_sandbox::unsandboxed(program.as_os_str(), args))
                 })
             }),
         })
@@ -503,6 +501,63 @@ impl LspManager {
                 .then_with(|| a.diagnostic.column.cmp(&b.diagnostic.column))
         });
         out
+    }
+
+    /// Forward external workspace file changes (for example after a mutating `shell`
+    /// command) to every running language server covering those paths. Never lazily starts
+    /// stopped servers.
+    pub async fn notify_watched_files(&self, changes: &[(PathBuf, WatchChangeType)]) {
+        if changes.is_empty() {
+            return;
+        }
+        for client in self.clients() {
+            let relevant: Vec<(PathBuf, WatchChangeType)> = changes
+                .iter()
+                .filter(|(p, _)| p.starts_with(&client.root) || p.starts_with(&self.root))
+                .cloned()
+                .collect();
+            if !relevant.is_empty() {
+                let _ = client.did_change_watched_files(&relevant).await;
+            }
+        }
+    }
+
+    /// Stop only the running clients whose server id is in `ids`; unchanged servers keep
+    /// running and warm.
+    pub async fn stop_servers(&self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        let matching_idx: Vec<usize> = self
+            .specs
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| ids.iter().any(|id| id == &s.id))
+            .map(|(i, _)| i)
+            .collect();
+        let cells: Vec<Cell> = self
+            .slots
+            .lock()
+            .map(|mut slots| {
+                let keys: Vec<_> = slots
+                    .keys()
+                    .filter(|(idx, _)| matching_idx.contains(idx))
+                    .cloned()
+                    .collect();
+                keys.into_iter()
+                    .filter_map(|k| slots.remove(&k).map(|s| s.cell))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut set = tokio::task::JoinSet::new();
+        for c in cells.into_iter().filter_map(|cell| match cell.get() {
+            Some(Ok(client)) => Some(client.clone()),
+            _ => None,
+        }) {
+            set.spawn(async move { c.stop().await });
+        }
+        while set.join_next().await.is_some() {}
+        self.bump();
     }
 
     /// Stop every server.

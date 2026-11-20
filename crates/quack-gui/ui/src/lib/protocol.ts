@@ -83,9 +83,14 @@ export type TurnOverrides = { model?: string, profile?: string, };
 export type Usage = { prompt_tokens: number, completion_tokens: number, cached_prompt_tokens?: number,
 /**
  * Prompt tokens written to the server's cache, for servers that bill writes apart
- * (Anthropic). Part of `prompt_tokens`.
+ * (Anthropic, OpenAI). Part of `prompt_tokens`.
  */
-cache_write_tokens?: number, };
+cache_write_tokens?: number,
+/**
+ * Output tokens spent on reasoning/thinking, where the server reports them apart.
+ * Part of `completion_tokens`.
+ */
+reasoning_tokens?: number, };
 /**
  * One image as it travels through the history: base64 (standard, padded), its media
  * type, and its pixel size when the file's header reported it.
@@ -167,7 +172,7 @@ export type ToolStat = { name: string, calls: number, failed: number, ms: number
 /**
  * One model call, for the charts in `/stats`.
  */
-export type RequestStat = { prompt: number, cached: number, completion: number, cost?: number,
+export type RequestStat = { prompt: number, cached: number, cache_write?: number, completion: number, reasoning?: number, cost?: number,
 /**
  * Absent for requests from before a resume, and for replies too short to time.
  */
@@ -480,6 +485,14 @@ prompt_tokens: number, completion_tokens: number,
  */
 cached_tokens: number,
 /**
+ * Prompt tokens written to the server's cache, where reported.
+ */
+cache_write_tokens?: number,
+/**
+ * Output tokens spent on reasoning/thinking, where reported.
+ */
+reasoning_tokens?: number,
+/**
  * Requests that said how much was cached; zero when the server never does.
  */
 cache_reported: number,
@@ -598,7 +611,11 @@ export type InputItem = { "type": "text", text: string, } | { "type": "image", p
 /**
  * A notification from the engine to its clients.
  */
-export type Event = { "event": "hook_setup", request: number, info: HookSetupInfo, } | { "event": "hook_setup_saved", request: number, info: HookSetupInfo, note?: string, } | { "event": "hook_setup_pending", request: number, } | { "event": "hook_setup_failed", request: number, message: string, } | { "event": "hook_check_result", request: number, status: string, message: string, } | { "event": "startup_progress", subsystem: Subsystem, state: LoadState, } | { "event": "startup_complete" } | { "event": "session_configured", session: SessionInfo, } | { "event": "session_title", title?: string, } | { "event": "model_catalog", providers: Array<ProviderModels>,
+export type Event = { "event": "hook_setup", request: number, info: HookSetupInfo, } | { "event": "hook_setup_saved", request: number, info: HookSetupInfo, note?: string, } | { "event": "hook_setup_pending", request: number, } | { "event": "hook_setup_failed", request: number, message: string, } | { "event": "hook_check_result", request: number, status: string, message: string, } | { "event": "startup_progress", subsystem: Subsystem, state: LoadState, } | { "event": "startup_complete" } | { "event": "session_configured",
+/**
+ * Boxed: `SessionInfo` is large, and every event clone would copy it.
+ */
+session: SessionInfo, } | { "event": "session_title", title?: string, } | { "event": "model_catalog", providers: Array<ProviderModels>,
 /**
  * `<provider>/<model>` in use, if any.
  */
@@ -610,7 +627,11 @@ active: string,
 /**
  * Set with `/profiles <id>` or `[model] profile`, rather than chosen per model.
  */
-forced: boolean, profiles: Array<ProfileInfo>, } | { "event": "session_resumed", session: SessionInfo, items: Array<ReplayItem>, } | { "event": "session_resume_failed", reason: string, } | { "event": "session_list", sessions: Array<SessionSummary>, } | { "event": "setting_saved", key: string, value: string, path: string, note?: string, } | { "event": "hook_payload_choice", id: string, path: string, } | { "event": "hook_enabled", id: string, path: string, note?: string | null, } | { "event": "mcp_enabled", id: string, path: string, } | { "event": "mcp_server_saved", id: string, path: string, } | { "event": "shutdown_complete" } | { "event": "config_reloaded" } | { "event": "project_trust", path: string, summary: string, changed: boolean, } | { "event": "turn_started", turn: TurnId, } | { "event": "turn_queued", waiting_for: string, } | { "event": "assistant_delta", text: string, } | { "event": "reasoning_delta", text: string, } | { "event": "assistant_rewrite", text: string, } | { "event": "tool_call_begin", call: ToolCallInfo, } | { "event": "tool_call_output_delta", call_id: CallId, chunk: string, } | { "event": "tool_call_end", call_id: CallId, result: ToolResultSummary, } | { "event": "approval_request", call_id: CallId, request: ApprovalRequest,
+forced: boolean, profiles: Array<ProfileInfo>, } | { "event": "session_resumed",
+/**
+ * Boxed: both fields are large, and every event clone would copy them.
+ */
+session: SessionInfo, items: Array<ReplayItem>, } | { "event": "session_resume_failed", reason: string, } | { "event": "session_list", sessions: Array<SessionSummary>, } | { "event": "setting_saved", key: string, value: string, path: string, note?: string, } | { "event": "hook_payload_choice", id: string, path: string, } | { "event": "hook_enabled", id: string, path: string, note?: string | null, } | { "event": "mcp_enabled", id: string, path: string, } | { "event": "mcp_server_saved", id: string, path: string, } | { "event": "shutdown_complete" } | { "event": "config_reloaded" } | { "event": "project_trust", path: string, summary: string, changed: boolean, } | { "event": "turn_started", turn: TurnId, } | { "event": "turn_queued", waiting_for: string, } | { "event": "assistant_delta", text: string, } | { "event": "reasoning_delta", text: string, } | { "event": "assistant_rewrite", text: string, } | { "event": "tool_call_begin", call: ToolCallInfo, } | { "event": "tool_call_output_delta", call_id: CallId, chunk: string, } | { "event": "tool_call_end", call_id: CallId, result: ToolResultSummary, } | { "event": "approval_request", call_id: CallId, request: ApprovalRequest,
 /**
  * The allow rules "always allow" would save (`shell:cargo test`); empty when no
  * rule can allow this call, so only "allow for this session" is offered.
@@ -655,7 +676,7 @@ model: string, } | { "event": "agent", id: string, inner: Event, } | { "event": 
 /**
  * e.g. `12 steps · 34.5k tokens`.
  */
-summary: string, } | { "event": "plan", checklist: string, } | { "event": "diagnostics", errors: number, warnings: number, } | { "event": "notice", message: string, } | { "event": "update_available", current: string, latest: string, } | { "event": "update_check_result", current: string, latest?: string, update_available: boolean, url?: string, error?: string, } | { "event": "warning", message: string, } | { "event": "error", error: EngineError, } | { "event": "egress_ledger", entries: Array<EgressEntry>, stats: EgressStats, } | { "event": "egress_recorded", entry: EgressEntry, } | { "event": "tool_probe_result", report: ToolProbeReport, } | { "event": "lsp_diagnostics", items: Array<LspDiagnosticItem>, };
+summary: string, } | { "event": "plan", checklist: string, } | { "event": "diagnostics", errors: number, warnings: number, } | { "event": "notice", message: string, } | { "event": "update_available", current: string, latest: string, } | { "event": "update_check_result", current: string, latest?: string, update_available: boolean, url?: string, error?: string, } | { "event": "warning", message: string, } | { "event": "error", error: EngineError, } | { "event": "egress_ledger", entries: Array<EgressEntry>, stats: EgressStats, } | { "event": "egress_recorded", entry: EgressEntry, } | { "event": "tool_probe_result", report: ToolProbeReport, } | { "event": "worktree_created", path: string, branch: string, session_id: SessionId, } | { "event": "lsp_diagnostics", items: Array<LspDiagnosticItem>, };
 /**
  * A request from a client to the engine.
  */
@@ -663,7 +684,7 @@ export type Op = { "op": "user_turn", items: Array<InputItem>, overrides: TurnOv
 /**
  * Empty preserves the current approval policy; legacy callers may choose one.
  */
-mode: string, } | { "op": "run_doctor" } | { "op": "list_mcp" } | { "op": "restart_mcp", id: string, } | { "op": "enable_mcp", id: string, } | { "op": "disable_mcp", id: string, } | { "op": "add_mcp", id: string, url: string, command: string, args: Array<string>, bearer_env?: string, bearer_token?: SecretText, scope?: WriteScope, } | { "op": "save_mcp_server", id: string, scope: WriteScope, description: string, command: string, args: Array<string>, cwd: string, url: string, sandbox?: boolean, env: { [key in string]: McpSecretValue }, headers: { [key in string]: McpSecretValue }, } | { "op": "list_lsp" } | { "op": "init_instructions" } | { "op": "detect_servers" } | { "op": "add_provider", id: string, base_url: string, api?: string, model: string, } | { "op": "list_services" } | { "op": "sign_in", id?: string, } | { "op": "set_provider_key", id: string, key: SecretText, } | { "op": "add_server", base_url: string, key?: SecretText, } | { "op": "list_provider_connections" } | { "op": "save_provider_connection", id: string, http_version?: ProviderHttpVersion, no_proxy?: boolean, } | { "op": "list_memory" } | { "op": "save_memory", scope: string, name: string, description: string, kind: string, body: string, previous_scope?: string, previous_name?: string, } | { "op": "delete_memory", scope: string, name: string, } | { "op": "set_title", title: string, } | { "op": "save_setting", key: string, value: string, scope: WriteScope, } | { "op": "fork_session" } | { "op": "export", format: ExportFormat, path?: string, } | { "op": "list_rewind_points" } | { "op": "rewind", back: number, conversation: boolean, files: boolean, force: boolean, } | { "op": "reload_config" } | { "op": "trust_project", decision: string, } | { "op": "enable_hook", id: string, replace_payload?: boolean | null, } | { "op": "inspect_hook_setup", id: string, request: number, } | { "op": "save_hook_setup", id: string, request: number, revision: string, connections: Array<HookConnectionDraft>,
+mode: string, } | { "op": "run_doctor" } | { "op": "list_mcp" } | { "op": "restart_mcp", id: string, } | { "op": "enable_mcp", id: string, } | { "op": "disable_mcp", id: string, } | { "op": "add_mcp", id: string, url: string, command: string, args: Array<string>, bearer_env?: string, bearer_token?: SecretText, scope?: WriteScope, } | { "op": "save_mcp_server", id: string, scope: WriteScope, description: string, command: string, args: Array<string>, cwd: string, url: string, sandbox?: boolean, env: { [key in string]: McpSecretValue }, headers: { [key in string]: McpSecretValue }, } | { "op": "list_lsp" } | { "op": "init_instructions" } | { "op": "detect_servers" } | { "op": "add_provider", id: string, base_url: string, api?: string, model: string, } | { "op": "list_services" } | { "op": "sign_in", id?: string, } | { "op": "set_provider_key", id: string, key: SecretText, } | { "op": "add_server", base_url: string, key?: SecretText, } | { "op": "list_provider_connections" } | { "op": "save_provider_connection", id: string, http_version?: ProviderHttpVersion, no_proxy?: boolean, } | { "op": "list_memory" } | { "op": "save_memory", scope: string, name: string, description: string, kind: string, body: string, previous_scope?: string, previous_name?: string, } | { "op": "delete_memory", scope: string, name: string, } | { "op": "set_title", title: string, } | { "op": "save_setting", key: string, value: string, scope: WriteScope, } | { "op": "fork_session" } | { "op": "fork_worktree", name?: string, } | { "op": "export", format: ExportFormat, path?: string, } | { "op": "list_rewind_points" } | { "op": "rewind", back: number, conversation: boolean, files: boolean, force: boolean, } | { "op": "reload_config" } | { "op": "trust_project", decision: string, } | { "op": "enable_hook", id: string, replace_payload?: boolean | null, } | { "op": "inspect_hook_setup", id: string, request: number, } | { "op": "save_hook_setup", id: string, request: number, revision: string, connections: Array<HookConnectionDraft>,
 /**
  * None keeps the current enabled state.
  */

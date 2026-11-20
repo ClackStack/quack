@@ -319,7 +319,12 @@ const INFO: AppInfo = {
 	history: ['Check test failures in the pond module', 'Explain how session memory works']
 };
 
-const SESSION = { id: 'dev-session-0000', cwd: INFO.cwd, model: INFO.model, profile: 'generic' };
+const SESSION = {
+	id: 'dev-session-0000',
+	cwd: INFO.cwd,
+	model: INFO.model ?? undefined,
+	profile: 'generic'
+};
 
 function savedSessions() {
 	return [
@@ -1434,7 +1439,7 @@ export function devTransport(): Transport {
 							url: 'https://sign-in.example.dev/authorize?demo=1'
 							});
 						setTimeout(() => {
-							send(tab, { event: 'sign_in_result', id, error: null });
+							send(tab, { event: 'sign_in_result', id, error: undefined });
 							send(tab, { event: 'services', services: [] });
 						}, 4000);
 					}
@@ -1826,9 +1831,9 @@ export function devTransport(): Transport {
 						send(tab, {
 							event: 'update_check_result',
 							current: INFO.version,
-							latest: null,
+							latest: undefined,
 							update_available: false,
-							url: null,
+							url: undefined,
 							error: 'no update source is set · set updates.url'
 						});
 						break;
@@ -1840,7 +1845,7 @@ export function devTransport(): Transport {
 						send(tab, {
 							event: 'update_check_result',
 							current: INFO.version,
-							latest: null,
+							latest: undefined,
 							update_available: false,
 							url: updatesUrl,
 							error: `blocked by network.offline: add \`${host}\` to network.egress_allow to use it`
@@ -1853,7 +1858,7 @@ export function devTransport(): Transport {
 						latest: INFO.version,
 						update_available: false,
 						url: updatesUrl,
-						error: null
+						error: undefined
 					});
 					break;
 				}

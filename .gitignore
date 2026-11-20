@@ -24,6 +24,7 @@ perf.data*
 
 # cargo-dist / release staging
 /dist/
+*.cdx.json
 
 # --- Test artifacts ---
 # insta writes these when a snapshot changes; accept with `cargo insta review`.

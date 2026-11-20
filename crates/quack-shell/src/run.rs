@@ -1,7 +1,6 @@
 //! Run one command with merged, ordered output, a timeout and cancellation.
 
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,19 +38,15 @@ pub struct RunResult {
 pub async fn run(shell: &ShellKind, script: &str, opts: RunOptions) -> std::io::Result<RunResult> {
     let mut cmd = match &opts.sandbox {
         Some(policy) => {
-            quack_sandbox::command(policy, shell.program().as_os_str(), shell.args(script))
+            quack_sandbox::sandboxed(policy, shell.program().as_os_str(), shell.args(script))
                 .map_err(std::io::Error::other)?
         }
-        None => {
-            let mut c = tokio::process::Command::new(shell.program());
-            c.args(shell.args(script));
-            c
-        }
+        None => quack_sandbox::unsandboxed(shell.program().as_os_str(), shell.args(script)),
     };
     cmd.current_dir(&opts.cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdin_null()
+        .stdout_piped()
+        .stderr_piped()
         .kill_on_drop(true)
         // Never wait on a pager or a credential prompt.
         .env("GIT_PAGER", "cat")
@@ -67,12 +62,12 @@ pub async fn run(shell: &ShellKind, script: &str, opts: RunOptions) -> std::io::
     }
 
     let mut child = cmd.spawn()?;
-    let tree = Tree::new(&child);
+    let tree = Tree::from_sandbox_child(&child);
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    if let Some(out) = child.stdout.take() {
+    if let Some(out) = child.take_stdout() {
         tokio::spawn(pump(out, tx.clone()));
     }
-    if let Some(err) = child.stderr.take() {
+    if let Some(err) = child.take_stderr() {
         tokio::spawn(pump(err, tx.clone()));
     }
     drop(tx);
@@ -179,19 +174,30 @@ impl Tree {
         Self { pid: child.id() }
     }
 
+    #[cfg(unix)]
+    pub fn from_sandbox_child(child: &quack_sandbox::Child) -> Self {
+        Self { pid: child.id() }
+    }
+
     #[cfg(windows)]
     pub fn new(child: &tokio::process::Child) -> Self {
+        Self::from_parts(child.id(), child.raw_handle())
+    }
+
+    #[cfg(windows)]
+    pub fn from_sandbox_child(child: &quack_sandbox::Child) -> Self {
+        Self::from_parts(child.id(), child.raw_handle())
+    }
+
+    #[cfg(windows)]
+    fn from_parts(pid: Option<u32>, handle: Option<std::os::windows::io::RawHandle>) -> Self {
         // A grandchild started in the instant before assignment escapes the job;
         // `taskkill /T` below still finds it while its parent lives.
-        let job =
-            crate::job::Job::new().filter(|j| child.raw_handle().is_some_and(|h| j.assign(h)));
+        let job = crate::job::Job::new().filter(|j| handle.is_some_and(|h| j.assign(h)));
         if job.is_none() {
             tracing::debug!("no job object for this command; using taskkill");
         }
-        Self {
-            pid: child.id(),
-            job,
-        }
+        Self { pid, job }
     }
 
     #[cfg(unix)]
@@ -212,8 +218,8 @@ impl Tree {
         if let Some(pid) = self.pid {
             let _ = std::process::Command::new("taskkill")
                 .args(["/T", "/F", "/PID", &pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status();
         }
     }

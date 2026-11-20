@@ -13,12 +13,12 @@ api_key = { env = "DEEPSEEK_API_KEY" }
 [[models]]
 id = "deepseek-flash"
 vision = true
-reasoning = { effort = "high", efforts = ["low", "high", "max"] }
+reasoning = { effort = "high", efforts = ["low", "high", "max"], preserve_in_history = "current_turn" }
 
 [[models]]
 id = "deepseek-v4-flash"
-reasoning = { effort = "high", efforts = ["low", "high", "max"] }
+reasoning = { effort = "high", efforts = ["low", "high", "max"], preserve_in_history = "current_turn" }
 
 [[models]]
 id = "deepseek-v4-pro"
-reasoning = { effort = "high", efforts = ["low", "high", "max"] }
+reasoning = { effort = "high", efforts = ["low", "high", "max"], preserve_in_history = "current_turn" }

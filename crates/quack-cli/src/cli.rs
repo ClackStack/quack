@@ -23,6 +23,9 @@ pub(crate) struct Global {
     /// Run as if started in this directory.
     #[arg(short = 'C', long = "cd", global = true, value_name = "DIR")]
     pub cd: Option<PathBuf>,
+    /// Create or reopen a git worktree under `.quack/worktrees/<NAME>` on branch `quack/<NAME>`.
+    #[arg(long, global = true, value_name = "NAME")]
+    pub worktree: Option<String>,
     /// Model as <provider>/<model>; overrides [model].default.
     #[arg(short = 'm', long, global = true)]
     pub model: Option<String>,

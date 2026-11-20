@@ -8,7 +8,7 @@ pub mod ops;
 pub mod pos;
 mod rpc;
 
-pub use client::Client;
+pub use client::{Client, WatchChangeType};
 pub use manager::{
     DiagnosticEntry, LspManager, MAX_RESTARTS, Prepare, ServerSpec, Status, TOOL_WAIT,
 };

@@ -3,8 +3,9 @@
 pub mod checkpoint;
 pub mod memory;
 pub mod session;
+pub mod snapshot;
 pub mod time;
-pub mod trust;
+pub mod worktree;
 
 /// FNV-1a 64-bit hash; stable across builds. Used to detect changes (the project key
 /// names a folder on disk, the undo hash notices re-edits), so the constants and the byte

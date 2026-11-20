@@ -498,7 +498,7 @@ describe('SettingsPanel & SettingsFieldRow rendering', () => {
 			latest: '0.2.0',
 			update_available: true,
 			url: 'https://github.com/ClackStack/quack/releases/latest',
-			error: null
+			error: undefined
 		});
 		const available = render(SettingsPanel, { props: { session } }).body;
 		expect(available).toContain('quack 0.2.0 is available');

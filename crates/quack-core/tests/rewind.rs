@@ -194,3 +194,95 @@ async fn rewind_refuses_when_files_changed_since() {
     assert!(!ws.join("a.txt").exists());
     engine.shutdown().await;
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn undo_and_rewind_restore_shell_command_mutations() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"role\":\"tool\""))
+        .respond_with(sse_text("shell changes applied"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse_call(
+            "c_shell",
+            "shell",
+            serde_json::json!({
+                "command": "printf 'modified\\n' > keep.txt && printf 'new\\n' > created.txt && rm gone.txt"
+            }),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    let ws = loaded.dirs.workspace_root.clone();
+    std::fs::write(ws.join("keep.txt"), b"original\r\n").expect("write keep");
+    std::fs::write(ws.join("gone.txt"), b"must come back\n").expect("write gone");
+
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    engine
+        .submit(Op::SetPermissionMode {
+            mode: PermissionMode::Allow,
+        })
+        .await;
+    turn(&mut engine, "run shell mutations").await;
+
+    assert_eq!(
+        std::fs::read_to_string(ws.join("keep.txt")).expect("keep"),
+        "modified\n"
+    );
+    assert!(ws.join("created.txt").exists());
+    assert!(!ws.join("gone.txt").exists());
+
+    // Rewind point lists all three files touched by the shell command.
+    engine.submit(Op::ListRewindPoints).await;
+    let points = next(&mut engine, |e| match e {
+        Event::RewindPoints { points } => Some(points),
+        _ => None,
+    })
+    .await;
+    assert_eq!(points.len(), 1);
+    assert!(
+        points[0].files.contains(&"keep.txt".to_owned()),
+        "{points:?}"
+    );
+    assert!(
+        points[0].files.contains(&"created.txt".to_owned()),
+        "{points:?}"
+    );
+    assert!(
+        points[0].files.contains(&"gone.txt".to_owned()),
+        "{points:?}"
+    );
+
+    // `/undo` reverts all three shell mutations cleanly (including CRLF bytes and deleted file).
+    engine
+        .submit(Op::Undo {
+            checkpoint: None,
+            force: false,
+        })
+        .await;
+    let (restored, conflicts) = next(&mut engine, |e| match e {
+        Event::FilesRestored {
+            restored,
+            conflicts,
+        } => Some((restored, conflicts)),
+        _ => None,
+    })
+    .await;
+    assert!(conflicts.is_empty(), "{conflicts:?}");
+    assert_eq!(restored.len(), 3, "{restored:?}");
+    assert_eq!(
+        std::fs::read(ws.join("keep.txt")).expect("keep"),
+        b"original\r\n"
+    );
+    assert_eq!(
+        std::fs::read(ws.join("gone.txt")).expect("gone"),
+        b"must come back\n"
+    );
+    assert!(!ws.join("created.txt").exists());
+    engine.shutdown().await;
+}

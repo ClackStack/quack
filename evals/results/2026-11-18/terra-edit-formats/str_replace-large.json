@@ -1,0 +1,30 @@
+{
+  "harness": "quack 0.0.0",
+  "date": "2026-11-18",
+  "suite": "tasks",
+  "model": "chatgpt/terra",
+  "profile": "generic",
+  "sampling": {},
+  "results": [
+    {
+      "task": "big-file-edit",
+      "category": "long-context",
+      "passed": true,
+      "changed": [
+        "handlers.py"
+      ],
+      "steps": 4,
+      "tool_calls": 3,
+      "tool_errors": 0,
+      "parse_failures": 0,
+      "edit_failures": 0,
+      "prompt_tokens": 15381,
+      "cached_tokens": 4096,
+      "completion_tokens": 206,
+      "compactions": 0,
+      "pruned": 0,
+      "peak_prompt": 3990,
+      "seconds": 14.270048625
+    }
+  ]
+}

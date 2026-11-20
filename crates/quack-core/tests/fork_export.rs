@@ -32,7 +32,7 @@ async fn resumed(root: &std::path::Path, url: &str, id: &str) -> Vec<ReplayItem>
     let loaded = workspace(root, url, "[\"tiny\"]", "");
     let mut engine = Engine::spawn_with(Arc::new(loaded), Resume::Id(id.to_owned()));
     let items = until(&mut engine, |e| match e {
-        Event::SessionResumed { items, .. } => Some(items.clone()),
+        Event::SessionResumed { items, .. } => Some(items.to_vec()),
         _ => None,
     })
     .await;
@@ -172,5 +172,96 @@ async fn small_model_title_is_saved_and_restored() {
 
     let mut engine = Engine::spawn_with(loaded, Resume::Latest);
     until(&mut engine, is_title).await;
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn fork_worktree_creates_isolated_branch_and_continues_in_worktree() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wiremock::matchers::body_string_contains(
+            "write in worktree",
+        ))
+        .and(wiremock::matchers::body_string_contains(
+            "\"role\":\"tool\"",
+        ))
+        .respond_with(sse_text("wrote in worktree"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(wiremock::matchers::body_string_contains(
+            "write in worktree",
+        ))
+        .respond_with(common::sse_call(
+            "c_wt",
+            "write",
+            serde_json::json!({"path": "isolated.txt", "content": "only in worktree\n"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse_text("first ok"))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = workspace(tmp.path(), &server.uri(), "[\"tiny\"]", "");
+    let ws = loaded.dirs.workspace_root.clone();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&ws)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "quack")
+            .env("GIT_AUTHOR_EMAIL", "quack@example.com")
+            .env("GIT_COMMITTER_NAME", "quack")
+            .env("GIT_COMMITTER_EMAIL", "quack@example.com")
+            .status()
+            .expect("git")
+    };
+    if !git(&["init", "-q"]).success() {
+        return;
+    }
+    std::fs::write(ws.join("base.txt"), "base\n").expect("write");
+    assert!(git(&["add", "base.txt"]).success());
+    assert!(git(&["commit", "-q", "-m", "init"]).success());
+
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    engine
+        .submit(Op::SetPermissionMode {
+            mode: quack_core::protocol::PermissionMode::Allow,
+        })
+        .await;
+    turn(&mut engine, "initial message").await;
+
+    engine
+        .submit(Op::ForkWorktree {
+            name: Some("feat-x".into()),
+        })
+        .await;
+    let (wt_path, wt_branch) = until(&mut engine, |e| match e {
+        Event::WorktreeCreated { path, branch, .. } => Some((path.clone(), branch.clone())),
+        _ => None,
+    })
+    .await;
+    assert_eq!(wt_branch, "quack/feat-x");
+    assert!(wt_path.ends_with("feat-x"), "{wt_path}");
+    // Wait for reload inside the new worktree to finish.
+    until(&mut engine, |e| match e {
+        Event::SessionConfigured { session } if session.cwd == wt_path => Some(()),
+        _ => None,
+    })
+    .await;
+
+    turn(&mut engine, "write in worktree").await;
+    assert!(
+        std::path::Path::new(&wt_path).join("isolated.txt").exists(),
+        "expected isolated.txt inside worktree {wt_path}"
+    );
+    assert!(
+        !ws.join("isolated.txt").exists(),
+        "main workspace should remain untouched"
+    );
     engine.shutdown().await;
 }

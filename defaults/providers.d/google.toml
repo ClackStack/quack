@@ -14,6 +14,7 @@ api_key = { env = "GEMINI_API_KEY" }
 id = "gemini-4-carbon"
 alias = "carbon"
 context_window = 1048576
+compact_at = 200000
 max_output = 65536
 vision = true
 reasoning = { effort = "medium", efforts = ["low", "medium", "high"] }
@@ -22,6 +23,7 @@ reasoning = { effort = "medium", efforts = ["low", "medium", "high"] }
 id = "gemini-4-argon"
 alias = "argon"
 context_window = 1048576
+compact_at = 200000
 max_output = 65536
 vision = true
 reasoning = { effort = "medium", efforts = ["low", "medium", "high"] }
@@ -30,6 +32,7 @@ reasoning = { effort = "medium", efforts = ["low", "medium", "high"] }
 id = "gemini-4-hydrogen"
 alias = "hydrogen"
 context_window = 1048576
+compact_at = 200000
 max_output = 65536
 vision = true
 reasoning = { effort = "high", efforts = ["low", "medium", "high", "xhigh"] }
@@ -38,6 +41,7 @@ reasoning = { effort = "high", efforts = ["low", "medium", "high", "xhigh"] }
 id = "gemini-3.8-flash"
 alias = "gemini-flash"
 context_window = 1048576
+compact_at = 200000
 max_output = 65536
 vision = true
 reasoning = { effort = "medium", efforts = ["low", "medium", "high"] }

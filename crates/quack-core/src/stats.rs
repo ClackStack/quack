@@ -19,6 +19,8 @@ pub(crate) struct Stats {
     prompt: u64,
     completion: u64,
     cached: u64,
+    cache_write: u64,
+    reasoning: u64,
     cache_reported: u32,
     cost: f64,
     priced: u32,
@@ -53,6 +55,8 @@ impl Default for Stats {
             prompt: 0,
             completion: 0,
             cached: 0,
+            cache_write: 0,
+            reasoning: 0,
             cache_reported: 0,
             cost: 0.0,
             priced: 0,
@@ -108,7 +112,9 @@ impl Stats {
         self.history.push_back(RequestStat {
             prompt: u.prompt_tokens,
             cached: u.cached_prompt_tokens.unwrap_or(0),
+            cache_write: u.cache_write_tokens.unwrap_or(0),
             completion: u.completion_tokens,
+            reasoning: u.reasoning_tokens.unwrap_or(0),
             cost,
             ttft_ms: None,
             tokens_per_sec: None,
@@ -118,6 +124,12 @@ impl Stats {
         if let Some(c) = u.cached_prompt_tokens {
             self.cached += u64::from(c);
             self.cache_reported += 1;
+        }
+        if let Some(w) = u.cache_write_tokens {
+            self.cache_write += u64::from(w);
+        }
+        if let Some(r) = u.reasoning_tokens {
+            self.reasoning += u64::from(r);
         }
     }
 
@@ -206,6 +218,8 @@ impl Stats {
             prompt_tokens: self.prompt,
             completion_tokens: self.completion,
             cached_tokens: self.cached,
+            cache_write_tokens: self.cache_write,
+            reasoning_tokens: self.reasoning,
             cache_reported: self.cache_reported,
             cost: (self.priced > 0).then_some(self.cost),
             unpriced: self.requests.saturating_sub(self.unreported + self.priced),
@@ -238,6 +252,7 @@ mod tests {
             completion_tokens: completion,
             cached_prompt_tokens: cached,
             cache_write_tokens: None,
+            reasoning_tokens: None,
         }
     }
 
@@ -369,5 +384,35 @@ mod tests {
         }
         let h = s.report("m/x", 1).history;
         assert_eq!(h.len(), StatsReport::HISTORY, "only the newest are kept");
+    }
+
+    #[test]
+    fn tracks_cache_write_and_reasoning_tokens_across_resume() {
+        let mut s = Stats::default();
+        let u = Usage {
+            prompt_tokens: 1_000,
+            completion_tokens: 300,
+            cached_prompt_tokens: Some(400),
+            cache_write_tokens: Some(250),
+            reasoning_tokens: Some(180),
+        };
+        s.request(Some(&u), Some(0.01), Duration::from_millis(50));
+        let r = s.report("chatgpt/sol", 1);
+        assert_eq!(r.cache_write_tokens, 250);
+        assert_eq!(r.reasoning_tokens, 180);
+        assert_eq!(r.history[0].cache_write, 250);
+        assert_eq!(r.history[0].reasoning, 180);
+
+        let rec = Record {
+            ts: "2026-11-19T00:00:00Z".into(),
+            kind: "usage".into(),
+            data: serde_json::json!({ "usage": u, "cost": 0.01 })
+                .as_object()
+                .cloned()
+                .expect("object"),
+        };
+        let resumed = Stats::from_log(&[rec]).report("chatgpt/sol", 1);
+        assert_eq!(resumed.cache_write_tokens, 250);
+        assert_eq!(resumed.reasoning_tokens, 180);
     }
 }

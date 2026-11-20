@@ -25,7 +25,7 @@ intelligence.
 
 ### 1. Install
 
-The installer asks what to install: both the desktop GUI (`quack-gui`) and the terminal UI (`quack`), the default, or just one (pass `--tui` / `--gui`, `-Tui` / `-Gui` on Windows, to skip the question). They are separate apps sharing one core, config, sessions, memory, and prompt history. Re-running the installer defaults to updating whatever is already installed. On Linux it installs the `.deb` (or `.rpm`) system package when the machine can, falling back to the self-contained archive in `~/.local`; `--pkg archive` forces the archive.
+The installer asks what to install: both the desktop GUI (`quack-gui`) and the terminal UI (`quack`), the default, or just one (pass `--tui` / `--gui`, `-Tui` / `-Gui` on Windows, to skip the question). They are separate apps sharing one core, config, sessions, memory, and prompt history. Re-running the installer defaults to updating whatever is already installed. On Linux it updates existing `.deb`/`.rpm` installations using that same package format (never silently falling back to the archive), and on fresh installs uses `.deb`/`.rpm` when the machine can, falling back to the self-contained archive in `~/.local`; `--pkg archive` forces the archive.
 
 **Linux and macOS:**
 ```sh
@@ -68,9 +68,12 @@ checkpoints its JSON after each trial; `--stop-on-incomplete` stops after a resu
 execution error or missing accounting. See the [offline preflight and pilot checklist](evals/README.md#before-a-paid-profile-pilot).
 
 The bundled OpenAI and ChatGPT providers use native Responses compaction for long
-conversations. Quack replays the encrypted checkpoint after resume and uses a text
-summary for focused `/compact <focus>` requests or if the native endpoint fails.
-Set `native_compaction = false` in a provider override to select text compaction.
+conversations (preserving session context across the checkpoint), keep histories strictly
+append-only with delta-only reminders for warm KV prefix caches, and set `compact_at = 250000`
+on 500k models to compact below the 272k long-context cliff. Quack replays the encrypted
+checkpoint after resume and uses a text summary (routed through `[model] small` at minimal
+reasoning effort when configured) for focused `/compact <focus>` requests or if the native
+endpoint fails. Set `native_compaction = false` in a provider override to select text compaction.
 
 ### 3. Common Commands
 
@@ -96,7 +99,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 
 - **Open-weight first**: Built from the ground up for open models with family profiles (Qwen, DeepSeek, GLM, Kimi, Mistral), grammar-guided decoding, and reasoning preservation.
 - **Fast and lightweight**: Native Rust binary, sub-10ms startup, low memory footprint, and zero telemetry or implicit network egress.
-- **Sandboxed by default**: Commands run in an OS-level sandbox (Landlock and seccomp on Linux, Seatbelt on macOS) restricted to workspace writes with no network access.
+- **Sandboxed by default**: Commands run in an OS-level sandbox (Landlock and seccomp on Linux, Seatbelt on macOS, Restricted Token + Low Integrity + Job Objects on Windows) restricted to workspace writes with no network access.
 - **AST-aware command security**: Tree-sitter parses Bash and PowerShell commands down to AST nodes, ensuring compound commands, subshells, and aliases cannot bypass deny rules.
 - **Compiler and syntax aware**: Immediate Tree-sitter syntax validation on edits and background LSP diagnostics that guide the model to fix type or compile errors immediately.
 - **Smart context distillation**: Automatically folds passing test sequences (Cargo, Pytest, Go, Jest) and verbose build logs, keeping context compact and prompt caches warm.
@@ -124,18 +127,18 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 
 ### Tools & Editing
 
-- **Core tool suite**: `read`, `write`, `glob`, `grep`, `list_dir`, `shell`, `lsp`, and `index`.
-- **Intelligent code indexing**: `index` generates Tree-sitter symbol outlines (functions, types, methods, and line ranges) for Rust, Python, Go, TypeScript, JavaScript, C, C++, and Bash. Large file reads automatically return outlines so the model reads only relevant definition spans.
+- **Core tool suite**: `read` (500-line default cap with automatic outlining for large files), `write`, `glob`, `grep` (`content`/`files`/`count` modes, context lines, and match limits), `list_dir`, `shell` (including managed background jobs via `background: true` and `job_action: "output" | "stop" | "list"`), `lsp`, and `index`. Allowed read-only tools execute in parallel while preserving result order.
+- **Intelligent code indexing**: `index` generates Tree-sitter symbol outlines (functions, types, methods, and line ranges, cached per file snapshot) for Rust, Python, Go, TypeScript, JavaScript, C, C++, and Bash. Large file reads automatically return outlines so the model reads only relevant definition spans.
 - **Flexible edit formats**: Configurable via `[tools] edit_format`:
-  - `str_replace`: Forgiving single-snippet replacement, or batch independent exact replacements in one file with `edits`.
-  - `hashline`: File snapshot tags and numbered lines, with function-level block targeting.
-  - `apply_patch`: Multi-file transactional patches.
+  - `str_replace`: Forgiving single-snippet replacement (with optional `symbol` scoping), or batch independent exact replacements in one file with `edits`.
+  - `hashline`: File snapshot tags and numbered lines, with function-level block targeting and shown-line guards on replacements and insertions.
+  - `apply_patch`: Multi-file transactional patches with ambiguity rejection, post-edit LSP diagnostics, and nested `AGENTS.md` discovery.
   - `search_replace_blocks`: Multi-block SEARCH/REPLACE operations.
   - `whole_file`: Full file rewrites.
 - On OpenAI-compatible Responses and ChatGPT plan routes, optional tool arguments can be omitted. An `edit` batch can send just `path` and `edits`.
 - **Transactional guarantees**: Multi-file refactors check all changes before writing. If any single change fails, all touched files roll back to their original state.
 - `str_replace` and `apply_patch` require a prior read or write before changing an existing file and reject a stale read. Hashline tracks file versions and the numbered ranges shown to the model.
-- **Distilled test output**: Build and test outputs (Cargo, Pytest, unittest, Go test, Jest, TAP) fold passing tests (`[... 42 passed tests omitted ...]`), retaining all assertion failures and stack traces while preserving context space.
+- **Distilled test output**: Build and test outputs (Cargo, Pytest, unittest, Go test, Jest, TAP, and compiler progress lines) fold passing tests (`[... 42 passed tests omitted ...]`), spill truncated output to a temp file when trimmed, and retain assertion failures and stack traces while preserving context space.
 
 ### Code Intelligence (LSP)
 
@@ -147,12 +150,12 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 ### Safety & Sandboxing
 
 - **Independent work mode and approvals**: choose **Plan / Edit** and **Ask / Allow** separately. Plan reads and searches; Edit may change files and run tests. Ask prompts for unapproved actions; Allow runs them within the configured sandbox. `/yolo` or `--yolo` explicitly disables approvals and sandboxing.
-- **OS-level sandboxing**: Shell commands execute in an isolated sandbox (Landlock + seccomp on Linux, Seatbelt on macOS) with workspace-only write access and network access disabled.
+- **OS-level sandboxing**: Shell commands (and opt-in `sandbox = true` MCP/LSP servers) execute in an isolated sandbox (Landlock + seccomp on Linux, Seatbelt on macOS, Restricted Token + Low Integrity + Job Objects on Windows) with workspace-only write access and network access disabled.
 - **AST-aware command verification**: Tree-sitter parses shell commands to verify that compound expressions (`&&`, `||`, subshells, command substitutions, aliases) do not violate deny rules.
 - **Transparent approvals**: When an edit needs approval, the prompt shows a diff preview with options to allow once (`y`), allow for session (`a`), permanently allow rule (`A`), or deny (`n`).
 - **Project trust**: Untrusted cloned repositories execute no `.quack/` configurations until explicitly trusted via `/trust`.
 - **Quick sandbox toggle**: Toggle the sandbox on or off during a session with `/sandbox` while preserving work mode and approvals.
-- **Pre-egress Secret Shield & Session Egress Ledger**: Locally scans outbound prompts, `@` slices, and tool results with `redact-secret` plus active resolved credentials (`[network] secret_guard = "ask"`) before HTTP egress, while logging every outbound/blocked hop into a live session ledger.
+- **Pre-egress Secret Shield & Session Egress Ledger**: Locally scans outbound prompts, `@` file mentions/slices, `AGENTS.md` / session instructions, tool results, and previously local history on mid-session switches to remote providers with `redact-secret` plus active resolved credentials (`[network] secret_guard = "ask"`) before HTTP egress, while logging every outbound/blocked hop into a live session ledger.
 
 ### Planning & Sub-Agents
 
@@ -191,7 +194,7 @@ configuration and migration from older modes.
 - **Lossless compaction**: Compaction preserves the original user prompt and files changed to date.
 - **Context analytics**: `/context` visualizes token distribution across prompts, tools, and history; `/stats` graphs cumulative token usage, latency, and session cost.
 - **Session persistence**: Every session is written incrementally and survives crashes. Continue seamlessly with `quack --continue` or `/resume`.
-- **Time travel and branches**: `/undo` rolls back file changes; `/rewind` reverts files and conversation turns to any previous point; `/fork` branches a session into a new thread.
+- **Time travel and branches**: `/undo` rolls back file changes (including mutating shell commands via private shadow git snapshots); `/rewind` reverts files and conversation turns to any previous point; `/fork` branches a session into a new thread, and `/fork --worktree [name]` (or `quack --worktree <name>`) isolates the branch in a git worktree under `.quack/worktrees/<name>`.
 - **Persistent memory**: Maintains project and global memory notes (`/memory`), auto-detecting corrections and preferences across sessions.
 - **Instruction hierarchy**: Automatically loads instructions from `AGENTS.md` (and imports existing `CLAUDE.md`, `.cursorrules`, or Copilot files).
 

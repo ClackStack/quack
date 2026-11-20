@@ -81,6 +81,12 @@ pub(crate) fn compact_body(req: &ChatRequest, route: Route) -> Result<Value, Pro
     if route == Route::ChatgptPlan {
         body["context_management"] = json!([{ "type": "compaction", "compact_threshold": 1000 }]);
         body["tool_choice"] = json!("none");
+        // The plan route generates a post-compaction reply that Quack discards; strip
+        // `reasoning.summary` so we don't pay for discarded summary tokens or conflict with
+        // a lowered `effort = "none"`.
+        if let Some(r) = body.get_mut("reasoning").and_then(Value::as_object_mut) {
+            r.remove("summary");
+        }
         return Ok(body);
     }
     let input = body["input"].as_array_mut().ok_or_else(|| {
@@ -96,15 +102,48 @@ pub(crate) fn compact_body(req: &ChatRequest, route: Route) -> Result<Value, Pro
 pub(crate) fn build_body(req: &ChatRequest, route: Route) -> Value {
     let mut instructions = None;
     let mut input = Vec::new();
+    let explicit_bp = req.prompt_cache.explicit_breakpoints;
+    let dev_instructions = req.prompt_cache.developer_instructions;
+    let mut static_bp_placed = false;
     for (i, m) in req.messages.iter().enumerate() {
         match m {
-            Message::System { content } if i == 0 => instructions = Some(content.clone()),
+            Message::System { content } if i == 0 && !dev_instructions => {
+                instructions = Some(content.clone());
+            }
+            Message::System { content } if i == 0 => {
+                if explicit_bp {
+                    static_bp_placed = true;
+                    input.push(json!({
+                        "role": "developer",
+                        "content": [{
+                            "type": "input_text",
+                            "text": content,
+                            "prompt_cache_breakpoint": { "mode": "explicit" },
+                        }],
+                    }));
+                } else {
+                    input.push(json!({
+                        "role": "developer",
+                        "content": [{ "type": "input_text", "text": content }],
+                    }));
+                }
+            }
             Message::System { content } => {
                 input.push(json!({ "role": "developer", "content": content }));
             }
-            Message::Compaction { sealed, .. } => input.extend_from_slice(&sealed.items),
+            Message::Compaction {
+                sealed,
+                session_context,
+                ..
+            } => {
+                input.extend_from_slice(&sealed.items);
+                if let Some(ctx) = session_context.as_deref().filter(|c| !c.is_empty()) {
+                    input.push(json!({ "role": "developer", "content": ctx }));
+                }
+            }
             Message::User { content, images } => {
-                if images.is_empty() {
+                let mark_first_user = explicit_bp && !static_bp_placed && !content.is_empty();
+                if images.is_empty() && !mark_first_user {
                     input.push(json!({ "role": "user", "content": content }))
                 } else {
                     let mut parts: Vec<Value> = images
@@ -112,7 +151,12 @@ pub(crate) fn build_body(req: &ChatRequest, route: Route) -> Value {
                         .map(|i| json!({ "type": "input_image", "image_url": i.data_url() }))
                         .collect();
                     if !content.is_empty() {
-                        parts.push(json!({ "type": "input_text", "text": content }));
+                        let mut text = json!({ "type": "input_text", "text": content });
+                        if mark_first_user {
+                            static_bp_placed = true;
+                            text["prompt_cache_breakpoint"] = json!({ "mode": "explicit" });
+                        }
+                        parts.push(text);
                     }
                     input.push(json!({ "role": "user", "content": parts }))
                 }
@@ -200,8 +244,36 @@ pub(crate) fn build_body(req: &ChatRequest, route: Route) -> Value {
     if let Some(k) = &req.cache_key {
         body["prompt_cache_key"] = json!(k);
     }
-    // The plan route takes no output cap or sampling settings.
+    let mut cache_opts = serde_json::Map::new();
+    if explicit_bp {
+        // Implicit mode keeps the server's rolling tail breakpoint while honoring our
+        // explicit static breakpoint on the developer/first-user prefix.
+        cache_opts.insert("mode".into(), json!("implicit"));
+    }
+    if let Some(ttl) = req
+        .prompt_cache
+        .ttl
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+    {
+        cache_opts.insert("ttl".into(), json!(ttl));
+    }
+    if req.prompt_cache.diagnostics
+        && let Some(prev) = req
+            .comparison_response_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+    {
+        cache_opts.insert("comparison_response_id".into(), json!(prev));
+    }
+    if !cache_opts.is_empty() {
+        body["prompt_cache_options"] = Value::Object(cache_opts);
+    }
+    // The plan route takes no output cap, sampling, or parallel_tool_calls override.
     if route == Route::Api {
+        if !req.tools.is_empty() && req.parallel_tool_calls == Some(false) {
+            body["parallel_tool_calls"] = json!(false);
+        }
         if let Some(n) = req.max_tokens {
             body["max_output_tokens"] = json!(n);
         }
@@ -219,6 +291,11 @@ pub(crate) fn build_body(req: &ChatRequest, route: Route) -> Value {
             body["reasoning"] = json!({});
         }
         body["reasoning"]["effort"] = json!(e);
+        if e.eq_ignore_ascii_case("none")
+            && let Some(r) = body["reasoning"].as_object_mut()
+        {
+            r.remove("summary");
+        }
     }
     body
 }
@@ -248,6 +325,7 @@ fn usage(u: &Value) -> Usage {
         completion_tokens: num("/output_tokens").unwrap_or(0),
         cached_prompt_tokens: num("/input_tokens_details/cached_tokens"),
         cache_write_tokens: num("/input_tokens_details/cache_write_tokens"),
+        reasoning_tokens: num("/output_tokens_details/reasoning_tokens"),
     }
 }
 
@@ -390,7 +468,7 @@ impl EventParser {
             FinishReason::ToolCalls
         };
         if let Some(route) = self.compaction_route
-            && finish == FinishReason::Stop
+            && matches!(finish, FinishReason::Stop | FinishReason::Length)
         {
             let items = compaction_items(
                 &mut self.items,
@@ -404,6 +482,15 @@ impl EventParser {
             out.push(StreamEvent::Sealed(items));
         }
         out.push(StreamEvent::Finish(finish));
+        if let Some(id) = r["id"].as_str().filter(|id| !id.is_empty()) {
+            out.push(StreamEvent::ResponseId(id.to_owned()));
+        }
+        if r["prompt_cache_diagnostics"].is_object() {
+            tracing::debug!(
+                diagnostics = %r["prompt_cache_diagnostics"],
+                "responses prompt cache diagnostics"
+            );
+        }
         if r["usage"].is_object() {
             out.push(StreamEvent::Usage(usage(&r["usage"])));
         }
@@ -500,10 +587,23 @@ mod tests {
 
     #[test]
     fn plan_compaction_replays_only_the_latest_checkpoint() {
-        let body = compact_body(&ChatRequest::default(), Route::ChatgptPlan).expect("request");
+        let req = ChatRequest {
+            reasoning_effort: Some("low".into()),
+            extra_body: serde_json::from_value(json!({
+                "reasoning": { "summary": "auto", "context": "all_turns" }
+            }))
+            .expect("extra body"),
+            ..ChatRequest::default()
+        };
+        let body = compact_body(&req, Route::ChatgptPlan).expect("request");
         assert_eq!(body["context_management"][0]["type"], "compaction");
         assert_eq!(body["tool_choice"], "none");
         assert_eq!(body["input"], json!([]));
+        assert_eq!(
+            body["reasoning"],
+            json!({ "effort": "low", "context": "all_turns" }),
+            "plan compaction strips reasoning.summary from the discarded reply"
+        );
 
         let checkpoint = json!({ "type": "compaction", "encrypted_content": "latest" });
         let completed = json!({
@@ -521,8 +621,31 @@ mod tests {
         assert_eq!(
             events,
             [
-                StreamEvent::Sealed(vec![checkpoint]),
+                StreamEvent::Sealed(vec![checkpoint.clone()]),
                 StreamEvent::Finish(FinishReason::Stop)
+            ]
+        );
+
+        // If the discarded post-compaction reply hits max_output_tokens, still keep the
+        // encrypted compaction checkpoint that was already produced.
+        let incomplete = json!({
+            "type": "response.incomplete",
+            "response": {
+                "incomplete_details": { "reason": "max_output_tokens" },
+                "output": [
+                    checkpoint,
+                    { "type": "message", "role": "assistant", "content": [] }
+                ]
+            }
+        });
+        let events = EventParser::new(Some(Route::ChatgptPlan))
+            .parse(&incomplete.to_string())
+            .expect("incomplete compacted response");
+        assert_eq!(
+            events,
+            [
+                StreamEvent::Sealed(vec![checkpoint]),
+                StreamEvent::Finish(FinishReason::Length)
             ]
         );
     }
@@ -700,6 +823,7 @@ mod tests {
                 completion_tokens: 7,
                 cached_prompt_tokens: Some(40),
                 cache_write_tokens: None,
+                reasoning_tokens: None,
             })
         );
         let Message::Assistant {
@@ -829,5 +953,84 @@ mod tests {
             .parse(r#"{"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"too long"}}}"#)
             .expect_err("failed");
         assert_eq!(e.kind, ErrorKind::ContextLengthExceeded);
+    }
+
+    #[test]
+    fn developer_instructions_explicit_breakpoints_diagnostics_and_compaction_context() {
+        let req = ChatRequest {
+            model: "gpt-6.2-sol".into(),
+            messages: vec![
+                Message::System {
+                    content: "static system prompt".into(),
+                },
+                Message::Compaction {
+                    content: "fallback".into(),
+                    sealed: crate::Sealed {
+                        provider: "openai".into(),
+                        model: "gpt-6.2-sol".into(),
+                        fingerprint: "fp".into(),
+                        items: vec![json!({ "type": "compaction", "encrypted_content": "ENC" })],
+                    },
+                    session_context: Some("<context>AGENTS.md rules</context>".into()),
+                },
+                Message::User {
+                    content: "next".into(),
+                    images: Vec::new(),
+                },
+            ],
+            tools: vec![ToolSpec {
+                name: "read".into(),
+                description: "d".into(),
+                parameters: json!({"type":"object"}),
+            }],
+            parallel_tool_calls: Some(false),
+            prompt_cache: quack_config::provider::PromptCache {
+                explicit_breakpoints: true,
+                developer_instructions: true,
+                ttl: Some("12h".into()),
+                diagnostics: true,
+                ..quack_config::provider::PromptCache::default()
+            },
+            comparison_response_id: Some("resp_prev".into()),
+            ..ChatRequest::default()
+        };
+        let api = build_body(&req, Route::Api);
+        assert!(api.get("instructions").is_none());
+        assert_eq!(api["parallel_tool_calls"], false);
+        assert_eq!(
+            api["prompt_cache_options"],
+            json!({ "mode": "implicit", "ttl": "12h", "comparison_response_id": "resp_prev" })
+        );
+        let input = api["input"].as_array().expect("input");
+        assert_eq!(input[0]["role"], "developer");
+        assert_eq!(
+            input[0]["content"][0]["prompt_cache_breakpoint"],
+            json!({ "mode": "explicit" })
+        );
+        assert_eq!(input[1]["type"], "compaction");
+        assert_eq!(input[2]["role"], "developer");
+        assert_eq!(input[2]["content"], "<context>AGENTS.md rules</context>");
+        assert_eq!(input[3]["content"], "next");
+
+        // Plan route omits parallel_tool_calls override.
+        let plan = build_body(&req, Route::ChatgptPlan);
+        assert!(plan.get("parallel_tool_calls").is_none());
+    }
+
+    #[test]
+    fn parses_reasoning_tokens_and_response_id() {
+        let mut p = EventParser::default();
+        let mut b = ResponseBuilder::default();
+        for ev in p
+            .parse(r#"{"type":"response.completed","response":{"id":"resp_123","usage":{"input_tokens":100,"output_tokens":40,"input_tokens_details":{"cached_tokens":80,"cache_write_tokens":20},"output_tokens_details":{"reasoning_tokens":30}}}}"#)
+            .expect("parses")
+        {
+            b.push(&ev);
+        }
+        assert_eq!(b.response_id.as_deref(), Some("resp_123"));
+        let u = b.usage.expect("usage");
+        assert_eq!(u.cached_prompt_tokens, Some(80));
+        assert_eq!(u.cache_write_tokens, Some(20));
+        assert_eq!(u.reasoning_tokens, Some(30));
     }
 }

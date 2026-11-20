@@ -43,12 +43,30 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
             _ => Vec::new(),
         })
         .collect();
-    let messages: Vec<Value> = req
+    let last_user = req
         .messages
         .iter()
-        .map(|m| match m {
+        .rposition(|m| matches!(m, Message::User { .. } | Message::Compaction { .. }));
+    let text_tool_mode =
+        req.tool_mode == Some(quack_config::provider::ToolCallMode::Text) && !req.tools.is_empty();
+    let mut messages: Vec<Value> = req
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(idx, m)| match m {
             Message::System { content } => json!({ "role": "system", "content": content }),
-            Message::Compaction { content, .. } => json!({ "role": "user", "content": content }),
+            Message::Compaction {
+                content,
+                session_context,
+                ..
+            } => {
+                let text = match session_context.as_deref().filter(|c| !c.is_empty()) {
+                    Some(ctx) if content.is_empty() => ctx.to_owned(),
+                    Some(ctx) => format!("{ctx}\n\n{content}"),
+                    None => content.clone(),
+                };
+                json!({ "role": "user", "content": text })
+            }
             Message::User { content, images } => {
                 let mut v = json!({ "role": "user", "content": content });
                 if !images.is_empty() {
@@ -65,13 +83,15 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
                 ..
             } => {
                 let mut v = json!({ "role": "assistant", "content": content });
+                let echo = crate::openai_chat::should_echo_reasoning(
+                    req.preserve_reasoning,
+                    req.reasoning_effort.as_deref(),
+                    idx,
+                    last_user,
+                );
                 // Thinking models keep their reasoning across tool calls; the model's
                 // template drops what it doesn't use.
-                if let Some(r) = reasoning.as_deref().filter(|r| {
-                    !r.is_empty()
-                        && req.preserve_reasoning != Some(false)
-                        && req.reasoning_effort.as_deref() != Some("none")
-                }) {
+                if let Some(r) = reasoning.as_deref().filter(|r| !r.is_empty() && echo) {
                     v["thinking"] = json!(r);
                 }
                 if !tool_calls.is_empty() {
@@ -105,11 +125,27 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
         })
         .collect();
 
+    if text_tool_mode {
+        let guide = crate::openai_chat::text_tools_prompt(&req.tools);
+        if let Some(sys) = messages
+            .first_mut()
+            .filter(|m| m["role"] == "system")
+            .and_then(|m| m["content"].as_str().map(str::to_owned))
+        {
+            messages[0]["content"] = json!(format!("{sys}{guide}"));
+        } else {
+            messages.insert(
+                0,
+                json!({ "role": "system", "content": guide.trim_start() }),
+            );
+        }
+    }
+
     let mut body = Map::new();
     body.insert("model".into(), json!(req.model));
     body.insert("messages".into(), Value::Array(messages));
     body.insert("stream".into(), json!(true));
-    if !req.tools.is_empty() {
+    if !req.tools.is_empty() && !text_tool_mode {
         let tools = crate::openai_chat::openai_tools_json(&req.tools);
         body.insert("tools".into(), Value::Array(tools));
     }
@@ -278,6 +314,7 @@ impl LineParser {
                 completion_tokens: num("eval_count").unwrap_or(0),
                 cached_prompt_tokens: None,
                 cache_write_tokens: None,
+                reasoning_tokens: None,
             }));
             let reason = if self.calls > 0 {
                 FinishReason::ToolCalls
@@ -445,7 +482,7 @@ mod tests {
             build_body(&req)["messages"][0]["thinking"],
             "read a.rs first"
         );
-        req.preserve_reasoning = Some(false);
+        req.preserve_reasoning = Some(quack_config::provider::ReasoningHistory::Never);
         assert!(build_body(&req)["messages"][0].get("thinking").is_none());
     }
 

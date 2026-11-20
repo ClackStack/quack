@@ -3,19 +3,23 @@
 
 use std::collections::{HashMap, HashSet};
 
-use quack_config::provider::{Cost, ReasoningFormat};
+use quack_config::provider::{
+    Cost, ReasoningFormat, ReasoningHistory, ReasoningWire, ToolCallMode,
+};
 use quack_protocol::Usage;
 use serde_json::{Map, Value, json};
 
 use crate::error::{ErrorKind, ProviderError, body_message};
 use crate::reasoning::{Piece, ThinkSplitter};
-use crate::types::{ChatRequest, DiscoveredModel, FinishReason, Message, StreamEvent, merge};
+use crate::types::{
+    ChatRequest, DiscoveredModel, FinishReason, Message, StreamEvent, ToolSpec, merge,
+};
 
 pub(crate) const CHAT_PATH: &str = "chat/completions";
 pub(crate) const MODELS_PATH: &str = "models";
 
 /// The `tools` array both the openai-chat and ollama `/api/chat` bodies use.
-pub(crate) fn openai_tools_json(tools: &[crate::types::ToolSpec]) -> Vec<Value> {
+pub(crate) fn openai_tools_json(tools: &[ToolSpec]) -> Vec<Value> {
     tools
         .iter()
         .map(|t| {
@@ -76,9 +80,6 @@ struct Shape<'a> {
     google: bool,
     /// Tool-call ids as Mistral's tokenizer takes them: exactly 9 letters or digits.
     short_ids: bool,
-    /// Send earlier reasoning back: as `reasoning_content`, or a `thinking` part for
-    /// Mistral.
-    echo_reasoning: bool,
     /// Tool names by call id, for tool results.
     names: HashMap<&'a str, &'a str>,
 }
@@ -100,21 +101,94 @@ fn flush_images(messages: &mut Vec<Value>, pending: &mut Vec<Value>) {
     }
 }
 
-/// Serialize a request. Earlier reasoning is sent back, since thinking models expect
-/// it across tool calls (DeepSeek rejects a tool request without it; MiniMax, Kimi and GLM
-/// lose the thread). Chat templates on local servers drop what they don't use.
-/// `preserve_in_history = false` turns it off.
+/// Prompt block describing tools for `ToolCallMode::Text` (when the wire `tools` array is
+/// omitted because the server or chat template lacks native tool calling).
+pub(crate) fn text_tools_prompt(tools: &[ToolSpec]) -> String {
+    let mut out = String::from(
+        "\n\n<tools>\nTo call a tool, output a `<tool_call>` block with JSON containing `name` and `arguments`:\n\
+         <tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>\n\n\
+         Available tools:\n",
+    );
+    for t in tools {
+        out.push_str(&format!(
+            "- {}: {}\n  parameters: {}\n",
+            t.name, t.description, t.parameters
+        ));
+    }
+    out.push_str("</tools>");
+    out
+}
+
+/// JSON Schema response_format for `ToolCallMode::Grammar`: constrains structured output to
+/// `{ content, tool_calls }` naming only offered tools.
+fn grammar_response_format(tools: &[ToolSpec]) -> Value {
+    if tools.is_empty() {
+        return json!({ "type": "json_object" });
+    }
+    let names: Vec<Value> = tools.iter().map(|t| json!(t.name)).collect();
+    json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "assistant_turn",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string" },
+                    "tool_calls": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string", "enum": names },
+                                "arguments": { "type": "object" }
+                            },
+                            "required": ["name", "arguments"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["content"],
+                "additionalProperties": false
+            }
+        }
+    })
+}
+
+/// Whether earlier reasoning should be echoed on message `index`, given the last user turn.
+pub(crate) fn should_echo_reasoning(
+    mode: Option<ReasoningHistory>,
+    effort: Option<&str>,
+    index: usize,
+    last_user: Option<usize>,
+) -> bool {
+    if effort == Some("none") {
+        return false;
+    }
+    match mode {
+        Some(ReasoningHistory::Never) => false,
+        Some(ReasoningHistory::CurrentTurn) => last_user.is_none_or(|u| index > u),
+        Some(ReasoningHistory::AllTurns) | None => true,
+    }
+}
+
+/// Serialize a request. Earlier reasoning is sent back according to `preserve_in_history`
+/// (`all_turns` by default, `current_turn` to keep reasoning only within the active
+/// tool-call chain, or `never` / `false` to disable).
 pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
     let mistral = dialect == Dialect::Mistral;
     let effort = req
         .reasoning_effort
         .as_deref()
         .map(|e| if mistral { mistral_effort(e) } else { e });
+    let last_user = req
+        .messages
+        .iter()
+        .rposition(|m| matches!(m, Message::User { .. } | Message::Compaction { .. }));
+    let text_tool_mode = req.tool_mode == Some(ToolCallMode::Text) && !req.tools.is_empty();
     let shape = Shape {
         mistral,
         google: dialect == Dialect::Google,
         short_ids: mistral || is_mistral_large(&req.model),
-        echo_reasoning: effort != Some("none") && req.preserve_reasoning != Some(false),
         names: req
             .messages
             .iter()
@@ -127,17 +201,18 @@ pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
     };
     let mut messages: Vec<Value> = Vec::with_capacity(req.messages.len() + 1);
     let mut pending: Vec<Value> = Vec::new();
-    for m in &req.messages {
+    for (idx, m) in req.messages.iter().enumerate() {
+        let echo = should_echo_reasoning(req.preserve_reasoning, effort, idx, last_user);
         match m {
             // Mistral takes image chunks in the tool message itself (`message_json`).
             Message::Tool { images, .. } if !images.is_empty() && !shape.mistral => {
                 // The text goes back as the tool result; the pixels follow as user parts.
-                messages.push(message_json(m, &shape));
+                messages.push(message_json(m, &shape, echo));
                 pending.extend(images.iter().map(image_part));
             }
             Message::Tool { .. } => {
                 // A run of tool results stays contiguous; the pixels wait for its end.
-                messages.push(message_json(m, &shape));
+                messages.push(message_json(m, &shape, echo));
             }
             m => {
                 flush_images(&mut messages, &mut pending);
@@ -149,11 +224,26 @@ pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
                 {
                     messages.push(json!({ "role": "assistant", "content": "" }));
                 }
-                messages.push(message_json(m, &shape));
+                messages.push(message_json(m, &shape, echo));
             }
         }
     }
     flush_images(&mut messages, &mut pending);
+    if text_tool_mode {
+        let guide = text_tools_prompt(&req.tools);
+        if let Some(sys) = messages
+            .first_mut()
+            .filter(|m| m["role"] == "system")
+            .and_then(|m| m["content"].as_str().map(str::to_owned))
+        {
+            messages[0]["content"] = json!(format!("{sys}{guide}"));
+        } else {
+            messages.insert(
+                0,
+                json!({ "role": "system", "content": guide.trim_start() }),
+            );
+        }
+    }
     let mut body = Map::new();
     body.insert("model".into(), json!(req.model));
     body.insert("messages".into(), Value::Array(messages));
@@ -168,9 +258,18 @@ pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
             body.insert("stream_options".into(), json!({ "include_usage": true }));
         }
     }
-    if !req.tools.is_empty() {
+    if req.prompt_cache.cache_key
+        && !body.contains_key("prompt_cache_key")
+        && let Some(key) = req.cache_key.as_deref().filter(|k| !k.is_empty())
+    {
+        body.insert("prompt_cache_key".into(), json!(key));
+    }
+    if !req.tools.is_empty() && !text_tool_mode {
         let tools = openai_tools_json(&req.tools);
         body.insert("tools".into(), Value::Array(tools));
+        if req.parallel_tool_calls == Some(false) && matches!(dialect, Dialect::Standard) {
+            body.insert("parallel_tool_calls".into(), json!(false));
+        }
     }
     if let Some(n) = req.max_tokens {
         body.insert("max_tokens".into(), json!(n));
@@ -178,6 +277,10 @@ pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
     let s = &req.sampling;
     // Hosted APIs with strict schemas reject sampling settings they don't have.
     let local = |v: Option<Value>| v.filter(|_| matches!(dialect, Dialect::Standard));
+    let wire_effort = match req.reasoning_wire {
+        ReasoningWire::Effort => effort,
+        ReasoningWire::EnableThinking | ReasoningWire::None => None,
+    };
     let optional = [
         ("temperature", s.temperature.map(Value::from)),
         ("top_p", s.top_p.map(Value::from)),
@@ -187,20 +290,37 @@ pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
             "repetition_penalty",
             local(s.repetition_penalty.map(Value::from)),
         ),
-        ("reasoning_effort", effort.map(Value::from)),
+        ("reasoning_effort", wire_effort.map(Value::from)),
     ];
     for (k, v) in optional {
         if let Some(v) = v {
             body.insert(k.into(), v);
         }
     }
-    if req.tool_mode == Some(quack_config::provider::ToolCallMode::Grammar) {
-        body.insert("response_format".into(), json!({ "type": "json_object" }));
+    if req.tool_mode == Some(ToolCallMode::Grammar) {
+        body.insert(
+            "response_format".into(),
+            grammar_response_format(&req.tools),
+        );
     }
     let mut body = Value::Object(body);
     merge(&mut body, &req.extra_body);
-    if let Some(effort) = effort {
-        body["reasoning_effort"] = json!(effort);
+    match req.reasoning_wire {
+        ReasoningWire::Effort => {
+            if let Some(effort) = effort {
+                body["reasoning_effort"] = json!(effort);
+            }
+        }
+        ReasoningWire::EnableThinking => {
+            if let Some(effort) = effort {
+                if !body["chat_template_kwargs"].is_object() {
+                    body["chat_template_kwargs"] = json!({});
+                }
+                body["chat_template_kwargs"]["enable_thinking"] =
+                    json!(!matches!(effort, "none" | "off"));
+            }
+        }
+        ReasoningWire::None => {}
     }
     body
 }
@@ -254,7 +374,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
-fn message_json(m: &Message, shape: &Shape<'_>) -> Value {
+fn message_json(m: &Message, shape: &Shape<'_>, echo_reasoning: bool) -> Value {
     let id = |id: &str| {
         if shape.short_ids {
             short_id(id)
@@ -264,7 +384,18 @@ fn message_json(m: &Message, shape: &Shape<'_>) -> Value {
     };
     match m {
         Message::System { content } => json!({ "role": "system", "content": content }),
-        Message::Compaction { content, .. } => json!({ "role": "user", "content": content }),
+        Message::Compaction {
+            content,
+            session_context,
+            ..
+        } => {
+            let text = match session_context.as_deref().filter(|c| !c.is_empty()) {
+                Some(ctx) if content.is_empty() => ctx.to_owned(),
+                Some(ctx) => format!("{ctx}\n\n{content}"),
+                None => content.clone(),
+            };
+            json!({ "role": "user", "content": text })
+        }
         Message::User { content, images } => {
             if images.is_empty() {
                 json!({ "role": "user", "content": content })
@@ -285,7 +416,7 @@ fn message_json(m: &Message, shape: &Shape<'_>) -> Value {
             let mut v = json!({ "role": "assistant", "content": content });
             let echo = reasoning
                 .as_deref()
-                .filter(|r| shape.echo_reasoning && !r.is_empty());
+                .filter(|r| echo_reasoning && !r.is_empty());
             if let Some(r) = echo.filter(|_| !shape.mistral) {
                 v["reasoning_content"] = json!(r);
             }
@@ -485,10 +616,13 @@ impl ChunkParser {
     }
 
     fn delta(&mut self, d: &Value, out: &mut Vec<StreamEvent>) {
-        for key in ["reasoning_content", "reasoning"] {
-            if let Some(r) = d.get(key).and_then(Value::as_str).filter(|r| !r.is_empty()) {
-                out.push(StreamEvent::ReasoningDelta(r.to_owned()));
-            }
+        // Prefer `reasoning_content`; fall back to `reasoning` so gateways that mirror
+        // the same delta under both keys don't double reasoning in history and break cache.
+        if let Some(r) = ["reasoning_content", "reasoning"]
+            .into_iter()
+            .find_map(|key| d.get(key).and_then(Value::as_str).filter(|r| !r.is_empty()))
+        {
+            out.push(StreamEvent::ReasoningDelta(r.to_owned()));
         }
         match d.get("content") {
             Some(Value::String(text)) if !text.is_empty() => self.text(text, out),
@@ -585,7 +719,8 @@ fn parse_usage(u: &Value) -> Usage {
         cached_prompt_tokens: num("/prompt_tokens_details/cached_tokens")
             .or_else(|| num("/cached_tokens"))
             .or_else(|| num("/prompt_cache_hit_tokens")),
-        cache_write_tokens: None,
+        cache_write_tokens: num("/prompt_tokens_details/cache_write_tokens"),
+        reasoning_tokens: num("/completion_tokens_details/reasoning_tokens"),
     }
 }
 
@@ -1004,7 +1139,7 @@ mod tests {
         assert_eq!(b["reasoning_effort"], "none");
         assert_eq!(b["messages"][2]["content"], "");
         let mut kept_out = mistral_history();
-        kept_out.preserve_reasoning = Some(false);
+        kept_out.preserve_reasoning = Some(ReasoningHistory::Never);
         assert_eq!(
             build_body(&kept_out, Dialect::Mistral)["messages"][2]["content"],
             ""
@@ -1027,6 +1162,30 @@ mod tests {
         assert!(b["messages"][3].get("name").is_none());
         assert_eq!(short_id("abcDEF123"), "abcDEF123");
         assert_ne!(short_id("call_0"), short_id("call_1"));
+    }
+
+    #[test]
+    fn prompt_cache_key_is_opt_in_on_standard_openai_chat() {
+        let mut req = ChatRequest {
+            model: "accounts/fireworks/models/kimi-k3p1-pro".into(),
+            cache_key: Some("session-42".into()),
+            ..ChatRequest::default()
+        };
+        assert!(
+            build_body(&req, Dialect::Standard)
+                .get("prompt_cache_key")
+                .is_none()
+        );
+        req.prompt_cache.cache_key = true;
+        assert_eq!(
+            build_body(&req, Dialect::Standard)["prompt_cache_key"],
+            "session-42"
+        );
+        // Mistral keeps its own derived cache key even when prompt_cache.cache_key is set.
+        assert_ne!(
+            build_body(&req, Dialect::Mistral)["prompt_cache_key"],
+            "session-42"
+        );
     }
 
     #[test]
@@ -1059,6 +1218,7 @@ mod tests {
                 completion_tokens: 5,
                 cached_prompt_tokens: Some(8),
                 cache_write_tokens: None,
+                reasoning_tokens: None,
             })
         );
         assert_eq!(
@@ -1234,5 +1394,142 @@ mod tests {
         assert!(google.get("top_k").is_none());
         assert!(google.get("min_p").is_none());
         assert!(google.get("repetition_penalty").is_none());
+    }
+
+    #[test]
+    fn preserve_reasoning_current_turn_wire_modes_parallel_and_tool_modes() {
+        let tool = ToolSpec {
+            name: "read".into(),
+            description: "Read file".into(),
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        };
+        let mut req = ChatRequest {
+            model: "deepseek-v4".into(),
+            messages: vec![
+                Message::System {
+                    content: "sys".into(),
+                },
+                Message::User {
+                    content: "turn 1".into(),
+                    images: Vec::new(),
+                },
+                Message::Assistant {
+                    content: "done 1".into(),
+                    reasoning: Some("old thought".into()),
+                    tool_calls: Vec::new(),
+                    sealed: None,
+                },
+                Message::User {
+                    content: "turn 2".into(),
+                    images: Vec::new(),
+                },
+                Message::Assistant {
+                    content: String::new(),
+                    reasoning: Some("current thought".into()),
+                    tool_calls: vec![ToolCall {
+                        id: "c1".into(),
+                        name: "read".into(),
+                        arguments: "{}".into(),
+                    }],
+                    sealed: None,
+                },
+                Message::Tool {
+                    call_id: "c1".into(),
+                    content: "ok".into(),
+                    images: Vec::new(),
+                },
+            ],
+            tools: vec![tool],
+            reasoning_effort: Some("high".into()),
+            preserve_reasoning: Some(ReasoningHistory::CurrentTurn),
+            reasoning_wire: ReasoningWire::EnableThinking,
+            parallel_tool_calls: Some(false),
+            ..ChatRequest::default()
+        };
+        let b = build_body(&req, Dialect::Standard);
+        assert!(b["messages"][2].get("reasoning_content").is_none());
+        assert_eq!(b["messages"][4]["reasoning_content"], "current thought");
+        assert!(b.get("reasoning_effort").is_none());
+        assert_eq!(b["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(b["parallel_tool_calls"], false);
+
+        req.reasoning_effort = Some("none".into());
+        let off = build_body(&req, Dialect::Standard);
+        assert_eq!(off["chat_template_kwargs"]["enable_thinking"], false);
+        assert!(off["messages"][4].get("reasoning_content").is_none());
+
+        req.reasoning_wire = ReasoningWire::None;
+        req.reasoning_effort = Some("high".into());
+        let none_wire = build_body(&req, Dialect::Standard);
+        assert!(none_wire.get("reasoning_effort").is_none());
+        assert!(none_wire.get("chat_template_kwargs").is_none());
+
+        // ToolCallMode::Text moves tools into the system prompt and omits wire `tools`.
+        req.tool_mode = Some(ToolCallMode::Text);
+        let text_mode = build_body(&req, Dialect::Standard);
+        assert!(text_mode.get("tools").is_none());
+        assert!(
+            text_mode["messages"][0]["content"]
+                .as_str()
+                .is_some_and(|s| s.contains("<tools>") && s.contains("- read: Read file"))
+        );
+
+        // ToolCallMode::Grammar emits a json_schema response_format naming the offered tools.
+        req.tool_mode = Some(ToolCallMode::Grammar);
+        let grammar_mode = build_body(&req, Dialect::Standard);
+        assert_eq!(grammar_mode["response_format"]["type"], "json_schema");
+        assert_eq!(
+            grammar_mode["response_format"]["json_schema"]["schema"]["properties"]["tool_calls"]["items"]
+                ["properties"]["name"]["enum"],
+            json!(["read"])
+        );
+        let parsed = crate::toolparse::extract(
+            r#"{"content":"checking","tool_calls":[{"name":"read","arguments":{"path":"a.rs"}}]}"#,
+            crate::toolparse::TextFormat::Auto,
+            &["read"],
+        )
+        .expect("parses grammar json reply");
+        assert_eq!(parsed.0, "checking");
+        assert_eq!(parsed.1.len(), 1);
+        assert_eq!(parsed.1[0].name, "read");
+
+        let usage = parse_usage(&json!({
+            "prompt_tokens": 200,
+            "completion_tokens": 50,
+            "prompt_tokens_details": { "cached_tokens": 120, "cache_write_tokens": 40 },
+            "completion_tokens_details": { "reasoning_tokens": 35 }
+        }));
+        assert_eq!(usage.cached_prompt_tokens, Some(120));
+        assert_eq!(usage.cache_write_tokens, Some(40));
+        assert_eq!(usage.reasoning_tokens, Some(35));
+    }
+
+    #[test]
+    fn delta_dedupes_reasoning_content_and_reasoning_aliases() {
+        let chunks = [
+            // Gateways sometimes mirror the same delta under both keys; emit it once.
+            r#"{"choices":[{"delta":{"reasoning_content":"check ","reasoning":"check "}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning":"the file"}}]}"#,
+            r#"{"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}"#,
+        ];
+        let mut p = ChunkParser::new(ReasoningFormat::Auto);
+        let mut b = ResponseBuilder::default();
+        for c in chunks {
+            for ev in p.parse(c).expect("chunk") {
+                b.push(&ev);
+            }
+        }
+        for ev in p.finish() {
+            b.push(&ev);
+        }
+        assert_eq!(
+            b.into_message(),
+            Message::Assistant {
+                content: "Done.".into(),
+                reasoning: Some("check the file".into()),
+                tool_calls: vec![],
+                sealed: None,
+            }
+        );
     }
 }

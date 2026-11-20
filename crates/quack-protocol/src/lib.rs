@@ -282,6 +282,13 @@ pub enum Op {
     /// Continue in a new session that starts as a copy of this one (`/fork`); the original
     /// stays as it is, to resume later.
     ForkSession,
+    /// Create a git worktree (`.quack/worktrees/<name>` on branch `quack/<name>`) and fork
+    /// the session into it (`/fork --worktree [name]`).
+    ForkWorktree {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        name: Option<String>,
+    },
     /// Write the transcript to a file (`/export`): `path` relative to the session's folder,
     /// or a name made from the title. Answered with a `Notice` naming the file.
     Export {
@@ -782,6 +789,12 @@ pub enum Event {
     /// On-demand tool-calling probe result, answering [`Op::ProbeToolCalling`].
     ToolProbeResult {
         report: ToolProbeReport,
+    },
+    /// A git worktree session was created via [`Op::ForkWorktree`].
+    WorktreeCreated {
+        path: String,
+        branch: String,
+        session_id: SessionId,
     },
     /// Per-file LSP diagnostics snapshot, answering [`Op::ListLspDiagnostics`].
     LspDiagnostics {
@@ -1362,10 +1375,15 @@ pub struct Usage {
     #[cfg_attr(feature = "ts", ts(optional))]
     pub cached_prompt_tokens: Option<u32>,
     /// Prompt tokens written to the server's cache, for servers that bill writes apart
-    /// (Anthropic). Part of `prompt_tokens`.
+    /// (Anthropic, OpenAI). Part of `prompt_tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub cache_write_tokens: Option<u32>,
+    /// Output tokens spent on reasoning/thinking, where the server reports them apart.
+    /// Part of `completion_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub reasoning_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1423,6 +1441,14 @@ pub struct ContextItem {
     pub prunable: bool,
 }
 
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
 /// Usage of one session. Token totals include earlier runs of a resumed session; timings
 /// and tool counts cover only the time since it was opened (`resumed`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1441,6 +1467,12 @@ pub struct StatsReport {
     pub completion_tokens: u64,
     /// Prompt tokens the server served from its cache.
     pub cached_tokens: u64,
+    /// Prompt tokens written to the server's cache, where reported.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub cache_write_tokens: u64,
+    /// Output tokens spent on reasoning/thinking, where reported.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub reasoning_tokens: u64,
     /// Requests that said how much was cached; zero when the server never does.
     #[serde(default)]
     pub cache_reported: u32,
@@ -1493,7 +1525,11 @@ impl StatsReport {
 pub struct RequestStat {
     pub prompt: u32,
     pub cached: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cache_write: u32,
     pub completion: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub reasoning: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub cost: Option<f64>,
@@ -1875,5 +1911,3 @@ mod tests {
         );
     }
 }
-
-

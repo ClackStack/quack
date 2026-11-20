@@ -14,13 +14,15 @@
 # taken silently.
 #
 # On Linux the release ships the TUI and GUI as .deb and .rpm packages besides the
-# self-contained archives. The installer uses a package when the machine can install one
-# (.deb on apt/dpkg systems, .rpm on dnf/yum/zypper systems, with root or sudo), falling
-# back to the self-contained archive under ~/.local otherwise; --pkg forces a choice.
-# --plucked installs the bundle without hosted-service provider files (OpenRouter,
-# Claude, OpenAI, ...), for setups with their own provider. --binary-only updates
-# binaries and leaves installed defaults alone. These two, like --prefix, --archive and
-# --from-source, always use the archive path.
+# self-contained archives. If quack or quack-gui is already installed as a .deb or .rpm
+# package, re-running the installer updates it with that same package format (never
+# silently falling back to the archive). On a fresh install it uses a package when the
+# machine can install one (.deb on apt/dpkg systems, .rpm on dnf/yum/zypper/rpm systems,
+# with root or sudo), falling back to the self-contained archive under ~/.local
+# otherwise; --pkg forces a choice. --plucked installs the bundle without hosted-service
+# provider files (OpenRouter, Claude, OpenAI, ...), for setups with their own provider.
+# --binary-only updates binaries and leaves installed defaults alone. These two, like
+# --prefix, --archive and --from-source, use the archive path.
 set -eu
 
 repo=ClackStack/quack
@@ -53,10 +55,11 @@ Usage: install.sh [options]
                        Linux only: how to install. `deb` and `rpm` are system packages
                        (binaries in /usr/bin, desktop integration and the shared
                        defaults bundle registered system-wide); `archive` is the
-                       self-contained bundle under --prefix. Default: the first package
-                       type this machine can install (deb, then rpm, with root or sudo),
-                       else the archive. Not with --plucked, --binary-only, --prefix,
-                       --archive or --from-source, which always use the archive.
+                       self-contained bundle under --prefix. Default: the package format
+                       already installed (.deb or .rpm), else the first package type this
+                       machine can install (with root or sudo), else the archive.
+                       `deb` and `rpm` cannot be combined with --plucked, --binary-only,
+                       --prefix, --archive or --from-source, which use the archive.
   --plucked            Leave out the provider files for hosted services (OpenRouter,
                        Claude, OpenAI, ...) for both TUI and GUI. Profiles, sub-agents,
                        MCP, language servers and local server files are all installed.
@@ -101,9 +104,58 @@ ask() {
   answer=${_line:-$2}
 }
 
-# Resolve the "latest" release tag through the GitHub API. The package asset names carry
-# the release version, so they need a concrete tag; returns non-zero when it can't.
+# Extract a release tag from a GitHub /releases/tag/<tag> redirect URL.
+tag_from_url() {
+  printf '%s\n' "$1" | tr -d '\r' \
+    | sed -n 's|.*/releases/tag/\([^/?# 	]*\).*|\1|p' \
+    | head -n 1
+}
+
+# Resolve the "latest" release tag so downloads are pinned to one immutable release.
+# Prefers GitHub's /releases/latest redirect (no API rate limit), falling back to the
+# GitHub API. Returns non-zero when neither yields a tag.
 latest_tag() {
+  _rel=https://github.com/$repo/releases/latest
+  _tag=
+  if command -v curl >/dev/null 2>&1; then
+    _loc=$(curl -fsSI --proto '=https' --tlsv1.2 "$_rel" 2>/dev/null \
+      | tr -d '\r' \
+      | sed -n 's/^[Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]:[ 	]*//p' \
+      | head -n 1) || _loc=
+    if [ -n "$_loc" ]; then
+      _tag=$(tag_from_url "$_loc")
+    fi
+    if [ -z "$_tag" ]; then
+      _eff=$(curl -fsSLI --proto '=https' --tlsv1.2 -o /dev/null -w '%{url_effective}' "$_rel" 2>/dev/null) || _eff=
+      if [ -n "$_eff" ]; then
+        _tag=$(tag_from_url "$_eff")
+      fi
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    _loc=$(wget --https-only --max-redirect=0 -S -O /dev/null "$_rel" 2>&1 \
+      | tr -d '\r' \
+      | sed -n 's/^[ 	]*[Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]:[ 	]*//p' \
+      | head -n 1) || _loc=
+    if [ -n "$_loc" ]; then
+      _tag=$(tag_from_url "$_loc")
+    fi
+    if [ -z "$_tag" ]; then
+      _loc=$(wget --https-only -S --spider "$_rel" 2>&1 \
+        | tr -d '\r' \
+        | sed -n 's/^[ 	]*[Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]:[ 	]*//p' \
+        | tail -n 1) || _loc=
+      if [ -n "$_loc" ]; then
+        _tag=$(tag_from_url "$_loc")
+      fi
+    fi
+  else
+    return 1
+  fi
+  if [ -n "$_tag" ]; then
+    printf '%s\n' "$_tag"
+    return 0
+  fi
+
   _api=https://api.github.com/repos/$repo/releases/latest
   if command -v curl >/dev/null 2>&1; then
     _json=$(curl -fsSL --proto '=https' --tlsv1.2 "$_api" 2>/dev/null) || return 1
@@ -112,13 +164,15 @@ latest_tag() {
   else
     return 1
   fi
-  printf '%s\n' "$_json" | sed -n 's/.*"tag_name"[: ]*"\([^"]*\)".*/\1/p' | head -n 1
+  _tag=$(printf '%s\n' "$_json" | sed -n 's/.*"tag_name"[: ]*"\([^"]*\)".*/\1/p' | head -n 1)
+  [ -n "$_tag" ] || return 1
+  printf '%s\n' "$_tag"
 }
 
 # --- System packages (.deb / .rpm) -----------------------------------------------
 
 have_root() {
-  [ "$(id -u)" -eq 0 ] || command -v sudo >/dev/null 2>&1
+  [ "$(id -u)" -eq 0 ] || command -v sudo >/dev/null 2>&1 || command -v doas >/dev/null 2>&1
 }
 
 as_root() {
@@ -126,6 +180,8 @@ as_root() {
     "$@"
   elif command -v sudo >/dev/null 2>&1; then
     sudo "$@"
+  elif command -v doas >/dev/null 2>&1; then
+    doas "$@"
   else
     die "this step needs root; re-run as root, install sudo, or pass --prefix DIR for a local install"
   fi
@@ -141,23 +197,30 @@ rpm_tooling() {
     || command -v rpm >/dev/null 2>&1
 }
 
+deb_installed() {
+  command -v dpkg-query >/dev/null 2>&1 \
+    && dpkg-query -W -f='${Status}\n' "$1" 2>/dev/null | grep -q 'ok installed'
+}
+
+rpm_installed() {
+  command -v rpm >/dev/null 2>&1 && rpm -q "$1" >/dev/null 2>&1
+}
+
 # Is $1 installed as a deb or an rpm package?
 pkg_installed() {
-  _name=$1
-  if command -v dpkg >/dev/null 2>&1 \
-    && dpkg-query -W -f='${Status}' "$_name" 2>/dev/null | grep -q 'ok installed'; then
-    return 0
-  fi
-  if command -v rpm >/dev/null 2>&1 && rpm -q "$_name" >/dev/null 2>&1; then
-    return 0
-  fi
-  return 1
+  deb_installed "$1" || rpm_installed "$1"
 }
 
 install_deb() {
   _deb=$1
+  case $_deb in
+    /*) _deb_arg=$_deb ;;
+    *) _deb_arg=./$_deb ;;
+  esac
+  chmod 755 "$tmp" 2>/dev/null || true
+  chmod 644 "$_deb" 2>/dev/null || true
   if command -v apt-get >/dev/null 2>&1; then
-    if as_root apt-get install -y --no-install-recommends "$_deb"; then
+    if as_root apt-get install -y --no-install-recommends "$_deb_arg"; then
       return 0
     fi
     say "apt-get could not install $(basename "$_deb"); retrying with dpkg"
@@ -175,9 +238,9 @@ install_rpm() {
   elif command -v yum >/dev/null 2>&1; then
     as_root yum install -y "$_rpm" || die "yum could not install $_rpm"
   elif command -v zypper >/dev/null 2>&1; then
-    as_root zypper --non-interactive install "$_rpm" || die "zypper could not install $_rpm"
+    as_root zypper --non-interactive --no-gpg-checks install "$_rpm" || die "zypper could not install $_rpm"
   elif command -v rpm >/dev/null 2>&1; then
-    as_root rpm -U "$_rpm" || die "rpm could not install $_rpm"
+    as_root rpm -U --replacepkgs "$_rpm" || die "rpm could not install $_rpm"
   else
     die "no rpm tooling found to install $(basename "$_rpm")"
   fi
@@ -186,8 +249,7 @@ install_rpm() {
 # Remove $1 through the package manager that owns it. Returns 1 when no package owns it.
 pkg_remove() {
   _name=$1
-  if command -v dpkg >/dev/null 2>&1 \
-    && dpkg-query -W -f='${Status}' "$_name" 2>/dev/null | grep -q 'ok installed'; then
+  if deb_installed "$_name"; then
     if command -v apt-get >/dev/null 2>&1; then
       as_root apt-get remove -y "$_name" || die "apt-get could not remove $_name"
     else
@@ -195,7 +257,7 @@ pkg_remove() {
     fi
     return 0
   fi
-  if command -v rpm >/dev/null 2>&1 && rpm -q "$_name" >/dev/null 2>&1; then
+  if rpm_installed "$_name"; then
     as_root rpm -e "$_name" || die "rpm could not remove $_name"
     return 0
   fi
@@ -257,12 +319,30 @@ bindir=$prefix/bin
 # package all count: re-running the installer then defaults to updating what is there.
 installed_tui=0
 installed_gui=0
+installed_tui_deb=0
+installed_gui_deb=0
+installed_tui_rpm=0
+installed_gui_rpm=0
 if [ -x "$bindir/quack" ]; then installed_tui=1; fi
 if [ -x "$bindir/quack-gui" ]; then installed_gui=1; fi
 if command -v quack >/dev/null 2>&1; then installed_tui=1; fi
 if command -v quack-gui >/dev/null 2>&1; then installed_gui=1; fi
-if pkg_installed quack; then installed_tui=1; fi
-if pkg_installed quack-gui; then installed_gui=1; fi
+if deb_installed quack || deb_installed quack-plucked; then
+  installed_tui=1
+  installed_tui_deb=1
+fi
+if deb_installed quack-gui || deb_installed quack-gui-plucked; then
+  installed_gui=1
+  installed_gui_deb=1
+fi
+if rpm_installed quack || rpm_installed quack-plucked; then
+  installed_tui=1
+  installed_tui_rpm=1
+fi
+if rpm_installed quack-gui || rpm_installed quack-gui-plucked; then
+  installed_gui=1
+  installed_gui_rpm=1
+fi
 
 if [ "$want_tui" = 0 ] && [ "$want_gui" = 0 ]; then
   if [ -n "$archive" ]; then
@@ -319,6 +399,23 @@ if [ "$want_tui" = 0 ] && [ "$want_gui" = 0 ]; then
 fi
 defaults=$prefix/share/quack/defaults
 host_os=$(uname -s)
+
+# If quack or quack-gui is already installed as a system package, record which
+# package manager owns it so updates keep using that same format.
+installed_pkg_kind=
+if [ "$want_tui" = 1 ] && [ "$installed_tui_deb" = 1 ]; then
+  installed_pkg_kind=deb
+elif [ "$want_gui" = 1 ] && [ "$installed_gui_deb" = 1 ]; then
+  installed_pkg_kind=deb
+elif [ "$want_tui" = 1 ] && [ "$installed_tui_rpm" = 1 ]; then
+  installed_pkg_kind=rpm
+elif [ "$want_gui" = 1 ] && [ "$installed_gui_rpm" = 1 ]; then
+  installed_pkg_kind=rpm
+elif [ "$installed_tui_deb" = 1 ] || [ "$installed_gui_deb" = 1 ]; then
+  installed_pkg_kind=deb
+elif [ "$installed_tui_rpm" = 1 ] || [ "$installed_gui_rpm" = 1 ]; then
+  installed_pkg_kind=rpm
+fi
 
 desktop_file_path() {
   if [ "$(id -u)" -eq 0 ] && { [ "$prefix" = /usr/local ] || [ "$prefix" = /usr ]; }; then
@@ -378,9 +475,16 @@ install_linux_desktop() {
 
 if [ "$uninstall" = 1 ]; then
   if [ "$want_tui" = 1 ]; then
+    _removed_tui_pkg=0
     if pkg_remove quack; then
       say "removed the quack system package"
-    else
+      _removed_tui_pkg=1
+    fi
+    if pkg_remove quack-plucked; then
+      say "removed the quack-plucked system package"
+      _removed_tui_pkg=1
+    fi
+    if [ -e "$bindir/quack" ] || [ "$_removed_tui_pkg" = 0 ]; then
       rm -f "$bindir/quack"
       say "removed $bindir/quack"
     fi
@@ -388,6 +492,9 @@ if [ "$uninstall" = 1 ]; then
   if [ "$want_gui" = 1 ]; then
     if pkg_remove quack-gui; then
       say "removed the quack-gui system package"
+    fi
+    if pkg_remove quack-gui-plucked; then
+      say "removed the quack-gui-plucked system package"
     fi
     rm -f "$bindir/quack-gui"
     _df=$(desktop_file_path)
@@ -659,22 +766,39 @@ else
       die "curl or wget is needed to download"
     fi
 
-    # On Linux, install the TUI and GUI as a system package when this machine can
-    # (.deb on apt/dpkg systems, .rpm on dnf/yum/zypper systems, root or sudo) and
-    # the release ships one; otherwise the self-contained archives below. --pkg
-    # forces a choice. --plucked, --binary-only and a custom --prefix always use
-    # the archive, the only path that supports them.
+    # On Linux, keep updating an existing .deb or .rpm installation with that
+    # same package format. On a fresh install (or when updating an archive
+    # install), prefer a system package when this machine can install one
+    # (.deb on apt/dpkg systems, .rpm on dnf/yum/zypper/rpm systems, with root
+    # or sudo) and the release ships one; otherwise use the self-contained
+    # archives below. --pkg forces a choice. --plucked, --binary-only and a
+    # custom --prefix use the archive path.
     pkg_kind=
     if [ "$host_os" = Linux ]; then
       if [ -n "$pkg_forced" ]; then
-        if [ "$plucked" = 1 ] || [ "$binary_only" = 1 ] || [ "$prefix_explicit" = 1 ]; then
-          die "--pkg $pkg_forced cannot be combined with --plucked, --binary-only or --prefix (those always use the archive)"
+        if [ "$pkg_forced" != archive ]; then
+          if [ "$plucked" = 1 ] || [ "$binary_only" = 1 ] || [ "$prefix_explicit" = 1 ]; then
+            die "--pkg $pkg_forced cannot be combined with --plucked, --binary-only or --prefix (those always use the archive)"
+          fi
+          pkg_kind=$pkg_forced
         fi
-        if [ "$pkg_forced" != archive ]; then pkg_kind=$pkg_forced; fi
-      elif [ "$plucked" = 0 ] && [ "$binary_only" = 0 ] && [ "$prefix_explicit" = 0 ]; then
-        if have_root && deb_tooling; then
+      elif [ -n "$installed_pkg_kind" ] && [ "$prefix_explicit" = 0 ]; then
+        if [ "$plucked" = 1 ]; then
+          die "quack is already installed as a .$installed_pkg_kind package, which manages /usr/share/quack/defaults; re-run without --plucked to update the package, run --uninstall first, or pass --pkg archive to install a separate plucked copy under $prefix"
+        fi
+        if [ "$binary_only" = 1 ]; then
+          die "quack is already installed as a .$installed_pkg_kind package, which cannot be updated with --binary-only; re-run without --binary-only to update the package, or pass --pkg archive to install a separate copy under $prefix"
+        fi
+        pkg_kind=$installed_pkg_kind
+      elif [ "$plucked" = 0 ] && [ "$binary_only" = 0 ] && [ "$prefix_explicit" = 0 ] && have_root; then
+        if command -v apt-get >/dev/null 2>&1; then
           pkg_kind=deb
-        elif have_root && rpm_tooling; then
+        elif command -v dnf >/dev/null 2>&1 || command -v microdnf >/dev/null 2>&1 \
+          || command -v yum >/dev/null 2>&1 || command -v zypper >/dev/null 2>&1; then
+          pkg_kind=rpm
+        elif command -v dpkg >/dev/null 2>&1; then
+          pkg_kind=deb
+        elif command -v rpm >/dev/null 2>&1; then
           pkg_kind=rpm
         fi
       fi
@@ -685,27 +809,34 @@ else
       die "installing a .deb needs apt-get or dpkg on this machine (try --pkg archive)"
     fi
     if [ "$pkg_kind" = deb ] && ! have_root; then
+      if [ "$installed_pkg_kind" = deb ] && [ -z "$pkg_forced" ]; then
+        die "quack is already installed as a .deb package; updating it needs root or sudo (or pass --pkg archive to install a separate copy under $prefix)"
+      fi
       die "installing a .deb needs root or sudo (try --pkg archive)"
     fi
     if [ "$pkg_kind" = rpm ] && ! rpm_tooling; then
       die "installing an .rpm needs dnf, yum, zypper or rpm on this machine (try --pkg archive)"
     fi
     if [ "$pkg_kind" = rpm ] && ! have_root; then
+      if [ "$installed_pkg_kind" = rpm ] && [ -z "$pkg_forced" ]; then
+        die "quack is already installed as an .rpm package; updating it needs root or sudo (or pass --pkg archive to install a separate copy under $prefix)"
+      fi
       die "installing an .rpm needs root or sudo (try --pkg archive)"
     fi
 
-    # The package asset names carry the release version, so "latest" has to be
-    # resolved to a concrete tag first (also pinning every download of this run to
-    # one immutable release); without it, use the archives.
+    if [ -n "$installed_pkg_kind" ] && [ "$pkg_kind" = "$installed_pkg_kind" ]; then
+      say "updating existing .$pkg_kind installation"
+    fi
+
+    # Resolve "latest" to a concrete tag when possible so every download of this
+    # run is pinned to one immutable release. If tag resolution fails, keep
+    # pkg_kind and discover the exact .deb/.rpm filename directly from SHA256SUMS.
     pkg_version=
     if [ -n "$pkg_kind" ] && [ "$version" = latest ]; then
       _tag=$(latest_tag) || _tag=
       if [ -n "$_tag" ]; then
         version=$_tag
         base=https://github.com/$repo/releases/download/$version
-      else
-        say "note: could not resolve the latest release (GitHub API); using the self-contained archive"
-        pkg_kind=
       fi
     fi
     if [ -n "$pkg_kind" ]; then
@@ -713,7 +844,9 @@ else
         x86_64) pkg_deb_arch=amd64; pkg_rpm_arch=x86_64 ;;
         aarch64) pkg_deb_arch=arm64; pkg_rpm_arch=aarch64 ;;
       esac
-      pkg_version=${version#v}
+      if [ "$version" != latest ]; then
+        pkg_version=${version#v}
+      fi
     fi
 
     sha256_file() {
@@ -733,31 +866,58 @@ else
       [ "$_want" = "$_got" ] || die "checksum mismatch for $_fname"
     }
 
+    # Find the package asset filename for $1 ("quack" or "quack-gui") in SHA256SUMS.
+    # Uses the exact version when known, and falls back to matching the package
+    # pattern in SHA256SUMS so a tag lookup failure never blocks .deb/.rpm.
+    find_pkg_in_sums() {
+      _pkg=$1
+      if [ -n "$pkg_version" ]; then
+        if [ "$pkg_kind" = deb ]; then
+          _exact=${_pkg}_${pkg_version}_${pkg_deb_arch}.deb
+        else
+          _rpm_ver=$(printf '%s' "$pkg_version" | tr '-' '_')
+          _exact=${_pkg}-${_rpm_ver}-1.${pkg_rpm_arch}.rpm
+        fi
+        if awk -v f="$_exact" '$2 == f || $2 == "*" f { found = 1; exit } END { exit !found }' "$tmp/SHA256SUMS"; then
+          printf '%s\n' "$_exact"
+          return 0
+        fi
+      fi
+      if [ "$pkg_kind" = deb ]; then
+        _pat="^${_pkg}_[0-9][^_]*_${pkg_deb_arch}[.]deb\$"
+      else
+        _pat="^${_pkg}-[0-9][^-]*-1[.]${pkg_rpm_arch}[.]rpm\$"
+      fi
+      awk -v pat="$_pat" '{
+        f = $2
+        sub(/^\*/, "", f)
+        if (f ~ pat) { print f; found = 1; exit }
+      } END { exit !found }' "$tmp/SHA256SUMS"
+    }
+
     tui_pkg_name=
     gui_pkg_name=
     if [ -n "$pkg_kind" ]; then
+      _missing_pkg=
       if [ "$want_tui" = 1 ]; then
-        if [ "$pkg_kind" = deb ]; then
-          tui_pkg_name=quack_${pkg_version}_${pkg_deb_arch}.deb
-        else
-          tui_pkg_name=quack-${pkg_version}-1.${pkg_rpm_arch}.rpm
-        fi
+        tui_pkg_name=$(find_pkg_in_sums quack) || _missing_pkg="quack .$pkg_kind package"
       fi
-      if [ "$want_gui" = 1 ]; then
-        if [ "$pkg_kind" = deb ]; then
-          gui_pkg_name=quack-gui_${pkg_version}_${pkg_deb_arch}.deb
-        else
-          gui_pkg_name=quack-gui-${pkg_version}-1.${pkg_rpm_arch}.rpm
-        fi
+      if [ -z "$_missing_pkg" ] && [ "$want_gui" = 1 ]; then
+        gui_pkg_name=$(find_pkg_in_sums quack-gui) || _missing_pkg="quack-gui .$pkg_kind package"
       fi
-      # A release without these assets (older tags) falls back to the archives.
-      for _name in $tui_pkg_name $gui_pkg_name; do
-        if ! awk -v f="$_name" '$2 == f || $2 == "*" f { found = 1; exit } END { exit !found }' "$tmp/SHA256SUMS"; then
-          say "note: this release has no $_name; using the self-contained archive instead"
+      if [ -n "$_missing_pkg" ]; then
+        if [ -n "$pkg_forced" ]; then
+          die "release $version has no $_missing_pkg for $arch in SHA256SUMS"
+        elif [ -n "$installed_pkg_kind" ]; then
+          die "release $version has no $_missing_pkg for $arch in SHA256SUMS (cannot update the installed .$installed_pkg_kind package; pass --pkg archive to install a separate copy under $prefix)"
+        else
+          # A fresh install against an older release without packages falls back to the archives.
+          say "note: release $version has no $_missing_pkg for $arch; using the self-contained archive instead"
           pkg_kind=
-          break
+          tui_pkg_name=
+          gui_pkg_name=
         fi
-      done
+      fi
       if [ -n "$pkg_kind" ] && [ -n "$tui_pkg_name" ]; then
         say "downloading $tui_pkg_name ($version)"
         fetch "$base/$tui_pkg_name" "$tmp/$tui_pkg_name" || die "download failed: $base/$tui_pkg_name"
@@ -857,11 +1017,21 @@ if [ -n "$tui_pkg" ] || [ -n "$gui_pkg" ]; then
   # System package install: the packages carry the binaries, the shared defaults
   # bundle (/usr/share/quack/defaults) and the desktop integration themselves.
   if [ -n "$tui_pkg" ]; then
+    if { [ "$pkg_kind" = deb ] && deb_installed quack-plucked; } \
+      || { [ "$pkg_kind" = rpm ] && rpm_installed quack-plucked; }; then
+      pkg_remove quack-plucked
+      say "removed legacy quack-plucked system package before upgrading"
+    fi
     if [ "$pkg_kind" = deb ]; then install_deb "$tui_pkg"; else install_rpm "$tui_pkg"; fi
     say "installed the quack package ($pkg_kind)"
     drop_stale_local quack
   fi
   if [ -n "$gui_pkg" ]; then
+    if { [ "$pkg_kind" = deb ] && deb_installed quack-gui-plucked; } \
+      || { [ "$pkg_kind" = rpm ] && rpm_installed quack-gui-plucked; }; then
+      pkg_remove quack-gui-plucked
+      say "removed legacy quack-gui-plucked system package before upgrading"
+    fi
     if [ "$pkg_kind" = deb ]; then install_deb "$gui_pkg"; else install_rpm "$gui_pkg"; fi
     say "installed the quack-gui package ($pkg_kind)"
     drop_stale_local quack-gui

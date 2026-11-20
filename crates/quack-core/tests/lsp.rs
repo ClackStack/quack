@@ -204,3 +204,144 @@ async fn rename_is_one_approved_edit_across_files() {
     );
     engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn multi_file_apply_patch_reports_lsp_diagnostics_and_nested_agents_md() {
+    let patch = "\
+*** Begin Patch
+*** Update File: a.fx
+@@
+-fn main() {}
++fn main() { ERROR }
+*** Update File: sub/b.fx
+@@
+-fn helper() {}
++fn helper() { 1 }
+*** End Patch";
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("diagnostics (1 new)"))
+        .respond_with(sse_text("I see both."))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("fn helper()"))
+        .respond_with(sse_call(
+            "c2",
+            "apply_patch",
+            serde_json::json!({"patch": patch}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("fn main()"))
+        .respond_with(sse_call(
+            "c1",
+            "read",
+            serde_json::json!({"path": "sub/b.fx"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse_call("c0", "read", serde_json::json!({"path": "a.fx"})))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    install_fixture(tmp.path());
+    std::fs::create_dir_all(tmp.path().join("user")).expect("mkdir");
+    std::fs::write(
+        tmp.path().join("user").join("config.toml"),
+        "[tools]\nedit_format = \"apply_patch\"\n",
+    )
+    .expect("config");
+    let loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    let ws = loaded.dirs.workspace_root.clone();
+    std::fs::create_dir_all(ws.join("sub")).expect("mkdir sub");
+    std::fs::write(ws.join("a.fx"), "fn main() {}\n").expect("write a");
+    std::fs::write(ws.join("sub/b.fx"), "fn helper() {}\n").expect("write b");
+    std::fs::write(ws.join("sub/AGENTS.md"), "SUB_RULE: keep helpers minimal\n")
+        .expect("write agents");
+
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    engine
+        .submit(Op::SetPermissionMode {
+            mode: PermissionMode::Allow,
+        })
+        .await;
+    turn(&mut engine, "patch both files").await;
+    let last = bodies(&server).await.pop().expect("request");
+    assert!(
+        last.contains("a.fx:1:13 error[F1]: found ERROR"),
+        "multi-file apply_patch should attach LSP diagnostics: {last}"
+    );
+    assert!(
+        last.contains("SUB_RULE: keep helpers minimal"),
+        "multi-file apply_patch should attach nested AGENTS.md: {last}"
+    );
+    engine.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_mutation_notifies_lsp_did_change_watched_files() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("exit code 0"))
+        .and(body_string_contains("found ERROR"))
+        .respond_with(sse_text("saw shell diagnostic"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("exit code 0"))
+        .respond_with(sse_call(
+            "c2",
+            "lsp",
+            serde_json::json!({"operation": "diagnostics", "path": "a.fx"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("fn main()"))
+        .respond_with(sse_call(
+            "c1",
+            "shell",
+            serde_json::json!({"command": "printf 'fn main() { ERROR }\\n' > a.fx"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse_call("c0", "read", serde_json::json!({"path": "a.fx"})))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    install_fixture(tmp.path());
+    let loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    let ws = loaded.dirs.workspace_root.clone();
+    std::fs::write(ws.join("a.fx"), "fn main() {}\n").expect("write a.fx");
+
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    engine
+        .submit(Op::SetPermissionMode {
+            mode: PermissionMode::Allow,
+        })
+        .await;
+    turn(
+        &mut engine,
+        "read then mutate via shell and check diagnostics",
+    )
+    .await;
+    let last = bodies(&server).await.pop().expect("request");
+    assert!(
+        last.contains("found ERROR"),
+        "expected LSP diagnostics refreshed via didChangeWatchedFiles after shell write: {last}"
+    );
+    engine.shutdown().await;
+}

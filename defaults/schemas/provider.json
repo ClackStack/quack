@@ -147,6 +147,16 @@
             "null"
           ]
         },
+        "compact_at": {
+          "default": null,
+          "description": "Soft prompt-token ceiling for automatic compaction, lower than `context_window`\n(for example below a long-context pricing cliff such as 272k on 500k models).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "context_window": {
           "default": null,
           "format": "uint32",
@@ -190,13 +200,26 @@
           "description": "`auto` or a profile id.",
           "type": "string"
         },
+        "prompt_cache": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PromptCache"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-model prompt-caching override (`openai-responses` and `openai-chat`); replaces\nthe provider's `prompt_cache` table when set."
+        },
         "reasoning": {
           "$ref": "#/$defs/Reasoning",
           "default": {
             "effort": "",
             "efforts": [],
             "format": "auto",
-            "preserve_in_history": null
+            "preserve_in_history": null,
+            "wire": "effort"
           }
         },
         "sampling": {
@@ -253,6 +276,48 @@
       ],
       "description": "Schema-only view of a `models` element."
     },
+    "PromptCache": {
+      "additionalProperties": false,
+      "properties": {
+        "affinity_header": {
+          "default": null,
+          "description": "Optional HTTP request header name to carry the session's cache key for sticky\nreplica routing (for example `\"x-session-affinity\"` on Fireworks AI).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cache_key": {
+          "default": false,
+          "description": "Send the session's cache key as `prompt_cache_key` in the request body on\n`openai-chat` providers that support it (such as Fireworks AI).\n(`openai-responses` always sends `prompt_cache_key` when a cache key is set.)",
+          "type": "boolean"
+        },
+        "developer_instructions": {
+          "default": false,
+          "description": "Send the system prompt as a leading `role: \"developer\"` input item instead of\ntop-level `instructions` (`openai-responses`), keeping it inside the cached prefix\non models that append `instructions` outside the cache.",
+          "type": "boolean"
+        },
+        "diagnostics": {
+          "default": false,
+          "description": "Attach `prompt_cache_options.comparison_response_id` on follow-up requests so the\nserver returns `prompt_cache_diagnostics` for debug logs (`openai-responses`).",
+          "type": "boolean"
+        },
+        "explicit_breakpoints": {
+          "default": false,
+          "description": "Place explicit `prompt_cache_breakpoint` markers on the stable prefix and recent\nconversation boundary (`openai-responses`).",
+          "type": "boolean"
+        },
+        "ttl": {
+          "default": null,
+          "description": "Optional cache retention TTL (`\"30m\"`, `\"12h\"` on `openai-responses`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "Reasoning": {
       "additionalProperties": false,
       "properties": {
@@ -273,12 +338,21 @@
           "default": "auto"
         },
         "preserve_in_history": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReasoningHistory"
+            },
+            {
+              "type": "null"
+            }
+          ],
           "default": null,
-          "description": "Default comes from the profile.",
-          "type": [
-            "boolean",
-            "null"
-          ]
+          "description": "How earlier reasoning is replayed in history: `false`/`\"never\"`, `\"current_turn\"`,\nor `true`/`\"all_turns\"`. Default comes from the adapter (`\"all_turns\"`)."
+        },
+        "wire": {
+          "$ref": "#/$defs/ReasoningWire",
+          "default": "effort",
+          "description": "How `effort` is placed on the wire for `openai-chat` providers."
         }
       },
       "type": "object"
@@ -297,6 +371,44 @@
         {
           "const": "auto",
           "description": "Read `reasoning_content` / `reasoning` fields, and split `<think>` tags when the reply opens with one.",
+          "type": "string"
+        }
+      ]
+    },
+    "ReasoningHistory": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/ReasoningHistoryMode"
+        }
+      ]
+    },
+    "ReasoningHistoryMode": {
+      "enum": [
+        "never",
+        "current_turn",
+        "all_turns"
+      ],
+      "type": "string"
+    },
+    "ReasoningWire": {
+      "description": "How `reasoning.effort` is serialized on `openai-chat` requests.",
+      "oneOf": [
+        {
+          "const": "effort",
+          "description": "Send `reasoning_effort` (the OpenAI-compatible default).",
+          "type": "string"
+        },
+        {
+          "const": "enable-thinking",
+          "description": "Set `chat_template_kwargs.enable_thinking` to a boolean (`false` for `none`/`off`).",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "Do not send a wire reasoning-effort field (rely on `extra_body` or server defaults).",
           "type": "string"
         }
       ]
@@ -654,6 +766,18 @@
       "default": "",
       "description": "A hint shown by setup, e.g. a server flag tool calls need.",
       "type": "string"
+    },
+    "prompt_cache": {
+      "$ref": "#/$defs/PromptCache",
+      "default": {
+        "affinity_header": null,
+        "cache_key": false,
+        "developer_instructions": false,
+        "diagnostics": false,
+        "explicit_breakpoints": false,
+        "ttl": null
+      },
+      "description": "Prompt-caching wire options (`openai-responses` and `openai-chat`)."
     },
     "tls": {
       "$ref": "#/$defs/Tls",

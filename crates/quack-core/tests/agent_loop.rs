@@ -855,3 +855,104 @@ async fn resume_without_model_warns_only_when_something_exists_to_resume() {
         vec!["cannot resume: no model is ready".to_owned()]
     );
 }
+
+#[tokio::test]
+async fn read_only_tools_run_in_parallel_and_consecutive_target_failures_nudge() {
+    let server = MockServer::start().await;
+    // Step 5: final answer after seeing the 3rd failing edit nudge.
+    Mock::given(method("POST"))
+        .and(body_string_contains("failed 3 times in a row"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"content":"Stopped retrying."},"finish_reason":"stop"}]}"#,
+        ]))
+        .mount(&server)
+        .await;
+    // Step 4: 3rd failing edit on a.txt with yet another wrong old_string.
+    Mock::given(method("POST"))
+        .and(body_string_contains("miss-2"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"e3","function":{"name":"edit","arguments":"{\"path\":\"a.txt\",\"old_string\":\"miss-3\",\"new_string\":\"ok\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ]))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    // Step 3: 2nd failing edit on a.txt with a different wrong old_string.
+    Mock::given(method("POST"))
+        .and(body_string_contains("miss-1"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"e2","function":{"name":"edit","arguments":"{\"path\":\"a.txt\",\"old_string\":\"miss-2\",\"new_string\":\"ok\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ]))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    // Step 2: after both parallel reads succeed, 1st failing edit on a.txt.
+    Mock::given(method("POST"))
+        .and(body_string_contains("BETA_CONTENT"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"e1","function":{"name":"edit","arguments":"{\"path\":\"a.txt\",\"old_string\":\"miss-1\",\"new_string\":\"ok\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ]))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    // Step 1: two read-only calls emitted in one assistant turn.
+    Mock::given(method("POST"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"r1","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"r2","function":{"name":"read","arguments":"{\"path\":\"b.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ]))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = workspace(tmp.path(), &server.uri());
+    std::fs::write(loaded.dirs.workspace_root.join("a.txt"), "ALPHA_CONTENT\n").expect("write a");
+    std::fs::write(loaded.dirs.workspace_root.join("b.txt"), "BETA_CONTENT\n").expect("write b");
+
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    engine
+        .submit(Op::SetPermissionMode {
+            mode: quack_core::protocol::PermissionMode::Allow,
+        })
+        .await;
+    engine
+        .submit(Op::UserTurn {
+            items: vec![InputItem::text("read both then edit")],
+            overrides: TurnOverrides::default(),
+        })
+        .await;
+
+    let mut text = String::new();
+    loop {
+        match next(&mut engine.events).await {
+            Event::AssistantDelta { text: t } => text.push_str(&t),
+            Event::TurnComplete { .. } => break,
+            Event::Error { error } => panic!("error: {}", error.message),
+            Event::TurnAborted { reason, .. } => panic!("aborted: {reason}"),
+            _ => {}
+        }
+    }
+    assert_eq!(text, "Stopped retrying.");
+
+    let posts: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.url.path().ends_with("/chat/completions"))
+        .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+        .collect();
+    let step2 = &posts[1];
+    let r1_pos = step2.find("\"tool_call_id\":\"r1\"").expect("r1 result");
+    let r2_pos = step2.find("\"tool_call_id\":\"r2\"").expect("r2 result");
+    assert!(
+        r1_pos < r2_pos,
+        "parallel read-only tool results must stay in original call order"
+    );
+    let last = posts.last().expect("last");
+    assert!(
+        last.contains("`edit` on `a.txt` has failed 3 times in a row"),
+        "expected consecutive target-failure nudge: {last}"
+    );
+    engine.shutdown().await;
+}

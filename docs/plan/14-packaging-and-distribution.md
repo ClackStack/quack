@@ -21,7 +21,7 @@ agent.
 |---|---|
 | Default (`install.sh`, asks; `install.ps1`) | `quack` + `quack-gui` + full shared `defaults/` bundle |
 | Linux system package (default when apt/dpkg or dnf/yum/zypper tooling and root/sudo exist) | `quack` and/or `quack-gui` as `.deb`/`.rpm`: binaries in `/usr/bin`, shared `defaults/` in `/usr/share/quack/defaults`, desktop entry registered by the package |
-| `--pkg deb\|rpm\|archive` (`install.sh`) | force the Linux install format; `--plucked`, `--binary-only`, `--prefix`, `--archive` and `--from-source` always use the archive |
+| `--pkg deb\|rpm\|archive` (`install.sh`) | force the Linux install format; `deb`/`rpm` cannot be combined with `--plucked`, `--binary-only`, `--prefix`, `--archive` or `--from-source` |
 | `--plucked` (`-Plucked`) | same `quack` / `quack-gui` binaries + shared `defaults/` without `config.toml` or off-machine `providers.d/*.toml` (`scripts/copy-defaults.sh`, `install.sh`, `install.ps1`) |
 
 ## Where defaults live after install
@@ -176,14 +176,20 @@ there, so re-running the script updates in place instead of adding the other app
 terminal to ask (CI, scripts) the default is taken silently. `--uninstall` likewise removes
 what is installed, through `apt`/`dpkg` or `rpm` when a package owns it.
 
-On Linux the script prefers a **system package**: `quack_<v>_<arch>.deb` via `apt-get`/`dpkg`
-when apt/dpkg tooling and root or sudo exist, else `quack-<v>-<arch>.rpm` via `dnf`/`yum`/
-`zypper`/`rpm`, else the self-contained archive under `--prefix`. Package names carry the
-version, so "latest" is resolved to a concrete tag through the GitHub API first (pinning the
-whole run to one immutable release; a failure falls back to the archive path). A GUI-only
-package install still fetches the TUI archive for the shared `defaults/`, which are laid out
-under `/usr/share/quack/defaults`; an earlier non-package copy in `$bindir` is dropped so the
-two cannot shadow each other on `PATH`. `--pkg deb|rpm|archive` forces a format.
+On Linux the script detects whether `quack` or `quack-gui` (including legacy `quack-plucked`/
+`quack-gui-plucked`) is already installed as a `.deb` or `.rpm` package and updates it with
+that same package format, failing with an actionable message (pointing to `--pkg archive`)
+rather than silently falling back to the musl archive when root/sudo, package assets, or
+archive-only flags (`--plucked`, `--binary-only`) conflict. On a fresh install it prefers a
+**system package**: `quack_<v>_<arch>.deb` via `apt-get`/`dpkg` when apt/dpkg tooling and
+root or sudo exist (checking `apt-get` vs `dnf`/`microdnf`/`yum`/`zypper` before bare `dpkg`/
+`rpm`), else `quack-<v>-<arch>.rpm`, else the self-contained archive under `--prefix`. "latest"
+is resolved via GitHub's `/releases/latest` redirect first (no API rate limit), falling back to
+the GitHub API and direct package-name lookup in `SHA256SUMS` so API failures never demote a
+package install to the archive. A GUI-only package install still fetches the TUI archive for
+the shared `defaults/`, which are laid out under `/usr/share/quack/defaults`; an earlier
+non-package copy in `$bindir` is dropped so the two cannot shadow each other on `PATH`. `--pkg
+deb|rpm|archive` forces a format.
 
 - `--tui` (`-Tui`, alias `--cli` / `-Cli`): install or uninstall only the TUI (`quack`) and its
   defaults bundle.
@@ -196,9 +202,11 @@ two cannot shadow each other on `PATH`. `--pkg deb|rpm|archive` forces a format.
   (works across release downloads, `--from-source`, and `.tar.gz`/`.zip` `--archive` installs).
 - `--binary-only` (`-BinaryOnly`): update binaries only. Existing defaults are left alone; a
   fresh install this way runs on the compiled-in core.
-- `--pkg deb|rpm|archive` (`install.sh`, Linux only): force the install format instead of the
-  default deb-then-rpm-then-archive capability check. Not combinable with `--plucked`,
-  `--binary-only`, `--prefix`, `--archive` or `--from-source`, which always use the archive.
+- `--pkg deb|rpm|archive` (`install.sh`, Linux only): force the install format instead of
+  matching an existing `.deb`/`.rpm` installation or the default system-package check. `deb`
+  and `rpm` cannot be combined with `--plucked`, `--binary-only`, `--prefix`, `--archive` or
+  `--from-source`, which use the archive (`--pkg archive` works alongside `--plucked`,
+  `--binary-only` and `--prefix`).
 - `--prefix`, `--version`, `--archive FILE` (offline installs of `.tar.gz`/`.zip`/`.AppImage`/`.dmg`/`-setup.exe`),
   `--from-source [DIR]` (build a checkout with cargo + desktop UI), `--uninstall` (keeps config, sessions and memory).
 - The binary is replaced by renaming, so a running quack is never left with a half-written
@@ -250,6 +258,19 @@ two cannot shadow each other on `PATH`. `--pkg deb|rpm|archive` forces a format.
   package selection and fallbacks, `--pkg` validation, `--uninstall` via package manager,
   `--plucked`/`--binary-only`/`--prefix`/`--archive`, macOS via a `uname` stub, and the
   interactive prompt through a pty.
+
+- **Hardened `.deb`/`.rpm` updates (2026-11-19):** `scripts/install.sh` now detects which
+  package manager (`dpkg-query` vs `rpm`) owns an existing `quack`/`quack-gui` (or legacy
+  `quack-plucked`/`quack-gui-plucked`) installation and pins updates to that format without
+  silently falling back to the musl tarball. `latest_tag()` resolves GitHub's `/releases/latest`
+  redirect before calling the rate-limited GitHub API, and `find_pkg_in_sums` discovers the
+  exact `.deb`/`.rpm` asset directly from `SHA256SUMS` (also normalizing pre-release `-` → `_`
+  for RPMs) so even tag-lookup failure keeps using `.deb`/`.rpm`. Fresh installs check
+  high-level managers (`apt-get` vs `dnf`/`microdnf`/`yum`/`zypper`) before bare `dpkg`/`rpm`;
+  `install_deb` makes the temp `.deb` readable for `_apt` and passes an explicit file path;
+  `install_rpm` uses `--no-gpg-checks` for `zypper` and `--replacepkgs` for bare `rpm -U`;
+  `--pkg archive` is accepted alongside `--plucked`/`--binary-only`/`--prefix`. Covered by
+  offline regression tests in `scripts/test_install.py` (22 tests).
 
 ### Still to do
 

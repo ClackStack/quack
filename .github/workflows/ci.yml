@@ -35,6 +35,11 @@ jobs:
       - name: minimal enterprise feature set builds
         if: matrix.name == 'linux-x64'
         run: cargo build -p quack-cli --locked --no-default-features --features proto-openai-chat,lang-common
+      - name: config schemas are up to date
+        if: matrix.name == 'linux-x64'
+        run: |
+          cargo run -q -p quack-cli --locked -- config schema --dir defaults/schemas
+          git diff --exit-code defaults/schemas
       - name: no-egress invariant (network namespace + connect() trace)
         if: matrix.name == 'linux-x64'
         run: |

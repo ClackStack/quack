@@ -3,15 +3,14 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use quack_sandbox::{ChildStdin, Command};
 use quack_shell::Tree;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{ChildStdin, Command};
 use tokio::sync::{oneshot, watch};
 
 use crate::diag::{Diagnostic, Snapshot};
@@ -64,6 +63,14 @@ impl std::fmt::Debug for Launch {
     }
 }
 
+/// LSP `FileChangeType` values for `workspace/didChangeWatchedFiles`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchChangeType {
+    Created = 1,
+    Changed = 2,
+    Deleted = 3,
+}
+
 enum SyncStep {
     Open,
     Change(i64),
@@ -109,9 +116,9 @@ impl Client {
             language_ids,
         } = launch;
         command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdin_piped()
+            .stdout_piped()
+            .stderr_piped()
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
@@ -120,12 +127,12 @@ impl Client {
         let mut child = command
             .spawn()
             .map_err(|e| format!("cannot start {id}: {e}"))?;
-        let tree = Tree::new(&child);
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let tree = Tree::from_sandbox_child(&child);
+        let (Some(stdin), Some(stdout)) = (child.take_stdin(), child.take_stdout()) else {
             return Err("the server's pipes are not available".into());
         };
         let log: Arc<Mutex<VecDeque<String>>> = Arc::default();
-        if let Some(stderr) = child.stderr.take() {
+        if let Some(stderr) = child.take_stderr() {
             let log = log.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
@@ -411,6 +418,64 @@ impl Client {
         Ok(text)
     }
 
+    /// Notify the language server that workspace files changed on disk (for example after
+    /// a `shell` command ran `cargo fmt`, `git checkout`, or code generation). Also resyncs
+    /// or closes any affected document that was already open so diagnostics stay fresh.
+    pub async fn did_change_watched_files(
+        &self,
+        changes: &[(PathBuf, WatchChangeType)],
+    ) -> Result<(), String> {
+        if changes.is_empty() || !self.alive() {
+            return Ok(());
+        }
+        let events: Vec<Value> = changes
+            .iter()
+            .map(|(path, kind)| {
+                json!({
+                    "uri": pos::path_to_uri(path),
+                    "type": *kind as u32,
+                })
+            })
+            .collect();
+        self.notify(
+            "workspace/didChangeWatchedFiles",
+            json!({ "changes": events }),
+        )
+        .await?;
+        for (path, kind) in changes {
+            let key = pos::key(path);
+            let is_open = self.state.lock().is_ok_and(|s| s.docs.contains_key(&key));
+            if !is_open {
+                continue;
+            }
+            match kind {
+                WatchChangeType::Deleted => {
+                    if let Ok(mut s) = self.state.lock() {
+                        s.docs.remove(&key);
+                        s.diagnostics.remove(&key);
+                    }
+                    let _ = self
+                        .notify(
+                            "textDocument/didClose",
+                            json!({ "textDocument": { "uri": pos::path_to_uri(path) } }),
+                        )
+                        .await;
+                    self.changed.send_modify(|n| *n += 1);
+                }
+                WatchChangeType::Created | WatchChangeType::Changed => {
+                    let _ = self.sync(path).await;
+                    let _ = self
+                        .notify(
+                            "textDocument/didSave",
+                            json!({ "textDocument": { "uri": pos::path_to_uri(path) } }),
+                        )
+                        .await;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Sync the file after an edit, save it, and wait for diagnostics to settle. `Err` when
     /// the file could not be sent at all, so the caller can say why diagnostics are missing.
     pub async fn changed(
@@ -567,7 +632,7 @@ struct Reader {
 }
 
 impl Reader {
-    async fn run(self, stdout: tokio::process::ChildStdout, client: std::sync::Weak<Client>) {
+    async fn run(self, stdout: quack_sandbox::ChildStdout, client: std::sync::Weak<Client>) {
         let mut r = BufReader::new(stdout);
         loop {
             let msg = match rpc::read(&mut r).await {

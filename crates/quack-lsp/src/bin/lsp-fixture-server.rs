@@ -50,6 +50,27 @@ fn main() {
                 }
                 None
             }
+            "workspace/didChangeWatchedFiles" => {
+                if let Some(changes) = params["changes"].as_array() {
+                    for c in changes {
+                        let Some(uri) = c["uri"].as_str() else {
+                            continue;
+                        };
+                        let kind = c["type"].as_u64().unwrap_or(2);
+                        if kind == 3 {
+                            docs.remove(uri);
+                            publish(uri, &docs);
+                        } else if let Ok(url) = url::Url::parse(uri)
+                            && let Ok(path) = url.to_file_path()
+                            && let Ok(text) = std::fs::read_to_string(&path)
+                        {
+                            docs.insert(uri.to_owned(), text);
+                            publish(uri, &docs);
+                        }
+                    }
+                }
+                None
+            }
             "textDocument/definition" => Some(word_at(params, &docs).map_or(Value::Null, |w| {
                 let found = docs.iter().find_map(|(uri, text)| {
                     text.lines().enumerate().find_map(|(i, l)| {

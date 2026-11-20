@@ -405,15 +405,13 @@ impl Provider {
         }
     }
 
-    /// Whether the history should only ever grow: per-request text (the plan reminder) is
-    /// then kept in it rather than sent once. Anthropic's signed thinking only verifies
-    /// against the exact history it was made after.
+    /// Whether the history should only ever grow: per-request text (the plan and working-file
+    /// reminders) is kept in history on state changes rather than appended and stripped on
+    /// the last message each step. Keeping the prefix immutable preserves Anthropic's signed
+    /// thinking, OpenAI Responses breakpoint caches, Fireworks' 4,096-token KV blocks, and
+    /// prefix caches on other hosted and local servers.
     pub fn append_only(&self) -> bool {
-        #[cfg(feature = "proto-anthropic")]
-        if self.api == Api::Anthropic {
-            return true;
-        }
-        false
+        true
     }
 
     /// Keep a sealed reply only for the provider, system prompt and tools that made it.
@@ -438,6 +436,18 @@ impl Provider {
             && self.file.native_compaction
     }
 
+    /// Whether this provider uses the ChatGPT plan Responses route (`auth.type = "chatgpt"`).
+    pub fn is_chatgpt_plan(&self) -> bool {
+        #[cfg(feature = "proto-openai-responses")]
+        {
+            self.api == Api::Responses && self.route == responses::Route::ChatgptPlan
+        }
+        #[cfg(not(feature = "proto-openai-responses"))]
+        {
+            false
+        }
+    }
+
     fn compaction_fingerprint(&self, req: &ChatRequest) -> String {
         let route = if self.has_login() { "signed-in" } else { "api" };
         fingerprint_with(req, &[self.base_url(), &self.file.api, route])
@@ -453,14 +463,23 @@ impl Provider {
         let mut prefix_matches = true;
         for message in &mut req.messages {
             match message {
-                Message::Compaction { content, sealed }
-                    if !self.native_compaction()
-                        || native_fp.as_ref() != Some(&sealed.fingerprint)
-                        || sealed.provider != self.id
-                        || sealed.model != req.model =>
+                Message::Compaction {
+                    content,
+                    sealed,
+                    session_context,
+                } if !self.native_compaction()
+                    || native_fp.as_ref() != Some(&sealed.fingerprint)
+                    || sealed.provider != self.id
+                    || sealed.model != req.model =>
                 {
+                    let body = std::mem::take(content);
+                    let content = match session_context.take().filter(|c| !c.is_empty()) {
+                        Some(ctx) if body.is_empty() => ctx,
+                        Some(ctx) => format!("{ctx}\n\n{body}"),
+                        None => body,
+                    };
                     *message = Message::User {
-                        content: std::mem::take(content),
+                        content,
                         images: Vec::new(),
                     };
                     prefix_matches = false;
@@ -761,6 +780,13 @@ impl Provider {
     ) {
         #[cfg(not(feature = "proto-openai-responses"))]
         let _ = compacting;
+        if req.prompt_cache == quack_config::provider::PromptCache::default() {
+            req.prompt_cache = self
+                .file
+                .model(&req.model)
+                .and_then(|m| m.prompt_cache.clone())
+                .unwrap_or_else(|| self.file.prompt_cache.clone());
+        }
         self.prepare_history(&mut req);
         if !self.extra.is_empty() {
             let mut extra = serde_json::Value::Object(self.extra.clone());
@@ -819,6 +845,31 @@ impl Provider {
         let bytes_sent = body_bytes.len() as u64;
         let redactions = self.pending_redactions.swap(0, Ordering::Relaxed);
         let req_url = self.url(&path);
+        let affinity = match req
+            .prompt_cache
+            .affinity_header
+            .as_deref()
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .zip(req.cache_key.as_deref().filter(|k| !k.is_empty()))
+        {
+            Some((name, value)) => {
+                let name = match HeaderName::from_bytes(name.as_bytes()) {
+                    Ok(n) => n,
+                    Err(_) => {
+                        let _ = tx
+                            .send(Err(ProviderError::new(
+                                ErrorKind::Config,
+                                format!("invalid prompt_cache.affinity_header `{name}`"),
+                            )))
+                            .await;
+                        return;
+                    }
+                };
+                HeaderValue::from_str(value).ok().map(|v| (name, v))
+            }
+            None => None,
+        };
 
         let mut attempt = 0;
         // A plain header set never changes mid-turn, so every retry reuses the first clone;
@@ -853,15 +904,14 @@ impl Provider {
             };
             // Taken per attempt: a retry after a stall gets the fresh client.
             let (generation, client) = self.client();
-            let send = headers
-                .apply(
-                    client
-                        .post(&req_url)
-                        .header(reqwest::header::ACCEPT, accept)
-                        .header(reqwest::header::CONTENT_TYPE, "application/json")
-                        .body(body_bytes.clone()),
-                )
-                .send();
+            let mut rb = client
+                .post(&req_url)
+                .header(reqwest::header::ACCEPT, accept)
+                .header(reqwest::header::CONTENT_TYPE, "application/json");
+            if let Some((name, value)) = &affinity {
+                rb = rb.header(name, value);
+            }
+            let send = headers.apply(rb.body(body_bytes.clone())).send();
             let first_byte = self.first_byte_timeout(attempt);
             let mut status = None;
             let result = match tokio::time::timeout(first_byte, send).await {
@@ -1749,5 +1799,49 @@ mod tests {
                 .expect("provider override goes direct"),
             "Hello"
         );
+    }
+
+    #[tokio::test]
+    async fn prompt_cache_sends_cache_key_and_affinity_header_on_openai_chat() {
+        let server = sse_server().await;
+        let file: ProviderFile = toml::from_str(&format!(
+            "base_url = \"{}/v1\"\n\
+             models = [\"m\"]\n\
+             [prompt_cache]\n\
+             cache_key = true\n\
+             affinity_header = \"x-session-affinity\"\n",
+            server.uri()
+        ))
+        .expect("provider toml");
+        let p =
+            Provider::new("mock", file, &NetworkSettings::default(), &|_| None).expect("provider");
+        let req = ChatRequest {
+            model: "m".into(),
+            messages: vec![Message::User {
+                content: "hi".into(),
+                images: Vec::new(),
+            }],
+            cache_key: Some("sess-abc123".into()),
+            ..ChatRequest::default()
+        };
+        let mut rx = p.stream(req, ReasoningFormat::Auto, CancellationToken::new());
+        let mut text = String::new();
+        while let Some(ev) = rx.recv().await {
+            if let StreamEvent::TextDelta(t) = ev.expect("stream event") {
+                text.push_str(&t);
+            }
+        }
+        assert_eq!(text, "Hello");
+        let reqs = server.received_requests().await.expect("requests");
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            reqs[0]
+                .headers
+                .get("x-session-affinity")
+                .and_then(|v| v.to_str().ok()),
+            Some("sess-abc123")
+        );
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).expect("json");
+        assert_eq!(body["prompt_cache_key"], "sess-abc123");
     }
 }

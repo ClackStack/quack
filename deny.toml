@@ -8,8 +8,9 @@ yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error via gtk 0.18 / glib 0.18 (tauri/wry/tao Linux deps); compile-time proc-macro only, no upgrade until Tauri drops gtk3" },
     { id = "RUSTSEC-2026-0370", reason = "zvariant 5 via zbus 5 required by tauri-plugin-{notification,opener,single-instance}; no upstream zbus 6 release yet" },
-    { id = "RUSTSEC-2026-0371", reason = "zbus_names 4 via zbus 5 required by tauri-plugin-{notification,opener,single-instance}; no upstream zbus 6 release yet" },
-    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive 5 via zbus 5 required by tauri-plugin-{notification,opener,single-instance}; compile-time proc-macro, no upstream zbus 6 release yet" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono via rmcp 3.9.0 (pinned for MCP 2026-07-28 support); unmaintained but not a vulnerability; drop when rmcp migrates to jiff/time" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names 4 via zbus 5 required by tauri-plugin-{notification,opener,single-instance}; tauri plugins not yet on zbus 6 (notify-rust already is)" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive 5 via zbus 5 required by tauri-plugin-{notification,opener,single-instance}; compile-time proc-macro, tauri plugins not yet on zbus 6 (notify-rust already is)" },
 ]
 
 [licenses]

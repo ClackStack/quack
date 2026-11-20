@@ -4,6 +4,9 @@
 # Nothing is contacted until then. The sign-in server below is contacted by `quack login`,
 # `quack logout`, and to renew the token about once an hour while this provider is in use.
 # Set a weekly cap for quack under Usage in ChatGPT settings.
+# GPT-6.2 entries place reusable system instructions inside `input` (`developer_instructions`)
+# so they stay in the cached prefix. `explicit_breakpoints` and `diagnostics` remain opt-in
+# per model because models such as `gpt-6-luna` reject `prompt_cache_options`.
 name = "ChatGPT plan"
 group = "Proprietary models"
 note = "sign in with `quack login chatgpt`"
@@ -16,14 +19,17 @@ extra_body = { reasoning = { summary = "auto", context = "all_turns" } }
 # The models the account offers are also listed in /models.
 # Default context budgets (Astra/Luna 272k, Sol and Terra 500k) and image input follow the
 # Codex catalog reviewed 2026-11-17; larger account/route-specific windows require an
-# explicit override. The catalog's `ultra` picker level is Codex-side multi-agent
+# explicit override. 500k models set `compact_at = 250000` to compact before the 272k
+# long-context pricing cliff. The catalog's `ultra` picker level is Codex-side multi-agent
 # delegation, not a wire effort, so it is not offered here.
 # Supported reasoning efforts: https://developers.openai.com/api/docs/guides/reasoning
 [[models]]
 id = "gpt-6.2-sol"
 alias = "sol"
 context_window = 500000
+compact_at = 250000
 vision = true
+prompt_cache = { developer_instructions = true }
 reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
 
 [[models]]
@@ -31,11 +37,13 @@ id = "gpt-6.2-astra"
 alias = "astra"
 context_window = 272000
 vision = true
+prompt_cache = { developer_instructions = true }
 reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
 
 [[models]]
 id = "gpt-6.1-sol"
 context_window = 500000
+compact_at = 250000
 vision = true
 reasoning = { effort = "medium", efforts = ["low", "medium", "high", "xhigh", "max"] }
 
@@ -56,5 +64,6 @@ reasoning = { effort = "medium", efforts = ["none", "low", "medium", "high", "xh
 id = "gpt-6.1-terra"
 alias = "terra"
 context_window = 500000
+compact_at = 250000
 vision = true
 reasoning = { effort = "medium", efforts = ["none", "low", "medium", "high", "xhigh", "max"] }

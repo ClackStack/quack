@@ -172,8 +172,23 @@ pub(crate) fn new_syntax_error(path: &Path, before: &str, after: &str) -> Option
     imp::error_lines(language, after)?.first().copied()
 }
 
+fn outline_key(language: &'static str, text: &str) -> (&'static str, usize, u64, u64) {
+    let mut h1: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h2: u64 = 0x1000_0000_01b3_9e37;
+    for &b in text.as_bytes() {
+        h1 ^= u64::from(b);
+        h1 = h1.wrapping_mul(0x0100_0000_01b3);
+        h2 = h2.wrapping_mul(31).wrapping_add(u64::from(b));
+    }
+    (language, text.len(), h1, h2)
+}
+
 fn outline_with(g: &Grammars, path: &Path, text: &str) -> Option<Outline> {
     let language = language_of(path)?;
+    let key = outline_key(language, text);
+    if let Some(cached) = g.cached_outline(key) {
+        return Some(cached);
+    }
     let mut symbols = imp::symbols(g, language, text)?;
     symbols.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
     // Several patterns can match one definition.
@@ -188,11 +203,13 @@ fn outline_with(g: &Grammars, path: &Path, text: &str) -> Option<Outline> {
         s.depth = open.len();
         open.push(s.end);
     }
-    Some(Outline {
+    let outline = Outline {
         language,
         lines: text.lines().count(),
         symbols,
-    })
+    };
+    g.store_outline(key, outline.clone());
+    Some(outline)
 }
 
 /// Extracted snippet for a symbol inside a workspace file.

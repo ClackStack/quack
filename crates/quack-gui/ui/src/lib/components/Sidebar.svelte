@@ -430,6 +430,12 @@
 					<dt>from cache</dt>
 					<dd>{cachedShare !== null ? `${Math.round(cachedShare * 100)}%` : '—'}</dd>
 				</div>
+				{#if (stats.cache_write_tokens ?? 0) > 0}
+					<div><dt>cache write</dt><dd>{fmtTokens(stats.cache_write_tokens ?? 0)}</dd></div>
+				{/if}
+				{#if (stats.reasoning_tokens ?? 0) > 0}
+					<div><dt>reasoning</dt><dd>{fmtTokens(stats.reasoning_tokens ?? 0)}</dd></div>
+				{/if}
 				{#if stats.tokens_per_sec}
 					<div><dt>speed</dt><dd>{stats.tokens_per_sec.toFixed(0)} tok/s</dd></div>
 				{/if}

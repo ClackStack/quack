@@ -243,7 +243,10 @@ impl Tool for Grep {
         };
         format!(
             "Search file contents with a regular expression (Rust regex syntax). Returns \
-             {shape}. Use `glob` to limit the files searched, e.g. `*.rs`."
+             {shape} (`output_mode: \"content\"`, default), matching file paths only \
+             (`\"files\"`), or match counts per file (`\"count\"`). Use `glob` to limit the \
+             files searched (e.g. `*.rs`), `context` for surrounding lines, and `limit` to cap \
+             results."
         )
     }
     fn schema(&self) -> Value {
@@ -253,7 +256,14 @@ impl Tool for Grep {
                 "pattern": { "type": "string", "description": "Regular expression" },
                 "path": { "type": "string", "description": "File or directory; default is the workspace root" },
                 "glob": { "type": "string", "description": "Only search files matching this glob" },
-                "case_insensitive": { "type": "boolean" }
+                "case_insensitive": { "type": "boolean" },
+                "output_mode": {
+                    "type": "string",
+                    "enum": ["content", "files", "count"],
+                    "description": "`content` (default: matching lines), `files` (matching paths only), or `count` (matches per file)"
+                },
+                "context": { "type": "integer", "description": "Context lines before and after each match (content mode, max 10)" },
+                "limit": { "type": "integer", "description": "Maximum matches (or files in files/count mode) to return" }
             },
             "required": ["pattern"]
         })
@@ -294,6 +304,44 @@ impl Tool for Grep {
                         .map_err(|e| format!("invalid glob: {e}"))
                 })
                 .transpose()?;
+            #[derive(Clone, Copy, PartialEq, Eq)]
+            enum Mode {
+                Content,
+                Files,
+                Count,
+            }
+            let mode = match opt_str(&args, &["output_mode", "mode"])
+                .unwrap_or("content")
+                .trim()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "content" | "lines" | "" => Mode::Content,
+                "files" | "files_with_matches" | "paths" => Mode::Files,
+                "count" | "counts" => Mode::Count,
+                other => {
+                    return Err(format!(
+                        "invalid output_mode `{other}`; use `content`, `files`, or `count`"
+                    ));
+                }
+            };
+            let context =
+                usize::try_from(opt_u64(&args, &["context", "context_lines", "C"]).unwrap_or(0))
+                    .unwrap_or(0)
+                    .min(10);
+            let limit = usize::try_from(
+                opt_u64(&args, &["limit", "max_results", "head_limit"]).unwrap_or(MAX_GREP as u64),
+            )
+            .unwrap_or(MAX_GREP)
+            .clamp(1, MAX_GREP);
+            let clip = |line: &str| {
+                let line = line.trim_end();
+                if line.chars().count() > MAX_GREP_LINE {
+                    format!("{}…", line.chars().take(MAX_GREP_LINE).collect::<String>())
+                } else {
+                    line.to_owned()
+                }
+            };
 
             let mut out = String::new();
             let mut matches = 0;
@@ -334,44 +382,104 @@ impl Tool for Grep {
                     None => (String::from_utf8_lossy(&bytes).into_owned(), None),
                 };
                 let shown_path = paths::display(&root, &path);
-                let mut in_file = false;
-                for (i, line) in text.lines().enumerate() {
-                    if !re.is_match(line) {
-                        continue;
+                let lines: Vec<&str> = text.lines().collect();
+                match mode {
+                    Mode::Files => {
+                        if lines.iter().any(|l| re.is_match(l)) {
+                            files += 1;
+                            matches += 1;
+                            if files <= limit {
+                                out.push_str(&format!("{shown_path}\n"));
+                            }
+                        }
                     }
-                    matches += 1;
-                    if !in_file {
-                        in_file = true;
+                    Mode::Count => {
+                        let count = lines.iter().filter(|l| re.is_match(l)).count();
+                        if count > 0 {
+                            files += 1;
+                            matches += count;
+                            if files <= limit {
+                                out.push_str(&format!("{shown_path}: {count}\n"));
+                            }
+                        }
+                    }
+                    Mode::Content => {
+                        let hit_indices: Vec<usize> = lines
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, l)| re.is_match(l).then_some(i))
+                            .collect();
+                        if hit_indices.is_empty() {
+                            continue;
+                        }
                         files += 1;
-                        if let Some((_, tag)) = &tagged
-                            && matches <= MAX_GREP
-                        {
-                            out.push_str(&crate::hashline::header(&shown_path, tag));
-                            out.push('\n');
+                        let mut printed_header = false;
+                        let mut last_printed: Option<usize> = None;
+                        for (pos, &hit) in hit_indices.iter().enumerate() {
+                            matches += 1;
+                            if matches > limit {
+                                continue;
+                            }
+                            if !printed_header {
+                                printed_header = true;
+                                if let Some((_, tag)) = &tagged {
+                                    out.push_str(&crate::hashline::header(&shown_path, tag));
+                                    out.push('\n');
+                                }
+                            }
+                            let start = hit.saturating_sub(context);
+                            let end = (hit + context).min(lines.len().saturating_sub(1));
+                            let next_hit = hit_indices.get(pos + 1).copied();
+                            let from = match last_printed {
+                                Some(prev) if start <= prev + 1 => prev + 1,
+                                Some(_) if context > 0 => {
+                                    out.push_str("--\n");
+                                    start
+                                }
+                                _ => start,
+                            };
+                            for (line_idx, line_text) in
+                                lines.iter().enumerate().take(end + 1).skip(from)
+                            {
+                                // Stop before a subsequent match so it prints with its own match marker.
+                                if line_idx > hit && next_hit.is_some_and(|nh| line_idx >= nh) {
+                                    break;
+                                }
+                                if let Some((reads, tag)) = &tagged {
+                                    reads.saw(&path, tag, &text, (line_idx + 1, line_idx + 1));
+                                }
+                                let sep = if line_idx == hit { ':' } else { '-' };
+                                out.push_str(&format!(
+                                    "{shown_path}{sep}{}{sep} {}\n",
+                                    line_idx + 1,
+                                    clip(line_text)
+                                ));
+                                last_printed = Some(line_idx);
+                            }
                         }
-                    }
-                    if matches <= MAX_GREP {
-                        if let Some((reads, tag)) = &tagged {
-                            reads.saw(&path, tag, &text, (i + 1, i + 1));
-                        }
-                        let line = line.trim_end();
-                        let shown = if line.chars().count() > MAX_GREP_LINE {
-                            format!("{}…", line.chars().take(MAX_GREP_LINE).collect::<String>())
-                        } else {
-                            line.to_owned()
-                        };
-                        out.push_str(&format!("{shown_path}:{}: {shown}\n", i + 1));
                     }
                 }
             }
             if matches == 0 {
                 return Ok(ToolOutput::ok("No matches.", "no matches"));
             }
-            if matches > MAX_GREP {
-                out.push_str(&format!(
-                    "… {} more matches; narrow the pattern or path\n",
-                    matches - MAX_GREP
-                ));
+            match mode {
+                Mode::Files | Mode::Count => {
+                    if files > limit {
+                        out.push_str(&format!(
+                            "… {} more files; narrow the pattern or path\n",
+                            files - limit
+                        ));
+                    }
+                }
+                Mode::Content => {
+                    if matches > limit {
+                        out.push_str(&format!(
+                            "… {} more matches; narrow the pattern or path\n",
+                            matches - limit
+                        ));
+                    }
+                }
             }
             Ok(ToolOutput::ok(
                 out,

@@ -16,7 +16,7 @@ use quack_providers::{
     StreamEvent, ToolCall, ToolSpec, tokens, toolparse,
 };
 use quack_store::checkpoint::Checkpoints;
-use quack_tools::{Answers, Decision, Permissions, Subject, Tool, ToolCtx, ToolOutput};
+use quack_tools::{Answers, Decision, Permissions, Subject, Tool, ToolCtx, ToolKind, ToolOutput};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -28,17 +28,43 @@ use crate::session::{self, SharedLog};
 use crate::startup::Setup;
 use crate::stats::Stats;
 
-/// Identical consecutive calls before the model is told to change approach.
+fn hash_str(s: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// Identical consecutive calls (or consecutive failures on the same target) before the
+/// model is told to change approach.
 const REPEAT_LIMIT: usize = 3;
 
-/// Repeated calls this turn, tracked by name and argument hash so the arguments
-/// (whole file contents for edits) are never cloned. `record` returns the length
-/// of the trailing run of the call and its total count in the turn.
+/// Last reminders appended to history for append-only providers, so unchanged reminders
+/// are emitted only when they change or after a compaction instead of every step.
+#[derive(Debug, Default)]
+pub(crate) struct ReminderState {
+    working_files: Option<String>,
+    plan: Option<String>,
+}
+
+/// Tracks which conversation history and prompt context have already been vetted for remote
+/// Secret Shield egress. Left unadvanced on loopback (`secret_guard_local = false`) so a
+/// mid-session switch from a local model to a cloud provider scans all prior turns.
+#[derive(Debug, Default)]
+pub(crate) struct EgressGuardState {
+    scanned_upto: usize,
+    system_checked: Option<(String, u64, Option<String>)>,
+    context_checked: Option<(String, u64, Option<String>)>,
+}
+
+/// Repeated calls and consecutive target failures this turn, tracked by name and argument
+/// hash so the arguments (whole file contents for edits) are never cloned. `record`
+/// returns the length of the trailing run of the call and its total count in the turn.
 #[derive(Default)]
 struct RecentCalls {
     counts: HashMap<(String, u64), usize>,
     last: Option<(String, u64)>,
     trailing: usize,
+    target_failures: HashMap<(String, String), usize>,
 }
 
 impl RecentCalls {
@@ -55,6 +81,21 @@ impl RecentCalls {
         };
         self.last = Some(key);
         (self.trailing, total)
+    }
+
+    fn record_outcome(&mut self, name: &str, target: Option<&str>, ok: bool) -> usize {
+        let Some(target) = target else {
+            return 0;
+        };
+        let key = (name.to_owned(), target.to_owned());
+        if ok {
+            self.target_failures.remove(&key);
+            0
+        } else {
+            let count = self.target_failures.entry(key).or_insert(0);
+            *count += 1;
+            *count
+        }
     }
 }
 
@@ -87,6 +128,9 @@ pub(crate) struct TurnCtx {
     pub session: String,
     /// The sub-agent run this turn is (`explore-2`); `None` for the session's own turns.
     pub agent: Option<String>,
+    /// The sub-agent definition id (`explore`), shared across runs of the same agent type
+    /// so their `prompt_cache_key` routes to the same warm prefix.
+    pub agent_type: Option<String>,
     /// Model calls before the turn stops.
     pub max_steps: usize,
     /// Sub-agent setups, built on first use.
@@ -99,6 +143,12 @@ pub(crate) struct TurnCtx {
     pub ledger: Arc<EgressLedger>,
     /// Runtime session-level secret fingerprint allowlist shared across turns.
     pub secret_allowlist: Arc<Mutex<Vec<String>>>,
+    /// Last server response id seen in this conversation (for Responses cache diagnostics).
+    pub last_response_id: Arc<Mutex<Option<String>>>,
+    /// Last plan / working-files reminders written into append-only history.
+    pub last_reminders: Arc<Mutex<ReminderState>>,
+    /// Remote Secret Shield vetting state across turns and model switches.
+    pub egress_guard: Arc<Mutex<EgressGuardState>>,
 }
 
 /// What the user sent, ready for the model, and what they typed (which hooks see).
@@ -126,8 +176,17 @@ impl TurnCtx {
     /// Count every attempted request, including summaries and discarded replies. A missing
     /// usage report stays null in the log so collectors can detect incomplete accounting.
     pub(crate) fn record_request(&self, usage: Option<&Usage>, took: std::time::Duration) {
+        self.record_request_for(&self.setup, usage, took);
+    }
+
+    pub(crate) fn record_request_for(
+        &self,
+        setup: &Setup,
+        usage: Option<&Usage>,
+        took: std::time::Duration,
+    ) {
         let cost = usage.and_then(|u| {
-            self.setup.model.cost.as_ref().map(|c| {
+            setup.model.cost.as_ref().map(|c| {
                 c.of(
                     u.prompt_tokens,
                     u.cached_prompt_tokens.unwrap_or(0),
@@ -149,18 +208,42 @@ impl TurnCtx {
         }
     }
 
-    /// For an append-only provider, end the step's last tool result with the plan and working
-    /// file reminders, where they stay: the next request extends this one instead of rewriting its end.
+    /// Clear tracked reminder state (for example after compaction removed earlier reminders).
+    pub(crate) fn reset_reminders(&self) {
+        if let Ok(mut state) = self.last_reminders.lock() {
+            state.working_files = None;
+            state.plan = None;
+        }
+        if let Ok(mut guard) = self.egress_guard.lock() {
+            guard.scanned_upto = 0;
+        }
+    }
+
+    /// For an append-only provider, append plan and working-file reminders to the step's
+    /// last tool result only when they changed since last emitted, and leave them in
+    /// history so the next request strictly extends this one without mutating its tail.
     fn keep_plan(&self, content: &mut String, last: bool) {
-        if last && self.setup.provider.append_only() {
-            if let Some(wf) = working_files_reminder(self) {
+        if !last || !self.setup.provider.append_only() {
+            return;
+        }
+        let wf = working_files_reminder(self);
+        let plan = self.setup.tool_ctx.plan.reminder();
+        let Ok(mut state) = self.last_reminders.lock() else {
+            return;
+        };
+        if wf != state.working_files {
+            if let Some(text) = &wf {
                 content.push_str("\n\n");
-                content.push_str(&wf);
+                content.push_str(text);
             }
-            if let Some(plan) = self.setup.tool_ctx.plan.reminder() {
+            state.working_files = wf;
+        }
+        if plan != state.plan {
+            if let Some(text) = &plan {
                 content.push_str("\n\n");
-                content.push_str(&plan);
+                content.push_str(text);
             }
+            state.plan = plan;
         }
     }
 
@@ -168,6 +251,143 @@ impl TurnCtx {
     fn push(&self, history: &mut Vec<Message>, m: Message) {
         session::record_message(self.log.as_ref(), &m);
         history.push(m);
+        if !crate::secrets::should_skip_guard(&self.network, self.setup.provider.base_url())
+            && let Ok(mut guard) = self.egress_guard.lock()
+        {
+            guard.scanned_upto = history.len();
+        }
+    }
+
+    /// Scan `system`, `session_context` (`AGENTS.md` + memory index), and any previously
+    /// unscanned `history` (such as turns run on a local loopback model before switching to
+    /// a remote host, or a resumed session) before sending a request to a remote provider.
+    async fn guard_session_and_history(&self, history: &mut [Message]) -> Result<(), ()> {
+        let base_url = self.setup.provider.base_url();
+        if crate::secrets::should_skip_guard(&self.network, base_url) {
+            return Ok(());
+        }
+
+        let sys_hash = hash_str(&self.setup.system);
+        let need_sys = !self.setup.system.is_empty()
+            && self.egress_guard.lock().ok().and_then(|g| {
+                g.system_checked
+                    .as_ref()
+                    .map(|(u, h, _)| (u == base_url, *h))
+            }) != Some((true, sys_hash));
+        if need_sys {
+            let ask_id = self.key(&format!("egress-system-{}", self.turn.0));
+            let clean = self
+                .guard_egress("system_prompt", self.setup.system.clone(), &ask_id)
+                .await?;
+            let override_text = (clean != self.setup.system).then_some(clean);
+            if let Ok(mut g) = self.egress_guard.lock() {
+                g.system_checked = Some((base_url.to_owned(), sys_hash, override_text));
+            }
+        }
+
+        let ctx_hash = hash_str(&self.setup.session_context);
+        let need_ctx = !self.setup.session_context.is_empty()
+            && self.egress_guard.lock().ok().and_then(|g| {
+                g.context_checked
+                    .as_ref()
+                    .map(|(u, h, _)| (u == base_url, *h))
+            }) != Some((true, ctx_hash));
+        if need_ctx {
+            let ask_id = self.key(&format!("egress-context-{}", self.turn.0));
+            let clean = self
+                .guard_egress(
+                    "session_context",
+                    self.setup.session_context.clone(),
+                    &ask_id,
+                )
+                .await?;
+            let override_text = (clean != self.setup.session_context).then_some(clean);
+            if let Ok(mut g) = self.egress_guard.lock() {
+                g.context_checked = Some((base_url.to_owned(), ctx_hash, override_text));
+            }
+        }
+
+        let start = self
+            .egress_guard
+            .lock()
+            .map(|g| g.scanned_upto.min(history.len()))
+            .unwrap_or(0);
+        for (idx, msg) in history.iter_mut().enumerate().skip(start) {
+            let ask_id = self.key(&format!("egress-history-{}-{idx}", self.turn.0));
+            match msg {
+                Message::User { content, .. } if !content.is_empty() => {
+                    *content = self
+                        .guard_egress("history:user", std::mem::take(content), &ask_id)
+                        .await?;
+                }
+                Message::Tool { content, .. } if !content.is_empty() => {
+                    *content = self
+                        .guard_egress("history:tool", std::mem::take(content), &ask_id)
+                        .await?;
+                }
+                Message::Assistant {
+                    content, sealed, ..
+                } if !content.is_empty() => {
+                    let original = content.clone();
+                    let clean = self
+                        .guard_egress("history:assistant", original.clone(), &ask_id)
+                        .await?;
+                    if clean != original {
+                        *content = clean;
+                        *sealed = None;
+                    }
+                }
+                Message::Compaction {
+                    content,
+                    session_context,
+                    ..
+                } => {
+                    if !content.is_empty() {
+                        *content = self
+                            .guard_egress("history:compaction", std::mem::take(content), &ask_id)
+                            .await?;
+                    }
+                    if let Some(ctx_text) = session_context.take()
+                        && !ctx_text.is_empty()
+                    {
+                        let ask_ctx =
+                            self.key(&format!("egress-history-ctx-{}-{idx}", self.turn.0));
+                        *session_context = Some(
+                            self.guard_egress("history:session_context", ctx_text, &ask_ctx)
+                                .await?,
+                        );
+                    }
+                }
+                Message::System { content } if !content.is_empty() => {
+                    *content = self
+                        .guard_egress("history:system", std::mem::take(content), &ask_id)
+                        .await?;
+                }
+                _ => {}
+            }
+        }
+        if let Ok(mut g) = self.egress_guard.lock() {
+            g.scanned_upto = history.len();
+        }
+        Ok(())
+    }
+
+    fn egress_overrides(&self) -> (Option<String>, Option<String>) {
+        let base_url = self.setup.provider.base_url();
+        let Ok(g) = self.egress_guard.lock() else {
+            return (None, None);
+        };
+        let sys = g
+            .system_checked
+            .as_ref()
+            .filter(|(u, _, _)| u == base_url)
+            .and_then(|(_, _, text)| text.clone());
+        let ctx = g
+            .context_checked
+            .as_ref()
+            .filter(|(u, _, _)| u == base_url)
+            .and_then(|(_, _, text)| text.clone());
+        (sys, ctx)
     }
 
     pub(crate) fn emit(&self, e: Event) {
@@ -461,6 +681,19 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
     } else {
         format!("{}\n\n{}", prompt.text, extra.join("\n\n"))
     };
+    if ctx.guard_session_and_history(&mut history).await.is_err() {
+        ctx.emit(Event::Warning {
+            message:
+                "Blocked outbound session context or prior history containing sensitive credentials; nothing was sent."
+                    .into(),
+        });
+        ctx.emit(Event::TurnAborted {
+            turn: ctx.turn,
+            reason: "blocked by Secret Shield".into(),
+        });
+        ctx.turn_end(json!({ "turn": ctx.turn.0, "outcome": "blocked" }));
+        return history;
+    }
     let ask_id = ctx.key(&format!("egress-user-{}", ctx.turn.0));
     let content = match ctx.guard_egress("user_prompt", content, &ask_id).await {
         Ok(clean) => clean,
@@ -581,6 +814,10 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                 total.prompt_tokens = u.prompt_tokens;
                 total.completion_tokens += u.completion_tokens;
                 total.cached_prompt_tokens = u.cached_prompt_tokens;
+                total.cache_write_tokens = u.cache_write_tokens;
+                if let Some(r) = u.reasoning_tokens {
+                    total.reasoning_tokens = Some(total.reasoning_tokens.unwrap_or(0) + r);
+                }
                 ctx.emit(Event::ContextUpdate {
                     used: u.prompt_tokens + u.completion_tokens,
                     budget: ctx.setup.budget.unwrap_or(0),
@@ -693,18 +930,39 @@ async fn run_tool_calls(
             interrupted = true;
             break;
         }
-        // Read-only sub-agents started together run side by side.
+        // Read-only sub-agents and allowed read-only tools started together run side by side.
         let together = side_by_side[i..].iter().take_while(|p| **p).count();
         if together > 1 {
             let batch = &calls[i..i + together];
+            let repeats: Vec<(usize, usize)> = batch
+                .iter()
+                .map(|c| recent.record(&c.name, &c.arguments))
+                .collect();
             let outs = futures::future::join_all(batch.iter().map(|c| run_call(ctx, c))).await;
             let end = i + together == calls.len();
-            for (n, (call, out)) in batch.iter().zip(outs).enumerate() {
+            for (n, ((call, (trailing, _)), out)) in batch.iter().zip(repeats).zip(outs).enumerate()
+            {
+                let target = failure_target(&ctx.setup, call);
+                let target_fails = recent.record_outcome(&call.name, target.as_deref(), out.ok);
                 let ToolOutput {
                     model: mut content,
                     images,
                     ..
                 } = out;
+                if trailing >= REPEAT_LIMIT {
+                    content.push_str(&format!(
+                        "\n\nNote: this exact call has now been made {trailing} times in a row. \
+                         Try a different approach."
+                    ));
+                } else if target_fails >= REPEAT_LIMIT
+                    && let Some(target) = target
+                {
+                    content.push_str(&format!(
+                        "\n\nNote: `{}` on `{target}` has failed {target_fails} times in a row. \
+                         Stop retrying small variations; re-read the file or diagnose the root error first.",
+                        call.name
+                    ));
+                }
                 content = apply_tool_guard(ctx, call, content).await;
                 ctx.keep_plan(&mut content, end && n + 1 == together);
                 ctx.push(
@@ -723,6 +981,8 @@ async fn run_tool_calls(
         i += 1;
         let (repeats, same_count) = recent.record(&call.name, &call.arguments);
         let mut out = run_call(ctx, call).await;
+        let target = failure_target(&ctx.setup, call);
+        let target_fails = recent.record_outcome(&call.name, target.as_deref(), out.ok);
         if repeats >= REPEAT_LIMIT {
             out.model.push_str(&format!(
                 "\n\nNote: this exact call has now been made {repeats} times in a row. \
@@ -733,6 +993,14 @@ async fn run_tool_calls(
                 "\n\nNote: this exact edit has already been attempted in this turn ({same_count} times total). \
                  Repeating identical changes without modifying arguments will not fix the problem. \
                  Read the file to check its actual state or try a different fix."
+            ));
+        } else if target_fails >= REPEAT_LIMIT
+            && let Some(target) = target
+        {
+            out.model.push_str(&format!(
+                "\n\nNote: `{}` on `{target}` has failed {target_fails} times in a row. \
+                 Stop retrying small variations; re-read the file or diagnose the root error first.",
+                call.name
             ));
         }
         out.model = apply_tool_guard(ctx, call, out.model).await;
@@ -772,22 +1040,88 @@ pub(crate) fn tokens_to_bytes(tokens: usize) -> usize {
     tokens * 7 / 2
 }
 
+/// Uncorrected token estimate for native compaction items (`Message::Compaction.sealed.items`).
+/// Counts the encrypted compaction payload's byte-scaled weight plus any retained items
+/// without counting unsent fallback text or wrapper metadata.
+pub(crate) fn sealed_compaction_tokens(items: &[Value]) -> u32 {
+    items.iter().fold(0u32, |acc, item| {
+        let item_tokens = if item["type"] == "compaction" {
+            item["encrypted_content"]
+                .as_str()
+                .map_or(0, |s| bytes_to_tokens(s.len()))
+        } else {
+            tokens::estimate(&item.to_string())
+        };
+        acc.saturating_add(item_tokens).saturating_add(4)
+    })
+}
+
+/// Uncorrected token estimate for one history message.
+/// - Images use `Image::tokens` instead of base64 byte length.
+/// - Assistant messages skip `sealed` so encrypted reasoning ciphertext and duplicate text
+///   copies do not inflate the budget estimate.
+/// - Compaction messages count `sealed.items` when native compaction is active and fallback
+///   `content` otherwise, matching what `prepare_history` sends on the wire.
+pub(crate) fn message_tokens(m: &Message, native_compaction: bool) -> u32 {
+    let image_tokens = |images: &[quack_protocol::Image]| -> u32 {
+        images.iter().fold(0u32, |acc, img| {
+            acc.saturating_add(quack_protocol::Image::tokens(img))
+        })
+    };
+    match m {
+        Message::System { content } => tokens::estimate(content).saturating_add(4),
+        Message::User { content, images } => tokens::estimate(content)
+            .saturating_add(image_tokens(images))
+            .saturating_add(4),
+        Message::Compaction {
+            content,
+            sealed,
+            session_context,
+        } => {
+            let body = if native_compaction {
+                sealed_compaction_tokens(&sealed.items)
+            } else {
+                tokens::estimate(content).saturating_add(4)
+            };
+            body.saturating_add(session_context.as_deref().map_or(0, tokens::estimate))
+        }
+        Message::Assistant {
+            content,
+            reasoning,
+            tool_calls,
+            sealed: _,
+        } => {
+            let calls = tool_calls.iter().fold(0u32, |acc, c| {
+                acc.saturating_add(tokens::estimate(&c.name))
+                    .saturating_add(tokens::estimate(&c.arguments))
+                    .saturating_add(8)
+            });
+            tokens::estimate(content)
+                .saturating_add(reasoning.as_deref().map_or(0, tokens::estimate))
+                .saturating_add(calls)
+                .saturating_add(4)
+        }
+        Message::Tool {
+            call_id: _,
+            content,
+            images,
+        } => tokens::estimate(content)
+            .saturating_add(image_tokens(images))
+            .saturating_add(8),
+    }
+}
+
+pub(crate) fn history_tokens(history: &[Message], native_compaction: bool) -> u32 {
+    history.iter().fold(0u32, |acc, m| {
+        acc.saturating_add(message_tokens(m, native_compaction))
+    })
+}
+
 /// Uncorrected estimate of a request's prompt: system prompt, history and tool definitions.
 /// Image payloads are counted as their rough token cost, not their base64 bytes, which
 /// would count a screenshot as tens of thousands of tokens.
 pub(crate) fn raw_estimate(s: &Setup, history: &[Message]) -> u32 {
-    let json = serde_json::to_string(history).unwrap_or_default();
-    let mut image_bytes = 0usize;
-    let mut image_tokens = 0u32;
-    for image in history.iter().flat_map(|m| match m {
-        Message::User { images, .. } | Message::Tool { images, .. } => images.as_slice(),
-        _ => &[],
-    }) {
-        image_bytes += image.data.len();
-        image_tokens = image_tokens.saturating_add(quack_protocol::Image::tokens(image));
-    }
-    let history = tokens::estimate(&json[..json.len().saturating_sub(image_bytes)])
-        .saturating_add(image_tokens);
+    let history = history_tokens(history, s.provider.native_compaction());
     // The tool block is constant for the setup, so its byte size is computed once.
     let tools: usize = *s.tool_block_bytes.get_or_init(|| {
         tool_specs(s)
@@ -828,6 +1162,10 @@ pub(crate) fn request(s: &Setup, mut messages: Vec<Message>, tools: bool) -> Cha
         sampling: sampling(s),
         reasoning_effort: Some(s.reasoning_effort()).filter(|e| !e.is_empty()),
         preserve_reasoning: s.model.reasoning.preserve_in_history,
+        reasoning_wire: s.model.reasoning.wire,
+        parallel_tool_calls: (!s.model.tool_calling.parallel).then_some(false),
+        prompt_cache: s.provider.file.prompt_cache_for(&s.model),
+        comparison_response_id: None,
         extra_body: serde_json::to_value(&s.model.extra_body)
             .ok()
             .and_then(|v| v.as_object().cloned())
@@ -835,6 +1173,36 @@ pub(crate) fn request(s: &Setup, mut messages: Vec<Message>, tools: bool) -> Cha
         cache_key: None,
         tool_mode: Some(s.model.tool_calling.mode),
     }
+}
+
+/// The lowest supported reasoning effort for utility calls (title generation, text
+/// compaction) so they don't burn full session thinking tokens.
+pub(crate) fn lowest_effort(model: &quack_config::provider::ModelEntry) -> Option<String> {
+    let efforts = &model.reasoning.efforts;
+    if efforts.is_empty() {
+        return None;
+    }
+    for wanted in ["none", "off", "minimal", "low"] {
+        if let Some(found) = efforts.iter().find(|e| e.eq_ignore_ascii_case(wanted)) {
+            return Some(found.clone());
+        }
+    }
+    efforts.first().cloned()
+}
+
+/// A lightweight tool-free request (title generation, text compaction) with minimal
+/// reasoning effort and no reasoning summary/context overhead.
+pub(crate) fn utility_request(s: &Setup, messages: Vec<Message>) -> ChatRequest {
+    let mut req = request(s, messages, false);
+    req.reasoning_effort = lowest_effort(&s.model);
+    if let Some(Value::Object(r)) = req.extra_body.get_mut("reasoning") {
+        r.remove("summary");
+        r.remove("context");
+        if r.is_empty() {
+            req.extra_body.remove("reasoning");
+        }
+    }
+    req
 }
 
 /// Images in the history from a model that took them (before a `/models` switch, a
@@ -914,15 +1282,23 @@ pub(crate) fn reasoning_format(s: &Setup) -> quack_config::provider::ReasoningFo
 /// the first user message. Keeping it out of the system prompt keeps the system prompt and
 /// the tool block, which chat templates render after it, the same in every session and
 /// project, so the server's prompt cache reuses them. The history keeps what the user typed.
-pub(crate) fn with_session_context(s: &Setup, messages: &mut [Message]) {
-    if s.session_context.is_empty() {
+fn with_session_context_text(ctx_text: &str, messages: &mut [Message]) {
+    if ctx_text.is_empty() {
         return;
     }
-    if let Some(Message::User { content, .. } | Message::Compaction { content, .. }) = messages
+    match messages
         .iter_mut()
         .find(|m| matches!(m, Message::User { .. } | Message::Compaction { .. }))
     {
-        *content = format!("{}\n\n{content}", s.session_context);
+        Some(Message::User { content, .. }) => {
+            *content = format!("{ctx_text}\n\n{content}");
+        }
+        Some(Message::Compaction {
+            session_context, ..
+        }) => {
+            *session_context = Some(ctx_text.to_owned());
+        }
+        _ => {}
     }
 }
 
@@ -950,19 +1326,30 @@ fn working_files_reminder(ctx: &TurnCtx) -> Option<String> {
 }
 
 pub(crate) fn history_messages(s: &Setup, history: &[Message]) -> Vec<Message> {
+    history_messages_with(s, None, None, history)
+}
+
+fn history_messages_with(
+    s: &Setup,
+    system_override: Option<&str>,
+    context_override: Option<&str>,
+    history: &[Message],
+) -> Vec<Message> {
     let mut messages = Vec::with_capacity(history.len() + 1);
-    if !s.system.is_empty() {
+    let system = system_override.unwrap_or(&s.system);
+    if !system.is_empty() {
         messages.push(Message::System {
-            content: s.system.clone(),
+            content: system.to_owned(),
         });
     }
     messages.extend_from_slice(history);
-    with_session_context(s, &mut messages);
+    let ctx_text = context_override.unwrap_or(&s.session_context);
+    with_session_context_text(ctx_text, &mut messages);
     messages
 }
 
 pub(crate) fn cache_key(ctx: &TurnCtx) -> String {
-    match &ctx.agent {
+    match ctx.agent_type.as_deref().or(ctx.agent.as_deref()) {
         Some(agent) => format!("{}/{agent}", ctx.session),
         None => ctx.session.clone(),
     }
@@ -974,29 +1361,17 @@ async fn stream_step(
     history: &[Message],
 ) -> Result<(Message, Option<Usage>), StepEnd> {
     let s = &ctx.setup;
-    let mut messages = history_messages(s, history);
-    // The plan and modified-files reminders ride on the last message of this request only,
-    // so the history (and the cached prefix before it) stays the same. An append-only provider
-    // has it in the history already (`TurnCtx::keep_plan`).
-    if !s.provider.append_only() {
-        if let Some(wf) = working_files_reminder(ctx)
-            && let Some(Message::Tool { content, .. } | Message::User { content, .. }) =
-                messages.last_mut()
-        {
-            content.push_str("\n\n");
-            content.push_str(&wf);
-        }
-        if let Some(plan) = s.tool_ctx.plan.reminder()
-            && let Some(Message::Tool { content, .. } | Message::User { content, .. }) =
-                messages.last_mut()
-        {
-            content.push_str("\n\n");
-            content.push_str(&plan);
-        }
-    }
+    let (sys_override, ctx_override) = ctx.egress_overrides();
+    let messages =
+        history_messages_with(s, sys_override.as_deref(), ctx_override.as_deref(), history);
+    // Plan and modified-files reminders are already written into history on state changes
+    // (`TurnCtx::keep_plan`) so earlier messages never mutate between steps.
     let mut req = request(s, messages, true);
-    // Sub-agents have their own prefix, so their own key.
+    // Sub-agents share one key per agent type so sibling/repeated runs reuse the warm prefix.
     req.cache_key = Some(cache_key(ctx));
+    if req.prompt_cache.diagnostics {
+        req.comparison_response_id = ctx.last_response_id.lock().ok().and_then(|g| g.clone());
+    }
     let fingerprint = quack_providers::fingerprint(&req);
     ctx.start_request();
     let mut rx = s
@@ -1091,6 +1466,11 @@ async fn stream_step(
         ctx.emit(Event::AssistantDelta { text: tail });
     }
     let usage = b.usage;
+    if let Some(resp_id) = b.response_id.clone()
+        && let Ok(mut slot) = ctx.last_response_id.lock()
+    {
+        *slot = Some(resp_id);
+    }
     let mut msg = b.into_message();
     if let Some(first) = first {
         emit_speed(ctx, sent, first, usage, &msg);
@@ -1359,17 +1739,51 @@ fn edits(s: &Setup, call: &ToolCall) -> bool {
         .is_some_and(|sub| matches!(sub, Subject::Edit(_) | Subject::Edits(_)))
 }
 
-/// Whether `call` starts a read-only sub-agent, which may run beside others.
+/// Target key for consecutive-failure doom-loop detection: file path(s) for edits, or
+/// the leading command tokens for shell commands.
+fn failure_target(s: &Setup, call: &ToolCall) -> Option<String> {
+    let (name, args) = internal_call(s, call)?;
+    let subject = s.registry.get(&name)?.subject(&args, &s.tool_ctx).ok()?;
+    match subject {
+        Subject::Edit(p) => Some(quack_tools::paths::display(&s.tool_ctx.root, &p)),
+        Subject::Edits(ps) if !ps.is_empty() => {
+            let shown: Vec<String> = ps
+                .iter()
+                .take(3)
+                .map(|p| quack_tools::paths::display(&s.tool_ctx.root, p))
+                .collect();
+            Some(shown.join(", "))
+        }
+        Subject::Shell(cmd) | Subject::ShellOutsideSandbox(cmd) => {
+            let prefix: Vec<&str> = cmd.split_whitespace().take(2).collect();
+            (!prefix.is_empty()).then(|| prefix.join(" "))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `call` may run side by side with adjacent parallelizable calls:
+/// - a read-only sub-agent (`task` with `read_only = true`), or
+/// - an allowed `ToolKind::ReadOnly` tool that does not require interactive approval.
 fn parallel(ctx: &TurnCtx, call: &ToolCall) -> bool {
     let s = &ctx.setup;
     let Some((internal, args)) = internal_call(s, call) else {
         return false;
     };
-    internal == "task"
-        && s.registry
-            .get("task")
-            .and_then(|t| t.subject(&args, &s.tool_ctx).ok())
-            == Some(Subject::Agent { read_only: true })
+    let Some(tool) = s.registry.get(&internal) else {
+        return false;
+    };
+    let Ok(subject) = tool.subject(&args, &s.tool_ctx) else {
+        return false;
+    };
+    if internal == "task" {
+        return subject == Subject::Agent { read_only: true };
+    }
+    tool.kind() == ToolKind::ReadOnly
+        && ctx
+            .perms
+            .lock()
+            .is_ok_and(|p| matches!(p.check(&subject), Decision::Allow))
 }
 
 /// Run one tool call through mapping, permissions and approval.
@@ -1576,10 +1990,46 @@ async fn execute(
             .collect(),
         None => Vec::new(),
     };
-    // Diagnostics before an edit, to report only what the edit changed.
+    // Diagnostics before an edit (single or multi-file), to report only what the edit changed.
     let lsp = tctx.lsp.clone();
-    let lsp_before = match (&subject, &lsp) {
-        (Subject::Edit(p), Some(m)) => m.before_edit(p).await,
+    let mut lsp_before = Vec::new();
+    if let Some(m) = &lsp {
+        for p in subject.edited() {
+            if let Some(snap) = m.before_edit(p).await {
+                lsp_before.push((p.clone(), snap));
+            }
+        }
+    }
+    // Shadow git snapshot before a mutating shell command so `/undo`, `/rewind`, and LSP
+    // `workspace/didChangeWatchedFiles` track files created, modified, or deleted by shell.
+    let shell_snapshot = match &subject {
+        Subject::Shell(cmd) | Subject::ShellOutsideSandbox(cmd)
+            if !quack_tools::is_read_only_shell(cmd) =>
+        {
+            let shadow_dir = ctx
+                .checkpoints
+                .as_ref()
+                .map(|cp| cp.shadow_git_dir())
+                .or_else(|| {
+                    lsp.as_ref()
+                        .is_some_and(|m| !m.clients().is_empty())
+                        .then(|| {
+                            std::env::temp_dir()
+                                .join(format!("quack-shadow-{}", std::process::id()))
+                        })
+                });
+            if let Some(shadow_dir) = shadow_dir {
+                let ws = root.clone();
+                let sdir = shadow_dir.clone();
+                tokio::task::spawn_blocking(move || quack_store::snapshot::capture_tree(&sdir, &ws))
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|tree| (shadow_dir, tree))
+            } else {
+                None
+            }
+        }
         _ => None,
     };
     let post_args = ctx.hooks.any(HookEvent::PostTool).then(|| args.clone());
@@ -1622,49 +2072,124 @@ async fn execute(
             tracing::warn!(error = %e, "could not record the edit for undo");
         }
     }
+    if let Some((shadow_dir, before_tree)) = shell_snapshot {
+        let ws = root.clone();
+        let changes = tokio::task::spawn_blocking(move || {
+            quack_store::snapshot::diff_after(&shadow_dir, &ws, &before_tree)
+        })
+        .await
+        .unwrap_or_default();
+        if !changes.is_empty() {
+            if let Some(cp) = &ctx.checkpoints {
+                for change in &changes {
+                    if let Err(e) = cp.record_snapshot(
+                        ctx.turn.0,
+                        &call_id.0,
+                        &change.path,
+                        change.before.as_deref(),
+                    ) {
+                        tracing::warn!(
+                            error = %e,
+                            path = %change.path.display(),
+                            "could not record shell change for undo"
+                        );
+                    }
+                }
+            }
+            if let Some(m) = &lsp {
+                let watched: Vec<(std::path::PathBuf, quack_lsp::WatchChangeType)> = changes
+                    .iter()
+                    .map(|c| {
+                        let kind = match c.kind {
+                            quack_store::snapshot::FileChangeKind::Created => {
+                                quack_lsp::WatchChangeType::Created
+                            }
+                            quack_store::snapshot::FileChangeKind::Changed => {
+                                quack_lsp::WatchChangeType::Changed
+                            }
+                            quack_store::snapshot::FileChangeKind::Deleted => {
+                                quack_lsp::WatchChangeType::Deleted
+                            }
+                        };
+                        (c.path.clone(), kind)
+                    })
+                    .collect();
+                m.notify_watched_files(&watched).await;
+            }
+        }
+    }
     if out.ok
         && let Some(m) = &lsp
     {
-        match (&subject, lsp_before) {
-            (Subject::Read(p), _) => m.touch(p),
-            (Subject::Edit(p), Some(before)) => {
+        match &subject {
+            Subject::Read(p) => m.touch(p),
+            Subject::Edit(_) | Subject::Edits(_) => {
                 let root = ctx.setup.tool_ctx.root.clone();
                 let display = move |f: &std::path::Path| quack_tools::paths::display(&root, f);
-                let report = tokio::select! {
-                    r = m.after_edit(p, &before, &display) => r,
-                    () = ctx.cancel.cancelled() => None,
-                };
-                if let Some(text) = report {
-                    if let Some(n) = text
-                        .strip_prefix("diagnostics (")
-                        .and_then(|t| t.split(' ').next())
-                    {
-                        out.summary.push_str(&format!(" · {n} new diagnostic(s)"));
+                let mut reports = Vec::new();
+                let mut total_new: u32 = 0;
+                for (p, before) in &lsp_before {
+                    let report = tokio::select! {
+                        r = m.after_edit(p, before, &display) => r,
+                        () = ctx.cancel.cancelled() => None,
+                    };
+                    if let Some(text) = report {
+                        if let Some(n) = text
+                            .strip_prefix("diagnostics (")
+                            .and_then(|t| t.split(' ').next())
+                            .and_then(|n| n.parse::<u32>().ok())
+                        {
+                            total_new = total_new.saturating_add(n);
+                        }
+                        reports.push(text);
                     }
-                    out.model.push_str("\n\n");
-                    out.model.push_str(&text);
-                    out.detail = Some(match out.detail.take() {
-                        Some(d) => format!("{d}\n{text}"),
-                        None => text,
-                    });
                 }
-            }
-            // Several files at once (a rename, a patch): the servers get the new text now.
-            (Subject::Edits(ps), _) => {
-                for p in ps {
-                    m.touch(p);
+                // Any edited path without a pre-edit snapshot still notifies its server.
+                for p in subject.edited() {
+                    if !lsp_before.iter().any(|(bp, _)| bp == p) {
+                        m.touch(p);
+                    }
+                }
+                if !reports.is_empty() {
+                    if total_new > 0 {
+                        out.summary
+                            .push_str(&format!(" · {total_new} new diagnostic(s)"));
+                    }
+                    let combined = reports.join("\n\n");
+                    out.model.push_str("\n\n");
+                    out.model.push_str(&combined);
+                    out.detail = Some(match out.detail.take() {
+                        Some(d) => format!("{d}\n{combined}"),
+                        None => combined,
+                    });
                 }
             }
             _ => {}
         }
     }
-    // AGENTS.md files below the root arrive with the first result that touches them.
-    if out.ok
-        && let Subject::Read(p) | Subject::Edit(p) = &subject
-        && let Some(extra) = ctx.nested.attach(p)
-    {
-        out.model.push_str("\n\n");
-        out.model.push_str(&extra);
+    // AGENTS.md files below the root arrive with the first result that touches them
+    // (including multi-file edits such as `apply_patch` and `edit_blocks`).
+    if out.ok {
+        let mut extras = Vec::new();
+        match &subject {
+            Subject::Read(p) | Subject::Edit(p) => {
+                if let Some(extra) = ctx.nested.attach(p) {
+                    extras.push(extra);
+                }
+            }
+            Subject::Edits(ps) => {
+                for p in ps {
+                    if let Some(extra) = ctx.nested.attach(p) {
+                        extras.push(extra);
+                    }
+                }
+            }
+            _ => {}
+        }
+        for extra in extras {
+            out.model.push_str("\n\n");
+            out.model.push_str(&extra);
+        }
     }
     if let Some(args) = post_args
         && !ctx.cancel.is_cancelled()
@@ -1808,5 +2333,82 @@ mod tests {
         }];
         dedupe_ids(&mut calls, &history);
         assert_eq!(calls[0].id, "call_0_1");
+    }
+
+    #[test]
+    fn message_tokens_skips_assistant_sealed_ciphertext_and_picks_wire_compaction_body() {
+        let huge_blob = "A".repeat(70_000);
+        let asst_plain = Message::Assistant {
+            content: "Look at src/lib.rs".into(),
+            reasoning: Some("Check the parser".into()),
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "read".into(),
+                arguments: r#"{"path":"src/lib.rs"}"#.into(),
+            }],
+            sealed: None,
+        };
+        let asst_sealed = Message::Assistant {
+            content: "Look at src/lib.rs".into(),
+            reasoning: Some("Check the parser".into()),
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "read".into(),
+                arguments: r#"{"path":"src/lib.rs"}"#.into(),
+            }],
+            sealed: Some(quack_providers::Sealed {
+                provider: "openai".into(),
+                model: "gpt-6.2-sol".into(),
+                fingerprint: "fp".into(),
+                items: vec![
+                    json!({ "type": "reasoning", "encrypted_content": huge_blob }),
+                    json!({ "type": "message", "text": "Look at src/lib.rs", "phase": "commentary" }),
+                ],
+            }),
+        };
+        assert_eq!(
+            message_tokens(&asst_plain, true),
+            message_tokens(&asst_sealed, true),
+            "sealed ciphertext and duplicate text must not inflate assistant estimates"
+        );
+
+        let compaction = Message::Compaction {
+            content: "fallback ".repeat(5_000),
+            sealed: quack_providers::Sealed {
+                provider: "openai".into(),
+                model: "gpt-6.2-sol".into(),
+                fingerprint: "fp".into(),
+                items: vec![json!({
+                    "type": "compaction",
+                    "encrypted_content": "B".repeat(3_500)
+                })],
+            },
+            session_context: None,
+        };
+        // Native mode counts the wire compaction item (~1000 tokens), not the 45KB fallback text.
+        let native_est = message_tokens(&compaction, true);
+        assert!(
+            (950..=1_100).contains(&native_est),
+            "expected ~1004 native tokens, got {native_est}"
+        );
+        // Non-native mode counts the portable fallback text (~12,857 tokens), not sealed.
+        let fallback_est = message_tokens(&compaction, false);
+        assert!(
+            fallback_est > 10_000,
+            "expected fallback text tokens, got {fallback_est}"
+        );
+
+        // Multi-byte UTF-8 text alongside a large base64 image must estimate cleanly.
+        let utf8_with_image = Message::User {
+            content: "é".repeat(100),
+            images: vec![quack_protocol::Image {
+                media_type: "image/png".into(),
+                data: "X".repeat(50_000),
+                width: Some(512),
+                height: Some(512),
+            }],
+        };
+        let est = message_tokens(&utf8_with_image, true);
+        assert!(est < 2_000, "image base64 must not inflate estimate: {est}");
     }
 }

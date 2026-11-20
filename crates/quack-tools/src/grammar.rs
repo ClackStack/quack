@@ -63,13 +63,18 @@ pub const HIGHLIGHT_NAMES: &[&str] = &[
 /// A highlighted run: its byte range in the source and its highlight name, if any.
 pub type Highlighted = (Range<usize>, Option<&'static str>);
 
+pub(crate) type OutlineKey = (&'static str, usize, u64, u64);
+
 /// Grammars with the query overrides of a set of `grammars/` folders. Queries compile on
-/// first use and are kept.
+/// first use and are kept; parsed file outlines are cached in a small bounded table so
+/// repeated `read`, `index`, `edit` and pruning passes don't re-parse unchanged files.
 pub struct Grammars {
     /// `grammars/` folders, lowest layer first.
     dirs: Vec<PathBuf>,
     /// Problems with override files, for `quack doctor` and the log.
     warnings: Mutex<Vec<String>>,
+    /// Bounded cache of parsed outlines keyed by `(language, text_len, hash1, hash2)`.
+    outlines: Mutex<std::collections::VecDeque<(OutlineKey, crate::outline::Outline)>>,
     #[cfg(feature = "lang-common")]
     cache: imp::Cache,
 }
@@ -94,9 +99,32 @@ impl Grammars {
         Self {
             dirs,
             warnings: Mutex::new(Vec::new()),
+            outlines: Mutex::new(std::collections::VecDeque::new()),
             #[cfg(feature = "lang-common")]
             cache: imp::Cache::default(),
         }
+    }
+
+    pub(crate) fn cached_outline(&self, key: OutlineKey) -> Option<crate::outline::Outline> {
+        let mut cache = self.outlines.lock().ok()?;
+        let pos = cache.iter().position(|(k, _)| *k == key)?;
+        let entry = cache.remove(pos)?;
+        let out = entry.1.clone();
+        cache.push_back(entry);
+        Some(out)
+    }
+
+    pub(crate) fn store_outline(&self, key: OutlineKey, outline: crate::outline::Outline) {
+        const MAX_OUTLINES: usize = 64;
+        let Ok(mut cache) = self.outlines.lock() else {
+            return;
+        };
+        if let Some(pos) = cache.iter().position(|(k, _)| *k == key) {
+            cache.remove(pos);
+        } else if cache.len() >= MAX_OUTLINES {
+            cache.pop_front();
+        }
+        cache.push_back((key, outline));
     }
 
     /// The `grammars/` folders of the given layer directories, lowest first.

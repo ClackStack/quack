@@ -247,7 +247,11 @@ pub struct RunResult {
     pub edit_failures: u32,
     pub prompt_tokens: u64,
     pub cached_tokens: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub cache_write_tokens: u64,
     pub completion_tokens: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub reasoning_tokens: u64,
     pub compactions: u32,
     /// Tool results replaced by a placeholder to save room.
     #[serde(default)]
@@ -905,13 +909,19 @@ async fn drive_turn(
     }
 }
 
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
 /// Copy the engine's usage report into the result. Incomplete or errored runs keep their
 /// known subtotal separate so it is never presented as the full cost.
 fn record_stats(result: &mut RunResult, stats: StatsReport) {
     result.steps = stats.requests;
     result.prompt_tokens = stats.prompt_tokens;
     result.cached_tokens = stats.cached_tokens;
+    result.cache_write_tokens = stats.cache_write_tokens;
     result.completion_tokens = stats.completion_tokens;
+    result.reasoning_tokens = stats.reasoning_tokens;
     result.compactions = stats.compactions;
     result.pruned = stats.pruned;
     result.peak_prompt = stats.history.iter().map(|r| r.prompt).max().unwrap_or(0);

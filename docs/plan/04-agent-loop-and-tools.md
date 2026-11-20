@@ -203,6 +203,7 @@ the compatibility alias `expected_replacements > 1`).
 - **Output**: stdout and stderr are interleaved with order preserved and streamed to the UI. The model sees head and tail trimmed to the budget, with the full output saved to `<session dir>/outputs/<call>.log` and a note telling the model how to read more (`read` on that path, or `grep`).
 - **Interactive commands**: no stdin by default (`/dev/null` or `NUL`). Commands known to page or prompt get env overrides: `GIT_PAGER=cat`, `PAGER=cat`, `GIT_TERMINAL_PROMPT=0`, `DEBIAN_FRONTEND=noninteractive`. PTY mode is opt-in per call, for tools that need a TTY.
 - **Process trees**: Unix uses `setsid` + `killpg`. Windows assigns every child to a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so closing the job kills the whole tree. This also prevents orphaned processes when quack exits or crashes.
+- **Managed background jobs (2026-11-19)**: `shell` accepts `background: true` to spawn long-running dev servers/watchers inside `quack_shell::BackgroundManager` (up to 8 concurrent jobs, 512 KiB ring buffer per job, normal shell permissions and OS sandbox, automatic process-tree cleanup on stop or session drop) and `job_action: "output" | "stop" | "list"` (with `job_id` / `tail_bytes`) to poll output or stop jobs.
 
 ### User shell escape
 

@@ -42,6 +42,11 @@ pub struct AgentFile {
     /// Model calls before the agent stops and reports what it has.
     #[serde(default)]
     pub max_steps: Option<u32>,
+    /// Optional reasoning effort override for this agent (`"none"`, `"low"`, `"medium"`, ...),
+    /// applied when the chosen model declares selectable efforts (or mapped to its lowest
+    /// declared level if unavailable). Unset inherits the parent turn's effort.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 fn yes() -> bool {

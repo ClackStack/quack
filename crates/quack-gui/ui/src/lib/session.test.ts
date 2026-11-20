@@ -39,7 +39,12 @@ const info: AppInfo = {
 	bundles_disabled: [],
 	history: []
 };
-const sessionInfo = { id: 'original', cwd: '/workspace', model: info.model, profile: 'generic' };
+const sessionInfo = {
+	id: 'original',
+	cwd: '/workspace',
+	model: info.model ?? undefined,
+	profile: 'generic'
+};
 function fixture(model: string | null = info.model) {
 	const transport: Transport = {
 		kind: 'tauri',
@@ -52,7 +57,7 @@ function fixture(model: string | null = info.model) {
 		listen: () => () => {}
 	};
 	const session = new Session(transport, 3, { ...info, model });
-	session.onEvent({ event: 'session_configured', session: { ...sessionInfo, model } });
+	session.onEvent({ event: 'session_configured', session: { ...sessionInfo, model: model ?? undefined } });
 	return {
 		session,
 		send: vi.mocked(transport.sendOp),
@@ -103,11 +108,11 @@ describe('setup and project trust', () => {
 			bundled: false,
 			models: [{ id: 'org/model' }]
 		});
-		session.onEvent({ event: 'model_catalog', providers: [provider('first')], current: null });
+		session.onEvent({ event: 'model_catalog', providers: [provider('first')], current: undefined });
 		await session.saveProviderKey('second', 'test-key');
 		expect(session.setupWorking).toBe(true);
 		session.onEvent({ event: 'provider_added', id: 'second' });
-		session.onEvent({ event: 'model_catalog', providers: [provider('second')], current: null });
+		session.onEvent({ event: 'model_catalog', providers: [provider('second')], current: undefined });
 		expect(session.providers.map((p) => p.id)).toEqual(['first', 'second']);
 		await session.setModel('second/org/model');
 		expect(session.setupOpen).toBe(true);
@@ -312,7 +317,7 @@ describe('model thinking levels', () => {
 		expect(send).toHaveBeenCalledWith(3, { op: 'set_reasoning_effort', effort: 'high' });
 		expect(session.thinkingOpen).toBe(false);
 		await session.setReasoningEffort(null);
-		expect(send).toHaveBeenCalledWith(3, { op: 'set_reasoning_effort', effort: null });
+		expect(send).toHaveBeenCalledWith(3, { op: 'set_reasoning_effort', effort: undefined });
 	});
 	it('does not ask for a level when the model declares none', () => {
 		const { session } = fixture();
@@ -337,7 +342,7 @@ describe('subscription sign-in', () => {
 		});
 		expect(session.signingIn).toEqual({ id: 'charm', url: 'https://charm.example/oauth' });
 		expect(openUrl).toHaveBeenCalledWith('https://charm.example/oauth');
-		session.onEvent({ event: 'sign_in_result', id: 'charm', error: null });
+		session.onEvent({ event: 'sign_in_result', id: 'charm', error: undefined });
 		expect(session.signingIn).toBeNull();
 		expect(session.setupNotice).toContain('Signed in to charm');
 		expect(send).toHaveBeenCalledWith(3, { op: 'list_services' });
@@ -358,7 +363,7 @@ describe('subscription sign-in', () => {
 	});
 	it('ignores results for services it is no longer signing in to', () => {
 		const { session } = fixture();
-		session.onEvent({ event: 'sign_in_result', id: 'other', error: null });
+		session.onEvent({ event: 'sign_in_result', id: 'other', error: undefined });
 		expect(session.setupNotice).toBe('');
 	});
 	it('clears the pending sign-in locally on cancel', async () => {
@@ -366,7 +371,7 @@ describe('subscription sign-in', () => {
 		await session.signIn('charm');
 		session.onEvent({ event: 'sign_in_url', id: 'charm', url: 'https://charm.example' });
 		await session.signIn(null);
-		expect(send).toHaveBeenCalledWith(3, { op: 'sign_in', id: null });
+		expect(send).toHaveBeenCalledWith(3, { op: 'sign_in', id: undefined });
 		expect(session.signingIn).toBeNull();
 	});
 });
@@ -999,7 +1004,7 @@ describe('update checks', () => {
 			latest: '0.1.0',
 			update_available: false,
 			url: 'https://releases.example/latest',
-			error: null
+			error: undefined
 		});
 		expect(session.updateChecking).toBe(false);
 		expect(session.updateState).toMatchObject({
@@ -1016,7 +1021,7 @@ describe('update checks', () => {
 		session.onEvent({
 			event: 'update_check_result',
 			current: '0.1.0',
-			latest: null,
+			latest: undefined,
 			update_available: false,
 			url: 'javascript:alert(1)',
 			error: 'blocked by network.offline'
@@ -1065,7 +1070,7 @@ describe('update checks', () => {
 			expect.objectContaining({
 				event: 'update_check_result',
 				update_available: false,
-				error: null
+				error: undefined
 			})
 		);
 		off();

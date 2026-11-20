@@ -105,6 +105,11 @@ const READ_ONLY_GIT: &[&str] = &[
 ];
 
 /// A simple command that only reads: `git status`, `rg foo src`, but not `find -delete`.
+/// Whether a shell command is purely read-only (inspecting files/git/etc. without writing).
+pub fn is_read_only_shell(cmd: &str) -> bool {
+    read_only_command(cmd)
+}
+
 fn read_only_command(cmd: &str) -> bool {
     let cmd = normalize(cmd);
     let mut words = cmd.split(' ');

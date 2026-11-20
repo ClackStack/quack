@@ -700,7 +700,7 @@ impl McpManager {
         self: Arc<Self>,
         idx: usize,
         generation: u64,
-        mut child: tokio::process::Child,
+        mut child: quack_sandbox::Child,
     ) {
         let status = child.wait().await;
         if self.shutting_down.load(Ordering::SeqCst) {
@@ -785,10 +785,11 @@ impl McpManager {
                 let value = serde_json::to_value(&r).unwrap_or_default();
                 let (is_error, text) = crate::output::render(&value, max_chars);
                 if is_http {
-                    let mut draft = EgressDraft::new(EgressKind::McpHttp, &s.spec.file.url, "mcp-http")
-                        .sent(bytes_sent)
-                        .received(text.len() as u64)
-                        .status(Some(200));
+                    let mut draft =
+                        EgressDraft::new(EgressKind::McpHttp, &s.spec.file.url, "mcp-http")
+                            .sent(bytes_sent)
+                            .received(text.len() as u64)
+                            .status(Some(200));
                     if is_error {
                         draft = draft.blocked("MCP tool returned error");
                     }

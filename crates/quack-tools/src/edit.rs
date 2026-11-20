@@ -11,7 +11,9 @@ use quack_protocol::ApprovalRequest;
 use serde_json::{Value, json};
 
 use crate::paths;
-use crate::registry::{Subject, Tool, ToolCtx, ToolKind, ToolOutput, arg_str, opt_bool, opt_u64};
+use crate::registry::{
+    Subject, Tool, ToolCtx, ToolKind, ToolOutput, arg_str, opt_bool, opt_str, opt_u64,
+};
 use crate::text::{TextFile, io_msg, unified_diff};
 
 const PATH: &[&str] = &["path", "file_path", "filename", "file"];
@@ -90,8 +92,11 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, String> {
         }
         return Err("old_string is empty; give the exact text to replace".into());
     }
-    let (after, note, count) =
-        replace(&file.text, &old, &new, all).map_err(|e| format!("{e} (in {shown})"))?;
+    let (after, note, count) = if let Some(symbol) = opt_str(args, &["symbol"]) {
+        replace_in_symbol(&file.text, &path, &shown, symbol, &old, &new, all, ctx)?
+    } else {
+        replace(&file.text, &old, &new, all).map_err(|e| format!("{e} (in {shown})"))?
+    };
     Ok(Plan {
         path,
         shown,
@@ -100,6 +105,35 @@ fn plan(args: &Value, ctx: &ToolCtx) -> Result<Plan, String> {
         note,
         count,
     })
+}
+
+/// Narrow a single `str_replace` to the line range of one outlined definition (`symbol`),
+/// disambiguating duplicate snippets without pasting surrounding functions.
+#[allow(clippy::too_many_arguments)]
+fn replace_in_symbol(
+    text: &str,
+    path: &std::path::Path,
+    shown: &str,
+    symbol: &str,
+    old: &str,
+    new: &str,
+    all: bool,
+    ctx: &ToolCtx,
+) -> Result<(String, Option<&'static str>, usize), String> {
+    let outline = ctx
+        .grammars
+        .outline(path, text)
+        .ok_or_else(|| format!("no outline for {shown}; omit `symbol` and include more context"))?;
+    let def = outline.find(symbol).ok_or_else(|| {
+        format!("no definition `{symbol}` in {shown}; `index` lists what is there")
+    })?;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let start = def.start.saturating_sub(1).min(lines.len());
+    let end = def.end.min(lines.len());
+    let slice = lines[start..end].join("\n");
+    let (replaced, note, count) = replace(&slice, old, new, all)
+        .map_err(|e| format!("{e} (in symbol `{symbol}` of {shown})"))?;
+    Ok((splice(&lines, start, end, &replaced), note, count))
 }
 
 fn normalized_arg<'a>(args: &'a Value, keys: &[&str]) -> Result<Cow<'a, str>, String> {
@@ -447,8 +481,9 @@ impl Tool for StrReplace {
 
     fn description(&self, _ctx: &ToolCtx) -> String {
         "Replace text in a file. `old_string` must match the file exactly (including indentation) \
-         and be unique unless `replace_all` is true; include a few surrounding lines to make it \
-         unique. For several independent exact replacements in one file, pass `edits` instead \
+         and be unique unless `replace_all` is true; include a few surrounding lines (or pass \
+         `symbol`, e.g. `Parser::parse`, to scope the edit to one definition) to make it unique. \
+         For several independent exact replacements in one file, pass `edits` instead \
          of the top-level pair. Every `edits` entry must match exactly once in the original file; \
          overlapping matches are refused and nothing is written unless the whole batch matches. \
          Read the file first; a file that was never read refuses the edit."
@@ -463,6 +498,7 @@ impl Tool for StrReplace {
                 "old_string": { "type": "string", "description": "Text to replace when making a single edit" },
                 "new_string": { "type": "string", "description": "Replacement text when making a single edit" },
                 "replace_all": { "type": "boolean", "description": "Replace every occurrence for a single edit (default false)" },
+                "symbol": { "type": "string", "description": "Optional definition name (e.g. `parse` or `Parser::parse`) to scope a single edit" },
                 "edits": {
                     "type": "array",
                     "minItems": 1,

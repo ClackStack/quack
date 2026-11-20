@@ -4,8 +4,6 @@
 //! the same operation live and again when it replays a session log.
 
 pub mod compact;
-pub mod index;
-pub mod ledger;
 pub mod prune;
 
 use quack_providers::Message;

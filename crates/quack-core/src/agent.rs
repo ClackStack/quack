@@ -134,6 +134,71 @@ impl Pool {
         let mut setups = self.setups.lock().await;
         setups.entry(key).or_insert(setup).clone()
     }
+
+    /// Resolve `[model] small` for lightweight utility tasks such as text compaction,
+    /// caching the setup for the session. Returns `None` when unset, identical to the
+    /// session model, or unavailable.
+    pub(crate) async fn small_setup(&self, parent: &TurnCtx) -> Option<Arc<Setup>> {
+        let wanted = self.config.settings.model.small.trim();
+        let p = &parent.setup;
+        if wanted.is_empty()
+            || wanted == p.model_ref
+            || wanted == format!("{}/{}", p.provider.id, p.model.id)
+        {
+            return None;
+        }
+        let key = (
+            "__small__".to_owned(),
+            wanted.to_owned(),
+            p.profile.id.clone(),
+        );
+        if let Some(s) = self.setups.lock().await.get(&key) {
+            return Some(s.clone());
+        }
+        let (pid, mid) = wanted.split_once('/')?;
+        let (quiet, _) = broadcast::channel(16);
+        let s = crate::startup::switch(
+            self.config.clone(),
+            quiet,
+            self.mcp.clone(),
+            self.lsp.clone(),
+            pid.to_owned(),
+            mid.to_owned(),
+        )
+        .await
+        .ok()?;
+        s.provider.set_ledger(parent.ledger.clone());
+        let s = Arc::new(s);
+        let mut setups = self.setups.lock().await;
+        Some(setups.entry(key).or_insert(s).clone())
+    }
+}
+
+/// Resolve an agent's optional `reasoning_effort` override against the chosen model's
+/// supported levels. Only applies an explicit override when the model declares selectable
+/// efforts (so models without effort levels don't receive an unknown wire parameter).
+fn agent_effort(base: &Setup, def: &AgentFile) -> Option<String> {
+    let Some(wanted) = def
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Some(base.reasoning_effort());
+    };
+    let efforts = &base.model.reasoning.efforts;
+    if efforts.is_empty() {
+        return Some(base.reasoning_effort());
+    }
+    if let Some(exact) = efforts.iter().find(|e| e.eq_ignore_ascii_case(wanted)) {
+        return Some(exact.clone());
+    }
+    // If the agent asked for a light effort (`none` / `low`) and the model starts higher
+    // (e.g. `["low", "medium", ...]`), pick the lowest declared level.
+    if matches!(wanted.to_ascii_lowercase().as_str(), "none" | "off" | "low") {
+        return efforts.first().cloned();
+    }
+    Some(base.reasoning_effort())
 }
 
 /// `base` with the agent's prompt after the system prompt and only the tools it may use.
@@ -159,7 +224,7 @@ fn derive(base: &Setup, def: &AgentFile) -> Setup {
     Setup {
         provider: base.provider.clone(),
         model: base.model.clone(),
-        reasoning_effort: std::sync::RwLock::new(Some(base.reasoning_effort())),
+        reasoning_effort: std::sync::RwLock::new(agent_effort(base, def)),
         model_ref: base.model_ref.clone(),
         profile: base.profile.clone(),
         system,
@@ -284,12 +349,16 @@ async fn start(parent: &TurnCtx, call_key: &str, req: TaskRequest) -> TaskReport
         hooks: parent.hooks.clone(),
         session: parent.session.clone(),
         agent: Some(id.clone()),
+        agent_type: Some(req.agent.clone()),
         max_steps,
         pool: parent.pool.clone(),
         prompt_lock: parent.prompt_lock.clone(),
         network: parent.network.clone(),
         ledger: parent.ledger.clone(),
         secret_allowlist: parent.secret_allowlist.clone(),
+        last_response_id: Arc::default(),
+        last_reminders: Arc::default(),
+        egress_guard: Arc::default(),
     };
     let cancel = ctx.cancel.clone();
     let prompt = turn::Prompt {

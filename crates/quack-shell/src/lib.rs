@@ -4,6 +4,7 @@
 //! Windows children go into a Job Object that kills everything in it when closed, so
 //! nothing outlives the command, or the harness; `taskkill /T` is the fallback.
 
+mod bg;
 mod detect;
 mod env;
 mod exec;
@@ -11,6 +12,7 @@ mod exec;
 mod job;
 mod run;
 
+pub use bg::{BackgroundManager, BgStatus, BgSummary};
 pub use detect::ShellKind;
 pub use env::inherited_env;
 pub use exec::{ExecOptions, ExecResult, exec};

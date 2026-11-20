@@ -324,3 +324,238 @@ async fn manual_prune_and_tool_calling_probe() {
 
     engine.shutdown().await;
 }
+
+/// Tiny HTTP forward proxy that forwards every request to `target` (`127.0.0.1:port`),
+/// allowing tests to use a non-loopback `base_url` (e.g. `http://cloud.test/v1`) so
+/// `is_loopback` is genuinely false without touching any external host.
+async fn spawn_forward_proxy(target: std::net::SocketAddr) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                let header_end = loop {
+                    let n = match client.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => n,
+                    };
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+                let content_len: usize = head
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                while buf.len() < header_end + content_len {
+                    let n = match client.read(&mut tmp).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+                // Rewrite `POST http://cloud.test/v1/... HTTP/1.1` -> `POST /v1/... HTTP/1.1`
+                let Some((req_line, rest)) = head.split_once("\r\n") else {
+                    return;
+                };
+                let mut parts = req_line.splitn(3, ' ');
+                let Some(method) = parts.next() else { return };
+                let Some(uri) = parts.next() else { return };
+                let Some(ver) = parts.next() else { return };
+                let path = if let Some(after_scheme) = uri.split_once("://").map(|(_, r)| r) {
+                    after_scheme
+                        .find('/')
+                        .map_or("/", |idx| &after_scheme[idx..])
+                } else {
+                    uri
+                };
+                let Ok(mut upstream) = tokio::net::TcpStream::connect(target).await else {
+                    return;
+                };
+                let mut forwarded_headers = String::new();
+                for line in rest.split("\r\n") {
+                    if line.is_empty() {
+                        break;
+                    }
+                    let lower = line.to_ascii_lowercase();
+                    if lower.starts_with("connection:") || lower.starts_with("proxy-connection:") {
+                        continue;
+                    }
+                    forwarded_headers.push_str(line);
+                    forwarded_headers.push_str("\r\n");
+                }
+                let rewritten = format!(
+                    "{method} {path} {ver}\r\n{forwarded_headers}Connection: close\r\n\r\n"
+                );
+                if upstream.write_all(rewritten.as_bytes()).await.is_err() {
+                    return;
+                }
+                if upstream.write_all(&buf[header_end..]).await.is_err() {
+                    return;
+                }
+                let mut resp = Vec::new();
+                let _ = upstream.read_to_end(&mut resp).await;
+                let _ = client.write_all(&resp).await;
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn secret_shield_redacts_agents_md_and_local_history_on_remote_switch() {
+    let local_server = MockServer::start().await;
+    let cloud_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse_text("local ok"))
+        .mount(&local_server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse_text("cloud ok"))
+        .mount(&cloud_server)
+        .await;
+
+    let proxy_url = spawn_forward_proxy(*cloud_server.address()).await;
+    let agents_secret = "ghp_AGENTSMDSECRET0000000000000000000000";
+    let local_turn_secret = "ghp_LOCALTURNSECRET000000000000000000000";
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let user = tmp.path().join("user");
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(user.join("providers.d")).expect("mkdir providers");
+    std::fs::create_dir_all(&ws).expect("mkdir ws");
+    std::fs::write(
+        ws.join("AGENTS.md"),
+        format!("Deploy token for notes: {agents_secret}\n"),
+    )
+    .expect("write AGENTS.md");
+    std::fs::write(
+        user.join("config.toml"),
+        "[model]\ndefault = \"local/tiny\"\n[network]\nsecret_guard = \"redact\"\nsecret_guard_local = false\n",
+    )
+    .expect("write config");
+    std::fs::write(
+        user.join("providers.d").join("local.toml"),
+        format!(
+            "base_url = \"{}/v1\"\nmodels = [\"tiny\"]\n",
+            local_server.uri()
+        ),
+    )
+    .expect("write local provider");
+    std::fs::write(
+        user.join("providers.d").join("cloud.toml"),
+        format!(
+            "base_url = \"http://cloud.example.test/v1\"\nmodels = [\"big\"]\n[http]\nproxy = \"{proxy_url}\"\n"
+        ),
+    )
+    .expect("write cloud provider");
+
+    let loaded = common::workspace(tmp.path(), &local_server.uri(), r#"["tiny"]"#, "");
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    wait_for_startup(&mut engine).await;
+
+    // Turn 1 on local loopback: secret_guard_local = false skips redaction.
+    turn(&mut engine, &format!("Local note with {local_turn_secret}")).await;
+    let local_reqs = bodies(&local_server).await;
+    let local_dump = serde_json::to_string(&local_reqs).expect("json");
+    assert!(local_dump.contains(local_turn_secret));
+    assert!(local_dump.contains(agents_secret));
+
+    // Switch mid-session from local loopback to remote cloud host.
+    engine
+        .submit(Op::SetModel {
+            provider: quack_core::protocol::ProviderId("cloud".into()),
+            model: quack_core::protocol::ModelId("big".into()),
+        })
+        .await;
+    loop {
+        if let Event::SessionConfigured { session } = next_event(&mut engine).await
+            && session.model.as_deref() == Some("cloud/big")
+        {
+            break;
+        }
+    }
+
+    // Turn 2 on cloud: prior local turn history AND AGENTS.md session_context must both be redacted!
+    turn(&mut engine, "Now summarize safely").await;
+    let cloud_reqs = bodies(&cloud_server).await;
+    assert_eq!(cloud_reqs.len(), 1);
+    let cloud_dump = serde_json::to_string(&cloud_reqs[0]).expect("json");
+    assert!(
+        !cloud_dump.contains(local_turn_secret),
+        "prior local history secret leaked to cloud: {cloud_dump}"
+    );
+    assert!(
+        !cloud_dump.contains(agents_secret),
+        "AGENTS.md secret leaked to cloud: {cloud_dump}"
+    );
+
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn input_item_file_and_plain_at_mentions_attach_workspace_context() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse_text("reviewed"))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    std::fs::write(
+        loaded.dirs.workspace_root.join("alpha.txt"),
+        "alpha_payload_value = 42\n",
+    )
+    .expect("write alpha");
+    std::fs::write(
+        loaded.dirs.workspace_root.join("beta.txt"),
+        "beta_payload_value = 99\n",
+    )
+    .expect("write beta");
+
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    wait_for_startup(&mut engine).await;
+
+    engine
+        .submit(Op::UserTurn {
+            items: vec![
+                InputItem::text("Compare with @beta.txt"),
+                InputItem::File {
+                    path: "alpha.txt".into(),
+                },
+            ],
+            overrides: TurnOverrides::default(),
+        })
+        .await;
+    loop {
+        if matches!(next_event(&mut engine).await, Event::TurnComplete { .. }) {
+            break;
+        }
+    }
+
+    let reqs = bodies(&server).await;
+    let dump = serde_json::to_string(&reqs[0]).expect("json");
+    assert!(
+        dump.contains("alpha_payload_value = 42"),
+        "expected InputItem::File content attached: {dump}"
+    );
+    assert!(
+        dump.contains("beta_payload_value = 99"),
+        "expected plain @beta.txt content attached: {dump}"
+    );
+
+    engine.shutdown().await;
+}

@@ -4,13 +4,12 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use quack_config::McpServerFile;
+use quack_sandbox::{Child, ChildStdin, ChildStdout};
 use quack_shell::Tree;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout};
 
 /// Lines of stderr kept for `/mcp` and failure messages.
 pub(crate) const LOG_LINES: usize = 60;
@@ -82,19 +81,15 @@ pub(crate) fn spawn(
     log: Log,
 ) -> Result<Spawned, String> {
     let mut cmd = match sandbox {
-        Some(policy) => quack_sandbox::command(policy, p.program.as_os_str(), &p.args)?,
-        None => {
-            let mut c = tokio::process::Command::new(&p.program);
-            c.args(&p.args);
-            c
-        }
+        Some(policy) => quack_sandbox::sandboxed(policy, p.program.as_os_str(), &p.args)?,
+        None => quack_sandbox::unsandboxed(p.program.as_os_str(), &p.args),
     };
     cmd.current_dir(&p.cwd)
         .env_clear()
         .envs(&p.env)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdin_piped()
+        .stdout_piped()
+        .stderr_piped()
         .kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
@@ -103,11 +98,11 @@ pub(crate) fn spawn(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", p.program.display()))?;
-    let tree = Tree::new(&child);
-    let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+    let tree = Tree::from_sandbox_child(&child);
+    let (Some(stdin), Some(stdout)) = (child.take_stdin(), child.take_stdout()) else {
         return Err("the server's pipes are not available".into());
     };
-    if let Some(stderr) = child.stderr.take() {
+    if let Some(stderr) = child.take_stderr() {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {

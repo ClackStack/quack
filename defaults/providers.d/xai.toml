@@ -14,18 +14,21 @@ api_key = { env = "XAI_API_KEY" }
 id = "grok-4.7"
 alias = "grok"
 context_window = 500000
+compact_at = 250000
 vision = true
 reasoning = { effort = "high", efforts = ["low", "medium", "high", "xhigh"] }
 
 [[models]]
 id = "grok-4.6"
 context_window = 500000
+compact_at = 250000
 vision = true
 reasoning = { effort = "high", efforts = ["low", "medium", "high"] }
 
 [[models]]
 id = "grok-4.20-0309-reasoning"
 context_window = 1000000
+compact_at = 250000
 vision = true
 
 [[models]]

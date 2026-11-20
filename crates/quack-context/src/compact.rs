@@ -54,8 +54,8 @@ pub fn cut_point(
     keep_tokens: u32,
     estimate: impl Fn(&[Message]) -> u32,
 ) -> Option<usize> {
-    // A native checkpoint alone has already been compacted.
-    let min_cut = if matches!(history.first(), Some(Message::Compaction { .. })) {
+    // A lone compaction summary (native or text) has already been compacted.
+    let min_cut = if history.first().is_some_and(is_summary) {
         2
     } else {
         1
@@ -80,6 +80,8 @@ pub fn cut_point(
         return None;
     }
     // The current turn alone is too big: keep its most recent steps that fit, at least one.
+    // If the current turn has no steps yet (a large new user message), still compact any
+    // earlier turns before it.
     let after = turns.last().map_or(0, |t| t + 1);
     let steps: Vec<usize> = crate::boundaries(history)
         .filter(|&i| i >= after && i >= min_cut)
@@ -89,6 +91,7 @@ pub fn cut_point(
         .find(|&&i| estimate(&history[i..]) <= keep_tokens)
         .or(steps.last())
         .copied()
+        .or_else(|| turns.last().copied().filter(|&t| t >= min_cut))
 }
 
 pub fn is_summary(m: &Message) -> bool {
@@ -311,13 +314,11 @@ pub fn unusable_summary(text: &str) -> Option<&'static str> {
 /// Replace `history[..cut]` with `summary`.
 pub fn apply(history: &mut Vec<Message>, cut: usize, summary: Message) {
     let cut = cut.min(history.len());
-    let native = matches!(summary, Message::Compaction { .. });
     history.splice(..cut, [summary]);
-    // The kept turns' signed reasoning was made after the summarized ones.
-    // A native checkpoint lets Responses retain reasoning from those turns.
-    if !native {
-        quack_providers::unseal(history);
-    }
+    // Any kept assistant replies were produced under the pre-compaction prefix, so their
+    // sealed reasoning no longer matches (Responses drops reasoning after a prefix edit).
+    // `unseal` only clears `Message::Assistant.sealed`, leaving `Message::Compaction.sealed`.
+    quack_providers::unseal(history);
 }
 
 #[cfg(test)]
@@ -363,6 +364,10 @@ mod tests {
         assert_eq!(cut_point(&h, 1, 1000, chars), Some(8));
         // A single turn: nothing before it, and it fits.
         assert_eq!(cut_point(&h[..2], KEEP_TURNS, 1000, chars), None);
+        // A large new user message over keep_tokens still compacts earlier turns before it.
+        let mut with_big = h[..4].to_vec();
+        with_big.push(user(&"z".repeat(500)));
+        assert_eq!(cut_point(&with_big, KEEP_TURNS, 150, chars), Some(4));
     }
 
     #[test]
@@ -488,5 +493,32 @@ mod tests {
         assert!(t.contains("2 older messages left out"));
         assert!(!t.contains("aaaa"));
         assert!(clip(&"é".repeat(2000), 100).len() < 200);
+    }
+
+    #[test]
+    fn does_not_recompact_a_lone_text_summary() {
+        let summary = summary_message("prior work", Some("fix billing.py"), &["billing.py".into()]);
+        // Only the summary + one active turn that fits in keep_tokens: nothing to compact yet.
+        let one_turn = vec![summary.clone(), user("check flag"), asst(&"a".repeat(100))];
+        assert_eq!(cut_point(&one_turn, KEEP_TURNS, 500, chars), None);
+
+        // When the active turn alone exceeds keep_tokens, cut inside it (never at index 1).
+        let big_turn = vec![
+            summary.clone(),
+            user("check flag"),
+            asst(&"a".repeat(200)),
+            asst(&"b".repeat(200)),
+        ];
+        assert_eq!(cut_point(&big_turn, KEEP_TURNS, 250, chars), Some(3));
+
+        // Once a second user turn exists after the summary, compact the summary + earlier turn.
+        let two_turns = vec![
+            summary,
+            user("turn 2"),
+            asst("done"),
+            user("turn 3"),
+            asst("next"),
+        ];
+        assert_eq!(cut_point(&two_turns, 1, 500, chars), Some(3));
     }
 }

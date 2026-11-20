@@ -3823,6 +3823,7 @@ version = "0.0.0"
 dependencies = [
  "futures",
  "quack-config",
+ "quack-sandbox",
  "quack-shell",
  "serde_json",
  "tempfile",
@@ -3903,6 +3904,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

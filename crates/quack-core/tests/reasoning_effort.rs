@@ -27,7 +27,7 @@ async fn next(engine: &mut EngineHandle) -> Event {
 async fn configured(engine: &mut EngineHandle) -> SessionInfo {
     loop {
         match next(engine).await {
-            Event::SessionConfigured { session } => return session,
+            Event::SessionConfigured { session } => return *session,
             Event::Error { error } => panic!("{}", error.message),
             Event::Warning { message } => panic!("{message}"),
             _ => {}
@@ -39,7 +39,7 @@ async fn started(engine: &mut EngineHandle) -> SessionInfo {
     let mut session = None;
     loop {
         match next(engine).await {
-            Event::SessionConfigured { session: ready } => session = Some(ready),
+            Event::SessionConfigured { session: ready } => session = Some(*ready),
             Event::StartupComplete => return session.expect("configured at startup"),
             Event::Error { error } => panic!("{}", error.message),
             _ => {}

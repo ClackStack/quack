@@ -74,9 +74,7 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
     for (i, m) in req.messages.iter().enumerate() {
         match m {
             Message::System { content } if i == 0 => system.push(content.clone()),
-            Message::System { content }
-            | Message::User { content, .. }
-            | Message::Compaction { content, .. } => {
+            Message::System { content } | Message::User { content, .. } => {
                 for block in m_images(m) {
                     push(&mut turns, "user", block);
                 }
@@ -86,6 +84,20 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
                         "user",
                         json!({ "type": "text", "text": content }),
                     );
+                }
+            }
+            Message::Compaction {
+                content,
+                session_context,
+                ..
+            } => {
+                let text = match session_context.as_deref().filter(|c| !c.is_empty()) {
+                    Some(ctx) if content.is_empty() => ctx.to_owned(),
+                    Some(ctx) => format!("{ctx}\n\n{content}"),
+                    None => content.clone(),
+                };
+                if !text.is_empty() {
+                    push(&mut turns, "user", json!({ "type": "text", "text": text }));
                 }
             }
             Message::Assistant {
@@ -458,6 +470,7 @@ impl EventParser {
             completion_tokens: self.output,
             cached_prompt_tokens: Some(read),
             cache_write_tokens: Some(write),
+            reasoning_tokens: None,
         }));
         out
     }
@@ -634,6 +647,7 @@ mod tests {
                 completion_tokens: 20,
                 cached_prompt_tokens: Some(90),
                 cache_write_tokens: Some(5),
+                reasoning_tokens: None,
             })
         );
         assert_eq!(b.finish, Some(FinishReason::ToolCalls));

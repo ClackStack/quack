@@ -355,7 +355,11 @@ pub(crate) fn apply_compaction(
     native: Option<quack_providers::Sealed>,
 ) {
     let message = match (summary, native) {
-        (Message::User { content, .. }, Some(sealed)) => Message::Compaction { content, sealed },
+        (Message::User { content, .. }, Some(sealed)) => Message::Compaction {
+            content,
+            sealed,
+            session_context: None,
+        },
         (summary, _) => summary,
     };
     compact::apply(history, cut, message);
