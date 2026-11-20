@@ -1,6 +1,6 @@
 //! Windows OS sandbox: Restricted Token (`DISABLE_MAX_PRIVILEGE` + `LUA_TOKEN` fallback)
-//! lowered to Low Integrity (`S-1-16-4096`, `NO_WRITE_UP`) combined with a Job Object
-//! (`KILL_ON_JOB_CLOSE` + `BasicUIRestrictions`).
+//! lowered to Low Integrity (`S-1-16-4096`, `NO_WRITE_UP`) combined with an isolated
+//! Window Station + Desktop and a Job Object (`KILL_ON_JOB_CLOSE` + `BasicUIRestrictions`).
 //!
 //! Normal user directories and system paths on NTFS sit at Medium Integrity with
 //! `NO_WRITE_UP`, so a Low-Integrity process can read and run dev toolchains (`pwsh`, `cmd`,
@@ -29,18 +29,22 @@ use std::ptr;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, FALSE, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
-    SetHandleInformation, TRUE, WAIT_OBJECT_0,
+    CloseHandle, FALSE, GENERIC_ALL, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
+    INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation, TRUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, SDDL_REVISION_1,
-    SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    ConvertStringSidToSidW, SDDL_REVISION_1, SE_FILE_OBJECT, SE_WINDOW_OBJECT,
+    SetNamedSecurityInfoW, SetSecurityInfo,
 };
 use windows_sys::Win32::Security::{
-    CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetSecurityDescriptorSacl,
+    CreateRestrictedToken, DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE,
+    GetSecurityDescriptorDacl, GetSecurityDescriptorSacl, GetTokenInformation,
     LABEL_SECURITY_INFORMATION, LUA_TOKEN, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
     SID_AND_ATTRIBUTES, SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES,
-    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenIntegrityLevel,
+    TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS,
+    TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
+    TokenDefaultDacl, TokenGroups, TokenIntegrityLevel, TokenLogonSid, TokenOwner, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -56,11 +60,18 @@ use windows_sys::Win32::System::JobObjects::{
     TerminateJobObject,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::StationsAndDesktops::{
+    CloseDesktop, CloseWindowStation, CreateDesktopW, CreateWindowStationW,
+    GetProcessWindowStation, GetUserObjectInformationW, HDESK, HWINSTA, SetProcessWindowStation,
+    UOI_NAME,
+};
+use windows_sys::Win32::System::SystemServices::SE_GROUP_LOGON_ID;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
     GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken, PROCESS_INFORMATION,
     ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::CWF_CREATE_ONLY;
 
 use crate::Policy;
 
@@ -76,6 +87,443 @@ const MECHANISM: &str = "Restricted Token (Low Integrity; filesystem write isola
 const PROBE_TIMEOUT_MS: u32 = 10_000;
 /// The folder inside the temp folder that sandboxed processes use as their temp folder.
 const SANDBOX_TEMP: &str = "quack-sandbox";
+
+struct OwnedSd(PSECURITY_DESCRIPTOR);
+
+impl OwnedSd {
+    fn parse(sddl: &str) -> io::Result<Self> {
+        let sddl_w = wide_str(sddl);
+        let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `sddl_w` is NUL-terminated UTF-16; `sd` is freed via `LocalFree` on drop.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl_w.as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 || sd.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(sd))
+    }
+
+    fn raw(&self) -> PSECURITY_DESCRIPTOR {
+        self.0
+    }
+}
+
+impl Drop for OwnedSd {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: `self.0` was allocated by `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
+            unsafe {
+                LocalFree(self.0.cast());
+            }
+        }
+    }
+}
+
+struct OwnedWinSta(HWINSTA);
+
+// SAFETY: Win32 window station handles can be stored and closed across threads.
+unsafe impl Send for OwnedWinSta {}
+// SAFETY: Win32 window station handles are thread-safe.
+unsafe impl Sync for OwnedWinSta {}
+
+impl OwnedWinSta {
+    fn new(raw: HWINSTA) -> Option<Self> {
+        (!raw.is_null()).then_some(Self(raw))
+    }
+
+    fn raw(&self) -> HWINSTA {
+        self.0
+    }
+}
+
+impl Drop for OwnedWinSta {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: owned handle returned by `CreateWindowStationW`.
+            unsafe {
+                CloseWindowStation(self.0);
+            }
+        }
+    }
+}
+
+struct OwnedDesktop(HDESK);
+
+// SAFETY: Win32 desktop handles can be stored and closed across threads.
+unsafe impl Send for OwnedDesktop {}
+// SAFETY: Win32 desktop handles are thread-safe.
+unsafe impl Sync for OwnedDesktop {}
+
+impl OwnedDesktop {
+    fn new(raw: HDESK) -> Option<Self> {
+        (!raw.is_null()).then_some(Self(raw))
+    }
+
+    fn raw(&self) -> HDESK {
+        self.0
+    }
+}
+
+impl Drop for OwnedDesktop {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: owned handle returned by `CreateDesktopW`.
+            unsafe {
+                CloseDesktop(self.0);
+            }
+        }
+    }
+}
+
+struct RestoreWinSta(HWINSTA);
+
+impl Drop for RestoreWinSta {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: restores the process's original window station before leaving scope.
+            unsafe {
+                SetProcessWindowStation(self.0);
+            }
+        }
+    }
+}
+
+struct SandboxDesktop {
+    _winsta: Option<OwnedWinSta>,
+    _desktop: OwnedDesktop,
+    lp_desktop: Vec<u16>,
+}
+
+fn sandbox_desktop() -> Result<&'static SandboxDesktop, String> {
+    static DESKTOP: OnceLock<Result<SandboxDesktop, String>> = OnceLock::new();
+    DESKTOP
+        .get_or_init(create_sandbox_desktop)
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+fn create_sandbox_desktop() -> Result<SandboxDesktop, String> {
+    let (user_sid, logon_sid) = current_token_sids()?;
+    let sddl = desktop_sddl(&user_sid, logon_sid.as_deref());
+    let sd = OwnedSd::parse(&sddl)
+        .map_err(|e| format!("could not build sandbox desktop security descriptor: {e}"))?;
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0),
+        lpSecurityDescriptor: sd.raw(),
+        bInheritHandle: FALSE,
+    };
+
+    // SAFETY: `GetProcessWindowStation` returns a process-owned handle; never close it.
+    let orig_winsta = unsafe { GetProcessWindowStation() };
+    let orig_name = (!orig_winsta.is_null())
+        .then(|| user_object_name(orig_winsta).ok())
+        .flatten();
+
+    let pid = std::process::id();
+    let winsta_try_name = wide_str(&format!("quack_sbx_{pid}"));
+    // Admins (such as CI runners) can create a uniquely named isolated Window Station.
+    // SAFETY: valid UTF-16 name and `SECURITY_ATTRIBUTES`.
+    let mut alt_winsta = OwnedWinSta::new(unsafe {
+        CreateWindowStationW(winsta_try_name.as_ptr(), CWF_CREATE_ONLY, GENERIC_ALL, &sa)
+    });
+    if alt_winsta.is_none() {
+        // Non-admins cannot pass a custom name; NULL creates/opens `Service-0x0-<LUID>$`.
+        // SAFETY: valid `SECURITY_ATTRIBUTES`.
+        alt_winsta =
+            OwnedWinSta::new(unsafe { CreateWindowStationW(ptr::null(), 0, GENERIC_ALL, &sa) });
+    }
+
+    let desktop_name = format!("quack_desk_{pid}");
+    let desktop_w = wide_str(&desktop_name);
+    let mut kept_winsta = None;
+    let mut created_desktop = None;
+    let mut actual_winsta_name = orig_name.clone().unwrap_or_default();
+
+    if let Some(winsta) = alt_winsta {
+        let alt_name = user_object_name(winsta.raw())
+            .map_err(|e| format!("could not read sandbox window station name: {e}"))?;
+        let is_same_as_orig = orig_name
+            .as_deref()
+            .is_some_and(|o| o.eq_ignore_ascii_case(&alt_name));
+
+        if !alt_name.eq_ignore_ascii_case("WinSta0") {
+            // Ensure DACL + Low Integrity label are applied even if `CreateWindowStationW`
+            // opened an existing `Service-0x0-<LUID>$` or dropped the SACL.
+            let _ = apply_window_object_security(winsta.raw(), sd.raw(), is_same_as_orig);
+        }
+
+        if is_same_as_orig {
+            // SAFETY: valid desktop name and `SECURITY_ATTRIBUTES`.
+            let desk = OwnedDesktop::new(unsafe {
+                CreateDesktopW(
+                    desktop_w.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    0,
+                    GENERIC_ALL,
+                    &sa,
+                )
+            });
+            if let Some(desk) = desk {
+                actual_winsta_name = alt_name;
+                kept_winsta = Some(winsta);
+                created_desktop = Some(desk);
+            }
+        } else if !orig_winsta.is_null()
+            // SAFETY: `winsta` is valid; `_restore` restores `orig_winsta` on drop.
+            && unsafe { SetProcessWindowStation(winsta.raw()) } != 0
+        {
+            let _restore = RestoreWinSta(orig_winsta);
+            // SAFETY: valid desktop name and `SECURITY_ATTRIBUTES`.
+            let desk = OwnedDesktop::new(unsafe {
+                CreateDesktopW(
+                    desktop_w.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    0,
+                    GENERIC_ALL,
+                    &sa,
+                )
+            });
+            if let Some(desk) = desk {
+                actual_winsta_name = alt_name;
+                kept_winsta = Some(winsta);
+                created_desktop = Some(desk);
+            }
+        }
+    }
+
+    let desktop = match created_desktop {
+        Some(d) => d,
+        None => OwnedDesktop::new(unsafe {
+            // SAFETY: fallback creates an isolated desktop on the caller's window station.
+            CreateDesktopW(
+                desktop_w.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                GENERIC_ALL,
+                &sa,
+            )
+        })
+        .ok_or_else(|| format!("CreateDesktopW failed: {}", io::Error::last_os_error()))?,
+    };
+
+    apply_window_object_security(desktop.raw(), sd.raw(), true)
+        .map_err(|e| format!("could not label sandbox desktop as Low Integrity: {e}"))?;
+
+    let actual_desk_name = user_object_name(desktop.raw()).unwrap_or(desktop_name);
+    let full_name = if actual_winsta_name.is_empty() {
+        actual_desk_name
+    } else {
+        format!("{actual_winsta_name}\\{actual_desk_name}")
+    };
+
+    Ok(SandboxDesktop {
+        _winsta: kept_winsta,
+        _desktop: desktop,
+        lp_desktop: wide_str(&full_name),
+    })
+}
+
+fn desktop_sddl(user_sid: &str, logon_sid: Option<&str>) -> String {
+    let mut s = format!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{user_sid})");
+    if let Some(logon) = logon_sid
+        && !logon.eq_ignore_ascii_case(user_sid)
+    {
+        s.push_str(&format!("(A;;GA;;;{logon})"));
+    }
+    s.push_str("S:(ML;;NW;;;LW)");
+    s
+}
+
+fn apply_window_object_security(
+    handle: HANDLE,
+    sd: PSECURITY_DESCRIPTOR,
+    set_dacl: bool,
+) -> io::Result<()> {
+    if set_dacl {
+        let mut present = FALSE;
+        let mut defaulted = FALSE;
+        let mut dacl = ptr::null_mut();
+        // SAFETY: `sd` is valid; `dacl` points inside `sd`.
+        if unsafe { GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) } != 0
+            && present != 0
+            && !dacl.is_null()
+        {
+            // SAFETY: `handle` is a valid window station or desktop handle.
+            let err = unsafe {
+                SetSecurityInfo(
+                    handle,
+                    SE_WINDOW_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    dacl,
+                    ptr::null_mut(),
+                )
+            };
+            if err != 0 {
+                return Err(io::Error::from_raw_os_error(
+                    i32::try_from(err).unwrap_or(i32::MAX),
+                ));
+            }
+        }
+    }
+
+    let mut present = FALSE;
+    let mut defaulted = FALSE;
+    let mut sacl = ptr::null_mut();
+    // SAFETY: `sd` is valid; `sacl` points inside `sd`.
+    if unsafe { GetSecurityDescriptorSacl(sd, &mut present, &mut sacl, &mut defaulted) } != 0
+        && present != 0
+        && !sacl.is_null()
+    {
+        // SAFETY: `handle` is a valid window station or desktop handle.
+        let err = unsafe {
+            SetSecurityInfo(
+                handle,
+                SE_WINDOW_OBJECT,
+                LABEL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                sacl,
+            )
+        };
+        if err != 0 {
+            return Err(io::Error::from_raw_os_error(
+                i32::try_from(err).unwrap_or(i32::MAX),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn user_object_name(handle: HANDLE) -> io::Result<String> {
+    let mut needed: u32 = 0;
+    // SAFETY: probes required byte size for `UOI_NAME`.
+    let _ = unsafe { GetUserObjectInformationW(handle, UOI_NAME, ptr::null_mut(), 0, &mut needed) };
+    if needed < 2 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut buf = vec![0u16; (needed as usize).div_ceil(size_of::<u16>())];
+    // SAFETY: `buf` is at least `needed` bytes.
+    if unsafe {
+        GetUserObjectInformationW(
+            handle,
+            UOI_NAME,
+            buf.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let units = (needed as usize / size_of::<u16>()).min(buf.len());
+    let slice = &buf[..units];
+    let end = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+    Ok(String::from_utf16_lossy(&slice[..end]))
+}
+
+fn query_token_info(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> io::Result<Vec<u64>> {
+    let mut needed: u32 = 0;
+    // SAFETY: probes required buffer byte size.
+    let ok = unsafe { GetTokenInformation(token, class, ptr::null_mut(), 0, &mut needed) };
+    if ok != 0 {
+        return Err(io::Error::other(
+            "GetTokenInformation unexpectedly succeeded on empty buffer",
+        ));
+    }
+    let err = io::Error::last_os_error();
+    if needed == 0 {
+        return Err(err);
+    }
+    let mut buf = vec![0u64; (needed as usize).div_ceil(size_of::<u64>())];
+    // SAFETY: `buf` is 8-byte aligned and holds at least `needed` bytes.
+    if unsafe { GetTokenInformation(token, class, buf.as_mut_ptr().cast(), needed, &mut needed) }
+        == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(buf)
+}
+
+fn sid_to_string(sid: PSID) -> io::Result<String> {
+    let mut wide_ptr: *mut u16 = ptr::null_mut();
+    // SAFETY: `sid` is a valid PSID; `wide_ptr` is freed via `LocalFree`.
+    if unsafe { ConvertSidToStringSidW(sid, &mut wide_ptr) } == 0 || wide_ptr.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `ConvertSidToStringSidW` returns a NUL-terminated UTF-16 string.
+    let len = unsafe {
+        let mut n = 0usize;
+        while *wide_ptr.add(n) != 0 {
+            n += 1;
+        }
+        n
+    };
+    // SAFETY: `wide_ptr` points to `len` valid UTF-16 code units.
+    let slice = unsafe { std::slice::from_raw_parts(wide_ptr, len) };
+    let s = String::from_utf16_lossy(slice);
+    // SAFETY: `wide_ptr` was allocated by `ConvertSidToStringSidW`.
+    unsafe {
+        LocalFree(wide_ptr.cast());
+    }
+    Ok(s)
+}
+
+fn current_token_sids() -> Result<(String, Option<String>), String> {
+    let mut token: HANDLE = ptr::null_mut();
+    // SAFETY: `GetCurrentProcess` returns a pseudo-handle.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(format!(
+            "OpenProcessToken failed: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let token = OwnedHandle::new(token).ok_or("OpenProcessToken returned null handle")?;
+
+    let user_buf = query_token_info(token.raw(), TokenUser)
+        .map_err(|e| format!("GetTokenInformation(TokenUser) failed: {e}"))?;
+    // SAFETY: `user_buf` is 8-byte aligned and holds a `TOKEN_USER`.
+    let user_psid = unsafe { (*user_buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let user_sid = sid_to_string(user_psid)
+        .map_err(|e| format!("ConvertSidToStringSidW(user) failed: {e}"))?;
+
+    let logon_sid = token_logon_sid(token.raw());
+    Ok((user_sid, logon_sid))
+}
+
+fn token_logon_sid(token: HANDLE) -> Option<String> {
+    if let Ok(buf) = query_token_info(token, TokenLogonSid) {
+        // SAFETY: `buf` holds a `TOKEN_GROUPS`.
+        let groups = unsafe { &*buf.as_ptr().cast::<TOKEN_GROUPS>() };
+        if groups.GroupCount > 0 {
+            return sid_to_string(groups.Groups[0].Sid).ok();
+        }
+    }
+    let buf = query_token_info(token, TokenGroups).ok()?;
+    // SAFETY: `buf` holds a `TOKEN_GROUPS` with `GroupCount` elements.
+    let groups = unsafe { &*buf.as_ptr().cast::<TOKEN_GROUPS>() };
+    let count = usize::try_from(groups.GroupCount).ok()?;
+    // SAFETY: `Groups` has `count` contiguous `SID_AND_ATTRIBUTES` items inside `buf`.
+    let slice = unsafe { std::slice::from_raw_parts(groups.Groups.as_ptr(), count) };
+    let logon_attr = SE_GROUP_LOGON_ID.cast_unsigned();
+    for g in slice {
+        if (g.Attributes & logon_attr) != 0 {
+            return sid_to_string(g.Sid).ok();
+        }
+    }
+    None
+}
 
 fn wide(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
@@ -203,6 +651,7 @@ fn create_low_integrity_token() -> Result<OwnedHandle, String> {
     // Try `DISABLE_MAX_PRIVILEGE | LUA_TOKEN` first (drops Administrators SID when elevated),
     // falling back to `DISABLE_MAX_PRIVILEGE` on standard tokens where `LUA_TOKEN` is rejected.
     // SAFETY: valid primary token handle and null optional arrays with zero counts.
+    let mut used_lua = true;
     let mut ok = unsafe {
         CreateRestrictedToken(
             current.raw(),
@@ -217,6 +666,7 @@ fn create_low_integrity_token() -> Result<OwnedHandle, String> {
         )
     };
     if ok == 0 {
+        used_lua = false;
         // SAFETY: same as above, without `LUA_TOKEN`.
         ok = unsafe {
             CreateRestrictedToken(
@@ -240,6 +690,12 @@ fn create_low_integrity_token() -> Result<OwnedHandle, String> {
     }
     let restricted =
         OwnedHandle::new(restricted).ok_or("CreateRestrictedToken returned null handle")?;
+
+    if used_lua {
+        // Elevated tokens often set TokenOwner / TokenDefaultDacl to `Administrators`, which
+        // `LUA_TOKEN` marks deny-only; ensure the user SID owns and accesses new objects.
+        fix_lua_token_defaults(restricted.raw());
+    }
 
     let sid_w = wide_str(LOW_INTEGRITY_SID);
     let mut sid: PSID = ptr::null_mut();
@@ -277,6 +733,49 @@ fn create_low_integrity_token() -> Result<OwnedHandle, String> {
         ));
     }
     Ok(restricted)
+}
+
+fn fix_lua_token_defaults(token: HANDLE) {
+    let Ok(user_buf) = query_token_info(token, TokenUser) else {
+        return;
+    };
+    // SAFETY: `user_buf` is 8-byte aligned and holds a `TOKEN_USER`.
+    let user_psid = unsafe { (*user_buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let mut owner = TOKEN_OWNER { Owner: user_psid };
+    let owner_len = u32::try_from(size_of::<TOKEN_OWNER>()).unwrap_or(0);
+    // SAFETY: `owner.Owner` lives inside `user_buf` for the duration of the call.
+    let _ = unsafe { SetTokenInformation(token, TokenOwner, (&raw mut owner).cast(), owner_len) };
+
+    let Ok(user_sid) = sid_to_string(user_psid) else {
+        return;
+    };
+    for sddl in [
+        format!("D:(A;;GA;;;SY)(A;;GA;;;{user_sid})"),
+        format!("D:(A;;GA;;;{user_sid})"),
+    ] {
+        let Ok(sd) = OwnedSd::parse(&sddl) else {
+            continue;
+        };
+        let mut present = FALSE;
+        let mut defaulted = FALSE;
+        let mut dacl = ptr::null_mut();
+        // SAFETY: `sd` is valid; `dacl` points inside `sd`.
+        if unsafe { GetSecurityDescriptorDacl(sd.raw(), &mut present, &mut dacl, &mut defaulted) }
+            != 0
+            && present != 0
+            && !dacl.is_null()
+        {
+            let mut def = TOKEN_DEFAULT_DACL { DefaultDacl: dacl };
+            let def_len = u32::try_from(size_of::<TOKEN_DEFAULT_DACL>()).unwrap_or(0);
+            // SAFETY: `dacl` lives inside `sd` for the duration of the call.
+            if unsafe {
+                SetTokenInformation(token, TokenDefaultDacl, (&raw mut def).cast(), def_len)
+            } != 0
+            {
+                break;
+            }
+        }
+    }
 }
 
 fn create_sandbox_job() -> Result<OwnedHandle, String> {
@@ -582,6 +1081,7 @@ impl WindowsCommand {
     fn launch(&self) -> io::Result<Launched> {
         let token = create_low_integrity_token().map_err(io::Error::other)?;
         let job = create_sandbox_job().map_err(io::Error::other)?;
+        let desktop = sandbox_desktop().map_err(io::Error::other)?;
         let (writable, child_temp) = self.writable_paths()?;
         label_writable_paths(&writable)?;
 
@@ -606,6 +1106,7 @@ impl WindowsCommand {
         let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
         si.cb = u32::try_from(size_of::<STARTUPINFOW>()).unwrap_or(0);
         si.dwFlags = STARTF_USESTDHANDLES;
+        si.lpDesktop = desktop.lp_desktop.as_ptr().cast_mut();
         si.hStdInput = child_in
             .as_ref()
             .map_or(INVALID_HANDLE_VALUE, OwnedHandle::raw);
@@ -927,6 +1428,18 @@ mod tests {
         assert_eq!(
             text,
             "\"C:\\Program Files\\pwsh.exe\" -Command \"echo \\\"hello world\\\" \\path\\\\\""
+        );
+    }
+
+    #[test]
+    fn desktop_sddl_grants_user_and_low_integrity() {
+        assert_eq!(
+            desktop_sddl("S-1-5-21-1-2-3-1001", Some("S-1-5-5-0-42")),
+            "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-5-21-1-2-3-1001)(A;;GA;;;S-1-5-5-0-42)S:(ML;;NW;;;LW)"
+        );
+        assert_eq!(
+            desktop_sddl("S-1-5-18", None),
+            "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-5-18)S:(ML;;NW;;;LW)"
         );
     }
 

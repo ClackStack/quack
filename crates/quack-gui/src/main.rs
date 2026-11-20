@@ -222,6 +222,9 @@ fn main() {
     // Launched from Finder/Dock, the PATH is the system default; give the engines the
     // login shell's so npx, cargo and friends are found (macOS/Linux).
     quack_gui::path_env::apply_login_shell_path();
+    // Create the isolated sandbox desktop before Tauri opens windows on WinSta0.
+    #[cfg(windows)]
+    let _ = quack_sandbox::available();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
             let parsed = quack_gui::tabs::parse_argv(&argv, Some(Path::new(&cwd)));
