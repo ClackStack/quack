@@ -163,6 +163,11 @@ export function tauriTransport(): Transport {
 			await invoke('notify_attention', { title, body });
 		},
 
+		async setWindowTitle(title: string): Promise<void> {
+			const { getCurrentWindow } = await import('@tauri-apps/api/window');
+			await getCurrentWindow().setTitle(title);
+		},
+
 		listen(listener: (message: TabMessage) => void): () => void {
 			listeners.add(listener);
 			return () => listeners.delete(listener);

@@ -355,14 +355,9 @@ impl Engine {
         self.turns += 1;
         let untitled = self.title.is_none();
         if untitled {
-            let first: String = typed
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .chars()
-                .take(50)
-                .collect();
-            self.set_title(Some(first));
+            // A stand-in until the small model's title arrives (or for good without one).
+            let first = typed.lines().map(str::trim).find(|l| !l.is_empty());
+            self.set_title(first.map(|l| title::shorten(l, title::MAX_CHARS)));
         }
         if untitled && self.turns == 1 && !typed.trim().is_empty() && self.log.is_some() {
             self.generate_title(&setup, &typed);

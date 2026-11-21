@@ -358,6 +358,39 @@ pub fn is_loopback(url: &str) -> bool {
     host == "localhost" || host == "[::1]" || host.starts_with("127.")
 }
 
+/// Whether the installed defaults bundle looks `--plucked`: present, without `config.toml`,
+/// and with no non-loopback provider files.
+pub fn is_plucked_defaults(defaults: Option<&Path>) -> bool {
+    let Some(dir) = defaults.filter(|d| d.is_dir()) else {
+        return false;
+    };
+    let looks_like_bundle = dir.join("profiles.d").is_dir()
+        || dir.join("providers.d").is_dir()
+        || dir.join("catalog.json").is_file();
+    if !looks_like_bundle || dir.join("config.toml").is_file() {
+        return false;
+    }
+    let providers_dir = dir.join("providers.d");
+    let Ok(entries) = std::fs::read_dir(&providers_dir) else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "toml") {
+            let Ok(text) = read_text(&path) else {
+                return false;
+            };
+            let Ok(file) = toml::from_str::<crate::ProviderFile>(&text) else {
+                return false;
+            };
+            if !is_loopback(&file.base_url) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Minimal `*` glob for id matching.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();

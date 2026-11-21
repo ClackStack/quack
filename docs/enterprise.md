@@ -15,10 +15,12 @@ and `defaults/config.toml` (`--plucked`) happens during installation rather than
 separate `-plucked` binaries or packages:
 
 - **Installer flags (`install.sh --plucked` / `install.ps1 -Plucked`)**: installs the same
-  `quack` and/or `quack-gui` binaries, then strips `defaults/config.toml` and every
-  `providers.d/*.toml` whose `base_url` is not loopback (`127.*`, `localhost`, `[::1]`)
-  before writing `defaults/` to disk. Profiles, `explore` and `general` sub-agents,
-  language servers, hooks, MCP examples (off until enabled), and local server configs stay.
+  `quack` and/or `quack-gui` binaries (including Linux `.deb` and `.rpm` packages as well as
+  archives), then strips `defaults/config.toml` and every `providers.d/*.toml` whose `base_url`
+  is not loopback (`127.*`, `localhost`, `[::1]`) before leaving `defaults/` on disk. Profiles,
+  `explore` and `general` sub-agents, language servers, hooks, MCP examples (off until
+  enabled), and local server configs stay. Subsequent updates keep an existing install
+  plucked automatically unless `--full` (`-Full`) is passed.
 - **Archives & desktop installers**: `quack-<target>.tar.gz` (Linux, macOS) and `.zip`
   (Windows) carry the CLI binary and the `defaults/` folder. `quack-gui-<target>.dmg`
   (macOS), `.AppImage` (glibc Linux), and `-setup.exe` (Windows) carry the desktop app

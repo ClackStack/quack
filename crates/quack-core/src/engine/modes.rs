@@ -330,8 +330,26 @@ impl Engine {
 /// default), and when read-only sub-agents can run, a pointer to them.
 pub(super) fn plan_note(setup: &Setup) -> String {
     let base = setup.profile.plan_prompt.as_deref().unwrap_or(PLAN_PROMPT);
+    let read_tools: Vec<&str> = ["read", "grep", "glob", "list_dir", "index", "lsp"]
+        .into_iter()
+        .filter_map(|t| setup.surface.name_of(t))
+        .collect();
+    let tool_guidance = match (read_tools.is_empty(), setup.surface.name_of("shell")) {
+        (false, Some(shell)) => format!(
+            " Prefer dedicated read-only tools ({}) over `{shell}` when possible; `{shell}` in plan mode only runs read-only inspection commands (such as rg, grep, find, sed -n, awk, head, tail, cat, wc, sort, uniq, cut, jq, diff, git status/diff/log/show) with no file writes, redirects, builds, tests or interpreter scripts.",
+            read_tools.join(", ")
+        ),
+        (false, None) => format!(
+            " Use the read-only search and file tools ({}).",
+            read_tools.join(", ")
+        ),
+        (true, Some(shell)) => format!(
+            " `{shell}` in plan mode only runs read-only inspection commands (such as rg, grep, find, sed -n, awk, head, tail, cat, wc, sort, uniq, cut, jq, diff, git status/diff/log/show) with no file writes, redirects, builds, tests or interpreter scripts."
+        ),
+        (true, None) => String::new(),
+    };
     let note = format!(
-        "{base} Only read and search while planning. Do not run tests, builds, scripts, edits or memory writes, even when an allow rule exists. Present a list of the exact test commands you propose to run, with what each verifies, for the user to review before implementation. If no tests apply, explain why. Keep proposed test steps pending in the checklist; do not execute them until the user accepts the plan."
+        "{base} Only read and search while planning.{tool_guidance} Do not run tests, builds, scripts, edits or memory writes, even when an allow rule exists. Present a list of the exact test commands you propose to run, with what each verifies, for the user to review before implementation. If no tests apply, explain why. Keep proposed test steps pending in the checklist; do not execute them until the user accepts the plan."
     );
     let explorers: Vec<&str> = setup
         .tool_ctx

@@ -1798,13 +1798,17 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
 
     let mut tctx = s.tool_ctx.clone();
     tctx.cancel = ctx.cancel.child_token();
-    // Yolo and `/sandbox off` run commands outside the sandbox.
-    if ctx
-        .perms
-        .lock()
-        .is_ok_and(|p| p.sandbox_off || p.mode == quack_config::settings::PermissionMode::Yolo)
-    {
-        tctx.sandbox = quack_tools::SandboxState::Off;
+    // Yolo and `/sandbox off` run commands outside the sandbox; in Plan mode, any active
+    // sandbox is tightened to a strict read-only policy (no writable paths, no network).
+    if let Ok(p) = ctx.perms.lock() {
+        if p.sandbox_off || p.mode == quack_config::settings::PermissionMode::Yolo {
+            tctx.sandbox = quack_tools::SandboxState::Off;
+        } else if p.work_mode == quack_config::settings::WorkMode::Plan
+            && matches!(tctx.sandbox, quack_tools::SandboxState::On(_))
+        {
+            tctx.sandbox =
+                quack_tools::SandboxState::On(Arc::new(quack_sandbox::Policy::default()));
+        }
     }
     let summary = tool.summary(&args, &tctx);
     begin(ctx, call, &summary);

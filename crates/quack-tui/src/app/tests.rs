@@ -1768,3 +1768,131 @@ fn gui_handoff_quits_only_when_binary_available() {
     assert!(app.wants_gui_handoff());
     assert!(app.should_quit());
 }
+
+#[test]
+fn changing_work_mode_and_approvals_directly_preserves_input_text() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = App::new(info());
+    type_str(&mut app, "refactor the authentication middleware");
+    assert_eq!(app.input.text(), "refactor the authentication middleware");
+
+    // 1. Ctrl-Y toggles approvals (ask -> allow -> ask) without touching input text.
+    app.on_terminal(TermEvent::Key(KeyEvent::new(
+        KeyCode::Char('y'),
+        KeyModifiers::CONTROL,
+    )));
+    assert_eq!(
+        app.take_ops(),
+        vec![Op::SetPermissionMode {
+            mode: PermissionMode::Allow,
+        }]
+    );
+    app.on_engine(Event::ModeChanged {
+        work_mode: WorkMode::Edit,
+        approvals: quack_protocol::ApprovalPolicy::Allow,
+    });
+    assert_eq!(app.input.text(), "refactor the authentication middleware");
+
+    // 2. Shift-Tab toggles work mode (edit -> plan) without touching input text.
+    press(&mut app, KeyCode::BackTab);
+    assert_eq!(
+        app.take_ops(),
+        vec![Op::SetWorkMode {
+            mode: WorkMode::Plan,
+        }]
+    );
+    app.on_engine(Event::ModeChanged {
+        work_mode: WorkMode::Plan,
+        approvals: quack_protocol::ApprovalPolicy::Allow,
+    });
+    assert_eq!(app.input.text(), "refactor the authentication middleware");
+
+    // 3. Clicking the status-bar work-mode and approval pills toggles them without touching input.
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+    terminal
+        .draw(|f| crate::ui::draw(f, &app))
+        .expect("draw status bar");
+    let work_rect = app.work_mode_area.get();
+    let perm_rect = app.permission_area.get();
+    assert!(work_rect.width > 0 && perm_rect.width > 0);
+
+    app.on_terminal(TermEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: work_rect.x + 1,
+        row: work_rect.y,
+        modifiers: KeyModifiers::NONE,
+    }));
+    assert_eq!(
+        app.take_ops(),
+        vec![Op::SetWorkMode {
+            mode: WorkMode::Edit,
+        }]
+    );
+    app.on_engine(Event::ModeChanged {
+        work_mode: WorkMode::Edit,
+        approvals: quack_protocol::ApprovalPolicy::Allow,
+    });
+    assert_eq!(app.input.text(), "refactor the authentication middleware");
+
+    app.on_terminal(TermEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: perm_rect.x + 1,
+        row: perm_rect.y,
+        modifiers: KeyModifiers::NONE,
+    }));
+    assert_eq!(
+        app.take_ops(),
+        vec![Op::SetPermissionMode {
+            mode: PermissionMode::Ask,
+        }]
+    );
+    app.on_engine(Event::ModeChanged {
+        work_mode: WorkMode::Edit,
+        approvals: quack_protocol::ApprovalPolicy::Ask,
+    });
+    assert_eq!(app.input.text(), "refactor the authentication middleware");
+
+    // 4. Selecting `/plan` or `/permissions` from Ctrl-P (Command palette) executes immediately
+    // and leaves the input text untouched instead of replacing it with `/plan ` or `/permissions `.
+    app.on_terminal(TermEvent::Key(KeyEvent::new(
+        KeyCode::Char('p'),
+        KeyModifiers::CONTROL,
+    )));
+    assert_eq!(app.modal.as_ref().map(|m| m.title.as_str()), Some("Help"));
+    type_str(&mut app, "plan");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.modal.is_none());
+    assert_eq!(
+        app.take_ops(),
+        vec![Op::SetWorkMode {
+            mode: WorkMode::Plan,
+        }]
+    );
+    assert_eq!(app.input.text(), "refactor the authentication middleware");
+
+    app.on_terminal(TermEvent::Key(KeyEvent::new(
+        KeyCode::Char('p'),
+        KeyModifiers::CONTROL,
+    )));
+    type_str(&mut app, "permissions");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.modal.as_ref().map(|m| m.title.as_str()),
+        Some("Permissions")
+    );
+    assert_eq!(app.input.text(), "refactor the authentication middleware");
+    // Select `allow` in the Permissions modal and press Enter: applies immediately, input stays intact.
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.modal.is_none());
+    assert_eq!(
+        app.take_ops(),
+        vec![Op::SetPermissionMode {
+            mode: PermissionMode::Allow,
+        }]
+    );
+    assert_eq!(app.input.text(), "refactor the authentication middleware");
+}

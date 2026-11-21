@@ -69,13 +69,17 @@ impl App {
         self.dirty = true;
     }
 
-    /// The button went down: a click in the input places the cursor, and either pane
-    /// starts a selection there.
+    /// The button went down: a click on a status-bar mode pill toggles it in place, a click
+    /// in the input places the cursor, and either pane starts a selection there.
     pub(super) fn press(&mut self, x: u16, y: u16) {
         self.selection = None;
         self.dirty = true;
         let at = (x, y).into();
-        if self.input_view.get().0.contains(at) {
+        if self.work_mode_area.get().contains(at) {
+            self.cycle_mode();
+        } else if self.permission_area.get().contains(at) {
+            self.cycle_approvals();
+        } else if self.input_view.get().0.contains(at) {
             self.click_input(x, y);
             self.selection = Some(Selection::new(Pane::Input, self.input_cell(x, y)));
         } else if !self.transcript.is_empty() && self.transcript_area.get().contains(at) {
@@ -343,7 +347,17 @@ impl App {
             }
             ModalOutcome::Insert(text) => {
                 self.modal = None;
-                self.input.set(&text);
+                let existing = self.input.text();
+                if text.starts_with('/')
+                    && text.ends_with(' ')
+                    && !existing.is_empty()
+                    && !existing.starts_with('/')
+                {
+                    let combined = format!("{text}{existing}");
+                    self.input.set(&combined);
+                } else {
+                    self.input.set(&text);
+                }
                 self.popup_dismissed = true;
             }
             ModalOutcome::Run(text) => {
@@ -390,6 +404,7 @@ impl App {
                 self.submit(popup.get(idx).cloned());
             }
             KeyCode::BackTab => self.cycle_mode(),
+            KeyCode::Char('y') if ctrl => self.cycle_approvals(),
             KeyCode::Tab => {
                 let idx = self.popup_selected.min(popup.len().saturating_sub(1));
                 if let Some(item) = popup.get(idx) {

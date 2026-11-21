@@ -9,6 +9,11 @@
 	const transport = getTransport();
 	const workspaces = new Workspaces(transport);
 	const active = $derived(workspaces.sessions[workspaces.activeIndex]);
+	// The window title follows the active job's title, like the terminal client's.
+	const windowTitle = $derived(`_(•)> ${active?.title || 'quack'}`);
+	$effect(() => {
+		void transport.setWindowTitle?.(windowTitle).catch(() => {});
+	});
 	const initialDemo =
 		typeof window !== 'undefined' && transport.kind === 'dev'
 			? new URLSearchParams(window.location.search).get('demo')
@@ -66,7 +71,7 @@
 </script>
 
 <svelte:head>
-	<title>_(•)&gt; quack</title>
+	<title>{windowTitle}</title>
 </svelte:head>
 
 {#if active}

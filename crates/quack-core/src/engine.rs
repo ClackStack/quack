@@ -46,6 +46,7 @@ mod modes;
 mod reload_ops;
 mod session_ops;
 mod setup_ops;
+mod title;
 mod turn_ops;
 
 use modes::plan_note;
@@ -216,7 +217,7 @@ pub struct Engine {
     log: Option<SharedLog>,
     turns: u32,
     title: Option<String>,
-    title_tasks: JoinSet<(SessionId, Option<String>)>,
+    title_tasks: JoinSet<(SessionId, Result<String, String>)>,
     switch_tx: Option<mpsc::Sender<(Role, Result<Setup, String>)>>,
     /// A mode set before startup finished, applied once a model is ready.
     pending_mode: Option<PermissionMode>,
@@ -460,10 +461,19 @@ impl Engine {
                     }
                 }
                 result = self.title_tasks.join_next(), if !self.title_tasks.is_empty() => {
-                    if let Some(Ok((session, Some(title)))) = result
+                    if let Some(Ok((session, title))) = result
                         && self.session.id == session
                     {
-                        self.save_title(title);
+                        match title {
+                            Ok(title) => self.save_title(title),
+                            Err(why) => {
+                                tracing::warn!(model = %self.config.settings.model.small, "no session title: {why}");
+                                self.warn(format!(
+                                    "model.small ({}) gave no session title: {why}",
+                                    self.config.settings.model.small.trim()
+                                ));
+                            }
+                        }
                     }
                 }
                 Some(ask) = asks.recv() => self.on_server_ask(ask),

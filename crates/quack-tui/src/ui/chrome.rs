@@ -164,14 +164,27 @@ pub(super) fn draw_status(
     } else {
         mode.as_str()
     };
+    let work_pill = format!(" {} ", app.info.work_mode.label());
+    let perm_pill = format!(" {label} ");
+    let work_w = u16::try_from(work_pill.width()).unwrap_or(0);
+    let perm_w = u16::try_from(perm_pill.width()).unwrap_or(0);
+    app.work_mode_area.set(Rect {
+        x: area.x.saturating_add(1),
+        y: area.y,
+        width: work_w,
+        height: area.height.min(1),
+    });
+    app.permission_area.set(Rect {
+        x: area.x.saturating_add(2).saturating_add(work_w),
+        y: area.y,
+        width: perm_w,
+        height: area.height.min(1),
+    });
     let mut left: Vec<Span<'_>> = vec![
         Span::raw(" "),
-        Span::styled(
-            format!(" {} ", app.info.work_mode.label()),
-            t.pill(t.mode(app.info.work_mode.label())),
-        ),
+        Span::styled(work_pill, t.pill(t.mode(app.info.work_mode.label()))),
         Span::raw(" "),
-        Span::styled(format!(" {label} "), t.pill(t.mode(mode))),
+        Span::styled(perm_pill, t.pill(t.mode(mode))),
         Span::raw(" "),
     ];
     // Yolo already says the sandbox is off.

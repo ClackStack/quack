@@ -34,6 +34,9 @@ The TUI shows work mode and approvals separately.
 | Control | Effect |
 |---|---|
 | **Shift-Tab** | Toggle Plan/Edit, keeping approvals |
+| **Ctrl-Y** | Toggle Ask/Allow approvals, keeping Plan/Edit |
+| **Click status-bar pills** | Click `plan`/`edit` or `ask`/`allow` in the status bar to toggle directly without touching the input text |
+| **Ctrl-P** | Command palette: run `/plan`, `/edit`, `/permissions`, `/yolo`, etc. directly while leaving any typed prompt in the input box intact |
 | `/plan [task]` | Enter Plan, optionally submitting a task |
 | `/edit [task]` | Enter Edit, optionally submitting a task |
 | `/plan accept` | Implement the plan, keeping approvals |

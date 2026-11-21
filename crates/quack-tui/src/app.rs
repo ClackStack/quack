@@ -76,6 +76,10 @@ pub struct App {
     pub(crate) input_view: Cell<(Rect, usize)>,
     /// The transcript's area as last drawn, scrollbar column included.
     pub(crate) transcript_area: Cell<Rect>,
+    /// Status-bar work-mode pill (`edit` / `plan`), clickable to toggle without touching input.
+    pub(crate) work_mode_area: Cell<Rect>,
+    /// Status-bar approvals pill (`ask` / `allow` / `YOLO`), clickable to toggle without touching input.
+    pub(crate) permission_area: Cell<Rect>,
     /// Rendered transcript rows per entry, so drawing only lays out new or changed text
     /// (streaming deltas, finished tools); see `ui::transcript_pieces`. Drawing only
     /// writes here, like the `Cell`s above.
@@ -248,6 +252,8 @@ impl App {
             view: Cell::new((0, 0)),
             input_view: Cell::new((Rect::default(), 0)),
             transcript_area: Cell::new(Rect::default()),
+            work_mode_area: Cell::new(Rect::default()),
+            permission_area: Cell::new(Rect::default()),
             transcript_cache: RefCell::new(crate::ui::TranscriptCache::default()),
             popup_cache: RefCell::new(None),
             popup_epoch: 0,

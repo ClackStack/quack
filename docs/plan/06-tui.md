@@ -216,7 +216,7 @@ The **approval dialog** shows a diff view for edits (side-by-side at 160 columns
 
 ## Keybindings
 
-Defaults are listed in `quack keys --print`. Users override them in `config.toml [keys]`. Notable defaults: Esc interrupts the turn (double Esc opens the rewind picker), Ctrl-C clears input or interrupts, and a second Ctrl-C quits. Shift-Tab toggles Plan/Edit, keeping Ask/Allow approvals, and Ctrl-T shows or hides the model's thinking (`/thinking show|hide`). PageUp/PageDown and Shift-Up/Down scroll the transcript, Ctrl-Home/Ctrl-End jump to its top and bottom, and the todo pane is toggled with `/todo`.
+Defaults are listed in `quack keys --print`. Users override them in `config.toml [keys]`. Notable defaults: Esc interrupts the turn (double Esc opens the rewind picker), Ctrl-C clears input or interrupts, and a second Ctrl-C quits. Shift-Tab toggles Plan/Edit, keeping Ask/Allow approvals; Ctrl-Y toggles Ask/Allow approvals, keeping Plan/Edit; clicking either mode pill in the status bar toggles it directly without touching the input box; and Ctrl-T shows or hides the model's thinking (`/thinking show|hide`). PageUp/PageDown and Shift-Up/Down scroll the transcript, Ctrl-Home/Ctrl-End jump to its top and bottom, and the todo pane is toggled with `/todo`.
 
 ## Themes
 

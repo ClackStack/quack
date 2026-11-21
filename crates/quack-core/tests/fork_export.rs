@@ -175,6 +175,85 @@ async fn small_model_title_is_saved_and_restored() {
     engine.shutdown().await;
 }
 
+/// A reasoning small model thinks first and wraps its answer; the title is still found,
+/// and the request leaves it room to think.
+#[tokio::test]
+async fn small_model_title_survives_reasoning_and_wrapping() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(wiremock::matchers::body_string_contains(
+            r#""model":"small""#,
+        ))
+        .and(wiremock::matchers::body_string_contains(
+            r#""max_tokens":1024"#,
+        ))
+        .respond_with(common::sse_raw(&[
+            serde_json::json!({"choices":[{"delta":{"reasoning_content":"The user wants the login form fixed."}}]}).to_string(),
+            serde_json::json!({"choices":[{"delta":{"content":"\n**Title:** \"Fix login form.\"\n"},"finish_reason":"stop"}]}).to_string(),
+        ]))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(wiremock::matchers::body_string_contains(
+            r#""model":"tiny""#,
+        ))
+        .respond_with(sse_text("Sure."))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut loaded = workspace(tmp.path(), &server.uri(), r#"["tiny", "small"]"#, "");
+    loaded.settings.model.small = "mock/small".into();
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    turn(
+        &mut engine,
+        "Please fix the login form, it accepts empty passwords and more",
+    )
+    .await;
+    until(&mut engine, |e| match e {
+        Event::SessionTitle { title: Some(t) } if t == "Fix login form" => Some(()),
+        _ => None,
+    })
+    .await;
+    engine.shutdown().await;
+}
+
+/// A small model that can't give a title says why instead of failing silently, and the
+/// first line of the prompt stays the title.
+#[tokio::test]
+async fn small_model_without_a_title_warns() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(sse_text("Sure."))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut loaded = workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    loaded.settings.model.small = "nowhere/small".into();
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    let seen = turn(&mut engine, "Please fix the login form").await;
+    let is_warning = |e: &Event| match e {
+        Event::Warning { message } if message.contains("session title") => Some(message.clone()),
+        _ => None,
+    };
+    let warning = match seen.iter().find_map(is_warning) {
+        Some(w) => w,
+        None => until(&mut engine, is_warning).await,
+    };
+    assert!(warning.contains("nowhere/small"), "{warning}");
+    engine.submit(Op::ListSessions).await;
+    let sessions = until(&mut engine, |e| match e {
+        Event::SessionList { sessions } => Some(sessions.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(sessions[0].title, "Please fix the login form");
+    engine.shutdown().await;
+}
+
 #[tokio::test]
 async fn fork_worktree_creates_isolated_branch_and_continues_in_worktree() {
     let server = MockServer::start().await;

@@ -43,12 +43,31 @@ impl App {
             "edit" => self.ops.push(Op::SetWorkMode {
                 mode: WorkMode::Edit,
             }),
+            "yolo" => {
+                if self.info.permission_mode != "yolo" {
+                    self.mode_before_yolo = self.info.permission_mode.clone();
+                }
+                self.ops.push(Op::SetPermissionMode {
+                    mode: PermissionMode::Yolo,
+                });
+            }
             _ => match mode.parse::<PermissionMode>() {
                 Ok(mode) => self.ops.push(Op::SetPermissionMode { mode }),
                 Err(()) => self.note(format!(
                     "unknown mode `{mode}`; use plan/edit for work mode or ask/allow for approvals"
                 )),
             },
+        }
+    }
+
+    /// Toggle approvals between Ask and Allow (or leave Yolo), keeping Plan/Edit and the input text intact.
+    pub(super) fn cycle_approvals(&mut self) {
+        if self.info.permission_mode == "yolo" {
+            self.toggle_yolo("off");
+        } else if self.info.permission_mode == "allow" {
+            self.set_mode("ask");
+        } else {
+            self.set_mode("allow");
         }
     }
 

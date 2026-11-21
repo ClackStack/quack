@@ -23,6 +23,9 @@ param(
     [switch]$Gui,
     # Leave out the provider files for hosted services; everything else is installed.
     [switch]$Plucked,
+    # Restore hosted-service provider files and config.toml when updating a plucked install.
+    [Alias('NoPlucked')]
+    [switch]$Full,
     # Install or update only the TUI binary; existing defaults are left as they are.
     [switch]$BinaryOnly,
     # Install folder; quack.exe and defaults\ go directly in it.
@@ -40,6 +43,7 @@ $ErrorActionPreference = 'Stop'
 $repo = 'ClackStack/quack'
 function Say($m) { Write-Host "quack: $m" }
 
+$usePlucked = $Plucked.IsPresent
 $explicitTui = $Tui.IsPresent
 $explicitGui = $Gui.IsPresent
 $wantTui = $explicitTui
@@ -94,13 +98,30 @@ if ($Uninstall) {
 
 # The defaults bundle without the provider files whose base_url is not on this machine,
 # as scripts/copy-defaults.sh --plucked builds it for the release archives.
+function Test-HostedProvider([System.IO.FileInfo]$f) {
+    $m = Select-String -Path $f.FullName -Pattern '^base_url *= *"[a-z]*://([^/:"]*)' | Select-Object -First 1
+    $host_ = if ($m) { $m.Matches[0].Groups[1].Value } else { '' }
+    return -not ($host_ -like '127.*' -or $host_ -eq 'localhost' -or $host_ -eq '[::1]')
+}
+
+function Test-DefaultsPlucked([string]$dir) {
+    if (-not (Test-Path $dir -PathType Container)) { return $false }
+    $hasBundle = (Test-Path (Join-Path $dir 'profiles.d') -PathType Container) -or
+                 (Test-Path (Join-Path $dir 'providers.d') -PathType Container) -or
+                 (Test-Path (Join-Path $dir 'catalog.json') -PathType Leaf)
+    if (-not $hasBundle) { return $false }
+    if (Test-Path (Join-Path $dir 'config.toml') -PathType Leaf) { return $false }
+    foreach ($f in Get-ChildItem (Join-Path $dir 'providers.d') -Filter *.toml -ErrorAction SilentlyContinue) {
+        if (Test-HostedProvider $f) { return $false }
+    }
+    return $true
+}
+
 function Copy-PluckedDefaults([string]$from, [string]$to) {
     Copy-Item -Recurse $from $to
     Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $to 'config.toml')
     foreach ($f in Get-ChildItem (Join-Path $to 'providers.d') -Filter *.toml -ErrorAction SilentlyContinue) {
-        $m = Select-String -Path $f.FullName -Pattern '^base_url *= *"[a-z]*://([^/:"]*)' | Select-Object -First 1
-        $host_ = if ($m) { $m.Matches[0].Groups[1].Value } else { '' }
-        if (-not ($host_ -like '127.*' -or $host_ -eq 'localhost' -or $host_ -eq '[::1]')) {
+        if (Test-HostedProvider $f) {
             Remove-Item -Force $f.FullName
         }
     }
@@ -243,12 +264,17 @@ try {
         if (-not $wantTui -and $guiSetup -and ($Prefix.TrimEnd('\') -ne $defaultPrefix.TrimEnd('\'))) {
             $defaults = Join-Path $nsisDir 'defaults'
         }
+        $usePlucked = $Plucked.IsPresent
+        if (-not $usePlucked -and -not $Full -and -not $BinaryOnly -and (Test-DefaultsPlucked $defaults)) {
+            $usePlucked = $true
+            Say 'existing installation is plucked; keeping hosted providers omitted (pass -Full to include them)'
+        }
         # The defaults: replaced as a whole, so files removed upstream disappear too.
         if ($BinaryOnly) {
             if (Test-Path $defaults) { Say "left the defaults in $defaults as they are (-BinaryOnly)" }
             else { Say 'no defaults installed (-BinaryOnly): add providers with `quack setup` or your own files' }
         } elseif (-not $newDefaults) {
-            if ($Plucked) {
+            if ($usePlucked) {
                 Say "warning: this archive has no defaults bundle, so -Plucked had nothing to filter; left $defaults as it is"
             } else {
                 Say "this archive has no defaults bundle; left $defaults as it is"
@@ -256,7 +282,7 @@ try {
         } else {
             New-Item -ItemType Directory -Force (Split-Path -Parent $defaults) | Out-Null
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$defaults.new"
-            if ($Plucked) {
+            if ($usePlucked) {
                 Copy-PluckedDefaults $newDefaults "$defaults.new"
             } else {
                 Copy-Item -Recurse $newDefaults "$defaults.new"
@@ -267,7 +293,7 @@ try {
             if ($defaults.TrimEnd('\') -ne $legacyNsisDefaults.TrimEnd('\')) {
                 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $legacyNsisDefaults
             }
-            if ($Plucked) {
+            if ($usePlucked) {
                 Say "installed plucked defaults in $defaults (hosted providers left out)"
             } else {
                 Say "installed the defaults in $defaults"
@@ -309,7 +335,7 @@ try {
         Say 'installed the TUI only (`quack`); re-run without -Tui anytime to add the desktop GUI'
     }
 
-    if ($Plucked) { Say 'no hosted services are set up (-Plucked): add your server with `quack setup` or in Settings' }
+    if ($usePlucked) { Say 'no hosted services are set up (-Plucked): add your server with `quack setup` or in Settings' }
     elseif ($wantTui) { Say 'run `quack setup` to pick a model, then `quack` or `quack-gui`' }
     else { Say 'open Quack (or run `quack-gui`) to get started' }
 } finally {

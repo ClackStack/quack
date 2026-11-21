@@ -525,8 +525,8 @@
 												<span>
 													<strong>quack {session.updateState.latest} is available</strong>
 													(you have <code>{session.updateState.current}</code>). quack does not
-													self-update; install the new release from your package manager, release
-													page, or run <code>quack update</code>.
+													self-update; run <code>quack update</code> for the install command, or
+													download it from the release page.
 												</span>
 												{#if isHttpUrl(session.updateState.url)}
 													<button

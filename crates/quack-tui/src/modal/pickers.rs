@@ -28,6 +28,7 @@ pub(crate) fn help(theme: &Theme) -> Modal {
                 c.pending
                     .map_or_else(|| "available".into(), |m| format!("planned for {m}")),
             ));
+            let requires_arg = c.args.starts_with('<');
             ModalItem {
                 label: format!("/{}", c.name),
                 hint: c.pending.unwrap_or_default().to_owned(),
@@ -35,9 +36,9 @@ pub(crate) fn help(theme: &Theme) -> Modal {
                 action: Some(format!(
                     "/{}{}",
                     c.name,
-                    if c.args.is_empty() { "" } else { " " }
+                    if requires_arg { " " } else { "" }
                 )),
-                run: false,
+                run: !requires_arg,
                 alt: None,
                 charts: Vec::new(),
             }
@@ -662,6 +663,28 @@ pub(crate) fn config(
                 let flipped = if r.value == "true" { "false" } else { "true" };
                 detail.push(Line::styled(
                     format!("⏎ set to {flipped} in {target}"),
+                    theme.dim,
+                ));
+                (Some(format!("/config set{flag} {} {flipped}", r.key)), true)
+            } else if r.key == "permissions.work_mode" {
+                let flipped = if r.value.trim_matches('"') == "plan" {
+                    "\"edit\""
+                } else {
+                    "\"plan\""
+                };
+                detail.push(Line::styled(
+                    format!("⏎ set to {flipped} in {target} and apply now"),
+                    theme.dim,
+                ));
+                (Some(format!("/config set{flag} {} {flipped}", r.key)), true)
+            } else if r.key == "permissions.mode" {
+                let flipped = if r.value.trim_matches('"') == "allow" {
+                    "\"ask\""
+                } else {
+                    "\"allow\""
+                };
+                detail.push(Line::styled(
+                    format!("⏎ set to {flipped} in {target} and apply now"),
                     theme.dim,
                 ));
                 (Some(format!("/config set{flag} {} {flipped}", r.key)), true)

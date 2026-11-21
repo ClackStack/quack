@@ -491,6 +491,11 @@ export class Session {
 				break;
 			case 'session_title':
 				this.title = ev.title ?? '';
+				// Keep the open job's row in the saved list in step without a new listing.
+				if (ev.title)
+					this.sessions = this.sessions.map((s) =>
+						s.current ? { ...s, title: ev.title ?? s.title } : s
+					);
 				break;
 			case 'assistant_delta':
 				this.#progressSinceWarning = true;

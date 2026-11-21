@@ -56,7 +56,7 @@ Rules:
 - `quack --resume <id>` resumes by id or unique prefix; `quack sessions` lists them. `/resume` opens the picker (title, age, turns, model, first message preview, fuzzy search).
 - `/fork` starts a new session that branches from the current point. Its `session_start` records `parent` + event index.
 - `/rewind` picks a previous user message. The conversation is truncated to before it (by appending a `rewind` event; nothing is deleted), and the user is optionally offered to **restore files** to the matching checkpoint.
-- `/title <text>`. Automatic titles come from the `small` model in the background when the first turn starts, if one is configured. The truncated first line is shown immediately and stays if generation fails. Generated titles are saved for the terminal window title and resume picker. A manual title takes precedence.
+- `/title <text>`. Automatic titles come from the `small` model in the background when the first turn starts, if one is configured (`engine/title.rs`: up to 20 s to set the model up, 30 s and 1,024 output tokens for the request so a reasoning model can think first; the reply is cleaned of `Title:`, markdown, quotes and a final full stop and cut to 50 characters at a word). The first line, shortened the same way, is shown immediately and stays if generation fails; the failure is reported as a warning naming `model.small` and the reason. Generated titles are saved for the terminal window title and resume picker. A manual title takes precedence.
 - `/export [md|json]` writes a readable transcript.
 - `quack sessions prune --older-than 30d` cleans up. `[sessions] retention_days` does the same automatically.
 

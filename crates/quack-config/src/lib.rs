@@ -45,8 +45,8 @@ pub use edit::{SettingRow, set_in_file, write_atomic};
 pub use enable::{HookEnableOutcome, HookEnabled};
 pub use hooks::HookFile;
 pub use items::{
-    Item, ItemState, glob_match, is_loopback, load_dir_items, load_items, load_items_merging,
-    url_host,
+    Item, ItemState, glob_match, is_loopback, is_plucked_defaults, load_dir_items, load_items,
+    load_items_merging, url_host,
 };
 pub use load::{
     ConfigError, LayerReport, LayerStatus, LoadOptions, Loaded, Origin, ProjectStatus, load,

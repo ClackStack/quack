@@ -20,19 +20,24 @@
 # machine can install one (.deb on apt/dpkg systems, .rpm on dnf/yum/zypper/rpm systems,
 # with root or sudo), falling back to the self-contained archive under ~/.local
 # otherwise; --pkg forces a choice. --plucked installs the bundle without hosted-service
-# provider files (OpenRouter, Claude, OpenAI, ...), for setups with their own provider.
-# --binary-only updates binaries and leaves installed defaults alone. These two, like
-# --prefix, --archive and --from-source, use the archive path.
+# provider files (OpenRouter, Claude, OpenAI, ...), for setups with their own provider
+# (works for .deb/.rpm packages as well as archives, and updates to a plucked install keep
+# it plucked unless --full is passed). --binary-only updates binaries and leaves
+# installed defaults alone; like --prefix, --archive and --from-source, it uses the
+# archive path.
 set -eu
 
 repo=ClackStack/quack
 prefix=${QUACK_INSTALL_PREFIX:-$HOME/.local}
 prefix_explicit=0
 if [ -n "${QUACK_INSTALL_PREFIX:-}" ]; then prefix_explicit=1; fi
+sys_root=${QUACK_INSTALL_SYSROOT:-}
+sys_defaults=$sys_root/usr/share/quack/defaults
 version=latest
 want_tui=0
 want_gui=0
 plucked=0
+full=0
 binary_only=0
 pkg_forced=
 archive=
@@ -58,11 +63,14 @@ Usage: install.sh [options]
                        self-contained bundle under --prefix. Default: the package format
                        already installed (.deb or .rpm), else the first package type this
                        machine can install (with root or sudo), else the archive.
-                       `deb` and `rpm` cannot be combined with --plucked, --binary-only,
+                       `deb` and `rpm` cannot be combined with --binary-only,
                        --prefix, --archive or --from-source, which use the archive.
   --plucked            Leave out the provider files for hosted services (OpenRouter,
                        Claude, OpenAI, ...) for both TUI and GUI. Profiles, sub-agents,
                        MCP, language servers and local server files are all installed.
+                       Updates to a plucked install stay plucked automatically.
+  --full               Include hosted-service provider files and config.toml again when
+                       updating an install that was previously --plucked.
   --binary-only        Install or update only the binaries. Existing defaults
                        are left as they are; none are installed if there were none.
   --prefix DIR         Install into DIR/bin and DIR/share/quack (default: ~/.local,
@@ -268,7 +276,8 @@ while [ $# -gt 0 ]; do
   case $1 in
     --tui | --cli) want_tui=1 ;;
     --gui) want_gui=1 ;;
-    --plucked) plucked=1 ;;
+    --plucked) plucked=1; full=0 ;;
+    --full | --no-plucked) full=1; plucked=0 ;;
     --binary-only) binary_only=1 ;;
     --pkg)
       [ $# -ge 2 ] || die "--pkg needs deb, rpm or archive"
@@ -509,11 +518,11 @@ if [ "$uninstall" = 1 ]; then
     say "removed $bindir/quack-gui"
   fi
   if [ ! -e "$bindir/quack" ] && [ ! -e "$bindir/quack-gui" ] \
-    && [ ! -e /usr/bin/quack ] && [ ! -e /usr/bin/quack-gui ]; then
+    && [ ! -e "$sys_root/usr/bin/quack" ] && [ ! -e "$sys_root/usr/bin/quack-gui" ]; then
     rm -rf "$defaults"
     rmdir "$prefix/share/quack" 2>/dev/null || true
-    if [ -d /usr/share/quack ] && have_root; then
-      as_root rm -rf /usr/share/quack || true
+    if [ -d "$sys_root/usr/share/quack" ] && have_root; then
+      as_root rm -rf "$sys_root/usr/share/quack" || true
     fi
     say "removed $defaults"
   fi
@@ -529,6 +538,72 @@ cleanup() {
   rm -rf "$tmp"
 }
 trap cleanup EXIT INT TERM
+
+has_hosted_provider() {
+  for _f in "$1"/providers.d/*.toml; do
+    [ -f "$_f" ] || continue
+    _host=$(sed -n 's|^base_url *= *"[a-z]*://\([^/:"]*\).*|\1|p' "$_f" | head -n 1)
+    case $_host in
+      127.* | localhost | "[::1]") ;;
+      *) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+dir_is_plucked() {
+  _d=$1
+  [ -d "$_d" ] || return 1
+  if [ ! -d "$_d/profiles.d" ] && [ ! -d "$_d/providers.d" ] && [ ! -f "$_d/catalog.json" ]; then
+    return 1
+  fi
+  [ ! -f "$_d/config.toml" ] || return 1
+  ! has_hosted_provider "$_d"
+}
+
+# Remove config.toml and non-loopback provider files from $1 (with root when $2 = 1).
+pluck_defaults_dir() {
+  _dir=$1
+  _use_root=${2:-0}
+  set -- "$_dir/config.toml"
+  for _f in "$_dir"/providers.d/*.toml; do
+    [ -f "$_f" ] || continue
+    _host=$(sed -n 's|^base_url *= *"[a-z]*://\([^/:"]*\).*|\1|p' "$_f" | head -n 1)
+    case $_host in
+      127.* | localhost | "[::1]") ;;
+      *) set -- "$@" "$_f" ;;
+    esac
+  done
+  if [ "$_use_root" = 1 ]; then
+    as_root rm -f "$@"
+  else
+    rm -f "$@"
+  fi
+}
+
+# Preserve an existing plucked install on updates unless --plucked, --full or --binary-only
+# was passed explicitly. $1 is the selected pkg_kind ("deb", "rpm", or "").
+maybe_preserve_plucked() {
+  _target_pkg=$1
+  [ "$plucked" = 0 ] && [ "$full" = 0 ] && [ "$binary_only" = 0 ] || return 0
+  _was_plucked=0
+  if [ -n "$_target_pkg" ]; then
+    if deb_installed quack-plucked || deb_installed quack-gui-plucked \
+      || rpm_installed quack-plucked || rpm_installed quack-gui-plucked; then
+      _was_plucked=1
+    elif dir_is_plucked "$sys_defaults"; then
+      _was_plucked=1
+    elif [ ! -d "$sys_defaults" ] && dir_is_plucked "$defaults"; then
+      _was_plucked=1
+    fi
+  elif dir_is_plucked "$defaults"; then
+    _was_plucked=1
+  fi
+  if [ "$_was_plucked" = 1 ]; then
+    plucked=1
+    say "existing installation is plucked; keeping hosted providers omitted (pass --full to include them)"
+  fi
+}
 
 install_defaults_dir() {
   _src_defaults=$1
@@ -549,15 +624,7 @@ install_defaults_dir() {
     rm -rf "$defaults.new"
     cp -R "$_src_defaults" "$defaults.new"
     if [ "$plucked" = 1 ]; then
-      rm -f "$defaults.new/config.toml"
-      for _f in "$defaults.new"/providers.d/*.toml; do
-        [ -f "$_f" ] || continue
-        _host=$(sed -n 's|^base_url *= *"[a-z]*://\([^/:"]*\).*|\1|p' "$_f" | head -n 1)
-        case $_host in
-          127.* | localhost | "[::1]") ;;
-          *) rm -f "$_f" ;;
-        esac
-      done
+      pluck_defaults_dir "$defaults.new"
     fi
     rm -rf "$defaults"
     mv "$defaults.new" "$defaults"
@@ -644,6 +711,7 @@ gui_dmg=
 gui_appimage=
 tui_pkg=
 gui_pkg=
+pkg_kind=
 
 if [ -n "$source_dir" ]; then
   [ -f "$source_dir/Cargo.toml" ] || die "$source_dir is not a quack checkout"
@@ -692,6 +760,7 @@ if [ -n "$source_dir" ]; then
   fi
 
   if [ "$want_tui" = 1 ] || [ "$want_gui" = 1 ]; then
+    maybe_preserve_plucked ""
     new_defaults=$source_dir/defaults
     if [ "$plucked" = 1 ]; then
       "$source_dir/scripts/copy-defaults.sh" "$tmp/defaults" --plucked || die "copying the defaults failed"
@@ -771,26 +840,23 @@ else
     # install), prefer a system package when this machine can install one
     # (.deb on apt/dpkg systems, .rpm on dnf/yum/zypper/rpm systems, with root
     # or sudo) and the release ships one; otherwise use the self-contained
-    # archives below. --pkg forces a choice. --plucked, --binary-only and a
-    # custom --prefix use the archive path.
+    # archives below. --pkg forces a choice. --binary-only and a custom
+    # --prefix use the archive path.
     pkg_kind=
     if [ "$host_os" = Linux ]; then
       if [ -n "$pkg_forced" ]; then
         if [ "$pkg_forced" != archive ]; then
-          if [ "$plucked" = 1 ] || [ "$binary_only" = 1 ] || [ "$prefix_explicit" = 1 ]; then
-            die "--pkg $pkg_forced cannot be combined with --plucked, --binary-only or --prefix (those always use the archive)"
+          if [ "$binary_only" = 1 ] || [ "$prefix_explicit" = 1 ]; then
+            die "--pkg $pkg_forced cannot be combined with --binary-only or --prefix (those always use the archive)"
           fi
           pkg_kind=$pkg_forced
         fi
       elif [ -n "$installed_pkg_kind" ] && [ "$prefix_explicit" = 0 ]; then
-        if [ "$plucked" = 1 ]; then
-          die "quack is already installed as a .$installed_pkg_kind package, which manages /usr/share/quack/defaults; re-run without --plucked to update the package, run --uninstall first, or pass --pkg archive to install a separate plucked copy under $prefix"
-        fi
         if [ "$binary_only" = 1 ]; then
           die "quack is already installed as a .$installed_pkg_kind package, which cannot be updated with --binary-only; re-run without --binary-only to update the package, or pass --pkg archive to install a separate copy under $prefix"
         fi
         pkg_kind=$installed_pkg_kind
-      elif [ "$plucked" = 0 ] && [ "$binary_only" = 0 ] && [ "$prefix_explicit" = 0 ] && have_root; then
+      elif [ "$binary_only" = 0 ] && [ "$prefix_explicit" = 0 ] && have_root; then
         if command -v apt-get >/dev/null 2>&1; then
           pkg_kind=deb
         elif command -v dnf >/dev/null 2>&1 || command -v microdnf >/dev/null 2>&1 \
@@ -979,25 +1045,38 @@ else
     if [ "$want_tui" = 1 ]; then new_tui_bin=$top/bin/quack; fi
     if [ -d "$top/share/quack/defaults" ]; then new_defaults=$top/share/quack/defaults; fi
   fi
+  maybe_preserve_plucked "$pkg_kind"
 fi
 
 # Install the shared defaults bundle next to a system-package install (/usr/bin
 # binaries find it at ../share/quack/defaults).
 install_system_defaults() {
   _src=$1
-  _dest=/usr/share/quack/defaults
+  _dest=$sys_defaults
   if [ -z "$_src" ]; then
-    say "this archive has no defaults bundle; left $_dest as it is"
+    if [ "$plucked" = 1 ]; then
+      say "warning: this archive has no defaults bundle, so --plucked had nothing to filter; left $_dest as it is"
+    else
+      say "this archive has no defaults bundle; left $_dest as it is"
+    fi
     return 0
   fi
   rm -rf "$tmp/defaults.sys"
   cp -R "$_src" "$tmp/defaults.sys"
-  as_root mkdir -p /usr/share/quack
+  if [ "$plucked" = 1 ]; then
+    pluck_defaults_dir "$tmp/defaults.sys"
+  fi
+  chmod -R a+rX "$tmp/defaults.sys" 2>/dev/null || true
+  as_root mkdir -p "$(dirname "$_dest")"
   as_root rm -rf "${_dest}.new"
   as_root cp -R "$tmp/defaults.sys" "${_dest}.new"
   as_root rm -rf "$_dest"
   as_root mv "${_dest}.new" "$_dest"
-  say "installed the defaults in $_dest"
+  if [ "$plucked" = 1 ]; then
+    say "installed plucked defaults in $_dest (hosted providers left out)"
+  else
+    say "installed the defaults in $_dest"
+  fi
 }
 
 # The package binaries live in /usr/bin; drop an earlier non-package copy in $bindir
@@ -1024,6 +1103,10 @@ if [ -n "$tui_pkg" ] || [ -n "$gui_pkg" ]; then
     fi
     if [ "$pkg_kind" = deb ]; then install_deb "$tui_pkg"; else install_rpm "$tui_pkg"; fi
     say "installed the quack package ($pkg_kind)"
+    if [ "$plucked" = 1 ]; then
+      pluck_defaults_dir "$sys_defaults" 1
+      say "installed plucked defaults in $sys_defaults (hosted providers left out)"
+    fi
     drop_stale_local quack
   fi
   if [ -n "$gui_pkg" ]; then

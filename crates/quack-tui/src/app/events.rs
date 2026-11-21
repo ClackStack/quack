@@ -854,6 +854,20 @@ impl App {
                 self.info.small_model = parsed_model;
                 true
             }
+            "permissions.work_mode" => {
+                let mode = value.trim().trim_matches('"');
+                if matches!(mode, "plan" | "edit") {
+                    self.set_mode(mode);
+                }
+                true
+            }
+            "permissions.mode" => {
+                let mode = value.trim().trim_matches('"');
+                if mode != "null" && !mode.is_empty() {
+                    self.set_mode(mode);
+                }
+                true
+            }
             _ => false,
         };
         let layer = if !self.info.project_config.is_empty() && path == self.info.project_config {

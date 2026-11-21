@@ -237,4 +237,6 @@ export interface Transport {
 	stagePastedImage?(tab: number, bytes: Uint8Array): Promise<string>;
 	/** Show an OS attention notification when enabled and unfocused. */
 	notifyAttention?(title: string, body: string): Promise<void>;
+	/** Set the OS window title (the active job's title). */
+	setWindowTitle?(title: string): Promise<void>;
 }

@@ -21,8 +21,8 @@ agent.
 |---|---|
 | Default (`install.sh`, asks; `install.ps1`) | `quack` + `quack-gui` + full shared `defaults/` bundle |
 | Linux system package (default when apt/dpkg or dnf/yum/zypper tooling and root/sudo exist) | `quack` and/or `quack-gui` as `.deb`/`.rpm`: binaries in `/usr/bin`, shared `defaults/` in `/usr/share/quack/defaults`, desktop entry registered by the package |
-| `--pkg deb\|rpm\|archive` (`install.sh`) | force the Linux install format; `deb`/`rpm` cannot be combined with `--plucked`, `--binary-only`, `--prefix`, `--archive` or `--from-source` |
-| `--plucked` (`-Plucked`) | same `quack` / `quack-gui` binaries + shared `defaults/` without `config.toml` or off-machine `providers.d/*.toml` (`scripts/copy-defaults.sh`, `install.sh`, `install.ps1`) |
+| `--pkg deb\|rpm\|archive` (`install.sh`) | force the Linux install format; `deb`/`rpm` cannot be combined with `--binary-only`, `--prefix`, `--archive` or `--from-source` |
+| `--plucked` (`-Plucked`) | same `quack` / `quack-gui` binaries + shared `defaults/` without `config.toml` or off-machine `providers.d/*.toml` (`scripts/copy-defaults.sh`, `install.sh`, `install.ps1`); works with `.deb`/`.rpm` and archives, and updates preserve it unless `--full` (`-Full`) is passed |
 
 ## Where defaults live after install
 
@@ -180,7 +180,10 @@ On Linux the script detects whether `quack` or `quack-gui` (including legacy `qu
 `quack-gui-plucked`) is already installed as a `.deb` or `.rpm` package and updates it with
 that same package format, failing with an actionable message (pointing to `--pkg archive`)
 rather than silently falling back to the musl archive when root/sudo, package assets, or
-archive-only flags (`--plucked`, `--binary-only`) conflict. On a fresh install it prefers a
+archive-only flags (`--binary-only`) conflict. `--plucked` works directly with `.deb` and
+`.rpm` packages too (stripping `config.toml` and non-loopback `providers.d/*.toml` from
+`/usr/share/quack/defaults`), and re-running without `--plucked` keeps an existing plucked
+install plucked unless `--full` is passed. On a fresh install it prefers a
 **system package**: `quack_<v>_<arch>.deb` via `apt-get`/`dpkg` when apt/dpkg tooling and
 root or sudo exist (checking `apt-get` vs `dnf`/`microdnf`/`yum`/`zypper` before bare `dpkg`/
 `rpm`), else `quack-<v>-<arch>.rpm`, else the self-contained archive under `--prefix`. "latest"
@@ -199,12 +202,14 @@ deb|rpm|archive` forces a format.
   archive to extract shared `defaults/` without installing the `quack` binary.
 - `--plucked` (`-Plucked`): install the same `quack` and/or `quack-gui` binaries while filtering
   `config.toml` and non-loopback `providers.d/*.toml` out of the installed `defaults/` folder
-  (works across release downloads, `--from-source`, and `.tar.gz`/`.zip` `--archive` installs).
+  (works across `.deb`/`.rpm` packages, release archives, `--from-source`, and `.tar.gz`/`.zip`
+  `--archive` installs; updates preserve plucked state automatically unless `--full` / `-Full`
+  is passed).
 - `--binary-only` (`-BinaryOnly`): update binaries only. Existing defaults are left alone; a
   fresh install this way runs on the compiled-in core.
 - `--pkg deb|rpm|archive` (`install.sh`, Linux only): force the install format instead of
   matching an existing `.deb`/`.rpm` installation or the default system-package check. `deb`
-  and `rpm` cannot be combined with `--plucked`, `--binary-only`, `--prefix`, `--archive` or
+  and `rpm` cannot be combined with `--binary-only`, `--prefix`, `--archive` or
   `--from-source`, which use the archive (`--pkg archive` works alongside `--plucked`,
   `--binary-only` and `--prefix`).
 - `--prefix`, `--version`, `--archive FILE` (offline installs of `.tar.gz`/`.zip`/`.AppImage`/`.dmg`/`-setup.exe`),
@@ -284,7 +289,7 @@ deb|rpm|archive` forces a format.
 
 ### Version checks (2026-11-04)
 
-- `quack update` asks `updates.url` for the latest version, then prints the command for this install, going by where the binary lives: `brew upgrade <formula>` under a `Cellar`, the package manager under `/usr/bin`, "build again" for `target/` and `.cargo/`, otherwise the install script. It changes nothing. Replacing the binary waits for signatures and notarization: `SHA256SUMS` comes from the same place as the binary, package-managed installs shouldn't be overwritten, Windows can't overwrite a running exe, and the bundle must move with the binary.
+- `quack update` asks `updates.url` for the latest version, then prints the command for this install, going by where the binary lives: `brew upgrade <formula>` under a `Cellar`, "build again" for `target/` and `.cargo/`, otherwise the install script (`{url}/download/install.sh` / `install.ps1`, passing `--plucked` / `-Plucked` when the active defaults bundle is plucked) for any `/latest` release endpoint — including `/usr/bin` `.deb`/`.rpm` installs, falling back to package-manager instructions for `/usr/bin` only when `updates.url` is not a `/latest` endpoint. It changes nothing. Replacing the binary waits for signatures and notarization: `SHA256SUMS` comes from the same place as the binary, package-managed installs shouldn't be overwritten without the installer, Windows can't overwrite a running exe, and the bundle must move with the binary.
 - `updates.check = true` does the same check at most once a day in the background and sends `Event::UpdateAvailable`, which the TUI and desktop GUI show (never on by default; the GUI also offers an on-demand **Check for updates** button via `Op::CheckUpdates` / `Event::UpdateCheckResult`). The last answer is kept in `checks.json` in the cache directory, so the notice returns on each start without another request. A failed check counts as a check and stays quiet.
 - The default `updates.url` is GitHub's `releases/latest`. quack reads the redirect's last path segment and doesn't follow it, so only `github.com` is contacted, with no API rate limit. A mirror can answer with the version as text instead. The URL is in `defaults/config.toml`, which `--plucked` leaves out, so plucked installs name no outside host: `quack update` there says to set `updates.url`.
 - `quack setup` asks once, naming the hosts, whether to turn on both checks (default no; the answer is saved, so it isn't asked again). `/setup` has a Checks tab, unless there are no URLs or `network.offline` is on, and `/config` and TOML work too. `network.offline` and policy hosts block the checks ([11](11-security.md#network-egress-policy)); an administrator can also lock `updates` or `catalog`.

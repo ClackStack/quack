@@ -732,7 +732,7 @@ mod tests {
         assert_eq!(m.selected_item().map(|i| i.label.as_str()), Some("/resume"));
         assert_eq!(
             m.on_key(key(KeyCode::Enter)),
-            ModalOutcome::Insert("/resume ".into())
+            ModalOutcome::Run("/resume".into())
         );
         assert_eq!(
             m.on_key(key(KeyCode::Esc)),

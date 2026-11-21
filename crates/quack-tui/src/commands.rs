@@ -341,6 +341,11 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("@", "Mention a file in the workspace; Tab completes"),
     ("Ctrl-P", "Command palette (/help)"),
     ("Shift-Tab", "Toggle Plan/Edit, keeping approvals"),
+    ("Ctrl-Y", "Toggle Ask/Allow approvals, keeping Plan/Edit"),
+    (
+        "Click mode pills",
+        "Toggle Plan/Edit or Ask/Allow in the status bar",
+    ),
     ("Tab (in modal)", "Switch tab"),
     ("Tab / Shift-Tab (hook setup)", "Move between fields"),
     ("Ctrl-S / Ctrl-E (hook setup)", "Save / Save and enable"),

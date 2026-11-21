@@ -49,7 +49,7 @@ This follows maki's approach: parse the command with **tree-sitter-bash** (Unix 
 - `git diff && rm -rf build` → `[git diff] [rm -rf build]`. **Every** sub-command must be allowed.
 - Pipelines, subshells, `$(…)`, backticks, `eval`, `bash -c "…"`, `Invoke-Expression`, and `iex` are analysed recursively where possible. Plan refuses commands it cannot classify as read-only. In Edit, opaque commands follow the approval policy and cannot match allow rules.
 - Redirections that write files (`>`, `>>`, `Out-File`, `Set-Content`) are treated as edits to those paths.
-- A built-in classifier checks known read-only commands and their arguments (`ls`, `cat`, `git status/diff/log`, `rg`, `Get-ChildItem`, `Get-Content`, …). Allow rules cannot make a mutating or unrecognized command eligible in Plan.
+- A built-in classifier checks known read-only commands and their arguments (`ls`, `cat`, `git status/diff/log/show/ls-tree/...` including `-C` and `--no-pager`, `rg`, `grep`, `find` including read-only `-exec`, `xargs` with read-only targets, `sed` without `-i`/`w`/`e`, `awk` without `system`/`getline`/pipes/redirections, `sort` without `-o`, `uniq`, `cut`, `tr`, `jq`, `diff`, `Get-ChildItem`, `Get-Content`, …). In Plan mode, any active OS sandbox is also tightened to a strict read-only policy (`writable: []`, `network: false`). Allow rules cannot make a mutating or unrecognized command eligible in Plan.
 - Parse failures cannot match allow rules; Plan refuses them, while Edit follows the approval policy.
 
 #### As implemented (2026-10-18, ahead of M3)
