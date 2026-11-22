@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use quack_protocol::ApprovalRequest;
-use quack_shell::{RunOptions, run};
+use quack_shell::{EXIT_DRAIN, RunOptions, run};
 use serde_json::{Value, json};
 
 use crate::paths;
@@ -327,6 +327,7 @@ impl Tool for Shell {
             let opts = RunOptions {
                 cwd: ctx.root.clone(),
                 timeout,
+                drain: EXIT_DRAIN,
                 cancel: ctx.cancel.clone(),
                 on_output: ctx.on_output.clone(),
                 sandbox: policy(&args, ctx),

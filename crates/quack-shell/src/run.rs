@@ -13,11 +13,19 @@ use crate::ShellKind;
 /// Output kept in memory per command; the rest is counted but dropped.
 const MAX_CAPTURE: usize = 4 * 1024 * 1024;
 
+/// Default post-exit drain: how long output from grandchildren still holding the
+/// pipes is waited for after the shell itself has exited.
+pub const EXIT_DRAIN: Duration = Duration::from_millis(200);
+
 #[derive(Debug)]
 pub struct RunOptions {
     pub cwd: PathBuf,
     pub timeout: Duration,
     pub cancel: CancellationToken,
+    /// How long to wait for more output once the shell has exited but grandchildren
+    /// still hold the pipes open (they are killed when this passes with nothing new).
+    /// [`EXIT_DRAIN`] unless a caller needs a wider margin.
+    pub drain: Duration,
     /// Receives output chunks as they arrive (for live display).
     pub on_output: Option<mpsc::UnboundedSender<String>>,
     /// Run inside the OS sandbox with this policy.
@@ -104,7 +112,7 @@ pub async fn run(shell: &ShellKind, script: &str, opts: RunOptions) -> std::io::
             break;
         }
         if status.is_some() && output_open {
-            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+            match tokio::time::timeout(opts.drain, rx.recv()).await {
                 Ok(Some(bytes)) => {
                     stash(opts.on_output.as_ref(), &mut captured, &mut dropped, &bytes);
                     continue;
@@ -233,6 +241,7 @@ mod tests {
         RunOptions {
             cwd: std::env::temp_dir(),
             timeout: Duration::from_millis(timeout_ms),
+            drain: EXIT_DRAIN,
             cancel: CancellationToken::new(),
             on_output: None,
             sandbox: None,
@@ -267,9 +276,13 @@ mod tests {
     async fn output_after_exit_reaches_the_live_callback() {
         let sh = ShellKind::detect("sh", None);
         let (tx, mut rx) = mpsc::unbounded_channel();
+        // A grandchild holds the pipe open and writes only after the shell has exited.
+        // The drain window is widened: on a loaded CI runner (macOS especially) fork and
+        // exec of the grandchild can take longer than the 200ms default, which would
+        // turn this code-path test into a race against machine speed.
         let mut o = opts(20_000);
         o.on_output = Some(tx);
-        // A grandchild holds the pipe open and writes only after the shell has exited.
+        o.drain = Duration::from_secs(10);
         let r = run(&sh, "(sleep 0.05; echo tail) & exit 0", o)
             .await
             .expect("runs");
