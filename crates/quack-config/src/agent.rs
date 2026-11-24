@@ -39,7 +39,7 @@ pub struct AgentFile {
     /// running the turn. Falls back to that model when the one named cannot load.
     #[serde(default)]
     pub model: String,
-    /// Model calls before the agent stops and reports what it has.
+    /// Model calls before the agent stops and reports what it has (defaults to 250; runaway guard).
     #[serde(default)]
     pub max_steps: Option<u32>,
     /// Optional reasoning effort override for this agent (`"none"`, `"low"`, `"medium"`, ...),
@@ -70,8 +70,13 @@ mod tests {
             let p = e.expect("entry").path();
             if p.extension().is_some_and(|x| x == "toml") {
                 let text = std::fs::read_to_string(&p).expect("read");
-                toml::from_str::<AgentFile>(&text)
+                let agent = toml::from_str::<AgentFile>(&text)
                     .unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+                match p.file_stem().and_then(|s| s.to_str()) {
+                    Some("explore") => assert_eq!(agent.max_steps, Some(250)),
+                    Some("general") => assert_eq!(agent.max_steps, Some(500)),
+                    _ => {}
+                }
             }
         }
     }

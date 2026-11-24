@@ -293,7 +293,7 @@ export const reference: Group[] = [
 			['tools', 'all', 'Tool names it may use'],
 			['read_only', 'false', 'Change nothing; may run in plan mode and in parallel'],
 			['model', 'the caller’s', '`small` or `<provider>/<model>`'],
-			['max_steps', 'none', 'Model calls before it reports']
+			['max_steps', '250', 'Model calls before it stops and reports (runaway guard; `explore` 250, `general` 500)']
 		]
 	}
 ];

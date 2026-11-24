@@ -645,7 +645,7 @@ and confirms the hook is active. Turning a hook off lists its id in `[hooks] dis
 | `tools` | all | Allowed tool names (e.g. `["read", "grep", "index"]`) |
 | `read_only` | `false` | Restrict agent to read-only tools; permits parallel runs |
 | `model` | caller model | Model override (`small` or `<provider>/<model>`) |
-| `max_steps` | none | Maximum execution steps before stopping |
+| `max_steps` | `250` | Maximum model calls before stopping (runaway guard; shipped `explore` = 250, `general` = 500) |
 
 ---
 

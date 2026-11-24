@@ -472,7 +472,7 @@ impl Engine {
                 images,
                 start,
             };
-            let history = turn::run(ctx, history, prompt).await;
+            let history = turn::run(ctx, history, prompt).await.history;
             let _ = done.send((turn, history)).await;
         });
     }

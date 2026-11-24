@@ -16,7 +16,7 @@ Optional fields, all described in `../schemas/agent.json`:
 | `tools` | every tool of the session | Internal tool names (`read`, `grep`, `shell`, `edit`, ...); `mcp` adds MCP tools. `task` and `ask_user` are never given |
 | `read_only` | `false` | Edits refused and only reading commands run, as in plan mode. Read-only agents run in plan mode, and several started in one reply run in parallel |
 | `model` | the model running the turn | `small` for `[model] small`, or `<provider>/<model>` |
-| `max_steps` | 50 | Model calls before it stops and reports |
+| `max_steps` | 250 | Model calls before it stops and reports (runaway guard) |
 
 Shipped: `explore` (read-only search, on the `small` model when set) and `general` (any
 self-contained change). Both are also compiled into the binary from these files, so they

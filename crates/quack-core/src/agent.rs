@@ -19,8 +19,8 @@ use crate::session;
 use crate::startup::Setup;
 use crate::turn::{self, TurnCtx};
 
-/// Model calls a sub-agent makes when its file sets no `max_steps`.
-const MAX_STEPS: usize = 50;
+/// Model calls a sub-agent makes when its file sets no `max_steps` (runaway guard).
+const MAX_STEPS: usize = 250;
 
 /// Edit tools, which read-only agents are not offered.
 const EDIT_TOOLS: &[&str] = &[
@@ -367,8 +367,14 @@ async fn start(parent: &TurnCtx, call_key: &str, req: TaskRequest) -> TaskReport
         images: Vec::new(),
         start: None,
     };
-    let history = turn::run(ctx, Vec::new(), prompt).await;
-    let report = report(&history, cancel.is_cancelled(), max_steps);
+    let outcome = turn::run(ctx, Vec::new(), prompt).await;
+    let report = report(
+        &outcome.history,
+        cancel.is_cancelled(),
+        max_steps,
+        outcome.steps,
+        outcome.step_limited,
+    );
     parent.emit(Event::AgentFinished {
         id,
         ok: report.ok,
@@ -378,11 +384,13 @@ async fn start(parent: &TurnCtx, call_key: &str, req: TaskRequest) -> TaskReport
 }
 
 /// The final reply, or why there is none and the last thing the agent said.
-fn report(history: &[Message], interrupted: bool, max_steps: usize) -> TaskReport {
-    let steps = history
-        .iter()
-        .filter(|m| matches!(m, Message::Assistant { .. }))
-        .count();
+fn report(
+    history: &[Message],
+    interrupted: bool,
+    max_steps: usize,
+    steps: usize,
+    step_limited: bool,
+) -> TaskReport {
     let summary = format!("{steps} step{}", if steps == 1 { "" } else { "s" });
     let last_text = history.iter().rev().find_map(|m| match m {
         Message::Assistant { content, .. } if !content.trim().is_empty() => Some(content.trim()),
@@ -404,7 +412,7 @@ fn report(history: &[Message], interrupted: bool, max_steps: usize) -> TaskRepor
     }
     let why = if interrupted {
         "It was interrupted.".to_owned()
-    } else if steps >= max_steps {
+    } else if step_limited || steps >= max_steps {
         format!("It stopped at its limit of {max_steps} steps.")
     } else {
         "It stopped without a final reply (see the warnings).".to_owned()
@@ -442,11 +450,11 @@ mod tests {
             },
             said("found it in a.rs:3"),
         ];
-        let r = report(&h, false, 5);
+        let r = report(&h, false, 5, 1, false);
         assert!(r.ok);
         assert_eq!(r.text, "found it in a.rs:3");
         assert_eq!(r.summary, "1 step");
-        let r = report(&h, true, 5);
+        let r = report(&h, true, 5, 1, false);
         assert!(!r.ok && r.text.starts_with("It was interrupted."));
     }
 
@@ -460,8 +468,14 @@ mod tests {
                 images: Vec::new(),
             },
         ];
-        let r = report(&h, false, 1);
+        let r = report(&h, false, 1, 1, true);
         assert!(!r.ok);
         assert!(r.text.contains("limit of 1 steps") && r.text.ends_with("looking in src"));
+
+        // Even after compaction shrinks `history`, `step_limited` still reports the step limit.
+        let r = report(&h, false, 250, 250, true);
+        assert!(!r.ok);
+        assert_eq!(r.summary, "250 steps · stopped");
+        assert!(r.text.contains("limit of 250 steps") && r.text.ends_with("looking in src"));
     }
 }

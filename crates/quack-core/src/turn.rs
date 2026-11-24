@@ -636,8 +636,17 @@ enum StepEnd {
 /// once a reply has started).
 const MAX_DROPPED_RETRIES: u32 = 2;
 
-/// Run the turn; returns the updated history.
-pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt) -> Vec<Message> {
+/// Result of running one turn (or sub-agent turn).
+pub(crate) struct TurnOutcome {
+    pub history: Vec<Message>,
+    /// Completed assistant steps produced during this turn (unaffected by compaction).
+    pub steps: usize,
+    /// Whether the turn ended because it stopped at `max_steps`.
+    pub step_limited: bool,
+}
+
+/// Run the turn; returns the updated history and outcome metadata.
+pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt) -> TurnOutcome {
     ctx.emit(Event::TurnStarted { turn: ctx.turn });
     let mut extra = match prompt.start {
         Some(start) => start.await.unwrap_or_else(|e| {
@@ -671,7 +680,11 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
             reason: format!("blocked by hook `{id}`"),
         });
         ctx.turn_end(json!({ "turn": ctx.turn.0, "outcome": "blocked" }));
-        return history;
+        return TurnOutcome {
+            history,
+            steps: 0,
+            step_limited: false,
+        };
     }
     extra.extend(hooked.context);
     // Hook context rides on the user message, after the cached prefix, and is kept with
@@ -692,7 +705,11 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
             reason: "blocked by Secret Shield".into(),
         });
         ctx.turn_end(json!({ "turn": ctx.turn.0, "outcome": "blocked" }));
-        return history;
+        return TurnOutcome {
+            history,
+            steps: 0,
+            step_limited: false,
+        };
     }
     let ask_id = ctx.key(&format!("egress-user-{}", ctx.turn.0));
     let content = match ctx.guard_egress("user_prompt", content, &ask_id).await {
@@ -708,7 +725,11 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                 reason: "blocked by Secret Shield".into(),
             });
             ctx.turn_end(json!({ "turn": ctx.turn.0, "outcome": "blocked" }));
-            return history;
+            return TurnOutcome {
+                history,
+                steps: 0,
+                step_limited: false,
+            };
         }
     };
     ctx.push(
@@ -724,6 +745,8 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
     let mut overflowed = false;
     let mut dropped = 0;
     let mut truncated = 0;
+    let mut completed_steps = 0usize;
+    let mut step_limited = false;
 
     let end = 'steps: {
         let mut steps = 0usize;
@@ -732,10 +755,22 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                 match continue_at_limit(&ctx).await {
                     Continue::Proceed => steps = 0,
                     Continue::Stop => {
-                        ctx.error(EngineErrorKind::Internal, format!(
-                            "Stopped after {} model calls · increase agent.max_steps or send a message to continue.",
-                            ctx.max_steps
-                        ));
+                        step_limited = true;
+                        let msg = match ctx.agent_type.as_deref() {
+                            Some(agent) => format!(
+                                "Stopped after {} model calls · increase max_steps in agents.d/{agent}.toml.",
+                                ctx.max_steps
+                            ),
+                            None if ctx.agent.is_some() => format!(
+                                "Stopped after {} model calls · increase max_steps in agents.d.",
+                                ctx.max_steps
+                            ),
+                            None => format!(
+                                "Stopped after {} model calls · increase agent.max_steps or send a message to continue.",
+                                ctx.max_steps
+                            ),
+                        };
+                        ctx.error(EngineErrorKind::Internal, msg);
                         break 'steps StepEnd::Aborted("step limit reached".into());
                     }
                     Continue::Interrupted => break 'steps StepEnd::Aborted("interrupted".into()),
@@ -848,6 +883,7 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                 continue;
             }
             ctx.push(&mut history, msg);
+            completed_steps += 1;
             if !reported {
                 // Servers that do not report usage still get a live context figure.
                 ctx.context_estimate(&history);
@@ -894,7 +930,11 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
         }
         StepEnd::Truncated => unreachable!("truncated replies are handled inside the step loop"),
     }
-    history
+    TurnOutcome {
+        history,
+        steps: completed_steps,
+        step_limited,
+    }
 }
 
 /// Run one step's tool calls in order, putting each result into the history as it

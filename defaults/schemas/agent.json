@@ -20,7 +20,7 @@
     },
     "max_steps": {
       "default": null,
-      "description": "Model calls before the agent stops and reports what it has.",
+      "description": "Model calls before the agent stops and reports what it has (defaults to 250; runaway guard).",
       "format": "uint32",
       "minimum": 0,
       "type": [

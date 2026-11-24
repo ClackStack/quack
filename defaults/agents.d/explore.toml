@@ -6,7 +6,7 @@ tools = ["read", "list_dir", "glob", "grep", "index", "lsp", "shell"]
 model = "small"
 # Keep exploration light even when the parent session is set to high/xhigh/max thinking.
 reasoning_effort = "low"
-max_steps = 40
+max_steps = 250
 prompt = """
 You are a sub-agent that explores a codebase for another agent. You cannot change files; \
 only commands that read run. Stay within the workspace folder and its sub-folders; do not \

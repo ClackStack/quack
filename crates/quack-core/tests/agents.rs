@@ -614,3 +614,83 @@ async fn explore_agent_shares_cache_key_and_applies_reasoning_effort() {
         );
     }
 }
+
+#[tokio::test]
+async fn subagent_step_limit_stops_and_reports_agent_config_hint() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("SUBAGENT explore"))
+        .respond_with(sse_call(
+            "g1",
+            "grep",
+            serde_json::json!({"pattern": "needle"}),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("It stopped at its limit of 2 steps."))
+        .respond_with(sse_text("Got the partial report."))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse_call(
+            "t1",
+            "task",
+            serde_json::json!({"agent": "explore", "prompt": "keep searching"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("user").join("agents.d");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("explore.toml"),
+        "description = \"Finds things\"\n\
+         read_only = true\n\
+         max_steps = 2\n\
+         tools = [\"read\", \"grep\"]\n\
+         prompt = \"SUBAGENT explore\"\n",
+    )
+    .expect("explore");
+
+    let loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    submit(&engine, "search deeply").await;
+    let events = run_approving(&mut engine).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::StepLimitReached { .. })),
+        "sub-agent step limits should not pause the parent turn"
+    );
+    let agent_err = events
+        .iter()
+        .find_map(|e| match e {
+            Event::Agent { id, inner } if id == "explore-1" => match inner.as_ref() {
+                Event::Error { error } => Some(error.message.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("sub-agent step-limit error");
+    assert!(
+        agent_err.contains("Stopped after 2 model calls")
+            && agent_err.contains("agents.d/explore.toml"),
+        "{agent_err}"
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::AgentFinished { id, ok: false, summary }
+            if id == "explore-1" && summary == "2 steps · stopped"
+    )));
+    let sub_requests = bodies(&server)
+        .await
+        .into_iter()
+        .filter(|b| b.contains("SUBAGENT explore"))
+        .count();
+    assert_eq!(sub_requests, 2);
+    engine.shutdown().await;
+}
