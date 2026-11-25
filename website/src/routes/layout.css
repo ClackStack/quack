@@ -98,6 +98,15 @@
 		text-underline-offset: 0.2em;
 		text-decoration-thickness: 2px;
 	}
+	/* Tailwind v4 preflight resets buttons to the default cursor; use a pointer for clickable controls. */
+	a[href],
+	button:not(:disabled):not([aria-disabled='true']),
+	[role='button']:not(:disabled):not([aria-disabled='true']),
+	[role='tab']:not(:disabled):not([aria-disabled='true']),
+	[role='switch']:not(:disabled):not([aria-disabled='true']),
+	summary {
+		cursor: pointer;
+	}
 	h1,
 	h2,
 	h3 {

@@ -660,7 +660,11 @@ impl Engine {
             current: current.clone(),
             provider: provider.to_owned(),
             model: model.to_owned(),
-            prompt: prompt.trim().chars().take(2_000).collect(),
+            prompt: prompt
+                .trim()
+                .chars()
+                .take(title::MAX_PROMPT_CHARS)
+                .collect(),
         };
         let session = self.session.id.clone();
         self.title_tasks

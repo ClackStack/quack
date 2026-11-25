@@ -217,7 +217,7 @@ pub struct Engine {
     log: Option<SharedLog>,
     turns: u32,
     title: Option<String>,
-    title_tasks: JoinSet<(SessionId, Result<String, String>)>,
+    title_tasks: JoinSet<(SessionId, Result<String, title::TitleError>)>,
     switch_tx: Option<mpsc::Sender<(Role, Result<Setup, String>)>>,
     /// A mode set before startup finished, applied once a model is ready.
     pending_mode: Option<PermissionMode>,
@@ -466,12 +466,15 @@ impl Engine {
                     {
                         match title {
                             Ok(title) => self.save_title(title),
-                            Err(why) => {
+                            Err(title::TitleError::Config(why)) => {
                                 tracing::warn!(model = %self.config.settings.model.small, "no session title: {why}");
                                 self.warn(format!(
                                     "model.small ({}) gave no session title: {why}",
                                     self.config.settings.model.small.trim()
                                 ));
+                            }
+                            Err(title::TitleError::Generation(why)) => {
+                                tracing::warn!(model = %self.config.settings.model.small, "no session title: {why}");
                             }
                         }
                     }

@@ -468,3 +468,88 @@ async fn openai_chat_preserves_tool_extra_content_via_sealed() {
         "sig-turn-1"
     );
 }
+
+#[cfg(feature = "proto-anthropic")]
+#[tokio::test]
+async fn utility_request_strips_provider_thinking_while_keeping_fallbacks() {
+    let server = MockServer::start().await;
+    let done = [
+        r#"{"type":"message_start","message":{"usage":{"input_tokens":5}}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Short title"}}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}"#,
+        r#"{"type":"message_stop"}"#,
+    ];
+    let body: String = done.iter().map(|e| format!("data: {e}\n\n")).collect();
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let file: ProviderFile = toml::from_str(&format!(
+        "base_url = \"{}\"\napi = \"anthropic-messages\"\n\
+         extra_body = {{ thinking = {{ type = \"adaptive\", display = \"summarized\" }} }}\n",
+        server.uri()
+    ))
+    .expect("provider toml");
+    let p =
+        Provider::new("anthropic", file, &NetworkSettings::default(), &|_| None).expect("provider");
+
+    let mut req = request();
+    req.utility = true;
+    req.reasoning_effort = Some("low".into());
+    req.extra_body
+        .insert("fallbacks".into(), serde_json::json!("default"));
+    let mut rx = p.stream(req, ReasoningFormat::Auto, CancellationToken::new());
+    while rx.recv().await.is_some() {}
+
+    let sent = &server.received_requests().await.expect("requests")[0];
+    let sent: serde_json::Value = serde_json::from_slice(&sent.body).expect("json");
+    assert!(
+        sent.get("thinking").is_none(),
+        "provider thinking must be stripped on utility requests: {sent}"
+    );
+    assert_eq!(sent["fallbacks"], "default");
+    assert_eq!(sent["output_config"]["effort"], "low");
+}
+
+#[cfg(feature = "proto-openai-responses")]
+#[tokio::test]
+async fn utility_request_strips_provider_reasoning_summary_and_context() {
+    let server = MockServer::start().await;
+    let done = [
+        r#"{"type":"response.output_text.delta","output_index":0,"delta":"Short title"}"#,
+        r#"{"type":"response.completed","response":{}}"#,
+    ];
+    let body: String = done.iter().map(|e| format!("data: {e}\n\n")).collect();
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let file: ProviderFile = toml::from_str(&format!(
+        "base_url = \"{}\"\napi = \"openai-responses\"\n\
+         extra_body = {{ reasoning = {{ summary = \"auto\", context = \"all_turns\" }} }}\n",
+        server.uri()
+    ))
+    .expect("provider toml");
+    let p =
+        Provider::new("openai", file, &NetworkSettings::default(), &|_| None).expect("provider");
+
+    let mut req = request();
+    req.utility = true;
+    req.reasoning_effort = Some("low".into());
+    let mut rx = p.stream(req, ReasoningFormat::Auto, CancellationToken::new());
+    while rx.recv().await.is_some() {}
+
+    let sent = &server.received_requests().await.expect("requests")[0];
+    let sent: serde_json::Value = serde_json::from_slice(&sent.body).expect("json");
+    assert_eq!(sent["reasoning"], serde_json::json!({ "effort": "low" }));
+}

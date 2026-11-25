@@ -795,6 +795,9 @@ impl Provider {
                 req.extra_body = m;
             }
         }
+        if req.utility {
+            crate::types::strip_utility_extra(&mut req.extra_body);
+        }
         let (path, body, accept) = match self.api {
             Api::OpenAiChat => (
                 openai_chat::CHAT_PATH.to_owned(),

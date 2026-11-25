@@ -35,6 +35,9 @@ pub struct ChatRequest {
     pub cache_key: Option<String>,
     /// Tool calling mode (e.g. grammar / guided decoding).
     pub tool_mode: Option<quack_config::provider::ToolCallMode>,
+    /// Lightweight utility request (session title, text compaction): strip thinking and
+    /// reasoning-summary overhead from provider and model `extra_body`.
+    pub utility: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,6 +173,29 @@ pub(crate) fn merge(
     }
 }
 
+/// Strip thinking and reasoning-summary overhead from merged provider/model `extra_body`
+/// for lightweight utility calls (session titles, text compaction), preserving unrelated
+/// options such as `fallbacks`.
+pub fn strip_utility_extra(extra: &mut serde_json::Map<String, serde_json::Value>) {
+    if let Some(serde_json::Value::Object(r)) = extra.get_mut("reasoning") {
+        r.remove("summary");
+        r.remove("context");
+        r.remove("effort");
+        if r.is_empty() {
+            extra.remove("reasoning");
+        }
+    }
+    extra.remove("thinking");
+    extra.remove("reasoning_effort");
+    extra.remove("think");
+    if let Some(serde_json::Value::Object(k)) = extra.get_mut("chat_template_kwargs") {
+        k.remove("enable_thinking");
+        if k.is_empty() {
+            extra.remove("chat_template_kwargs");
+        }
+    }
+}
+
 /// A normalized streaming event.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
@@ -280,4 +306,35 @@ pub struct DiscoveredModel {
     pub max_output: Option<u32>,
     /// Prices, when the endpoint lists them.
     pub cost: Option<Cost>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn strip_utility_extra_drops_thinking_and_keeps_unrelated_fields() {
+        let mut extra: serde_json::Map<String, serde_json::Value> = serde_json::from_value(json!({
+            "reasoning": { "summary": "auto", "context": "all_turns", "effort": "high" },
+            "thinking": { "type": "adaptive", "display": "summarized" },
+            "reasoning_effort": "max",
+            "think": true,
+            "chat_template_kwargs": { "enable_thinking": true, "add_generation_prompt": true },
+            "fallbacks": "default",
+        }))
+        .expect("extra map");
+
+        strip_utility_extra(&mut extra);
+
+        assert!(!extra.contains_key("reasoning"));
+        assert!(!extra.contains_key("thinking"));
+        assert!(!extra.contains_key("reasoning_effort"));
+        assert!(!extra.contains_key("think"));
+        assert_eq!(
+            extra["chat_template_kwargs"],
+            json!({ "add_generation_prompt": true })
+        );
+        assert_eq!(extra["fallbacks"], "default");
+    }
 }

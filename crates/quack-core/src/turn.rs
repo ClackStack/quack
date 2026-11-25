@@ -1212,6 +1212,7 @@ pub(crate) fn request(s: &Setup, mut messages: Vec<Message>, tools: bool) -> Cha
             .unwrap_or_default(),
         cache_key: None,
         tool_mode: Some(s.model.tool_calling.mode),
+        utility: false,
     }
 }
 
@@ -1231,17 +1232,12 @@ pub(crate) fn lowest_effort(model: &quack_config::provider::ModelEntry) -> Optio
 }
 
 /// A lightweight tool-free request (title generation, text compaction) with minimal
-/// reasoning effort and no reasoning summary/context overhead.
+/// reasoning effort and no reasoning summary/context or thinking-config overhead.
 pub(crate) fn utility_request(s: &Setup, messages: Vec<Message>) -> ChatRequest {
     let mut req = request(s, messages, false);
+    req.utility = true;
     req.reasoning_effort = lowest_effort(&s.model);
-    if let Some(Value::Object(r)) = req.extra_body.get_mut("reasoning") {
-        r.remove("summary");
-        r.remove("context");
-        if r.is_empty() {
-            req.extra_body.remove("reasoning");
-        }
-    }
+    quack_providers::strip_utility_extra(&mut req.extra_body);
     req
 }
 

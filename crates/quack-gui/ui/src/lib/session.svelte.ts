@@ -1039,9 +1039,25 @@ export class Session {
 				};
 				if (ev.update_available) this.updateDismissed = false;
 				break;
-			case 'warning':
-				this.#sealStreams();
-				this.turnPending = false;
+			case 'warning': {
+				const warningItem: Item = {
+					kind: 'system',
+					id: nextId(),
+					tone: 'warning',
+					text: ev.message
+				};
+				const last = this.items[this.items.length - 1];
+				const hasOpenStream =
+					this.streaming &&
+					!!last &&
+					(last.kind === 'assistant' || last.kind === 'reasoning') &&
+					last.streaming;
+				if (!hasOpenStream) {
+					this.#sealStreams();
+				}
+				if (!this.streaming) {
+					this.turnPending = false;
+				}
 				this.#pendingSettingSaves = 0;
 				this.settingSaving = false;
 				this.hookSaving = false;
@@ -1062,8 +1078,13 @@ export class Session {
 				if (this.issue?.kind !== 'error') this.issue = { kind: 'warning', message: ev.message };
 				this.switching = false;
 				this.setupWorking = false;
-				this.items.push({ kind: 'system', id: nextId(), tone: 'warning', text: ev.message });
+				if (hasOpenStream) {
+					this.items.splice(this.items.length - 1, 0, warningItem);
+				} else {
+					this.items.push(warningItem);
+				}
 				break;
+			}
 			case 'error': {
 				const wasMcpSaving = this.mcpSaving;
 				const wasHookSaving = this.hookSaving;

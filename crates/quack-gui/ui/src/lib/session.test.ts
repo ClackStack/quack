@@ -484,10 +484,27 @@ describe('field notes: skills, stats and specimens', () => {
 		});
 		expect(session.issue).toBeNull();
 
-		// Error stays more severe than subsequent turn_aborted and clears via dismissIssue().
+		// A background warning mid-stream keeps the open assistant message unsplit and streaming.
 		session.onEvent({ event: 'turn_started', turn: 2 });
+		session.onEvent({ event: 'assistant_delta', text: 'Hello ' });
+		session.onEvent({ event: 'warning', message: 'Background note' });
+		session.onEvent({ event: 'assistant_delta', text: 'world!' });
+		const assistantItems = session.items.filter((i) => i.kind === 'assistant');
+		expect(assistantItems.at(-1)).toMatchObject({ text: 'Hello world!', streaming: true });
+		session.onEvent({
+			event: 'turn_complete',
+			turn: 2,
+			usage: { prompt_tokens: 60, completion_tokens: 12 }
+		});
+		expect(session.items.filter((i) => i.kind === 'assistant').at(-1)).toMatchObject({
+			text: 'Hello world!',
+			streaming: false
+		});
+
+		// Error stays more severe than subsequent turn_aborted and clears via dismissIssue().
+		session.onEvent({ event: 'turn_started', turn: 3 });
 		session.onEvent({ event: 'error', error: { kind: 'provider', message: 'Quota exceeded' } });
-		session.onEvent({ event: 'turn_aborted', turn: 2, reason: 'Quota exceeded' });
+		session.onEvent({ event: 'turn_aborted', turn: 3, reason: 'Quota exceeded' });
 		expect(session.issue).toEqual({ kind: 'error', message: 'Quota exceeded' });
 		session.dismissIssue();
 		expect(session.issue).toBeNull();

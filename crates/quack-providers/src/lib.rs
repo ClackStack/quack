@@ -33,5 +33,5 @@ pub use provider::{Provider, http_client, http_client_observed, supports};
 pub use reqwest;
 pub use types::{
     ChatRequest, DiscoveredModel, FinishReason, Message, ResponseBuilder, Sealed, StreamEvent,
-    ToolCall, ToolSpec, fingerprint, unseal,
+    ToolCall, ToolSpec, fingerprint, strip_utility_extra, unseal,
 };

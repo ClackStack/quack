@@ -186,7 +186,7 @@ async fn small_model_title_survives_reasoning_and_wrapping() {
             r#""model":"small""#,
         ))
         .and(wiremock::matchers::body_string_contains(
-            r#""max_tokens":1024"#,
+            r#""max_tokens":4096"#,
         ))
         .respond_with(common::sse_raw(&[
             serde_json::json!({"choices":[{"delta":{"reasoning_content":"The user wants the login form fixed."}}]}).to_string(),
@@ -220,8 +220,92 @@ async fn small_model_title_survives_reasoning_and_wrapping() {
     engine.shutdown().await;
 }
 
-/// A small model that can't give a title says why instead of failing silently, and the
-/// first line of the prompt stays the title.
+/// If a reasoning small model still runs out of tokens before emitting a title, quack
+/// keeps the shortened first-line fallback quietly instead of warning mid-turn, and caps
+/// the user prompt excerpt sent for titling.
+#[tokio::test]
+async fn small_model_title_length_exhaustion_falls_back_quietly() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(wiremock::matchers::body_string_contains(
+            r#""model":"small""#,
+        ))
+        .respond_with(common::sse_raw(&[
+            serde_json::json!({"choices":[{"delta":{"reasoning_content":"Thinking deeply about this request..."}}]}).to_string(),
+            serde_json::json!({"choices":[{"delta":{},"finish_reason":"length"}]}).to_string(),
+        ]))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(wiremock::matchers::body_string_contains(
+            r#""model":"tiny""#,
+        ))
+        .respond_with(sse_text("Sure."))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut loaded = workspace(tmp.path(), &server.uri(), r#"["tiny", "small"]"#, "");
+    loaded.settings.model.small = "mock/small".into();
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    let long_prompt = format!("Fix login timeout bug\n\n{}", "details ".repeat(200));
+    let mut seen = turn(&mut engine, &long_prompt).await;
+
+    // Wait for the background title request to reach the mock server and settle.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let reqs = server.received_requests().await.expect("requests");
+        if reqs.len() >= 2 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for title request"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    engine.submit(Op::ListSessions).await;
+    let sessions = loop {
+        let ev = tokio::time::timeout(Duration::from_secs(10), engine.events.recv())
+            .await
+            .expect("event within 10s")
+            .expect("channel open");
+        if let Event::SessionList { sessions } = &ev {
+            let list = sessions.clone();
+            seen.push(ev);
+            break list;
+        }
+        seen.push(ev);
+    };
+    assert_eq!(sessions[0].title, "Fix login timeout bug");
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, Event::Warning { message } if message.contains("session title"))),
+        "generation exhaustion should not emit a user-facing warning: {seen:?}"
+    );
+    let title_req = server
+        .received_requests()
+        .await
+        .expect("requests")
+        .into_iter()
+        .find(|r| String::from_utf8_lossy(&r.body).contains(r#""model":"small""#))
+        .expect("title request");
+    let body: serde_json::Value = serde_json::from_slice(&title_req.body).expect("json");
+    let user_text = body["messages"][1]["content"].as_str().expect("user text");
+    assert!(
+        user_text.chars().count() <= 800,
+        "prompt excerpt too long: {}",
+        user_text.chars().count()
+    );
+    engine.shutdown().await;
+}
+
+/// A misconfigured `model.small` (e.g. unknown provider or rejected API key) still warns
+/// so the user knows their setting is broken, while keeping the first line as the title.
 #[tokio::test]
 async fn small_model_without_a_title_warns() {
     let server = MockServer::start().await;
