@@ -23,9 +23,10 @@ mod chrome;
 mod overlays;
 mod transcript;
 
+pub(crate) use chrome::plan_mark;
 use chrome::{
     draw_attachments, draw_header, draw_input, draw_panel, draw_plan, draw_plan_list, draw_status,
-    input_width, plan_mark, plan_open, welcome,
+    input_width, plan_open, welcome,
 };
 pub(crate) use overlays::key_hints;
 use overlays::{choices, draw_approval, draw_choices, draw_popup, draw_prompt};
@@ -40,6 +41,8 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App) {
     // The sidebar's startup section replaces the panel: one place shows the diagnostics,
     // so they never appear and vanish a moment later.
     let startup_sidebar = sidebar.is_some() && app.startup_status_visible();
+    let sidebar_view = sidebar.map(|area| crate::sidebar::build(app, area));
+    let sidebar_plan = sidebar_view.as_ref().is_some_and(|s| s.shows_plan);
     // The question or plan review bar takes rows from the transcript, keeping a few; the
     // startup panel gives way to it.
     let choices = choices(app, usize::from(main.width).saturating_sub(2));
@@ -63,6 +66,8 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App) {
         u16::try_from(app.plan.len() + 1)
             .unwrap_or(u16::MAX)
             .min(cap)
+    } else if sidebar_plan {
+        0
     } else {
         u16::from(plan_open(app))
     };
@@ -115,8 +120,8 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App) {
         sidebar.is_some() && !startup_sidebar,
         startup_sidebar,
     );
-    if let Some(area) = sidebar {
-        crate::sidebar::draw(f, app, area);
+    if let (Some(area), Some(view)) = (sidebar, sidebar_view) {
+        view.draw(f, app, area);
     }
     draw_popup(f, app, transcript);
     if let Some(c) = choices {
@@ -779,6 +784,197 @@ mod tests {
         assert!(
             s.contains("explore · 2 steps") && s.contains("fix the parser and add a test"),
             "{s}"
+        );
+    }
+
+    #[test]
+    fn sidebar_shows_plan_steps_and_progress_and_follows_updates() {
+        let mut app = App::new(test_info());
+        app.info.model = Some("charm/qwen3.8-flash".into());
+        app.info.profile = "generic".into();
+        started(&mut app);
+        app.transcript.push(Entry::User("fix the parser".into()));
+        app.transcript.push(Entry::Assistant(
+            "I found the failing case and am checking the parser.".into(),
+        ));
+        app.on_engine(Event::SessionTitle {
+            title: Some("Fix the parser".into()),
+        });
+        app.on_engine(Event::ContextUpdate {
+            used: 60_000,
+            budget: 88_400,
+            window: Some(104_000),
+            cache_hit_tokens: None,
+            threshold: Some(83_200),
+        });
+        app.on_engine(Event::Speed {
+            ttft_ms: 120,
+            tokens_per_sec: Some(48.0),
+        });
+        assert!(!render(&app, 140, 24).contains("Plan"));
+
+        app.take_dirty();
+        app.on_engine(Event::Plan {
+            checklist: "[x] read the parser\n[~] cache the token table\n[ ] run the benchmarks"
+                .into(),
+        });
+        assert!(app.take_dirty(), "a plan update must redraw the sidebar");
+        let s = render(&app, 140, 24);
+        for text in [
+            "Plan · 1/3 (33%)",
+            "✓ read the parser",
+            "▶ cache the token table",
+            "· run the benchmarks",
+        ] {
+            assert!(s.contains(text), "missing {text}: {s}");
+        }
+        assert!(
+            !s.contains("  plan  "),
+            "one-line plan strip yields to the sidebar: {s}"
+        );
+        insta::assert_snapshot!("sidebar_plan_140x24", s);
+
+        // Resizing narrower restores the one-line plan strip above the input.
+        let narrow = render(&app, 100, 24);
+        assert!(narrow.contains("  plan  "), "{narrow}");
+        assert!(narrow.contains("cache the token table"), "{narrow}");
+
+        // `/todo` still expands the full checklist above the input when asked.
+        app.execute("/todo");
+        let expanded = render(&app, 140, 24);
+        assert!(expanded.contains("  plan  "), "{expanded}");
+        app.execute("/todo");
+        assert!(!render(&app, 140, 24).contains("  plan  "));
+
+        // Completed plans stay visible in the sidebar at 100%.
+        app.on_engine(Event::Plan {
+            checklist: "[x] read the parser\n[x] cache the token table\n[x] run the benchmarks"
+                .into(),
+        });
+        let done = render(&app, 140, 24);
+        assert!(
+            done.contains("Plan · 3/3 (100%)") && done.contains("✓ run the benchmarks"),
+            "{done}"
+        );
+
+        // Clearing the plan removes the section.
+        app.on_engine(Event::Plan {
+            checklist: String::new(),
+        });
+        assert!(!render(&app, 140, 24).contains("Plan"));
+
+        // Starting a new session clears any active plan immediately.
+        app.on_engine(Event::Plan {
+            checklist: "[~] step one".into(),
+        });
+        assert!(render(&app, 140, 24).contains("Plan · 0/1 (0%)"));
+        app.execute("/new");
+        assert!(!render(&app, 140, 24).contains("Plan"));
+    }
+
+    #[test]
+    fn sidebar_plan_wraps_windows_long_lists_and_falls_back_when_crowded() {
+        use quack_protocol::CallId;
+        let mut app = App::new(test_info());
+        app.info.model = Some("charm/qwen3.8-flash".into());
+        app.info.profile = "generic".into();
+        started(&mut app);
+        app.transcript.push(Entry::User("fix the parser".into()));
+        app.on_engine(Event::SessionTitle {
+            title: Some("Fix the parser".into()),
+        });
+        app.on_engine(Event::ContextUpdate {
+            used: 60_000,
+            budget: 88_400,
+            window: Some(104_000),
+            cache_hit_tokens: None,
+            threshold: Some(83_200),
+        });
+        app.on_engine(Event::Speed {
+            ttft_ms: 120,
+            tokens_per_sec: Some(48.0),
+        });
+
+        // With vertical room, a long step wraps onto two indented lines instead of truncating.
+        app.on_engine(Event::Plan {
+            checklist:
+                "[x] inspect lexer\n[~] update token table and keep cache aligned\n[ ] run suite"
+                    .into(),
+        });
+        let tall = render(&app, 140, 32);
+        assert!(
+            tall.contains("update token table and keep") && tall.contains("cache aligned"),
+            "long step wraps cleanly when room allows: {tall}"
+        );
+
+        // A long plan at 24 rows keeps Context intact and windows around the active step.
+        app.on_engine(Event::Plan {
+            checklist: [
+                "[x] step one",
+                "[x] step two",
+                "[x] step three",
+                "[~] step four active",
+                "[ ] step five",
+                "[ ] step six",
+                "[ ] step seven",
+                "[ ] step eight",
+            ]
+            .join("\n"),
+        });
+        let windowed = render(&app, 140, 24);
+        assert!(
+            windowed.contains("48 tokens/s")
+                && windowed.contains("Plan · 3/8 (37%)")
+                && windowed.contains("▶ step four active")
+                && windowed.contains("+3 earlier · +2 more")
+                && !windowed.contains("  plan  "),
+            "{windowed}"
+        );
+        insta::assert_snapshot!("sidebar_plan_windowed_140x24", windowed);
+
+        // ASCII mode and NO_COLOR use ASCII marks, separator and meter.
+        app.info.ui.ascii = true;
+        app.glyphs = crate::theme::Glyphs::new(true);
+        app.theme = crate::theme::Theme::resolve("dark", true);
+        let ascii = render(&app, 140, 24);
+        assert!(
+            ascii.contains("Plan - 3/8 (37%)")
+                && ascii.contains("[~] step four active")
+                && ascii.contains("+3 earlier, +2 more")
+                && ascii.contains("############--------------------"),
+            "{ascii}"
+        );
+
+        // With one sub-agent on a 24-row screen (3 rows left), the sidebar uses its compact
+        // heading meter + active step row; with two sub-agents it yields to the main strip.
+        app.info.ui.ascii = false;
+        app.glyphs = crate::theme::Glyphs::new(false);
+        app.theme = crate::theme::Theme::resolve("dark", false);
+        app.on_engine(Event::AgentStarted {
+            id: "explore-1".into(),
+            agent: "explore".into(),
+            description: "search for explore-1".into(),
+            call_id: CallId("t-explore-1".into()),
+            model: "mock/small".into(),
+        });
+        let compact = render(&app, 140, 24);
+        assert!(
+            compact.contains("Plan ▰▰▰▱▱▱▱▱ 3/8")
+                && compact.contains("▶ step four active")
+                && !compact.contains("  plan  "),
+            "compact plan row when 3 rows remain: {compact}"
+        );
+        app.on_engine(Event::AgentStarted {
+            id: "explore-2".into(),
+            agent: "explore".into(),
+            description: "search for explore-2".into(),
+            call_id: CallId("t-explore-2".into()),
+            model: "mock/small".into(),
+        });
+        let crowded = render(&app, 140, 24);
+        assert!(
+            !crowded.contains("Plan ") && crowded.contains("  plan  "),
+            "fallback to main-pane strip when sidebar has no room: {crowded}"
         );
     }
 

@@ -36,6 +36,8 @@ pub(crate) struct Stats {
     history: VecDeque<RequestStat>,
     /// The newest history entry is still waiting for its `Speed`.
     timing: bool,
+    /// Cached prompt tokens reported by the most recent request, when the provider reports them.
+    last_cache_hit: Option<u32>,
 }
 
 #[derive(Debug, Default)]
@@ -70,6 +72,7 @@ impl Default for Stats {
             pruned: 0,
             history: VecDeque::new(),
             timing: false,
+            last_cache_hit: None,
         }
     }
 }
@@ -121,6 +124,7 @@ impl Stats {
         });
         self.prompt += u64::from(u.prompt_tokens);
         self.completion += u64::from(u.completion_tokens);
+        self.last_cache_hit = u.cached_prompt_tokens;
         if let Some(c) = u.cached_prompt_tokens {
             self.cached += u64::from(c);
             self.cache_reported += 1;
@@ -155,6 +159,10 @@ impl Stats {
 
     pub(crate) fn waited(&mut self, d: Duration) {
         self.approval += d;
+    }
+
+    pub(crate) fn last_cache_hit(&self) -> Option<u32> {
+        self.last_cache_hit
     }
 
     pub(crate) fn observe(&mut self, e: &Event) {

@@ -7,6 +7,11 @@ base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 catalog = "alibaba"
 api_key = { env = "DASHSCOPE_API_KEY" }
 
+# DashScope's OpenAI-compatible route supports explicit `cache_control: {"type":"ephemeral"}`
+# breakpoints on content blocks for deterministic prefix caching across Qwen3 models.
+[prompt_cache]
+cache_control = "breakpoints"
+
 [[models]]
 id = "qwen3.8-max"
 alias = "qwen-max"

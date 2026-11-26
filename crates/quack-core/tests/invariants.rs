@@ -746,7 +746,10 @@ async fn resume_reproduces_the_request_exactly() {
 
     std::fs::remove_dir_all(root.join("data")).expect("remove");
     copy_dir(&root.join("saved"), &root.join("data"));
-    std::fs::remove_file(root.join("ws").join("notes.txt")).expect("reset workspace");
+    // Even if workspace files changed before resuming (notes.txt stays on disk and a new
+    // top-level file appears), `/resume` must replay the session's pinned `<context>` so
+    // turn 0 stays byte-identical and preserves the prompt cache.
+    std::fs::write(root.join("ws").join("added_after.txt"), "new\n").expect("write");
     let mut resumed = spawn(Resume::Latest);
     turn(&mut resumed, "third question").await;
     resumed.shutdown().await;

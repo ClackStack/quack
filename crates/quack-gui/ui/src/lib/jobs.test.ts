@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { describeJob, parsePlanSteps, sortJobsForOverview, summarizeJobs } from './jobs';
+import {
+	describeJob,
+	parsePlanSteps,
+	sortJobsForOverview,
+	summarizeJobs,
+	summarizePlan
+} from './jobs';
 import { Session } from './session.svelte';
 import type { AppInfo, Transport } from './transport/types';
 
@@ -61,14 +67,46 @@ function makeSession(
 	return session;
 }
 
-describe('parsePlanSteps', () => {
-	it('parses done, current, and pending plan lines', () => {
-		expect(parsePlanSteps('[x] read files\n[~] edit lib\n[ ] run tests')).toEqual([
+describe('parsePlanSteps and summarizePlan', () => {
+	it('parses done, current, and pending plan lines and skips blank lines', () => {
+		expect(parsePlanSteps('[x] read files\n\n[~] edit lib\n[ ] run tests')).toEqual([
 			{ state: 'x', text: 'read files' },
 			{ state: '~', text: 'edit lib' },
 			{ state: ' ', text: 'run tests' }
 		]);
 		expect(parsePlanSteps('   ')).toEqual([]);
+	});
+
+	it('summarizes progress counts, fraction, percentage, active step, and completion', () => {
+		expect(summarizePlan('')).toEqual({
+			steps: [],
+			done: 0,
+			total: 0,
+			current: null,
+			fraction: 0,
+			percent: 0,
+			complete: false
+		});
+
+		const inProgress = summarizePlan('[x] read files\n[~] edit lib\n[ ] run tests');
+		expect(inProgress).toMatchObject({
+			done: 1,
+			total: 3,
+			current: 'edit lib',
+			percent: 33,
+			complete: false
+		});
+		expect(inProgress.fraction).toBeCloseTo(1 / 3);
+
+		const allDone = summarizePlan('[x] read files\n[x] edit lib');
+		expect(allDone).toMatchObject({
+			done: 2,
+			total: 2,
+			current: null,
+			fraction: 1,
+			percent: 100,
+			complete: true
+		});
 	});
 });
 
@@ -170,6 +208,7 @@ describe('describeJob', () => {
 			activeTool: 'cargo test -p quack-core',
 			planDone: 1,
 			planTotal: 3,
+			planPct: 33,
 			planCurrent: 'patch',
 			contextPct: 50,
 			canInterrupt: true

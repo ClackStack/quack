@@ -24,9 +24,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
 toml.workspace = true
 tracing.workspace = true
-# Already built for the TLS stack; the ChatGPT sign-in uses its SHA-256, RSA and random.
+# Already built for TLS. Responses uses SHA-256 to verify continuation prefixes, and
+# ChatGPT sign-in also uses ring for RSA and randomness.
 ring = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -37,10 +39,10 @@ ring = { workspace = true }
 
 [features]
 proto-openai-chat = []
-proto-openai-responses = []
+proto-openai-responses = ["dep:ring", "dep:tokio-tungstenite"]
 proto-anthropic = []
 proto-ollama = []
-auth-chatgpt = ["proto-openai-responses", "dep:ring"]
+auth-chatgpt = ["proto-openai-responses"]
 tokenizers = []
 
 [lints]

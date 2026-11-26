@@ -310,6 +310,15 @@ fn load_in(found: Dirs, env: Env<'_>, opts: &LoadOptions) -> Result<Loaded, Conf
         merge::set_path(&mut merged, "model.default", Value::String(model));
         origins.insert("model.default".into(), Origin::Env(model_var));
     }
+    let cache_key_var = format!("{ENV_PREFIX}PROMPT_CACHE_KEY");
+    if let Some(key) = env(&cache_key_var)
+        .and_then(|v| v.into_string().ok())
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+    {
+        merge::set_path(&mut merged, "context.cache_key", Value::String(key));
+        origins.insert("context.cache_key".into(), Origin::Env(cache_key_var));
+    }
     if let Some(model) = &opts.model {
         merge::set_path(&mut merged, "model.default", Value::String(model.clone()));
         origins.insert("model.default".into(), Origin::Cli);

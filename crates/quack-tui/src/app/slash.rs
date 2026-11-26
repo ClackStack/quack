@@ -284,6 +284,8 @@ impl App {
                 }
                 self.transcript.clear();
                 self.agents.clear();
+                self.plan.clear();
+                self.plan_expanded = false;
                 self.context = None;
                 self.growth.clear();
                 self.starting_new = true;

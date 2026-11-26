@@ -9,8 +9,13 @@ api_key = { env = "OPENROUTER_API_KEY" }
 # Sticky routing activates immediately from the first request when `x-session-id` is sent;
 # without it OpenRouter waits for a cache hit before pinning an upstream provider. Kept in
 # the header (not body `prompt_cache_key`) so non-OpenAI upstream endpoints never reject it.
+# Anthropic models on OpenRouter require an explicit `cache_control` directive; top-level
+# `cache_control = "auto"` enables OpenRouter's automatic caching across tools, system, and
+# multi-step tool results for `anthropic/*` without rewriting other upstreams' payloads.
 [prompt_cache]
 affinity_header = "x-session-id"
+cache_control = "auto"
+cache_control_models = ["anthropic/*"]
 
 # Prices: US dollars per million tokens. The rest of the catalog also arrives
 # through /models discovery; entries here pin context limits and the prices

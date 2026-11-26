@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use quack_config::provider::{
-    Cost, ReasoningFormat, ReasoningHistory, ReasoningWire, ToolCallMode,
+    CacheControlMode, Cost, ReasoningFormat, ReasoningHistory, ReasoningWire, ToolCallMode,
 };
 use quack_protocol::Usage;
 use serde_json::{Map, Value, json};
@@ -12,7 +12,8 @@ use serde_json::{Map, Value, json};
 use crate::error::{ErrorKind, ProviderError, body_message};
 use crate::reasoning::{Piece, ThinkSplitter};
 use crate::types::{
-    ChatRequest, DiscoveredModel, FinishReason, Message, StreamEvent, ToolSpec, merge,
+    ChatRequest, DiscoveredModel, FinishReason, Message, StreamEvent, ToolSpec,
+    cache_control_object, merge, split_session_context,
 };
 
 pub(crate) const CHAT_PATH: &str = "chat/completions";
@@ -244,14 +245,24 @@ pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
             );
         }
     }
+    if req.prompt_cache.cache_control == Some(CacheControlMode::Breakpoints) {
+        apply_cache_control_breakpoints(&mut messages, req.prompt_cache.ttl.as_deref());
+    }
     let mut body = Map::new();
     body.insert("model".into(), json!(req.model));
     body.insert("messages".into(), Value::Array(messages));
     body.insert("stream".into(), json!(true));
     match dialect {
         Dialect::Mistral => {
-            // Usage comes in the last chunk anyway; a stable key raises prompt-cache hits.
-            body.insert("prompt_cache_key".into(), json!(cache_key(&req.messages)));
+            // Prefer the session or shared cache key so routing survives compaction and
+            // parallel CI runs; fall back to hashing the opening messages when none is set.
+            let key = req
+                .cache_key
+                .as_deref()
+                .filter(|k| !k.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| cache_key(&req.messages));
+            body.insert("prompt_cache_key".into(), json!(key));
         }
         Dialect::Cohere => {}
         Dialect::Standard | Dialect::Google => {
@@ -263,6 +274,25 @@ pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
         && let Some(key) = req.cache_key.as_deref().filter(|k| !k.is_empty())
     {
         body.insert("prompt_cache_key".into(), json!(key));
+    }
+    if req.prompt_cache.cache_control == Some(CacheControlMode::Auto) {
+        body.insert(
+            "cache_control".into(),
+            cache_control_object(req.prompt_cache.ttl.as_deref()),
+        );
+    } else if req.prompt_cache.cache_control.is_none()
+        && matches!(dialect, Dialect::Standard)
+        && let Some(ttl) = req
+            .prompt_cache
+            .ttl
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+    {
+        body.insert(
+            "prompt_cache_options".into(),
+            json!({ "mode": "implicit", "ttl": ttl }),
+        );
     }
     if !req.tools.is_empty() && !text_tool_mode {
         let tools = openai_tools_json(&req.tools);
@@ -323,6 +353,73 @@ pub(crate) fn build_body(req: &ChatRequest, dialect: Dialect) -> Value {
         ReasoningWire::None => {}
     }
     body
+}
+
+/// Attach Anthropic-style `cache_control` breakpoints (at most 4) to `openai-chat`
+/// system and user content blocks for servers such as Alibaba DashScope and OpenRouter.
+/// Leaves `role: "tool"` content as plain strings for strict OpenAI-compatible servers.
+fn apply_cache_control_breakpoints(messages: &mut [Value], ttl: Option<&str>) {
+    let cc = cache_control_object(ttl);
+    let mut remaining: usize = 4;
+
+    let mark_part = |msg: &mut Value, cc: &Value| -> bool {
+        if let Some(parts) = msg.get_mut("content").and_then(Value::as_array_mut) {
+            if let Some(last) = parts.last_mut()
+                && last.get("cache_control").is_none()
+            {
+                last["cache_control"] = cc.clone();
+                return true;
+            }
+            return false;
+        }
+        if let Some(text) = msg.get("content").and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            let text = text.to_owned();
+            msg["content"] = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": cc.clone(),
+            }]);
+            return true;
+        }
+        false
+    };
+
+    if let Some(first) = messages.first_mut()
+        && first["role"] == "system"
+        && remaining > 0
+        && mark_part(first, &cc)
+    {
+        remaining -= 1;
+    }
+
+    if let Some(idx) = messages.iter().position(|m| m["role"] == "user")
+        && remaining > 0
+        && let Some(text) = messages[idx]["content"].as_str()
+        && let Some((ctx, prompt)) = split_session_context(text)
+    {
+        let (ctx, prompt) = (ctx.to_owned(), prompt.to_owned());
+        messages[idx]["content"] = json!([
+            { "type": "text", "text": ctx, "cache_control": cc.clone() },
+            { "type": "text", "text": prompt },
+        ]);
+        remaining -= 1;
+    }
+
+    let user_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| (m["role"] == "user").then_some(i))
+        .collect();
+    for idx in user_indices.into_iter().rev().take(2) {
+        if remaining == 0 {
+            break;
+        }
+        if mark_part(&mut messages[idx], &cc) {
+            remaining -= 1;
+        }
+    }
 }
 
 /// Mistral takes `none` or `high`, as Mistral's own harness maps them.
@@ -396,6 +493,7 @@ fn message_json(m: &Message, shape: &Shape<'_>, echo_reasoning: bool) -> Value {
             };
             json!({ "role": "user", "content": text })
         }
+        Message::Nudge { content } => json!({ "role": "user", "content": content }),
         Message::User { content, images } => {
             if images.is_empty() {
                 json!({ "role": "user", "content": content })
@@ -565,7 +663,11 @@ impl ChunkParser {
             }
         }
         if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
-            out.push(StreamEvent::Usage(parse_usage(u)));
+            out.push(StreamEvent::Usage(parse_usage(u, &v)));
+        } else if let Some(t) = v.get("timings").filter(|t| t.is_object())
+            && let Some(u) = parse_llama_timings(t)
+        {
+            out.push(StreamEvent::Usage(u));
         }
         Ok(out)
     }
@@ -707,21 +809,47 @@ pub(crate) fn piece_event(p: Piece) -> StreamEvent {
     }
 }
 
-fn parse_usage(u: &Value) -> Usage {
-    let num = |p: &str| {
-        u.pointer(p)
+fn parse_usage(u: &Value, chunk: &Value) -> Usage {
+    let num = |v: &Value, p: &str| {
+        v.pointer(p)
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
     };
     Usage {
-        prompt_tokens: num("/prompt_tokens").unwrap_or(0),
-        completion_tokens: num("/completion_tokens").unwrap_or(0),
-        cached_prompt_tokens: num("/prompt_tokens_details/cached_tokens")
-            .or_else(|| num("/cached_tokens"))
-            .or_else(|| num("/prompt_cache_hit_tokens")),
-        cache_write_tokens: num("/prompt_tokens_details/cache_write_tokens"),
-        reasoning_tokens: num("/completion_tokens_details/reasoning_tokens"),
+        prompt_tokens: num(u, "/prompt_tokens").unwrap_or(0),
+        completion_tokens: num(u, "/completion_tokens").unwrap_or(0),
+        cached_prompt_tokens: num(u, "/prompt_tokens_details/cached_tokens")
+            .or_else(|| num(u, "/cached_tokens"))
+            .or_else(|| num(u, "/prompt_cache_hit_tokens"))
+            .or_else(|| num(u, "/cache_read_input_tokens"))
+            .or_else(|| num(chunk, "/timings/cache_n")),
+        cache_write_tokens: num(u, "/prompt_tokens_details/cache_write_tokens")
+            .or_else(|| num(u, "/prompt_tokens_details/cache_creation_input_tokens"))
+            .or_else(|| num(u, "/cache_creation_input_tokens")),
+        reasoning_tokens: num(u, "/completion_tokens_details/reasoning_tokens"),
     }
+}
+
+/// Fallback for llama.cpp `llama-server` chunks that report `timings` without `usage`.
+fn parse_llama_timings(t: &Value) -> Option<Usage> {
+    let num = |k: &str| {
+        t.get(k)
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+    };
+    let prompt_n = num("prompt_n");
+    let cache_n = num("cache_n");
+    let predicted_n = num("predicted_n");
+    if prompt_n.is_none() && cache_n.is_none() && predicted_n.is_none() {
+        return None;
+    }
+    Some(Usage {
+        prompt_tokens: prompt_n.unwrap_or(0).saturating_add(cache_n.unwrap_or(0)),
+        completion_tokens: predicted_n.unwrap_or(0),
+        cached_prompt_tokens: cache_n,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+    })
 }
 
 /// llama.cpp's server info, at the server root rather than under `/v1`.
@@ -1181,11 +1309,18 @@ mod tests {
             build_body(&req, Dialect::Standard)["prompt_cache_key"],
             "session-42"
         );
-        // Mistral keeps its own derived cache key even when prompt_cache.cache_key is set.
-        assert_ne!(
+        // Mistral prefers the session/shared cache key when set (survives compaction and
+        // honors `--cache-key`), falling back to its message-derived hash when unset.
+        assert_eq!(
             build_body(&req, Dialect::Mistral)["prompt_cache_key"],
             "session-42"
         );
+        req.cache_key = None;
+        let fallback = build_body(&req, Dialect::Mistral)["prompt_cache_key"]
+            .as_str()
+            .expect("derived mistral key")
+            .to_owned();
+        assert!(fallback.starts_with("ch-"), "{fallback}");
     }
 
     #[test]
@@ -1493,15 +1628,154 @@ mod tests {
         assert_eq!(parsed.1.len(), 1);
         assert_eq!(parsed.1[0].name, "read");
 
-        let usage = parse_usage(&json!({
-            "prompt_tokens": 200,
-            "completion_tokens": 50,
-            "prompt_tokens_details": { "cached_tokens": 120, "cache_write_tokens": 40 },
-            "completion_tokens_details": { "reasoning_tokens": 35 }
-        }));
+        let usage = parse_usage(
+            &json!({
+                "prompt_tokens": 200,
+                "completion_tokens": 50,
+                "prompt_tokens_details": { "cached_tokens": 120, "cache_write_tokens": 40 },
+                "completion_tokens_details": { "reasoning_tokens": 35 }
+            }),
+            &json!({}),
+        );
         assert_eq!(usage.cached_prompt_tokens, Some(120));
         assert_eq!(usage.cache_write_tokens, Some(40));
         assert_eq!(usage.reasoning_tokens, Some(35));
+    }
+
+    #[test]
+    fn nudge_preserves_current_turn_reasoning_and_cache_control_modes_work() {
+        // 1. Mid-turn Message::Nudge sends as role="user" without stripping earlier
+        //    reasoning under ReasoningHistory::CurrentTurn.
+        let mut req = ChatRequest {
+            model: "deepseek-v4".into(),
+            messages: vec![
+                Message::System {
+                    content: "sys".into(),
+                },
+                Message::User {
+                    content: "<context>AGENTS.md</context>\n\nfix bug".into(),
+                    images: Vec::new(),
+                },
+                Message::Assistant {
+                    content: String::new(),
+                    reasoning: Some("step 1 thinking".into()),
+                    tool_calls: vec![ToolCall {
+                        id: "c1".into(),
+                        name: "read".into(),
+                        arguments: "{}".into(),
+                    }],
+                    sealed: None,
+                },
+                Message::Tool {
+                    call_id: "c1".into(),
+                    content: "ok".into(),
+                    images: Vec::new(),
+                },
+                Message::Nudge {
+                    content: "Your last reply was empty.".into(),
+                },
+            ],
+            preserve_reasoning: Some(ReasoningHistory::CurrentTurn),
+            ..ChatRequest::default()
+        };
+        let b = build_body(&req, Dialect::Standard);
+        assert_eq!(b["messages"][2]["reasoning_content"], "step 1 thinking");
+        assert_eq!(b["messages"][4]["role"], "user");
+        assert_eq!(b["messages"][4]["content"], "Your last reply was empty.");
+
+        // 2. CacheControlMode::Auto emits top-level `cache_control` with optional TTL.
+        req.prompt_cache.cache_control = Some(CacheControlMode::Auto);
+        req.prompt_cache.ttl = Some("1h".into());
+        let auto = build_body(&req, Dialect::Standard);
+        assert_eq!(
+            auto["cache_control"],
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+        assert!(auto.get("prompt_cache_options").is_none());
+
+        // 3. CacheControlMode::Breakpoints marks system, split <context>, and recent user
+        //    messages while keeping `role: "tool"` as a plain string (<= 4 breakpoints).
+        req.prompt_cache.cache_control = Some(CacheControlMode::Breakpoints);
+        req.prompt_cache.ttl = None;
+        let bp = build_body(&req, Dialect::Standard);
+        assert!(bp.get("cache_control").is_none());
+        assert_eq!(
+            bp["messages"][0]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert_eq!(
+            bp["messages"][1]["content"][0]["text"],
+            "<context>AGENTS.md</context>"
+        );
+        assert_eq!(
+            bp["messages"][1]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert_eq!(bp["messages"][1]["content"][1]["text"], "fix bug");
+        assert_eq!(bp["messages"][3]["role"], "tool");
+        assert!(bp["messages"][3]["content"].is_string());
+
+        // 4. Moonshot/Kimi implicit TTL on Standard dialect when cache_control is unset.
+        req.prompt_cache.cache_control = None;
+        req.prompt_cache.cache_key = true;
+        req.prompt_cache.ttl = Some("1h".into());
+        req.cache_key = Some("shared-ci-key".into());
+        let kimi = build_body(&req, Dialect::Standard);
+        assert_eq!(kimi["prompt_cache_key"], "shared-ci-key");
+        assert_eq!(
+            kimi["prompt_cache_options"],
+            json!({ "mode": "implicit", "ttl": "1h" })
+        );
+
+        // 5. Mistral prefers explicit req.cache_key over message hashing.
+        let mistral = build_body(&req, Dialect::Mistral);
+        assert_eq!(mistral["prompt_cache_key"], "shared-ci-key");
+    }
+
+    #[test]
+    fn parses_dashscope_and_llama_cpp_cache_usage_fields() {
+        let dashscope = parse_usage(
+            &json!({
+                "prompt_tokens": 500,
+                "completion_tokens": 30,
+                "prompt_tokens_details": {
+                    "cached_tokens": 320,
+                    "cache_creation_input_tokens": 150
+                }
+            }),
+            &json!({}),
+        );
+        assert_eq!(dashscope.cached_prompt_tokens, Some(320));
+        assert_eq!(dashscope.cache_write_tokens, Some(150));
+
+        // llama.cpp `timings.cache_n` fallback alongside usage and standalone.
+        let mut p = ChunkParser::new(ReasoningFormat::Auto);
+        let evs = p
+            .parse(r#"{"choices":[],"usage":{"prompt_tokens":400,"completion_tokens":20},"timings":{"cache_n":350,"prompt_n":50,"predicted_n":20}}"#)
+            .expect("chunk");
+        assert_eq!(
+            evs,
+            vec![StreamEvent::Usage(Usage {
+                prompt_tokens: 400,
+                completion_tokens: 20,
+                cached_prompt_tokens: Some(350),
+                cache_write_tokens: None,
+                reasoning_tokens: None,
+            })]
+        );
+        let timings_only = p
+            .parse(r#"{"choices":[],"timings":{"cache_n":300,"prompt_n":100,"predicted_n":15}}"#)
+            .expect("timings chunk");
+        assert_eq!(
+            timings_only,
+            vec![StreamEvent::Usage(Usage {
+                prompt_tokens: 400,
+                completion_tokens: 15,
+                cached_prompt_tokens: Some(300),
+                cache_write_tokens: None,
+                reasoning_tokens: None,
+            })]
+        );
     }
 
     #[test]

@@ -29,7 +29,7 @@ mod types;
 
 pub use error::{ErrorKind, ProviderError};
 pub use ledger::{EgressDraft, EgressLedger};
-pub use provider::{Provider, http_client, http_client_observed, supports};
+pub use provider::{Provider, ResponsesSession, http_client, http_client_observed, supports};
 pub use reqwest;
 pub use types::{
     ChatRequest, DiscoveredModel, FinishReason, Message, ResponseBuilder, Sealed, StreamEvent,

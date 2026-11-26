@@ -30,7 +30,9 @@ Between boundaries, history is append-only, so every request is a cache hit exce
 `[context] cache_strategy`:
 - `preserve`: only prune or compact at threshold or on overflow. Best for slow local GPUs.
 - `aggressive`: prune on every turn (maki-like). Best for fast hosted services without a cache discount, or for very small windows.
-- `auto` (default): uses the cost model above, with `prefill_tps` taken from the model TOML, or measured as `prompt_tokens / time_to_first_token` on uncached requests.
+- `auto` (default): keeps the prefix append-only whenever `serving.prefix_cache = true` (including slow local GPUs where re-prefilling is expensive), and prunes eagerly only when `serving.prefix_cache = false`. At the threshold boundary, providers without native compaction only prune without compacting when rule-based pruning frees at least 15% headroom below `threshold`; otherwise they compact directly so the session pays one cache reset instead of thrashing every 1–2 turns.
+
+`[context] cache_key` (also `--cache-key` and `QUACK_PROMPT_CACHE_KEY`): overrides the per-session UUID sent as `prompt_cache_key` or `affinity_header`, allowing parallel `quack exec` or CI jobs working on the same repository and `AGENTS.md` to share sticky replica routing (keep request volume below ~15 RPM per key+prefix on OpenAI). Opening `<context>` text is persisted in the session log (`session_context`) so `/resume` reproduces turn 0 byte-for-byte even after workspace changes.
 
 ### Stable prefix layout
 

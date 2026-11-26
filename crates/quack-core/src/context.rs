@@ -21,57 +21,114 @@ const PROTECT_MESSAGES: usize = 8;
 /// Assumed budget when the model's window is unknown.
 const FALLBACK_BUDGET: u32 = 32_000;
 
-/// Prefill speed (tokens/s) below which `cache_strategy = "auto"` prunes superseded
-/// tool results eagerly rather than re-prefilling stale reads on every step.
-const SLOW_PREFILL_TPS: u32 = 400;
+/// Minimum fraction of `threshold` that epoch pruning must free below `threshold` to
+/// skip compaction. Avoids paying a full prefix-cache reset (and unsealing thinking) for
+/// a small reclaim that would trip `threshold` again on the very next step.
+const PRUNE_HEADROOM_RATIO: f64 = 0.15;
 
 /// Whether `fit` should prune superseded reads/writes eagerly before reaching `threshold`.
+///
+/// Only prune eagerly when the user explicitly selects `aggressive`, or under `auto` when
+/// the server does not reuse KV prefixes (`prefix_cache = false`). When `prefix_cache` is
+/// enabled—especially on slow local GPUs where re-prefill is costly—editing earlier
+/// history invalidates the KV cache and must wait for an epoch boundary.
 fn eager_prune(s: &Setup) -> bool {
     match s.context.cache_strategy {
         CacheStrategy::Aggressive => true,
         CacheStrategy::Preserve => false,
-        CacheStrategy::Auto => {
-            !s.model.serving.prefix_cache
-                || s.model
-                    .serving
-                    .prefill_tps
-                    .is_some_and(|tps| tps > 0 && tps < SLOW_PREFILL_TPS)
-        }
+        CacheStrategy::Auto => !s.model.serving.prefix_cache,
     }
 }
 
-/// Fit each request to the window. Native compaction keeps the prefix intact until it
-/// reaches the server, unless eager pruning is active (`aggressive`, or `auto` on a
-/// server without prefix caching or with slow prefill). Returns the post-fit raw estimate
-/// so the caller does not have to recompute it.
+/// Estimated bytes reclaimed if `ops` were applied to `history`.
+fn reclaimable_bytes(history: &[Message], ops: &[prune::PruneOp]) -> usize {
+    ops.iter()
+        .filter_map(|op| match history.get(op.index) {
+            Some(Message::Tool { content, .. }) => {
+                Some(content.len().saturating_sub(op.content.len()))
+            }
+            _ => None,
+        })
+        .sum()
+}
+
+/// Fit each request to the window. Keeps the prefix append-only until `threshold` unless
+/// eager pruning is active (`aggressive`, or `auto` on a server without prefix caching).
+/// At `threshold`, providers without native compaction only prune without compacting when
+/// pruning frees meaningful headroom (`PRUNE_HEADROOM_RATIO`); otherwise they compact
+/// directly so the session pays one cache reset instead of thrashing every turn. Returns
+/// the post-fit raw estimate so the caller does not have to recompute it.
 pub(crate) async fn fit(ctx: &TurnCtx, history: &mut Vec<Message>) -> u32 {
     let s = &ctx.setup;
     let Some(threshold) = threshold(s) else {
         return raw_estimate(s, history);
     };
     let eager = eager_prune(s);
-    if !eager {
-        let raw = raw_estimate(s, history);
-        if turn::scale(s, raw) <= threshold {
-            return raw;
-        }
-    }
-    if eager || !s.provider.native_compaction() {
+    if eager {
         prune_now(ctx, history);
+        let mut raw = raw_estimate(s, history);
+        if turn::scale(s, raw) > threshold {
+            raw = try_compact(ctx, history, raw).await;
+        }
+        return raw;
     }
-    let mut raw = raw_estimate(s, history);
-    if turn::scale(s, raw) > threshold {
-        let reason = format!("context is over {}% of the budget", percent(s));
-        match compact_now(ctx, history, compact::KEEP_TURNS, None, &reason).await {
-            Ok(()) => raw = raw_estimate(s, history),
-            Err(e) => {
-                ctx.emit(Event::Warning {
-                    message: format!("could not compact: {e}"),
-                });
+
+    let raw = raw_estimate(s, history);
+    if turn::scale(s, raw) <= threshold {
+        return raw;
+    }
+
+    // Epoch boundary: check whether rule-based pruning frees enough headroom to avoid
+    // compacting (and avoid thrashing every 1-2 turns on a tiny reclaim).
+    let fallback_ops = if !s.provider.native_compaction() {
+        let protect_from = history.len().saturating_sub(PROTECT_MESSAGES);
+        let ops = plan_rule_ops(s, history, protect_from);
+        if !ops.is_empty() {
+            let saved = turn::bytes_to_tokens(reclaimable_bytes(history, &ops));
+            let post_prune_scaled = turn::scale(s, raw.saturating_sub(saved));
+            let target = (f64::from(threshold) * (1.0 - PRUNE_HEADROOM_RATIO)) as u32;
+            if post_prune_scaled <= target {
+                apply_prune_ops(s, history, ops, ctx.log.as_ref(), &ctx.tx, Some(&ctx.stats));
+                let after = raw_estimate(s, history);
+                if turn::scale(s, after) <= threshold {
+                    return after;
+                }
+                return try_compact(ctx, history, after).await;
             }
         }
+        ops
+    } else {
+        Vec::new()
+    };
+
+    let after = try_compact(ctx, history, raw).await;
+    // If compaction could not run (for example a single huge turn with nothing before it)
+    // and pruning still had reclaimable tool output, shed what we can to avoid overflow.
+    if turn::scale(s, after) > threshold && !fallback_ops.is_empty() {
+        apply_prune_ops(
+            s,
+            history,
+            fallback_ops,
+            ctx.log.as_ref(),
+            &ctx.tx,
+            Some(&ctx.stats),
+        );
+        return raw_estimate(s, history);
     }
-    raw
+    after
+}
+
+async fn try_compact(ctx: &TurnCtx, history: &mut Vec<Message>, fallback_raw: u32) -> u32 {
+    let reason = format!("context is over {}% of the budget", percent(&ctx.setup));
+    match compact_now(ctx, history, compact::KEEP_TURNS, None, &reason).await {
+        Ok(()) => raw_estimate(&ctx.setup, history),
+        Err(e) => {
+            ctx.emit(Event::Warning {
+                message: format!("could not compact: {e}"),
+            });
+            fallback_raw
+        }
+    }
 }
 
 fn percent(s: &Setup) -> u32 {
@@ -449,35 +506,50 @@ pub(crate) fn threshold(s: &Setup) -> Option<u32> {
     }
 }
 
-/// What is using the context. `history` is `None` while a turn holds it.
-pub(crate) fn report(s: &Setup, history: Option<&[Message]>) -> ContextReport {
+/// What is using the context. `history` is `None` while a turn holds it. When
+/// `last_cache_hit` is reported by the server, cached vs. uncached history items follow
+/// that measured boundary; otherwise it falls back to the last user-turn boundary.
+pub(crate) fn report(
+    s: &Setup,
+    history: Option<&[Message]>,
+    last_cache_hit: Option<u32>,
+) -> ContextReport {
     let ratio = s.estimator.lock().map_or(1.0, |e| e.ratio());
     let tok = |text: &str| (f64::from(tokens::estimate(text)) * ratio).round() as u32;
+    let sys_tokens = tok(&s.system);
     let mut segments = vec![ContextSegment {
         name: "System prompt".into(),
-        tokens: tok(&s.system),
+        tokens: sys_tokens,
         detail: format!("profile {}, core prompt", s.profile.id),
         zone: Some(ContextZone::CachedPrefix),
         prunable_indices: Vec::new(),
     }];
-    if !s.session_context.is_empty() {
+    let session_ctx = s.effective_session_context();
+    let ctx_tokens = if !session_ctx.is_empty() {
+        let t = tok(&session_ctx);
         segments.push(ContextSegment {
             name: "Session context".into(),
-            tokens: tok(&s.session_context),
+            tokens: t,
             detail: "workspace rules, memory & env".into(),
             zone: Some(ContextZone::SessionContext),
             prunable_indices: Vec::new(),
         });
-    }
+        t
+    } else {
+        0
+    };
+    let tools_tokens =
+        tok(&serde_json::to_string(&turn::request(s, Vec::new(), true).tools).unwrap_or_default());
     segments.push(ContextSegment {
         name: "Tool definitions".into(),
-        tokens: tok(
-            &serde_json::to_string(&turn::request(s, Vec::new(), true).tools).unwrap_or_default(),
-        ),
+        tokens: tools_tokens,
         detail: format!("{} tools", s.surface.tools.len()),
         zone: Some(ContextZone::CachedPrefix),
         prunable_indices: Vec::new(),
     });
+    let mut prefix_cursor = sys_tokens
+        .saturating_add(ctx_tokens)
+        .saturating_add(tools_tokens);
     let mut note = None;
     let mut tail_items = Vec::new();
     match history {
@@ -517,7 +589,10 @@ pub(crate) fn report(s: &Setup, history: Option<&[Message]>) -> ContextReport {
             for (idx, m) in history.iter().enumerate() {
                 let g = match m {
                     _ if compact::is_summary(m) => 0,
-                    Message::User { .. } | Message::System { .. } | Message::Compaction { .. } => 1,
+                    Message::User { .. }
+                    | Message::Nudge { .. }
+                    | Message::System { .. }
+                    | Message::Compaction { .. } => 1,
                     Message::Assistant { .. } => 2,
                     Message::Tool { .. } => 3,
                 };
@@ -525,7 +600,11 @@ pub(crate) fn report(s: &Setup, history: Option<&[Message]>) -> ContextReport {
                     (f64::from(turn::message_tokens(m, native)) * ratio).round() as u32;
                 let pruned = matches!(m, Message::Tool { content, .. } if content.starts_with(prune::MARKER));
                 let prunable = matches!(m, Message::Tool { .. }) && !pruned;
-                let cached = idx < uncached_from;
+                let cached = match last_cache_hit {
+                    Some(hit) => prefix_cursor.saturating_add(msg_tokens / 2) <= hit && hit > 0,
+                    None => idx < uncached_from,
+                };
+                prefix_cursor = prefix_cursor.saturating_add(msg_tokens);
                 groups[g].tokens += msg_tokens;
                 groups[g].count += 1;
                 if pruned {
@@ -590,7 +669,7 @@ pub(crate) fn report(s: &Setup, history: Option<&[Message]>) -> ContextReport {
 fn item_role(m: &Message) -> String {
     match m {
         _ if compact::is_summary(m) => "summary".into(),
-        Message::User { .. } | Message::Compaction { .. } => "user".into(),
+        Message::User { .. } | Message::Nudge { .. } | Message::Compaction { .. } => "user".into(),
         Message::System { .. } => "system".into(),
         Message::Assistant { .. } => "assistant".into(),
         Message::Tool { .. } => "tool".into(),
@@ -600,6 +679,7 @@ fn item_role(m: &Message) -> String {
 fn item_label(m: &Message) -> String {
     let raw = match m {
         Message::User { content, .. }
+        | Message::Nudge { content }
         | Message::System { content }
         | Message::Compaction { content, .. } => content.as_str(),
         Message::Assistant {

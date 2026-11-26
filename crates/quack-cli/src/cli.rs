@@ -32,6 +32,9 @@ pub(crate) struct Global {
     /// Profile for this run, e.g. `qwen-code`; shorthand for -c model.profile=ID.
     #[arg(long, global = true, value_name = "ID")]
     pub profile: Option<String>,
+    /// Shared prompt-cache routing key (overrides QUACK_PROMPT_CACHE_KEY and [context].cache_key).
+    #[arg(long = "cache-key", global = true, value_name = "KEY")]
+    pub cache_key: Option<String>,
     /// Override a setting, e.g. -c ui.ascii=true. Repeatable.
     #[arg(short = 'c', long = "config", global = true, value_name = "KEY=VALUE")]
     pub overrides: Vec<String>,

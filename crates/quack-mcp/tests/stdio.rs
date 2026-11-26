@@ -45,9 +45,9 @@ async fn lists_and_calls_tools_and_restarts_after_a_crash() {
 
     let tools = m.tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, ["echo", "fail", "crash", "deploy", "summarize"]);
-    assert!(tools[0].read_only && tools[0].auto_approve);
-    assert!(!tools[1].read_only && !tools[1].auto_approve);
+    assert_eq!(names, ["crash", "deploy", "echo", "fail", "summarize"]);
+    assert!(tools[2].read_only && tools[2].auto_approve);
+    assert!(!tools[0].read_only && !tools[0].auto_approve);
 
     let cancel = CancellationToken::new();
     let out = m
@@ -74,7 +74,16 @@ async fn lists_and_calls_tools_and_restarts_after_a_crash() {
     })
     .await
     .expect("noticed the exit");
+    // Tool declarations stay pinned in place across the transient reconnect so mid-session
+    // turns do not drop and re-append MCP schemas and bust the prompt cache.
+    let during_restart: Vec<String> = m.tools().into_iter().map(|t| t.name).collect();
+    assert_eq!(
+        during_restart,
+        ["crash", "deploy", "echo", "fail", "summarize"]
+    );
     ready(&m, "fx").await;
+    let after_restart: Vec<String> = m.tools().into_iter().map(|t| t.name).collect();
+    assert_eq!(after_restart, during_restart);
     let out = m
         .call("fx", "echo", serde_json::json!({"text": "again"}), &cancel)
         .await;
@@ -237,11 +246,18 @@ async fn bad_servers_fail_without_blocking_others() {
     m.start();
     ready(&m, "fx").await;
     let status = m.status();
+    let missing_status = status
+        .iter()
+        .find(|s| s.id == "missing")
+        .expect("missing server");
     assert!(
-        matches!(&status[0].state, ServerState::Failed(e) if e.contains("no-such-mcp-server-xyz")),
+        matches!(&missing_status.state, ServerState::Failed(e) if e.contains("no-such-mcp-server-xyz")),
         "{:?}",
-        status[0].state
+        missing_status.state
     );
+    // Servers are sorted deterministically by id (`fx` before `missing`).
+    assert_eq!(status[0].id, "fx");
+    assert_eq!(status[1].id, "missing");
     assert_eq!(m.tools().len(), 6);
     let out = m
         .call(

@@ -143,8 +143,8 @@ pub(crate) struct TurnCtx {
     pub ledger: Arc<EgressLedger>,
     /// Runtime session-level secret fingerprint allowlist shared across turns.
     pub secret_allowlist: Arc<Mutex<Vec<String>>>,
-    /// Last server response id seen in this conversation (for Responses cache diagnostics).
-    pub last_response_id: Arc<Mutex<Option<String>>>,
+    /// Connection-local Responses state and the last response ID for diagnostics.
+    pub responses_session: Arc<quack_providers::ResponsesSession>,
     /// Last plan / working-files reminders written into append-only history.
     pub last_reminders: Arc<Mutex<ReminderState>>,
     /// Remote Secret Shield vetting state across turns and model switches.
@@ -285,8 +285,9 @@ impl TurnCtx {
             }
         }
 
-        let ctx_hash = hash_str(&self.setup.session_context);
-        let need_ctx = !self.setup.session_context.is_empty()
+        let session_ctx = self.setup.effective_session_context();
+        let ctx_hash = hash_str(&session_ctx);
+        let need_ctx = !session_ctx.is_empty()
             && self.egress_guard.lock().ok().and_then(|g| {
                 g.context_checked
                     .as_ref()
@@ -295,13 +296,9 @@ impl TurnCtx {
         if need_ctx {
             let ask_id = self.key(&format!("egress-context-{}", self.turn.0));
             let clean = self
-                .guard_egress(
-                    "session_context",
-                    self.setup.session_context.clone(),
-                    &ask_id,
-                )
+                .guard_egress("session_context", session_ctx.clone(), &ask_id)
                 .await?;
-            let override_text = (clean != self.setup.session_context).then_some(clean);
+            let override_text = (clean != session_ctx).then_some(clean);
             if let Ok(mut g) = self.egress_guard.lock() {
                 g.context_checked = Some((base_url.to_owned(), ctx_hash, override_text));
             }
@@ -792,9 +789,8 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                         });
                         ctx.push(
                             &mut history,
-                            Message::User {
+                            Message::Nudge {
                                 content: LENGTH_NUDGE.into(),
-                                images: Vec::new(),
                             },
                         );
                         continue;
@@ -846,12 +842,20 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                 if let Ok(mut e) = ctx.setup.estimator.lock() {
                     e.observe(estimated, u.prompt_tokens);
                 }
-                total.prompt_tokens = u.prompt_tokens;
-                total.completion_tokens += u.completion_tokens;
-                total.cached_prompt_tokens = u.cached_prompt_tokens;
-                total.cache_write_tokens = u.cache_write_tokens;
+                total.prompt_tokens = total.prompt_tokens.saturating_add(u.prompt_tokens);
+                total.completion_tokens =
+                    total.completion_tokens.saturating_add(u.completion_tokens);
+                if let Some(c) = u.cached_prompt_tokens {
+                    total.cached_prompt_tokens =
+                        Some(total.cached_prompt_tokens.unwrap_or(0).saturating_add(c));
+                }
+                if let Some(w) = u.cache_write_tokens {
+                    total.cache_write_tokens =
+                        Some(total.cache_write_tokens.unwrap_or(0).saturating_add(w));
+                }
                 if let Some(r) = u.reasoning_tokens {
-                    total.reasoning_tokens = Some(total.reasoning_tokens.unwrap_or(0) + r);
+                    total.reasoning_tokens =
+                        Some(total.reasoning_tokens.unwrap_or(0).saturating_add(r));
                 }
                 ctx.emit(Event::ContextUpdate {
                     used: u.prompt_tokens + u.completion_tokens,
@@ -875,9 +879,8 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                 });
                 ctx.push(
                     &mut history,
-                    Message::User {
+                    Message::Nudge {
                         content: EMPTY_NUDGE.into(),
-                        images: Vec::new(),
                     },
                 );
                 continue;
@@ -1109,7 +1112,9 @@ pub(crate) fn message_tokens(m: &Message, native_compaction: bool) -> u32 {
         })
     };
     match m {
-        Message::System { content } => tokens::estimate(content).saturating_add(4),
+        Message::System { content } | Message::Nudge { content } => {
+            tokens::estimate(content).saturating_add(4)
+        }
         Message::User { content, images } => tokens::estimate(content)
             .saturating_add(image_tokens(images))
             .saturating_add(4),
@@ -1170,7 +1175,7 @@ pub(crate) fn raw_estimate(s: &Setup, history: &[Message]) -> u32 {
             .sum()
     });
     tokens::estimate(&s.system)
-        .saturating_add(tokens::estimate(&s.session_context))
+        .saturating_add(tokens::estimate(&s.effective_session_context()))
         .saturating_add(history)
         .saturating_add(bytes_to_tokens(tools))
 }
@@ -1379,15 +1384,30 @@ fn history_messages_with(
         });
     }
     messages.extend_from_slice(history);
-    let ctx_text = context_override.unwrap_or(&s.session_context);
+    let effective_ctx;
+    let ctx_text = match context_override {
+        Some(c) => c,
+        None => {
+            effective_ctx = s.effective_session_context();
+            &effective_ctx
+        }
+    };
     with_session_context_text(ctx_text, &mut messages);
     messages
 }
 
 pub(crate) fn cache_key(ctx: &TurnCtx) -> String {
+    let base = ctx
+        .setup
+        .context
+        .cache_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .unwrap_or(&ctx.session);
     match ctx.agent_type.as_deref().or(ctx.agent.as_deref()) {
-        Some(agent) => format!("{}/{agent}", ctx.session),
-        None => ctx.session.clone(),
+        Some(agent) => format!("{base}/{agent}"),
+        None => base.to_owned(),
     }
 }
 
@@ -1406,13 +1426,16 @@ async fn stream_step(
     // Sub-agents share one key per agent type so sibling/repeated runs reuse the warm prefix.
     req.cache_key = Some(cache_key(ctx));
     if req.prompt_cache.diagnostics {
-        req.comparison_response_id = ctx.last_response_id.lock().ok().and_then(|g| g.clone());
+        req.comparison_response_id = ctx.responses_session.last_response_id();
     }
     let fingerprint = quack_providers::fingerprint(&req);
     ctx.start_request();
-    let mut rx = s
-        .provider
-        .stream(req, reasoning_format(s), ctx.cancel.child_token());
+    let mut rx = s.provider.stream_in(
+        req,
+        reasoning_format(s),
+        ctx.cancel.child_token(),
+        ctx.responses_session.clone(),
+    );
     let mut b = ResponseBuilder::default();
     let sent = std::time::Instant::now();
     let mut first: Option<std::time::Instant> = None;
@@ -1502,10 +1525,8 @@ async fn stream_step(
         ctx.emit(Event::AssistantDelta { text: tail });
     }
     let usage = b.usage;
-    if let Some(resp_id) = b.response_id.clone()
-        && let Ok(mut slot) = ctx.last_response_id.lock()
-    {
-        *slot = Some(resp_id);
+    if let Some(resp_id) = b.response_id.take() {
+        ctx.responses_session.set_response_id(resp_id);
     }
     let mut msg = b.into_message();
     if let Some(first) = first {

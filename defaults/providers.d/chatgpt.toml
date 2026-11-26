@@ -12,6 +12,7 @@ group = "Proprietary models"
 note = "sign in with `quack login chatgpt`"
 api = "openai-responses"
 native_compaction = true
+responses_websocket = true
 base_url = "https://api.openai.com/v1"
 auth = { type = "chatgpt", issuer = "https://auth.openai.com" }
 extra_body = { reasoning = { summary = "auto", context = "all_turns" } }

@@ -27,6 +27,30 @@ use crate::types::{
     ChatRequest, DiscoveredModel, Message, StreamEvent, fingerprint, fingerprint_with, merge,
 };
 
+#[cfg(feature = "proto-openai-responses")]
+mod websocket;
+
+/// Connection-local Responses state. Each conversation, including each sub-agent run,
+/// has its own instance and can always start again from its local history.
+#[derive(Debug, Default)]
+pub struct ResponsesSession {
+    response_id: std::sync::Mutex<Option<String>>,
+    #[cfg(feature = "proto-openai-responses")]
+    socket: tokio::sync::Mutex<websocket::SessionSocket>,
+}
+
+impl ResponsesSession {
+    pub fn last_response_id(&self) -> Option<String> {
+        self.response_id.lock().ok().and_then(|id| id.clone())
+    }
+
+    pub fn set_response_id(&self, id: String) {
+        if let Ok(mut previous) = self.response_id.lock() {
+            *previous = Some(id);
+        }
+    }
+}
+
 /// Longest wait we honour from a `Retry-After` header.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
@@ -511,7 +535,7 @@ impl Provider {
         }
         let fingerprint = self.compaction_fingerprint(&req);
         let model = req.model.clone();
-        let mut stream = self.start_stream(req, ReasoningFormat::Auto, cancel, true);
+        let mut stream = self.start_stream(req, ReasoningFormat::Auto, cancel, true, None);
         let mut items = None;
         let mut usage = None;
         while let Some(event) = stream.recv().await {
@@ -750,7 +774,18 @@ impl Provider {
         reasoning: ReasoningFormat,
         cancel: CancellationToken,
     ) -> mpsc::Receiver<Result<StreamEvent, ProviderError>> {
-        self.start_stream(req, reasoning, cancel, false)
+        self.start_stream(req, reasoning, cancel, false, None)
+    }
+
+    /// Stream a conversation step, using its Responses WebSocket when configured.
+    pub fn stream_in(
+        &self,
+        req: ChatRequest,
+        reasoning: ReasoningFormat,
+        cancel: CancellationToken,
+        session: Arc<ResponsesSession>,
+    ) -> mpsc::Receiver<Result<StreamEvent, ProviderError>> {
+        self.start_stream(req, reasoning, cancel, false, Some(session))
     }
 
     fn start_stream(
@@ -759,13 +794,14 @@ impl Provider {
         reasoning: ReasoningFormat,
         cancel: CancellationToken,
         compacting: bool,
+        session: Option<Arc<ResponsesSession>>,
     ) -> mpsc::Receiver<Result<StreamEvent, ProviderError>> {
         let (tx, rx) = mpsc::channel(256);
         let this = self.clone();
         tokio::spawn(async move {
             tokio::select! {
                 () = cancel.cancelled() => {}
-                () = this.run_stream(req, reasoning, compacting, &tx) => {}
+                () = this.run_stream(req, reasoning, compacting, session.as_deref(), &tx) => {}
             }
         });
         rx
@@ -776,10 +812,11 @@ impl Provider {
         mut req: ChatRequest,
         reasoning: ReasoningFormat,
         compacting: bool,
+        session: Option<&ResponsesSession>,
         tx: &mpsc::Sender<Result<StreamEvent, ProviderError>>,
     ) {
         #[cfg(not(feature = "proto-openai-responses"))]
-        let _ = compacting;
+        let _ = (compacting, session);
         if req.prompt_cache == quack_config::provider::PromptCache::default() {
             req.prompt_cache = self
                 .file
@@ -833,6 +870,16 @@ impl Provider {
                 "text/event-stream",
             ),
         };
+        #[cfg(feature = "proto-openai-responses")]
+        if self.api == Api::Responses
+            && self.file.responses_websocket
+            && !compacting
+            && !req.utility
+            && let Some(session) = session
+            && self.stream_websocket(session, &body, tx).await
+        {
+            return;
+        }
         let body_bytes = match serde_json::to_vec(&body) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -1065,7 +1112,7 @@ enum Wire {
 type Parsed = Result<Vec<StreamEvent>, ProviderError>;
 
 /// One request's headers: the shared set, or a per-request one with a fresh token.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum RequestHeaders {
     Shared(Arc<HeaderMap>),
     /// Only a signed-in provider builds a per-request map.

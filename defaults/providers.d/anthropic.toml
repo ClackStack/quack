@@ -19,6 +19,8 @@ headers = { "anthropic-beta" = "thinking-binding-controls-2026-08-01,server-side
 extra_body = { thinking = { type = "adaptive", display = "summarized", block_binding = { prefix_mismatch_behavior = "drop_block" } } }
 
 # Prices: US dollars per million tokens. Cache writes are the 5-minute rate.
+# Set `[prompt_cache] ttl = "1h"` in a user-layer override to extend cache retention to
+# one hour (billed at Anthropic's 1-hour cache-write rate).
 # Every bundled Claude takes the same five effort levels, and each `effort` below is its
 # documented default (Opus 5.5 and Haiku 5.5 default to medium, the rest to high):
 # https://docs.anthropic.com/en/docs/build-with-claude/effort

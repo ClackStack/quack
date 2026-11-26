@@ -8,7 +8,10 @@ pub(crate) fn init(dir: &Path) -> Option<WorkerGuard> {
     std::fs::create_dir_all(dir).ok()?;
     let appender = tracing_appender::rolling::never(dir, "quack.log");
     let (writer, guard) = tracing_appender::non_blocking(appender);
-    let filter = EnvFilter::try_from_env("QUACK_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    // Tungstenite's trace output includes raw conversation frames.
+    let filter = EnvFilter::try_from_env("QUACK_LOG")
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+        .add_directive("tungstenite=off".parse().expect("static log directive"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(writer)

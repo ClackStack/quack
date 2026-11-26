@@ -4,10 +4,10 @@
 	import {
 		compactCount as fmtTokens,
 		describeJob,
-		parsePlanSteps,
 		projectName,
 		shortenPath as shorten,
 		summarizeJobs,
+		summarizePlan,
 		type JobActionTarget
 	} from '#lib/jobs';
 	import type { Session } from '#lib/session.svelte';
@@ -54,8 +54,7 @@
 	let projectsTabBtn: HTMLButtonElement | undefined = $state();
 	let jobsTabBtn: HTMLButtonElement | undefined = $state();
 
-	const planItems = $derived(parsePlanSteps(session.plan));
-	const doneCount = $derived(planItems.filter((p) => p.state === 'x').length);
+	const plan = $derived(summarizePlan(session.plan));
 
 	const busy = $derived(session.streaming || session.turnPending);
 	const activeSummary = $derived(describeJob(session));
@@ -362,6 +361,39 @@
 		</ul>
 	</section>
 
+	{#if plan.total > 0}
+		<section aria-labelledby="rail-plan-heading">
+			<h2 id="rail-plan-heading">
+				Plan
+				<span class={['count', { complete: plan.complete }]}>{plan.done}/{plan.total}</span>
+				<span class={['pct', { complete: plan.complete }]}>{plan.percent}%</span>
+			</h2>
+			<div
+				class="plan-track"
+				role="progressbar"
+				aria-label="Plan progress"
+				aria-valuenow={plan.done}
+				aria-valuemin={0}
+				aria-valuemax={plan.total}
+				aria-valuetext={`${plan.done} of ${plan.total} steps complete (${plan.percent}%)`}
+			>
+				<div class="plan-fill" style:--fill={plan.fraction}></div>
+			</div>
+			<ol class="plan">
+				{#each plan.steps as item, i (`${i}:${item.text}`)}
+					<li class={{ done: item.state === 'x', doing: item.state === '~' }}>
+						<span class="mark" aria-hidden="true">{item.state === 'x' ? '✓' : i + 1}</span>
+						<span class="sr-only">
+							{item.state === 'x' ? 'Done: ' : item.state === '~' ? 'In progress: ' : 'Pending: '}
+						</span>
+						<span class="p-text">{item.text}</span>
+						{#if item.state === '~'}<span class="tag">now</span>{/if}
+					</li>
+				{/each}
+			</ol>
+		</section>
+	{/if}
+
 	<section>
 		<h2>
 			Context
@@ -593,21 +625,6 @@
 			</button>
 		{/if}
 	</section>
-
-	{#if planItems.length > 0}
-		<section>
-			<h2>Plan <span class="count">{doneCount}/{planItems.length}</span></h2>
-			<ol class="plan">
-				{#each planItems as item, i (i)}
-					<li class:done={item.state === 'x'} class:doing={item.state === '~'}>
-						<span class="mark" aria-hidden="true">{i + 1}</span>
-						<span class="p-text">{item.text}</span>
-						{#if item.state === '~'}<span class="tag">now</span>{/if}
-					</li>
-				{/each}
-			</ol>
-		</section>
-	{/if}
 
 	{#if session.agents.length > 0}
 		<section>
@@ -1176,7 +1193,9 @@
 		.dot {
 			animation: none;
 		}
-		.rail-tab {
+		.rail-tab,
+		.g-fill,
+		.plan-fill {
 			transition: none;
 		}
 	}
@@ -1234,6 +1253,11 @@
 
 	.pct.near {
 		color: var(--duck);
+	}
+
+	.pct.complete,
+	.count.complete {
+		color: var(--cloth-ok);
 	}
 
 	.gauge-wrap {
@@ -1521,18 +1545,36 @@
 	}
 
 	/* plan */
+	.plan-track {
+		position: relative;
+		height: 6px;
+		border: 1px solid rgba(219, 228, 233, 0.32);
+		border-radius: 999px;
+		background: rgba(8, 16, 24, 0.3);
+		overflow: hidden;
+	}
+
+	.plan-fill {
+		height: 100%;
+		width: calc(100% * var(--fill));
+		border-radius: 999px;
+		background: var(--cloth-ok);
+		transition: width 300ms ease-out;
+	}
+
 	.plan {
 		list-style: none;
-		margin: 0;
+		margin: 2px 0 0;
 		padding: 0;
 		display: grid;
 		gap: 7px;
-		counter-reset: step;
+		max-height: 280px;
+		overflow-y: auto;
 	}
 
 	.plan li {
 		display: flex;
-		align-items: baseline;
+		align-items: flex-start;
 		gap: 9px;
 		font-size: 0.78125rem;
 		line-height: 1.35;
@@ -1542,17 +1584,25 @@
 	.plan .mark {
 		width: 16px;
 		height: 16px;
-		transform: translateY(2px);
+		margin-top: 1px;
 		color: var(--cloth-dim);
+	}
+
+	.p-text {
+		flex: 1;
+		min-width: 0;
+		overflow-wrap: anywhere;
 	}
 
 	.plan li.doing {
 		color: var(--cloth-ink);
+		font-weight: 500;
 	}
 
 	.plan li.doing .mark {
 		color: var(--duck);
 		border-color: var(--duck);
+		background: rgba(232, 178, 26, 0.14);
 	}
 
 	.plan li.done {
@@ -1571,6 +1621,9 @@
 	}
 
 	.tag {
+		flex: none;
+		align-self: flex-start;
+		margin-top: 1px;
 		margin-left: auto;
 		background: var(--duck);
 		color: #2b240f;
@@ -1580,7 +1633,18 @@
 		text-transform: uppercase;
 		border-radius: 999px;
 		padding: 1.5px 7px;
-		transform: translateY(-1px);
+	}
+
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
 	}
 
 	/* agents */

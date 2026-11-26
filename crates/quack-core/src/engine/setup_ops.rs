@@ -411,6 +411,12 @@ impl Engine {
             // Keep the history, the plan and the session's approvals.
             Some(c) => {
                 setup.tool_ctx.plan = c.setup.tool_ctx.plan.clone();
+                if let Some(saved) = &self.saved_session_context
+                    && setup.profile.id == c.setup.profile.id
+                    && setup.tool_ctx.root == c.setup.tool_ctx.root
+                {
+                    setup.set_session_context(Some(saved.clone()));
+                }
                 c.setup = Arc::new(setup);
                 c.reset_transient();
             }
@@ -429,7 +435,7 @@ impl Engine {
                     history: Some(history),
                     editor: None,
                     plan_start: None,
-                    last_response_id: Arc::default(),
+                    responses_session: Arc::default(),
                     last_reminders: Arc::default(),
                     egress_guard: Arc::default(),
                 });
@@ -760,9 +766,14 @@ impl Engine {
     }
 
     pub(super) fn context_report(&self) {
+        let last_cache_hit = self.stats.lock().ok().and_then(|s| s.last_cache_hit());
         match &self.convo {
             Some(c) => self.emit(Event::ContextReport {
-                report: Box::new(crate::context::report(&c.setup, c.history.as_deref())),
+                report: Box::new(crate::context::report(
+                    &c.setup,
+                    c.history.as_deref(),
+                    last_cache_hit,
+                )),
             }),
             None => self.warn("no model is ready, so there is no context yet".into()),
         }

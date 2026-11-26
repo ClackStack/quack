@@ -12,7 +12,10 @@ use quack_protocol::Usage;
 use serde_json::{Value, json};
 
 use crate::error::{ErrorKind, ProviderError, body_message};
-use crate::types::{ChatRequest, FinishReason, Message, StreamEvent, merge};
+use crate::types::{
+    ChatRequest, FinishReason, Message, StreamEvent, cache_control_object, merge,
+    split_session_context,
+};
 
 pub(crate) const VERSION: &str = "2023-06-01";
 /// `max_tokens` is required; this is used when the model entry sets none.
@@ -71,19 +74,39 @@ fn m_images(m: &Message) -> Vec<Value> {
 pub(crate) fn build_body(req: &ChatRequest) -> Value {
     let mut system: Vec<String> = Vec::new();
     let mut turns: Vec<Value> = Vec::new();
+    // Index of a dedicated `<context>...</context>` block inside `turns[0]` so we can place
+    // a static workspace-context breakpoint ahead of the user's per-session prompt.
+    let mut session_ctx_block: Option<usize> = None;
     for (i, m) in req.messages.iter().enumerate() {
         match m {
             Message::System { content } if i == 0 => system.push(content.clone()),
-            Message::System { content } | Message::User { content, .. } => {
+            Message::System { content }
+            | Message::User { content, .. }
+            | Message::Nudge { content } => {
                 for block in m_images(m) {
                     push(&mut turns, "user", block);
                 }
                 if !content.is_empty() {
-                    push(
-                        &mut turns,
-                        "user",
-                        json!({ "type": "text", "text": content }),
-                    );
+                    let is_first_user = matches!(m, Message::User { .. })
+                        && turns.is_empty()
+                        && session_ctx_block.is_none();
+                    if is_first_user && let Some((ctx, prompt)) = split_session_context(content) {
+                        push(&mut turns, "user", json!({ "type": "text", "text": ctx }));
+                        if let Some(len) = turns[0]["content"].as_array().map(Vec::len) {
+                            session_ctx_block = Some(len - 1);
+                        }
+                        push(
+                            &mut turns,
+                            "user",
+                            json!({ "type": "text", "text": prompt }),
+                        );
+                    } else {
+                        push(
+                            &mut turns,
+                            "user",
+                            json!({ "type": "text", "text": content }),
+                        );
+                    }
                 }
             }
             Message::Compaction {
@@ -162,19 +185,25 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
             json!({ "role": "user", "content": [{ "type": "text", "text": "(start)" }] }),
         );
     }
-    // A cache breakpoint on the newest block: everything before it is reused next time.
-    // The previous request put its own on the end of the user turn before the last reply;
-    // marking that again reads it back even when the newest step added many blocks.
+    // Anthropic allows at most 4 `cache_control` breakpoints and evaluates prefixes in
+    // `tools -> system -> messages` order. Allocate breakpoints strictly within that cap:
+    // 1) newest user block + previous user turn end (rolling conversation cache, up to 2)
+    // 2) `system` (covers `tools + system`), or `tools.last()` if `system` is empty (1)
+    // 3) opening `<context>` block when split, else `tools.last()` when `system` is set (1)
+    let cc = cache_control_object(req.prompt_cache.ttl.as_deref());
+    let mut remaining_bp: usize = 4;
     let n = turns.len();
     for i in [n.checked_sub(3), n.checked_sub(1)].into_iter().flatten() {
-        if turns[i]["role"] != "user" {
+        if remaining_bp == 0 || turns[i]["role"] != "user" {
             continue;
         }
         if let Some(block) = turns[i]["content"]
             .as_array_mut()
             .and_then(|c| c.last_mut())
+            && block.get("cache_control").is_none()
         {
-            block["cache_control"] = json!({ "type": "ephemeral" });
+            block["cache_control"] = cc.clone();
+            remaining_bp -= 1;
         }
     }
 
@@ -185,14 +214,28 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
         "stream": true,
     });
     if !system.is_empty() {
-        body["system"] = json!([{
+        let mut sys = json!({
             "type": "text",
             "text": system.join("\n\n"),
-            "cache_control": { "type": "ephemeral" },
-        }]);
+        });
+        if remaining_bp > 0 {
+            sys["cache_control"] = cc.clone();
+            remaining_bp -= 1;
+        }
+        body["system"] = json!([sys]);
+    }
+    if let Some(ctx_idx) = session_ctx_block
+        && remaining_bp > 0
+        && let Some(block) = body["messages"][0]["content"]
+            .as_array_mut()
+            .and_then(|c| c.get_mut(ctx_idx))
+        && block.get("cache_control").is_none()
+    {
+        block["cache_control"] = cc.clone();
+        remaining_bp -= 1;
     }
     if !req.tools.is_empty() {
-        body["tools"] = req
+        let mut tools: Vec<Value> = req
             .tools
             .iter()
             .map(|t| {
@@ -203,6 +246,12 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
                 })
             })
             .collect();
+        if remaining_bp > 0
+            && let Some(last) = tools.last_mut()
+        {
+            last["cache_control"] = cc;
+        }
+        body["tools"] = Value::Array(tools);
     }
     let s = &req.sampling;
     if let Some(t) = s.temperature {
@@ -792,5 +841,113 @@ mod tests {
             path("https://host/api/anthropic/v1/", "messages"),
             "messages"
         );
+    }
+
+    fn count_breakpoints(v: &Value) -> usize {
+        match v {
+            Value::Object(m) => {
+                usize::from(m.contains_key("cache_control"))
+                    + m.values().map(count_breakpoints).sum::<usize>()
+            }
+            Value::Array(a) => a.iter().map(count_breakpoints).sum(),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn ttl_tools_fallback_and_session_context_split_stay_within_four_breakpoints() {
+        // With empty system prompt, the last tool gets a cache breakpoint + custom TTL.
+        let empty_sys = ChatRequest {
+            model: "claude-opus-5-5".into(),
+            messages: vec![Message::User {
+                content: "hi".into(),
+                images: Vec::new(),
+            }],
+            tools: vec![
+                ToolSpec {
+                    name: "a".into(),
+                    description: "a".into(),
+                    parameters: json!({"type":"object"}),
+                },
+                ToolSpec {
+                    name: "b".into(),
+                    description: "b".into(),
+                    parameters: json!({"type":"object"}),
+                },
+            ],
+            prompt_cache: quack_config::provider::PromptCache {
+                ttl: Some("1h".into()),
+                ..Default::default()
+            },
+            ..ChatRequest::default()
+        };
+        let b = build_body(&empty_sys);
+        assert!(b.get("system").is_none());
+        assert!(b["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            b["tools"][1]["cache_control"],
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+        assert!(count_breakpoints(&b) <= 4);
+
+        // With system + tools + split `<context>` + multi-turn history, never exceed 4
+        // breakpoints and keep `<context>` in its own cached block on turn 0.
+        let multi = ChatRequest {
+            model: "claude-opus-5-5".into(),
+            messages: vec![
+                Message::System {
+                    content: "sys".into(),
+                },
+                Message::User {
+                    content: "<context>AGENTS.md</context>\n\nfirst".into(),
+                    images: Vec::new(),
+                },
+                Message::Assistant {
+                    content: "reply 1".into(),
+                    reasoning: None,
+                    tool_calls: Vec::new(),
+                    sealed: None,
+                },
+                Message::User {
+                    content: "second".into(),
+                    images: Vec::new(),
+                },
+                Message::Assistant {
+                    content: "reply 2".into(),
+                    reasoning: None,
+                    tool_calls: Vec::new(),
+                    sealed: None,
+                },
+                Message::User {
+                    content: "third".into(),
+                    images: Vec::new(),
+                },
+            ],
+            tools: vec![ToolSpec {
+                name: "read".into(),
+                description: "read".into(),
+                parameters: json!({"type":"object"}),
+            }],
+            prompt_cache: quack_config::provider::PromptCache {
+                ttl: Some("1h".into()),
+                ..Default::default()
+            },
+            ..ChatRequest::default()
+        };
+        let b = build_body(&multi);
+        assert_eq!(count_breakpoints(&b), 4, "{b:#}");
+        assert_eq!(
+            b["system"][0]["cache_control"],
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+        assert_eq!(
+            b["messages"][0]["content"][0]["text"],
+            "<context>AGENTS.md</context>"
+        );
+        assert_eq!(
+            b["messages"][0]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+        assert_eq!(b["messages"][0]["content"][1]["text"], "first");
     }
 }

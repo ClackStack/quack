@@ -64,8 +64,20 @@ it runs, then its result summary (`/tasks` keeps the full detail). Only the last
 few finished runs stay listed; older ones collapse into a `+N earlier` line so
 the rest of the panel keeps its room.
 
-The folder and branch move out of the header, and context/speed move out of
-the status bar while the sidebar is visible. Model and thinking level remain next
+When the model creates a plan (`Event::Plan` / `todo`), a **Plan** section
+appears below Context with the completion count and percentage (`Plan · 1/3 (33%)`),
+a progress meter, and the steps (done, active, pending). Steps wrap onto up to
+two indented lines when the whole plan fits, or switch to one line per step and
+window around the active/next step (with `+N earlier` / `+N more`) when vertical
+space is tight. Completed plans remain visible at 100% until cleared or a new
+session starts. While the sidebar shows the plan, the one-line plan strip above
+the input steps aside (`/todo` still expands the full list there); if the
+sidebar has too few rows left (for example alongside sub-agents on a 24-row
+terminal) or narrows below 140×24, the main-pane strip stays visible.
+
+The folder and branch move out of the header, context/speed move out of
+the status bar, and the one-line plan strip moves out of the main pane while the
+sidebar shows them. Model and thinking level remain next
 to each other in the status bar and the sidebar's Model section. Permission mode, sandbox warnings,
 activity, approvals and diagnostics stay in the status bar. Resizing below either
 minimum restores the single-column layout and its metadata. Popups and approval

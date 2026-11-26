@@ -33,8 +33,13 @@ impl Engine {
                 tokio::task::spawn_blocking(move || startup::refresh_extensions(&old, &cfg, &tx))
                     .await
             {
+                let prompt_changed = fresh.system != c.setup.system
+                    || fresh.effective_session_context() != c.setup.effective_session_context()
+                    || fresh.surface.tools != c.setup.surface.tools;
                 c.setup = Arc::new(fresh);
-                c.last_response_id = Arc::default();
+                if prompt_changed {
+                    c.responses_session = Arc::default();
+                }
                 for &k in &ev.data_kinds {
                     if k != "hooks" && !reloaded.iter().any(|r| r == k) {
                         reloaded.push(k.to_owned());
@@ -416,6 +421,12 @@ impl Engine {
         let history = match self.convo.take() {
             Some(c) => {
                 self.saved_plan_start = c.plan_start;
+                if let Some(saved) = &self.saved_session_context
+                    && setup.profile.id == c.setup.profile.id
+                    && setup.tool_ctx.root == c.setup.tool_ctx.root
+                {
+                    setup.set_session_context(Some(saved.clone()));
+                }
                 if let Ok(old) = c.perms.lock() {
                     // A locked mode keeps the configured one from `setup`.
                     if !self.mode_locked() {
@@ -449,7 +460,7 @@ impl Engine {
             history: Some(history),
             editor: None,
             plan_start: None,
-            last_response_id: Arc::default(),
+            responses_session: Arc::default(),
             last_reminders: Arc::default(),
             egress_guard: Arc::default(),
         });

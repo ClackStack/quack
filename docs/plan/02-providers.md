@@ -56,8 +56,9 @@ pub enum StreamEvent {
 
 ## anthropic-messages and openai-responses (2026-10-18)
 
-- **`anthropic-messages`** (`proto-anthropic`): `POST <base>/v1/messages`, or `<base>/messages` when `base_url` already ends in `/v1`. With no `auth_header`, the key goes in `x-api-key` and `anthropic-version: 2023-06-01` is sent. The history is folded into alternating turns: tool results are `tool_result` blocks in the next user turn, a system message after the first becomes user text, and the conversation always opens with the user. Cache breakpoints sit on the system prompt, the newest block, and the end of the user turn before the last reply (where the previous request put its own, so a step that adds many blocks still reads the cache). `max_tokens` is required, so 8,192 is sent when the model sets none. `reasoning.effort` becomes `output_config.effort`. Thinking is turned on by the provider file (`extra_body.thinking`), not by the adapter, since compatible hosts take other shapes. Replies with thinking are kept sealed and sent back unchanged (below). Usage counts cache reads and writes in the prompt, reads as cached and writes as `cache_write_tokens`. `refusal` ends a reply as a content filter. Models are listed from `/v1/models`.
-- **`openai-responses`** (`proto-openai-responses`): `POST <base>/responses`, stateless (`store: false`, the whole history in `input` each time, as with chat). The first system message is `instructions`, later ones `developer` messages. Tool calls and results are `function_call` / `function_call_output` items. Streams of text, reasoning (`reasoning_text` and `reasoning_summary_text`) and function-call arguments are handled, including servers that send arguments only at `.done`. `reasoning.effort` comes from the model's `reasoning.effort`; the request's `cache_key` (the session id) is sent as `prompt_cache_key`. Replies with encrypted reasoning or an assistant `phase` are kept sealed and sent back in order. `input_tokens_details.cache_write_tokens` is counted.
+- **`anthropic-messages`** (`proto-anthropic`): `POST <base>/v1/messages`, or `<base>/messages` when `base_url` already ends in `/v1`. With no `auth_header`, the key goes in `x-api-key` and `anthropic-version: 2023-06-01` is sent. The history is folded into alternating turns: tool results are `tool_result` blocks in the next user turn, and a system message after the first becomes user text, and the conversation always opens with the user. Up to 4 `cache_control` breakpoints (honoring `[prompt_cache] ttl`, e.g. `"1h"`) sit on the newest block, the end of the user turn before the last reply, `system` (or the last tool when `system` is empty), and a split leading `<context>` block on turn 0 (or the last tool when there is no `<context>`). `max_tokens` is required, so 8,192 is sent when the model sets none. `reasoning.effort` becomes `output_config.effort`. Thinking is turned on by the provider file (`extra_body.thinking`), not by the adapter, since compatible hosts take other shapes. Replies with thinking are kept sealed and sent back unchanged (below). Usage counts cache reads and writes in the prompt, reads as cached and writes as `cache_write_tokens`. `refusal` ends a reply as a content filter. Models are listed from `/v1/models`.
+- **`openai-responses`** (`proto-openai-responses`): `POST <base>/responses` with the whole history in `input`, or [WebSocket continuation](#responses-websocket-continuation) when configured. Both use `store: false`. The first system message is `instructions` or an initial `developer` item, depending on `prompt_cache.developer_instructions`. Later system messages become `developer` items. When `prompt_cache.explicit_breakpoints = true`, leading `<context>` on turn 0 is split into its own `input_text` part with an explicit breakpoint ahead of the user's opening prompt. Tool calls and results are `function_call` / `function_call_output` items. Both transports use the same streaming parser for text, reasoning and function arguments, including arguments that arrive only at `.done`. Model settings supply `reasoning.effort`, and the session or shared cache key is sent as `prompt_cache_key`. Replies with encrypted reasoning or an assistant `phase` are kept sealed and sent back in order. `input_tokens_details.cache_write_tokens` is counted.
+- **`openai-chat` & `ollama` prompt caching (2026-11-25)**: `[prompt_cache]` on `openai-chat` supports `cache_key`, `affinity_header`, `ttl` (`prompt_cache_options` implicit TTL for Moonshot/Kimi), `cache_control = "auto"` (top-level `cache_control`, scoped via `cache_control_models = ["anthropic/*"]` on OpenRouter), and `cache_control = "breakpoints"` (content-block breakpoints on DashScope Qwen). Mistral prefers the explicit session/shared `cache_key` over hashing opening messages. Usage parsing handles `cache_creation_input_tokens`, `cache_read_input_tokens`, and llama.cpp `timings.cache_n`. Native `ollama` maps `[prompt_cache] ttl` to `keep_alive` (`defaults/providers.d/ollama.toml` sets `"15m"`) and parses `prompt_eval_cached_count`.
 - Both are tested against mock servers only (`quack-providers/tests/mock_server.rs`, plus unit tests of the request bodies and stream parsing).
 
 ## Claude, OpenAI and ChatGPT plans (2026-10-19)
@@ -149,6 +150,24 @@ for custom providers. Focused summaries and endpoint failures use Quack's text
 compaction.
 See [how compaction is applied and replayed](05-context-management.md#native-responses-compaction-2026-11-18).
 
+### Responses WebSocket continuation
+
+Bundled `chatgpt` and `openai` set `responses_websocket = true`. Other provider files
+default to HTTP. The upgrade uses the configured Responses endpoint, credentials, TLS
+and proxy settings. It declines redirects.
+
+Each conversation or sub-agent run owns its socket. Quack sends the full input first.
+It sends `previous_response_id` with only the new input when the local prefix and model
+settings still match. History changes start a new chain with full input. When the socket
+expires or the service rejects its continuation, quack can reconnect and send full input.
+A refused upgrade falls back to HTTP for a minute before quack tries another upgrade.
+An interruption drops the active socket. A stream failure after the response starts is
+reported to the engine as usual. Session logs retain the full history for resume.
+Compaction, titles and other one-off requests use HTTP.
+
+Set `responses_websocket = false` in a provider override to select HTTP streaming.
+[WebSocket continuation and recovery](https://developers.openai.com/api/docs/guides/websocket-mode)
+
 ## Provider file schema
 
 ### Minimal form (what most users write)
@@ -178,6 +197,7 @@ name = "Corp GPU cluster"
 api = "openai-chat"                    # default
 base_url = "https://llm.corp.internal/v1"
 enabled = true
+# responses_websocket = true           # openai-responses endpoints with WebSocket support
 
 # auth — any secret form from 01-configuration
 api_key = { env = "CORP_LLM_KEY" }

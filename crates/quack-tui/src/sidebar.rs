@@ -9,9 +9,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use quack_protocol::LoadState;
 
-use crate::app::App;
+use crate::app::{App, PlanState};
 use crate::theme::{meter, tokens};
-use crate::ui::truncate;
+use crate::ui::{plan_mark, truncate};
 use crate::wrap::wrap;
 
 const MIN_WIDTH: u16 = 140;
@@ -39,14 +39,33 @@ pub(crate) fn areas(screen: Rect, enabled: bool) -> (Rect, Option<Rect>) {
     (main, Some(sidebar))
 }
 
-pub(crate) fn draw(f: &mut Frame<'_>, app: &App, area: Rect) {
-    let t = &app.theme;
-    let block = Block::new()
+#[derive(Debug)]
+pub(crate) struct Sidebar {
+    rows: Vec<Line<'static>>,
+    /// Whether the sidebar rendered the session's plan; when true, the main pane omits
+    /// its one-line plan strip unless `/todo` expanded it.
+    pub(crate) shows_plan: bool,
+}
+
+impl Sidebar {
+    pub(crate) fn draw(self, f: &mut Frame<'_>, app: &App, area: Rect) {
+        f.render_widget(Paragraph::new(self.rows).block(sidebar_block(app)), area);
+    }
+}
+
+fn sidebar_block(app: &App) -> Block<'static> {
+    Block::new()
         .borders(Borders::LEFT)
         .border_set(app.glyphs.border)
-        .border_style(t.border)
-        .padding(Padding::new(2, 1, 1, 0));
-    let width = usize::from(block.inner(area).width);
+        .border_style(app.theme.border)
+        .padding(Padding::new(2, 1, 1, 0))
+}
+
+pub(crate) fn build(app: &App, area: Rect) -> Sidebar {
+    let t = &app.theme;
+    let inner = sidebar_block(app).inner(area);
+    let width = usize::from(inner.width);
+    let height = usize::from(inner.height);
     let ascii = app.info.ui.ascii;
     let mut rows = Vec::new();
     let heading = t.dim.add_modifier(Modifier::BOLD);
@@ -54,8 +73,10 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App, area: Rect) {
     // diagnostics stay put instead of flashing over the transcript.
     if app.startup_status_visible() {
         draw_startup(app, &mut rows, heading, width, ascii);
-        f.render_widget(Paragraph::new(rows).block(block), area);
-        return;
+        return Sidebar {
+            rows,
+            shows_plan: false,
+        };
     }
     field(
         &mut rows,
@@ -155,7 +176,191 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App, area: Rect) {
     if let Some(speed) = app.speed {
         rows.push(Line::styled(format!("{speed:.0} tokens/s"), t.dim));
     }
-    f.render_widget(Paragraph::new(rows).block(block), area);
+    let shows_plan = if !app.plan.is_empty() {
+        let remaining = height.saturating_sub(rows.len());
+        draw_plan(app, &mut rows, heading, width, remaining, ascii)
+    } else {
+        false
+    };
+    Sidebar { rows, shows_plan }
+}
+
+/// The session's plan: progress summary, meter, and steps. Fits within `remaining` rows
+/// below Context without pushing metadata off-screen; returns `false` when vertical space
+/// is too tight so the main pane keeps its one-line plan strip.
+fn draw_plan(
+    app: &App,
+    rows: &mut Vec<Line<'static>>,
+    heading: Style,
+    width: usize,
+    remaining: usize,
+    ascii: bool,
+) -> bool {
+    if remaining < 3 || width == 0 {
+        return false;
+    }
+    let t = &app.theme;
+    let total = app.plan.len();
+    let done = app
+        .plan
+        .iter()
+        .filter(|(s, _)| *s == PlanState::Done)
+        .count();
+    let percent = done * 100 / total.max(1);
+    let count_style = if done == total { t.ok } else { t.dim };
+    let fraction = done as f32 / total.max(1) as f32;
+
+    rows.push(Line::raw(""));
+    if remaining == 3 {
+        let compact = meter(fraction, total.min(8), ascii);
+        rows.push(Line::from(vec![
+            Span::styled("Plan", heading),
+            Span::raw(" "),
+            Span::styled(compact, t.ok),
+            Span::styled(format!(" {done}/{total}"), count_style),
+        ]));
+        let (state, text) = &app.plan[plan_focus(&app.plan)];
+        push_plan_step_single(app, rows, *state, text, width, ascii);
+        return true;
+    }
+
+    let separator = if ascii { " - " } else { " · " };
+    rows.push(Line::from(vec![
+        Span::styled("Plan", heading),
+        Span::styled(separator, t.dim),
+        Span::styled(format!("{done}/{total} ({percent}%)"), count_style),
+    ]));
+    rows.push(Line::styled(meter(fraction, width, ascii), t.ok));
+
+    let step_room = remaining - 3;
+    let wrapped: Vec<Vec<String>> = app
+        .plan
+        .iter()
+        .map(|(state, text)| {
+            let lead = plan_mark(app, *state).0.width() + 1;
+            wrap_step(text, width.saturating_sub(lead), ascii)
+        })
+        .collect();
+    let wrapped_rows: usize = wrapped.iter().map(Vec::len).sum();
+    if wrapped_rows <= step_room {
+        for ((state, _), lines) in app.plan.iter().zip(wrapped) {
+            push_plan_step_wrapped(app, rows, *state, lines);
+        }
+        return true;
+    }
+
+    if total <= step_room {
+        for (state, text) in &app.plan {
+            push_plan_step_single(app, rows, *state, text, width, ascii);
+        }
+        return true;
+    }
+
+    let (visible, show_overflow) = if step_room >= 2 {
+        (step_room - 1, true)
+    } else {
+        (1, false)
+    };
+    let focus = plan_focus(&app.plan);
+    let leading_done = app
+        .plan
+        .iter()
+        .take_while(|(s, _)| *s == PlanState::Done)
+        .count();
+    let max_start = total.saturating_sub(visible);
+    let min_for_focus = focus.saturating_add(1).saturating_sub(visible);
+    let start = leading_done.max(min_for_focus).min(max_start);
+    let end = (start + visible).min(total);
+    for (state, text) in &app.plan[start..end] {
+        push_plan_step_single(app, rows, *state, text, width, ascii);
+    }
+    if show_overflow {
+        let hidden_above = start;
+        let hidden_below = total.saturating_sub(end);
+        let note = match (hidden_above, hidden_below) {
+            (0, b) => format!("  +{b} more"),
+            (a, 0) => format!("  +{a} earlier"),
+            (a, b) => {
+                let sep = if ascii { ", " } else { " · " };
+                format!("  +{a} earlier{sep}+{b} more")
+            }
+        };
+        rows.push(Line::styled(clip(&note, width, ascii), t.dim));
+    }
+    true
+}
+
+fn plan_focus(plan: &[(PlanState, String)]) -> usize {
+    plan.iter()
+        .position(|(s, _)| *s == PlanState::Active)
+        .or_else(|| plan.iter().position(|(s, _)| *s == PlanState::Pending))
+        .unwrap_or_else(|| plan.len().saturating_sub(1))
+}
+
+fn plan_text_style(app: &App, state: PlanState, mark_style: Style) -> Style {
+    match state {
+        PlanState::Done => app.theme.dim.add_modifier(Modifier::CROSSED_OUT),
+        PlanState::Active => mark_style.add_modifier(Modifier::BOLD),
+        PlanState::Pending => Style::new(),
+    }
+}
+
+fn wrap_step(text: &str, room: usize, ascii: bool) -> Vec<String> {
+    if room == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = wrap(text, room).into_iter();
+    let Some(first) = lines.next() else {
+        return vec![String::new()];
+    };
+    let mut out = vec![first];
+    if let Some(mut second) = lines.next() {
+        if lines.next().is_some() {
+            let dots = if ascii { "..." } else { "…" };
+            second = clip(&format!("{second}{dots}"), room, ascii);
+        }
+        out.push(second);
+    }
+    out
+}
+
+fn push_plan_step_wrapped(
+    app: &App,
+    rows: &mut Vec<Line<'static>>,
+    state: PlanState,
+    lines: Vec<String>,
+) {
+    let (mark, mark_style) = plan_mark(app, state);
+    let text_style = plan_text_style(app, state, mark_style);
+    let indent = " ".repeat(mark.width() + 1);
+    let mut iter = lines.into_iter();
+    rows.push(Line::from(vec![
+        Span::styled(format!("{mark} "), mark_style),
+        Span::styled(iter.next().unwrap_or_default(), text_style),
+    ]));
+    for rest in iter {
+        rows.push(Line::from(vec![
+            Span::raw(indent.clone()),
+            Span::styled(rest, text_style),
+        ]));
+    }
+}
+
+fn push_plan_step_single(
+    app: &App,
+    rows: &mut Vec<Line<'static>>,
+    state: PlanState,
+    text: &str,
+    width: usize,
+    ascii: bool,
+) {
+    let (mark, mark_style) = plan_mark(app, state);
+    let text_style = plan_text_style(app, state, mark_style);
+    let room = width.saturating_sub(mark.width() + 1);
+    rows.push(Line::from(vec![
+        Span::styled(format!("{mark} "), mark_style),
+        Span::styled(clip(text, room, ascii), text_style),
+    ]));
 }
 
 /// The session's sub-agent runs: the running ones live with their step count, the

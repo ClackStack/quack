@@ -228,7 +228,8 @@ fn derive(base: &Setup, def: &AgentFile) -> Setup {
         model_ref: base.model_ref.clone(),
         profile: base.profile.clone(),
         system,
-        session_context: base.session_context.clone(),
+        session_context: base.effective_session_context(),
+        session_context_override: std::sync::RwLock::default(),
         surface,
         registry: base.registry.clone(),
         tool_ctx,
@@ -356,7 +357,7 @@ async fn start(parent: &TurnCtx, call_key: &str, req: TaskRequest) -> TaskReport
         network: parent.network.clone(),
         ledger: parent.ledger.clone(),
         secret_allowlist: parent.secret_allowlist.clone(),
-        last_response_id: Arc::default(),
+        responses_session: Arc::default(),
         last_reminders: Arc::default(),
         egress_guard: Arc::default(),
     };

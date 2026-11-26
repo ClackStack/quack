@@ -71,6 +71,9 @@ pub struct ProviderFile {
     /// Use native Responses compaction for this provider's models.
     #[serde(default)]
     pub native_compaction: bool,
+    /// Use Responses WebSocket continuation for interactive conversations.
+    #[serde(default)]
+    pub responses_websocket: bool,
     /// Prompt-caching wire options (`openai-responses` and `openai-chat`).
     #[serde(default)]
     pub prompt_cache: PromptCache,
@@ -272,10 +275,19 @@ impl ProviderFile {
 
     /// Prompt-cache options for `model`, preferring any per-model override over the provider default.
     pub fn prompt_cache_for(&self, model: &ModelEntry) -> PromptCache {
-        model
+        let mut pc = model
             .prompt_cache
             .clone()
-            .unwrap_or_else(|| self.prompt_cache.clone())
+            .unwrap_or_else(|| self.prompt_cache.clone());
+        if !pc.cache_control_models.is_empty()
+            && !pc
+                .cache_control_models
+                .iter()
+                .any(|g| crate::glob_match(g, &model.id))
+        {
+            pc.cache_control = None;
+        }
+        pc
     }
 }
 
@@ -477,18 +489,41 @@ pub struct PromptCache {
     /// top-level `instructions` (`openai-responses`), keeping it inside the cached prefix
     /// on models that append `instructions` outside the cache.
     pub developer_instructions: bool,
-    /// Optional cache retention TTL (`"30m"`, `"12h"` on `openai-responses`).
+    /// Optional cache retention TTL (`"30m"`, `"12h"` on `openai-responses`; `"5m"`,
+    /// `"1h"` on `anthropic-messages` and `openai-chat` providers such as Moonshot/Kimi;
+    /// `keep_alive` duration such as `"15m"` on `ollama`).
     pub ttl: Option<String>,
     /// Attach `prompt_cache_options.comparison_response_id` on follow-up requests so the
     /// server returns `prompt_cache_diagnostics` for debug logs (`openai-responses`).
     pub diagnostics: bool,
     /// Send the session's cache key as `prompt_cache_key` in the request body on
-    /// `openai-chat` providers that support it (such as Fireworks AI).
+    /// `openai-chat` providers that support it (such as Fireworks AI and Moonshot/Kimi).
     /// (`openai-responses` always sends `prompt_cache_key` when a cache key is set.)
     pub cache_key: bool,
     /// Optional HTTP request header name to carry the session's cache key for sticky
-    /// replica routing (for example `"x-session-affinity"` on Fireworks AI).
+    /// replica routing (for example `"x-session-affinity"` on Fireworks AI,
+    /// `"x-session-id"` on OpenRouter, or `"x-grok-conv-id"` on xAI chat completions).
     pub affinity_header: Option<String>,
+    /// Optional Anthropic-style `cache_control` mode on `openai-chat` requests:
+    /// `"auto"` emits a top-level `cache_control` object (OpenRouter automatic caching);
+    /// `"breakpoints"` attaches `cache_control` markers to content blocks (DashScope Qwen
+    /// and Anthropic-compatible gateways).
+    pub cache_control: Option<CacheControlMode>,
+    /// When non-empty, only model ids matching one of these globs (for example
+    /// `["anthropic/*"]` on OpenRouter) receive `cache_control`.
+    pub cache_control_models: Vec<String>,
+}
+
+/// How Anthropic-style `cache_control` markers are emitted on `openai-chat` requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CacheControlMode {
+    /// Top-level `cache_control` object (OpenRouter automatic caching across tools, system,
+    /// and multi-step tool results without rewriting message content blocks).
+    Auto,
+    /// Explicit `cache_control` markers on content blocks (system prompt, opening session
+    /// context, and recent user messages; accepted by Alibaba DashScope and OpenRouter).
+    Breakpoints,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -786,6 +821,8 @@ mod tests {
                 diagnostics: false,
                 cache_key: false,
                 affinity_header: None,
+                cache_control: None,
+                cache_control_models: Vec::new(),
             }
         );
         assert_eq!(
@@ -802,5 +839,27 @@ mod tests {
             p.models[2].reasoning.preserve_in_history,
             Some(ReasoningHistory::AllTurns)
         );
+    }
+
+    #[test]
+    fn prompt_cache_control_models_scopes_explicit_caching_by_glob() {
+        let p: ProviderFile = toml::from_str(
+            r#"
+            base_url = "https://openrouter.ai/api/v1"
+            models = ["anthropic/claude-opus-5-5", "z-ai/glm-5.3-flash"]
+            [prompt_cache]
+            affinity_header = "x-session-id"
+            cache_control = "auto"
+            cache_control_models = ["anthropic/*"]
+            "#,
+        )
+        .expect("parses");
+        let claude = p.prompt_cache_for(&p.models[0]);
+        assert_eq!(claude.cache_control, Some(CacheControlMode::Auto));
+        assert_eq!(claude.affinity_header.as_deref(), Some("x-session-id"));
+
+        let glm = p.prompt_cache_for(&p.models[1]);
+        assert_eq!(glm.cache_control, None);
+        assert_eq!(glm.affinity_header.as_deref(), Some("x-session-id"));
     }
 }

@@ -206,7 +206,7 @@ async fn mcp_tools_are_offered_and_called() {
         }
     };
     assert_eq!(servers[0].state, McpServerState::Ready);
-    assert_eq!(servers[0].tools, ["echo", "drop_table"]);
+    assert_eq!(servers[0].tools, ["drop_table", "echo"]);
     assert!(!servers[0].deferred);
     engine.shutdown().await;
 }
@@ -263,6 +263,78 @@ async fn large_tool_sets_are_found_with_tool_search() {
         sent[1]
     );
     assert!(sent[2].contains("echo: found"), "{}", sent[2]);
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn deferred_tool_search_keeps_resource_tools_ahead_of_activated_tools() {
+    let mcp = serve(McpServer {
+        extras: true,
+        asks: false,
+    })
+    .await;
+    let llm = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("echo: found"))
+        .respond_with(sse_text("done"))
+        .mount(&llm)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("now available"))
+        .respond_with(sse_call("c2", "mcp__fx__echo", json!({"text": "found"})))
+        .mount(&llm)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse_call("c1", "tool_search", json!({"query": "echo text"})))
+        .up_to_n_times(1)
+        .mount(&llm)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = common::workspace(
+        tmp.path(),
+        &llm.uri(),
+        r#"[{ id = "tiny", context_window = 400 }]"#,
+        "",
+    );
+    add_server(tmp.path(), &mcp.uri(), "[tools]\nauto_approve = [\"*\"]\n");
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    mcp_ready(&mut engine).await;
+
+    turn(&mut engine, "use echo").await;
+    let reqs: Vec<Value> = bodies(&llm)
+        .await
+        .into_iter()
+        .filter(|b| !b.contains("You summarize a coding session"))
+        .map(|b| serde_json::from_str(&b).expect("json"))
+        .collect();
+    let names = |v: &Value| -> Vec<String> {
+        v["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let before = names(&reqs[0]);
+    let after = names(&reqs[1]);
+    // Activating `mcp__fx__echo` must ONLY append at the end of `tools[]`, leaving
+    // `tool_search`, `list_mcp_resources`, and `read_mcp_resource` untouched in front.
+    assert_eq!(
+        &after[..before.len()],
+        before.as_slice(),
+        "activating deferred tool shifted earlier tools: before={before:?} after={after:?}"
+    );
+    assert_eq!(after.last().map(String::as_str), Some("mcp__fx__echo"));
+    // `tool_search` description must not embed live tool counts.
+    let desc = reqs[0]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|t| t["function"]["name"] == "tool_search")
+        .and_then(|t| t["function"]["description"].as_str())
+        .expect("tool_search description");
+    assert!(!desc.contains("2 tools"), "dynamic count in schema: {desc}");
     engine.shutdown().await;
 }
 

@@ -123,7 +123,9 @@ pub fn transcript(history: &[Message], max_chars: usize) -> String {
 fn render(m: &Message) -> String {
     match m {
         Message::System { content } => format!("### System\n{content}"),
-        Message::User { content, .. } | Message::Compaction { content, .. } => {
+        Message::User { content, .. }
+        | Message::Nudge { content }
+        | Message::Compaction { content, .. } => {
             if is_summary(m) {
                 format!("### Summary of the session before this point\n{content}")
             } else {
@@ -343,6 +345,7 @@ mod tests {
         h.iter()
             .map(|m| match m {
                 Message::User { content, .. }
+                | Message::Nudge { content }
                 | Message::Compaction { content, .. }
                 | Message::Assistant { content, .. }
                 | Message::Tool { content, .. }

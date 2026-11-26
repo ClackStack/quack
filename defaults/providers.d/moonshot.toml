@@ -7,6 +7,11 @@ base_url = "https://api.moonshot.ai/v1"
 catalog = "moonshotai"
 api_key = { env = "MOONSHOT_API_KEY" }
 
+# Sticky routing for Kimi's implicit prompt cache; set `ttl = "1h"` in a user override
+# for longer idle gaps (default is `"5m"`).
+[prompt_cache]
+cache_key = true
+
 # The K3 models always reason and take `reasoning_effort` `low`/`high`/`max`, default
 # `max`. K2.6 has only a thinking toggle and K2.7 Code none, so they list no levels:
 # https://platform.kimi.ai/docs/guide/use-reasoning-effort

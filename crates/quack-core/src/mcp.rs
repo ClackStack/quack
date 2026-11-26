@@ -46,6 +46,10 @@ pub(crate) struct Mcp {
     pub manager: Arc<McpManager>,
     /// Model names of deferred tools `tool_search` turned on, in that order.
     activated: Mutex<Vec<String>>,
+    /// Server order pinned as servers first appear in a session: servers ready at the first
+    /// request appear in deterministic `id` order, while any slow server that connects later
+    /// appends at the tail instead of shifting earlier tool definitions.
+    server_order: Mutex<Vec<String>>,
     /// What [`Mcp::offered`] last returned, with the inputs it was built from: requests
     /// ask for the offered set on every model call and every tool dispatch, and
     /// rebuilding it clones every ready server's tool list.
@@ -76,13 +80,27 @@ impl Mcp {
         Arc::new(Self {
             manager,
             activated: Mutex::new(Vec::new()),
+            server_order: Mutex::new(Vec::new()),
             cache: Mutex::new(OfferCache::default()),
         })
     }
 
     fn adapters(&self) -> Vec<McpTool> {
-        self.manager
-            .tools()
+        let mut tools = self.manager.tools();
+        if let Ok(mut order) = self.server_order.lock() {
+            for t in &tools {
+                if !order.iter().any(|id| id == &t.server) {
+                    order.push(t.server.clone());
+                }
+            }
+            tools.sort_by_key(|t| {
+                order
+                    .iter()
+                    .position(|id| id == &t.server)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        tools
             .into_iter()
             .map(|info| McpTool {
                 name: model_tool_name(&info.server, &info.name),
@@ -131,25 +149,36 @@ impl Mcp {
     ) -> Vec<Arc<dyn Tool>> {
         let tools = self.adapters();
         let mut out: Vec<Arc<dyn Tool>> = Vec::new();
+        let has_resources = !self.manager.resources().is_empty();
         if !Self::deferred(&tools, budget) {
             out.extend(tools.into_iter().map(|t| Arc::new(t) as Arc<dyn Tool>));
+            if has_resources {
+                out.push(Arc::new(ListResources {
+                    manager: self.manager.clone(),
+                }));
+                out.push(Arc::new(ReadResource {
+                    manager: self.manager.clone(),
+                }));
+            }
         } else {
+            // Keep static MCP tools (`tool_search` and resource tools) ahead of dynamically
+            // activated tools so activating a match only appends at the tail of `tools[]`.
             out.push(Arc::new(ToolSearch {
                 mcp: Arc::clone(self),
             }));
+            if has_resources {
+                out.push(Arc::new(ListResources {
+                    manager: self.manager.clone(),
+                }));
+                out.push(Arc::new(ReadResource {
+                    manager: self.manager.clone(),
+                }));
+            }
             for name in activated {
                 if let Some(t) = tools.iter().find(|t| t.name == *name) {
                     out.push(Arc::new(t.clone()));
                 }
             }
-        }
-        if !self.manager.resources().is_empty() {
-            out.push(Arc::new(ListResources {
-                manager: self.manager.clone(),
-            }));
-            out.push(Arc::new(ReadResource {
-                manager: self.manager.clone(),
-            }));
         }
         out
     }
@@ -467,27 +496,33 @@ impl Tool for ToolSearch {
     }
 
     fn description(&self, _ctx: &ToolCtx) -> String {
-        let mut servers: Vec<(String, usize, String)> = Vec::new();
-        for s in self.mcp.manager.status() {
-            if s.state == ServerState::Ready {
-                servers.push((s.id, s.tools.len(), s.description));
-            }
-        }
-        let list: Vec<String> = servers
+        // Keep the description static over configured servers (never live ready state or
+        // tool counts) so reconnecting or late-connecting servers never mutate the schema
+        // and invalidate the model's prompt cache.
+        let list: Vec<String> = self
+            .mcp
+            .manager
+            .status()
             .into_iter()
-            .map(|(id, n, d)| {
-                if d.is_empty() {
-                    format!("{id} ({n} tools)")
+            .map(|s| {
+                if s.description.is_empty() {
+                    s.id
                 } else {
-                    format!("{id} ({n} tools: {d})")
+                    format!("{} ({})", s.id, s.description)
                 }
             })
             .collect();
-        format!(
+        if list.is_empty() {
             "Find tools on the connected MCP servers by what they do; the matches become \
-             available for your next steps. Servers: {}.",
-            list.join("; ")
-        )
+             available for your next steps."
+                .to_owned()
+        } else {
+            format!(
+                "Find tools on the connected MCP servers by what they do; the matches become \
+                 available for your next steps. Configured servers: {}.",
+                list.join("; ")
+            )
+        }
     }
 
     fn schema(&self) -> Value {
@@ -520,7 +555,7 @@ impl Tool for ToolSearch {
         })
     }
 
-    fn run<'a>(&'a self, args: Value, ctx: &'a ToolCtx) -> BoxFuture<'a, ToolOutput> {
+    fn run<'a>(&'a self, args: Value, _ctx: &'a ToolCtx) -> BoxFuture<'a, ToolOutput> {
         Box::pin(async move {
             let query = args
                 .get("query")
@@ -529,11 +564,27 @@ impl Tool for ToolSearch {
                 .unwrap_or_default();
             let found = self.search(query);
             if found.is_empty() {
+                let ready: Vec<String> = self
+                    .mcp
+                    .manager
+                    .status()
+                    .into_iter()
+                    .filter(|s| s.state == ServerState::Ready)
+                    .map(|s| {
+                        if s.description.is_empty() {
+                            format!("{} ({} tools)", s.id, s.tools.len())
+                        } else {
+                            format!("{} ({} tools: {})", s.id, s.tools.len(), s.description)
+                        }
+                    })
+                    .collect();
+                let servers = if ready.is_empty() {
+                    "No MCP servers are currently ready.".to_owned()
+                } else {
+                    format!("Ready servers: {}.", ready.join("; "))
+                };
                 return ToolOutput::ok(
-                    format!(
-                        "No tools match `{query}`. Try other words. {}",
-                        self.description(ctx)
-                    ),
+                    format!("No tools match `{query}`. Try other words. {servers}"),
                     "no matching tools",
                 );
             }

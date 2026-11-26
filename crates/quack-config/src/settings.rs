@@ -182,6 +182,11 @@ pub struct ContextSettings {
     /// reports one: to try a small window, or to keep a local server's memory down (Ollama
     /// gets it as `num_ctx`). Unset: the model's whole window.
     pub window: Option<u32>,
+    /// Shared prompt-cache routing key (overrides the per-session UUID sent as
+    /// `prompt_cache_key` or `affinity_header`). Useful for parallel `quack exec` or CI
+    /// runs sharing a repository and `AGENTS.md` (keep traffic under ~15 RPM per key on
+    /// OpenAI). Can also be set via `--cache-key` or `QUACK_PROMPT_CACHE_KEY`.
+    pub cache_key: Option<String>,
 }
 
 impl Default for ContextSettings {
@@ -191,6 +196,7 @@ impl Default for ContextSettings {
             cache_strategy: CacheStrategy::Auto,
             compaction_threshold: 0.80,
             window: None,
+            cache_key: None,
         }
     }
 }

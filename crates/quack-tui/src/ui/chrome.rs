@@ -302,7 +302,7 @@ pub(super) fn activity(app: &App) -> String {
     }
 }
 
-pub(super) fn plan_mark(app: &App, state: PlanState) -> (&'static str, Style) {
+pub(crate) fn plan_mark(app: &App, state: PlanState) -> (&'static str, Style) {
     let [done, active, pending] = app.glyphs.todo;
     match state {
         PlanState::Done => (done, app.theme.ok),

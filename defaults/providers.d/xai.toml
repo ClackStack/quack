@@ -1,5 +1,7 @@
 #:schema ../schemas/provider.json
 # xAI's API (Grok models via the Responses endpoint).
+# Responses automatically sends `prompt_cache_key` for sticky KV routing; if you switch a
+# custom override to `api = "openai-chat"`, set `[prompt_cache] affinity_header = "x-grok-conv-id"`.
 # Not contacted until XAI_API_KEY is set or `quack setup` stores a key.
 name = "xAI"
 group = "Proprietary models"

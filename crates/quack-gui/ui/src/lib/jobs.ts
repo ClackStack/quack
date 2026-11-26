@@ -9,6 +9,18 @@ export interface PlanStep {
 	text: string;
 }
 
+export interface PlanSummary {
+	steps: PlanStep[];
+	done: number;
+	total: number;
+	current: string | null;
+	/** 0..1 fraction of completed steps (0 when empty). */
+	fraction: number;
+	/** Rounded 0..100 completion percentage (0 when empty). */
+	percent: number;
+	complete: boolean;
+}
+
 export interface JobSummary {
 	tab: number;
 	cwd: string;
@@ -31,6 +43,7 @@ export interface JobSummary {
 	totalAgents: number;
 	planDone: number;
 	planTotal: number;
+	planPct: number;
 	planCurrent: string | null;
 	turns: number;
 	filesCount: number;
@@ -76,13 +89,35 @@ export function compactCount(n: number): string {
 export function parsePlanSteps(plan: string): PlanStep[] {
 	const text = plan.trim();
 	if (!text) return [];
-	return text.split('\n').map((line) => {
-		const match = /^\[([x~ ])\]\s*(.*)$/.exec(line.trim());
-		return {
-			state: (match?.[1] ?? ' ') as 'x' | '~' | ' ',
-			text: match?.[2] ?? line
-		};
-	});
+	return text
+		.split('\n')
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.map((line) => {
+			const match = /^\[([x~ ])\]\s*(.*)$/.exec(line);
+			return {
+				state: (match?.[1] ?? ' ') as 'x' | '~' | ' ',
+				text: match?.[2] ?? line
+			};
+		});
+}
+
+export function summarizePlan(plan: string): PlanSummary {
+	const steps = parsePlanSteps(plan);
+	const total = steps.length;
+	const done = steps.filter((step) => step.state === 'x').length;
+	const current = steps.find((step) => step.state === '~')?.text ?? null;
+	const fraction = total > 0 ? done / total : 0;
+	const percent = total > 0 ? Math.round(fraction * 100) : 0;
+	return {
+		steps,
+		done,
+		total,
+		current,
+		fraction,
+		percent,
+		complete: total > 0 && done === total
+	};
 }
 
 function compactSnippet(text: string, maxLen = 110): string {
@@ -392,9 +427,9 @@ export function describeJob(session: Session): JobSummary {
 	const activeAgents = session.agents.filter((a) => a.ok === null);
 	const flaggedAgents = session.agents.filter((a) => a.ok === false).length;
 
-	const planSteps = parsePlanSteps(session.plan);
-	const planDone = planSteps.filter((step) => step.state === 'x').length;
-	const planCurrent = planSteps.find((step) => step.state === '~')?.text ?? null;
+	const plan = summarizePlan(session.plan);
+	const planDone = plan.done;
+	const planCurrent = plan.current;
 
 	const files = session.editedFiles;
 	let adds = 0;
@@ -418,7 +453,7 @@ export function describeJob(session: Session): JobSummary {
 		activeAgents,
 		flaggedAgents,
 		planDone,
-		planTotal: planSteps.length,
+		planTotal: plan.total,
 		planCurrent,
 		latestAssistant
 	});
@@ -436,7 +471,8 @@ export function describeJob(session: Session): JobSummary {
 		flaggedAgents,
 		totalAgents: session.agents.length,
 		planDone,
-		planTotal: planSteps.length,
+		planTotal: plan.total,
+		planPct: plan.percent,
 		planCurrent,
 		turns,
 		filesCount: files.length,

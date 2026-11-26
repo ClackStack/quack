@@ -4,3 +4,8 @@ name = "Ollama"
 base_url = "http://127.0.0.1:11434"
 api = "ollama"
 note = "Uses Ollama's native API so each request sets the context window (its OpenAI endpoint silently cuts long prompts)."
+
+# Keep the loaded model and its KV cache in memory across reading/thinking pauses
+# (Ollama's own default unloads after 5m idle).
+[prompt_cache]
+ttl = "15m"

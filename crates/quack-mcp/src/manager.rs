@@ -212,8 +212,10 @@ struct Inner {
     prompts: Vec<PromptInfo>,
     resources: Vec<ResourceInfo>,
     service: Option<Arc<Service>>,
-    /// Order in which servers became ready, so tools of later servers go at the end.
-    ready_seq: u64,
+    /// Keep the last known tool/prompt/resource declarations in place across transient
+    /// reconnects so mid-session restarts do not drop and re-add tool schemas (which
+    /// would invalidate the model's prompt cache).
+    retained: bool,
     /// Bumped on every (re)connect; events from older connections are ignored.
     generation: u64,
     restarts: u32,
@@ -255,7 +257,6 @@ pub struct McpManager {
     sandbox: Option<Arc<quack_sandbox::Policy>>,
     cancel: CancellationToken,
     shutting_down: AtomicBool,
-    seq: AtomicU64,
     changed: watch::Sender<u64>,
     /// Where elicitation and sampling requests go; `None`: servers are told quack does
     /// neither.
@@ -281,11 +282,12 @@ impl McpManager {
     /// Like [`Self::new`]; servers whose file sets `sandbox = true` run under `sandbox`,
     /// and refuse to start without it.
     pub fn with_sandbox(
-        specs: Vec<ServerSpec>,
+        mut specs: Vec<ServerSpec>,
         root: PathBuf,
         network: NetworkSettings,
         sandbox: Option<Arc<quack_sandbox::Policy>>,
     ) -> Arc<Self> {
+        specs.sort_by(|a, b| a.id.cmp(&b.id));
         let servers = specs
             .into_iter()
             .map(|spec| {
@@ -297,7 +299,7 @@ impl McpManager {
                         prompts: Vec::new(),
                         resources: Vec::new(),
                         service: None,
-                        ready_seq: 0,
+                        retained: false,
                         generation: 0,
                         restarts: 0,
                     }),
@@ -315,7 +317,6 @@ impl McpManager {
             sandbox,
             cancel: CancellationToken::new(),
             shutting_down: AtomicBool::new(false),
-            seq: AtomicU64::new(1),
             changed: watch::Sender::new(0),
             asker: Mutex::new(None),
             ledger: Mutex::new(None),
@@ -386,33 +387,31 @@ impl McpManager {
         self.changed.send_modify(|n| *n += 1);
     }
 
-    /// Tools of ready servers: servers in the order they became ready, each server's
-    /// tools in its own order.
+    /// Tools of ready (or transiently reconnecting) servers, in deterministic server-id
+    /// and tool-name order.
     pub fn tools(&self) -> Vec<ToolInfo> {
         self.ready(|i| i.tools.clone())
     }
 
-    /// Prompts of ready servers, in the order the servers became ready.
+    /// Prompts of ready (or transiently reconnecting) servers, in deterministic order.
     pub fn prompts(&self) -> Vec<PromptInfo> {
         self.ready(|i| i.prompts.clone())
     }
 
-    /// Resources and resource templates of ready servers.
+    /// Resources and resource templates of ready (or transiently reconnecting) servers.
     pub fn resources(&self) -> Vec<ResourceInfo> {
         self.ready(|i| i.resources.clone())
     }
 
     fn ready<T>(&self, f: impl Fn(&Inner) -> Vec<T>) -> Vec<T> {
-        let mut ready: Vec<(u64, Vec<T>)> = self
-            .servers
+        self.servers
             .iter()
             .filter_map(|s| {
                 let inner = s.inner.lock().ok()?;
-                (inner.state == ServerState::Ready).then(|| (inner.ready_seq, f(&inner)))
+                (inner.state == ServerState::Ready || inner.retained).then(|| f(&inner))
             })
-            .collect();
-        ready.sort_by_key(|(seq, _)| *seq);
-        ready.into_iter().flat_map(|(_, t)| t).collect()
+            .flatten()
+            .collect()
     }
 
     pub fn status(&self) -> Vec<ServerStatus> {
@@ -473,7 +472,7 @@ impl McpManager {
         if let Ok(mut i) = self.servers[idx].inner.lock() {
             i.restarts = 0;
         }
-        self.stop(idx).await;
+        self.stop_inner(idx, true).await;
         Arc::clone(self).connect(idx).await;
         Ok(())
     }
@@ -483,7 +482,7 @@ impl McpManager {
         self.shutting_down.store(true, Ordering::SeqCst);
         self.cancel.cancel();
         for idx in 0..self.servers.len() {
-            self.stop(idx).await;
+            self.stop_inner(idx, false).await;
         }
     }
 
@@ -494,15 +493,18 @@ impl McpManager {
             .ok_or_else(|| format!("no MCP server `{id}`"))
     }
 
-    async fn stop(&self, idx: usize) {
+    async fn stop_inner(&self, idx: usize, keep_retained: bool) {
         let server = &self.servers[idx];
         if let Ok(mut i) = server.inner.lock() {
             i.generation += 1;
             i.state = ServerState::Stopped;
             i.service = None;
-            i.tools.clear();
-            i.prompts.clear();
-            i.resources.clear();
+            if !keep_retained {
+                i.retained = false;
+                i.tools.clear();
+                i.prompts.clear();
+                i.resources.clear();
+            }
         }
         if let Some(conn) = server.conn.lock().await.take() {
             close(conn.service).await;
@@ -532,9 +534,11 @@ impl McpManager {
             Ok(mut i) => {
                 i.generation += 1;
                 i.state = ServerState::Starting;
-                i.tools.clear();
-                i.prompts.clear();
-                i.resources.clear();
+                if !i.retained {
+                    i.tools.clear();
+                    i.prompts.clear();
+                    i.resources.clear();
+                }
                 i.service = None;
                 i.generation
             }
@@ -547,14 +551,13 @@ impl McpManager {
             Ok(Ok((conn, tools, prompts, resources))) => {
                 let service = Arc::clone(&conn.service);
                 *server.conn.lock().await = Some(conn);
-                let seq = self.seq.fetch_add(1, Ordering::SeqCst);
                 let current = self.set(idx, generation, |i| {
                     i.state = ServerState::Ready;
                     i.tools = tools;
                     i.prompts = prompts;
                     i.resources = resources;
                     i.service = Some(service);
-                    i.ready_seq = seq;
+                    i.retained = true;
                 });
                 if !current && let Some(conn) = server.conn.lock().await.take() {
                     close(conn.service).await;
@@ -573,6 +576,10 @@ impl McpManager {
         tracing::warn!(server = %server.spec.id, error = %outcome, "MCP server failed to start");
         self.set(idx, generation, |i| {
             i.state = ServerState::Failed(format!("{outcome}{last}"));
+            i.retained = false;
+            i.tools.clear();
+            i.prompts.clear();
+            i.resources.clear();
         });
     }
 
@@ -710,9 +717,6 @@ impl McpManager {
         let mut restart_in = None;
         let current = self.set(idx, generation, |i| {
             i.service = None;
-            i.tools.clear();
-            i.prompts.clear();
-            i.resources.clear();
             if i.restarts < MAX_RESTARTS {
                 i.restarts += 1;
                 restart_in = Some(Duration::from_secs(1 << i.restarts));
@@ -721,6 +725,10 @@ impl McpManager {
                     i.restarts
                 ));
             } else {
+                i.retained = false;
+                i.tools.clear();
+                i.prompts.clear();
+                i.resources.clear();
                 i.state = ServerState::Failed(format!("exited ({how}); /mcp restart tries again"));
             }
         });
@@ -946,7 +954,7 @@ async fn list_tools(peer: &Peer<RoleClient>, spec: &ServerSpec) -> Result<Vec<To
         .await
         .map_err(|e| format!("listing tools: {e}"))?;
     let rules = &spec.file.tools;
-    Ok(tools
+    let mut listed: Vec<ToolInfo> = tools
         .into_iter()
         .filter(|t| rules.allow.is_empty() || rules.allow.iter().any(|g| glob_match(g, &t.name)))
         .filter(|t| !rules.deny.iter().any(|g| glob_match(g, &t.name)))
@@ -962,7 +970,9 @@ async fn list_tools(peer: &Peer<RoleClient>, spec: &ServerSpec) -> Result<Vec<To
             schema: Value::Object((*t.input_schema).clone()),
             name: t.name.into_owned(),
         })
-        .collect())
+        .collect();
+    listed.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(listed)
 }
 
 async fn list_prompts(peer: &Peer<RoleClient>, server: &str) -> Result<Vec<PromptInfo>, String> {
@@ -976,7 +986,7 @@ async fn list_prompts(peer: &Peer<RoleClient>, server: &str) -> Result<Vec<Promp
         .list_all_prompts()
         .await
         .map_err(|e| format!("listing prompts: {e}"))?;
-    Ok(prompts
+    let mut listed: Vec<PromptInfo> = prompts
         .into_iter()
         .map(|p| PromptInfo {
             server: server.to_owned(),
@@ -993,7 +1003,9 @@ async fn list_prompts(peer: &Peer<RoleClient>, server: &str) -> Result<Vec<Promp
                 .collect(),
             name: p.name,
         })
-        .collect())
+        .collect();
+    listed.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(listed)
 }
 
 /// Resources, then resource templates. Read through JSON, so every spec revision's
@@ -1030,7 +1042,7 @@ async fn list_resources(
             template,
         }
     };
-    Ok(resources
+    let mut listed: Vec<ResourceInfo> = resources
         .iter()
         .map(|r| info(serde_json::to_value(r).unwrap_or_default(), false))
         .chain(
@@ -1039,7 +1051,14 @@ async fn list_resources(
                 .map(|t| info(serde_json::to_value(t).unwrap_or_default(), true)),
         )
         .filter(|r| !r.uri.is_empty())
-        .collect())
+        .collect();
+    listed.sort_by(|a, b| {
+        a.template
+            .cmp(&b.template)
+            .then(a.uri.cmp(&b.uri))
+            .then(a.name.cmp(&b.name))
+    });
+    Ok(listed)
 }
 
 type Headers = std::collections::HashMap<

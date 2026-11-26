@@ -14,6 +14,11 @@ pub fn boundaries(history: &[Message]) -> impl Iterator<Item = usize> + '_ {
     history
         .iter()
         .enumerate()
-        .filter(|(_, m)| matches!(m, Message::User { .. } | Message::Assistant { .. }))
+        .filter(|(_, m)| {
+            matches!(
+                m,
+                Message::User { .. } | Message::Nudge { .. } | Message::Assistant { .. }
+            )
+        })
         .map(|(i, _)| i)
 }

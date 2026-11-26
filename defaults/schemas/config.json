@@ -74,6 +74,14 @@
           "format": "double",
           "type": "number"
         },
+        "cache_key": {
+          "default": null,
+          "description": "Shared prompt-cache routing key (overrides the per-session UUID sent as\n`prompt_cache_key` or `affinity_header`). Useful for parallel `quack exec` or CI\nruns sharing a repository and `AGENTS.md` (keep traffic under ~15 RPM per key on\nOpenAI). Can also be set via `--cache-key` or `QUACK_PROMPT_CACHE_KEY`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "cache_strategy": {
           "$ref": "#/$defs/CacheStrategy",
           "default": "auto"
@@ -674,6 +682,7 @@
       "$ref": "#/$defs/ContextSettings",
       "default": {
         "budget_ratio": 0.85,
+        "cache_key": null,
         "cache_strategy": "auto",
         "compaction_threshold": 0.8,
         "window": null

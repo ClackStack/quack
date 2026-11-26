@@ -47,6 +47,15 @@ fn main() -> ExitCode {
     if let Some(p) = &cli.global.profile {
         overrides.push(format!("model.profile={}", toml_string(p)));
     }
+    if let Some(key) = cli
+        .global
+        .cache_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        overrides.push(format!("context.cache_key={}", toml_string(key)));
+    }
     let mode = match (cli.global.permission_mode, cli.global.yolo) {
         (_, true) => Some(cli::PermissionModeArg::Yolo),
         (m, false) => m,

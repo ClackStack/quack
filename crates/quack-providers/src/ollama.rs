@@ -67,6 +67,7 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
                 };
                 json!({ "role": "user", "content": text })
             }
+            Message::Nudge { content } => json!({ "role": "user", "content": content }),
             Message::User { content, images } => {
                 let mut v = json!({ "role": "user", "content": content });
                 if !images.is_empty() {
@@ -169,6 +170,15 @@ pub(crate) fn build_body(req: &ChatRequest) -> Value {
     }
     if req.tool_mode == Some(quack_config::provider::ToolCallMode::Grammar) {
         body.insert("format".into(), json!("json"));
+    }
+    if let Some(ttl) = req
+        .prompt_cache
+        .ttl
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        body.insert("keep_alive".into(), json!(ttl));
     }
     let mut body = Value::Object(body);
     merge(&mut body, &req.extra_body);
@@ -312,7 +322,7 @@ impl LineParser {
             out.push(StreamEvent::Usage(Usage {
                 prompt_tokens: num("prompt_eval_count").unwrap_or(0),
                 completion_tokens: num("eval_count").unwrap_or(0),
-                cached_prompt_tokens: None,
+                cached_prompt_tokens: num("prompt_eval_cached_count"),
                 cache_write_tokens: None,
                 reasoning_tokens: None,
             }));
@@ -497,7 +507,7 @@ mod tests {
             "\n",
             r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read","arguments":{"path":"a.rs"}}}]},"done":false}"#,
             "\n",
-            r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":120,"eval_count":9}"#,
+            r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":120,"prompt_eval_cached_count":96,"eval_count":9}"#,
         );
         let mut b = ResponseBuilder::default();
         // Split mid-line to exercise the decoder.
@@ -513,6 +523,7 @@ mod tests {
         }
         assert_eq!(b.finish, Some(FinishReason::ToolCalls));
         assert_eq!(b.usage.map(|u| u.prompt_tokens), Some(120));
+        assert_eq!(b.usage.and_then(|u| u.cached_prompt_tokens), Some(96));
         let Message::Assistant {
             content,
             reasoning,
@@ -549,5 +560,23 @@ mod tests {
         );
         assert_eq!(native_base("http://h:11434/v1/"), "http://h:11434");
         assert_eq!(native_base("http://h:11434"), "http://h:11434");
+    }
+
+    #[test]
+    fn keep_alive_comes_from_prompt_cache_ttl() {
+        let req = ChatRequest {
+            model: "qwen3:8b".into(),
+            messages: vec![Message::User {
+                content: "hi".into(),
+                images: Vec::new(),
+            }],
+            prompt_cache: quack_config::provider::PromptCache {
+                ttl: Some("15m".into()),
+                ..Default::default()
+            },
+            ..ChatRequest::default()
+        };
+        let b = build_body(&req);
+        assert_eq!(b["keep_alive"], "15m");
     }
 }

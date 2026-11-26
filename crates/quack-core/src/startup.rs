@@ -40,6 +40,10 @@ pub(crate) struct Setup {
     /// The profile's `context.md`, rendered once: put at the start of the first user
     /// message of each request (`turn::with_session_context`). Empty without one.
     pub session_context: String,
+    /// Pinned session context from the session log (recorded on turn 1 / restored on
+    /// `/resume`) so workspace edits, memory writes, branch switches, or date rollovers
+    /// never mutate turn 0 and invalidate the prompt cache.
+    pub session_context_override: std::sync::RwLock<Option<String>>,
     pub surface: ToolSurface,
     pub registry: Arc<Registry>,
     /// Template for per-call contexts (cancel and output are replaced per call).
@@ -78,6 +82,20 @@ impl Setup {
 
     pub(crate) fn reasoning_key(&self) -> String {
         format!("{}/{}", self.provider.id, self.model.id)
+    }
+
+    pub(crate) fn effective_session_context(&self) -> String {
+        self.session_context_override
+            .read()
+            .ok()
+            .and_then(|c| c.clone())
+            .unwrap_or_else(|| self.session_context.clone())
+    }
+
+    pub(crate) fn set_session_context(&self, text: Option<String>) {
+        if let Ok(mut slot) = self.session_context_override.write() {
+            *slot = text;
+        }
     }
 }
 
@@ -832,6 +850,7 @@ async fn build_setup(
         profile,
         system,
         session_context,
+        session_context_override: std::sync::RwLock::default(),
         surface,
         registry,
         tool_ctx,
@@ -914,6 +933,14 @@ pub(crate) fn refresh_extensions(
     };
 
     let effort = old.reasoning_effort.read().ok().and_then(|e| e.clone());
+    let ctx_override = if profile.id == old.profile.id {
+        old.session_context_override
+            .read()
+            .ok()
+            .and_then(|c| c.clone())
+    } else {
+        None
+    };
     let estimator = old.estimator.lock().map(|e| *e).unwrap_or_default();
 
     Setup {
@@ -924,6 +951,7 @@ pub(crate) fn refresh_extensions(
         profile,
         system,
         session_context,
+        session_context_override: std::sync::RwLock::new(ctx_override),
         surface,
         registry: old.registry.clone(),
         tool_ctx,

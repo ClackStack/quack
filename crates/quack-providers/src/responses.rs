@@ -1,10 +1,9 @@
 //! `openai-responses`: the OpenAI Responses API (`POST /v1/responses`), also served by
 //! some gateways and by vLLM for gpt-oss (docs/plan/02-providers.md).
 //!
-//! Requests are stateless (`store: false`): the whole history goes in `input` every time,
-//! the same way the chat adapter sends it, so prefix caching works the same. Reasoning
-//! comes back encrypted; a reply with reasoning or a `phase` is kept as the server sent it
-//! ([`crate::Sealed`]) and goes back in its order, so the model keeps its earlier thinking.
+//! The full request uses `store: false`. A compatible WebSocket continuation sends a
+//! suffix of its input. Reasoning comes back encrypted; a reply with reasoning or a
+//! `phase` is kept as the server sent it ([`crate::Sealed`]) for full-history replay.
 //!
 //! [`Route::ChatgptPlan`] is the route a ChatGPT sign-in uses: no sampling or output cap,
 //! and function tools inside a namespace.
@@ -15,7 +14,7 @@ use quack_protocol::Usage;
 use serde_json::{Value, json};
 
 use crate::error::{ErrorKind, ProviderError, body_message};
-use crate::types::{ChatRequest, FinishReason, Message, StreamEvent, merge};
+use crate::types::{ChatRequest, FinishReason, Message, StreamEvent, merge, split_session_context};
 
 pub(crate) const RESPONSES_PATH: &str = "responses";
 
@@ -46,11 +45,7 @@ fn unsealed(
             "message" => {
                 let t = item["text"].as_str()?;
                 text.push_str(t);
-                let mut m = json!({ "role": "assistant", "content": t });
-                if let Some(phase) = item.get("phase") {
-                    m["phase"] = phase.clone();
-                }
-                out.push(m);
+                out.push(assistant_item(t, item.get("phase")));
             }
             "function_call" => {
                 let c = calls.get(usize::try_from(item["ref"].as_u64()?).ok()?)?;
@@ -74,6 +69,54 @@ fn call_item(c: &crate::ToolCall, route: Route) -> Value {
         item["namespace"] = json!(NAMESPACE);
     }
     item
+}
+
+fn assistant_item(text: &str, phase: Option<&Value>) -> Value {
+    let mut item = json!({ "role": "assistant", "content": text });
+    if let Some(phase) = phase {
+        item["phase"] = phase.clone();
+    }
+    item
+}
+
+fn reasoning_item(item: &Value) -> Value {
+    let mut item = item.clone();
+    if let Some(object) = item.as_object_mut() {
+        object.remove("id");
+        object.remove("status");
+    }
+    item
+}
+
+fn message_text(item: &Value) -> String {
+    item["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part["text"].as_str())
+        .collect()
+}
+
+/// The completed output in the form our stateless adapter would replay it. A
+/// different or unrecognised output requires starting a new connection-local chain.
+pub(crate) fn replay_output(response: &Value, route: Route) -> Option<Vec<Value>> {
+    response["output"]
+        .as_array()?
+        .iter()
+        .map(|item| match item["type"].as_str()? {
+            "reasoning" => Some(reasoning_item(item)),
+            "message" => Some(assistant_item(&message_text(item), item.get("phase"))),
+            "function_call" => {
+                let call = crate::ToolCall {
+                    id: item["call_id"].as_str()?.to_owned(),
+                    name: item["name"].as_str()?.to_owned(),
+                    arguments: item["arguments"].as_str()?.to_owned(),
+                };
+                Some(call_item(&call, route))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 pub(crate) fn compact_body(req: &ChatRequest, route: Route) -> Result<Value, ProviderError> {
@@ -105,6 +148,7 @@ pub(crate) fn build_body(req: &ChatRequest, route: Route) -> Value {
     let explicit_bp = req.prompt_cache.explicit_breakpoints;
     let dev_instructions = req.prompt_cache.developer_instructions;
     let mut static_bp_placed = false;
+    let mut first_user_seen = false;
     for (i, m) in req.messages.iter().enumerate() {
         match m {
             Message::System { content } if i == 0 && !dev_instructions => {
@@ -141,16 +185,35 @@ pub(crate) fn build_body(req: &ChatRequest, route: Route) -> Value {
                     input.push(json!({ "role": "developer", "content": ctx }));
                 }
             }
+            Message::Nudge { content } => {
+                input.push(json!({ "role": "user", "content": content }));
+            }
             Message::User { content, images } => {
-                let mark_first_user = explicit_bp && !static_bp_placed && !content.is_empty();
-                if images.is_empty() && !mark_first_user {
+                let is_first_user = !first_user_seen;
+                first_user_seen = true;
+                let split_ctx = if explicit_bp && is_first_user {
+                    split_session_context(content)
+                } else {
+                    None
+                };
+                let mark_first_user =
+                    explicit_bp && !static_bp_placed && !content.is_empty() && split_ctx.is_none();
+                if images.is_empty() && !mark_first_user && split_ctx.is_none() {
                     input.push(json!({ "role": "user", "content": content }))
                 } else {
                     let mut parts: Vec<Value> = images
                         .iter()
                         .map(|i| json!({ "type": "input_image", "image_url": i.data_url() }))
                         .collect();
-                    if !content.is_empty() {
+                    if let Some((ctx, prompt)) = split_ctx {
+                        static_bp_placed = true;
+                        parts.push(json!({
+                            "type": "input_text",
+                            "text": ctx,
+                            "prompt_cache_breakpoint": { "mode": "explicit" },
+                        }));
+                        parts.push(json!({ "type": "input_text", "text": prompt }));
+                    } else if !content.is_empty() {
                         let mut text = json!({ "type": "input_text", "text": content });
                         if mark_first_user {
                             static_bp_placed = true;
@@ -345,6 +408,10 @@ impl EventParser {
         let v: Value = serde_json::from_str(data).map_err(|e| {
             ProviderError::new(ErrorKind::Protocol, format!("invalid stream event: {e}"))
         })?;
+        self.parse_value(&v)
+    }
+
+    pub(crate) fn parse_value(&mut self, v: &Value) -> Result<Vec<StreamEvent>, ProviderError> {
         let index = v["output_index"]
             .as_u64()
             .and_then(|n| u32::try_from(n).ok())
@@ -352,20 +419,20 @@ impl EventParser {
         let mut out = Vec::new();
         match v["type"].as_str().unwrap_or_default() {
             "response.output_text.delta" | "response.refusal.delta" => {
-                out.extend(str_field(&v, "delta").map(StreamEvent::TextDelta));
+                out.extend(str_field(v, "delta").map(StreamEvent::TextDelta));
             }
             "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
-                out.extend(str_field(&v, "delta").map(StreamEvent::ReasoningDelta));
+                out.extend(str_field(v, "delta").map(StreamEvent::ReasoningDelta));
             }
-            "response.output_item.added" => self.item_added(&v, index, &mut out),
-            "response.function_call_arguments.delta" => self.args_delta(&v, index, &mut out),
+            "response.output_item.added" => self.item_added(v, index, &mut out),
+            "response.function_call_arguments.delta" => self.args_delta(v, index, &mut out),
             // Servers that don't stream arguments send them whole at the end.
-            "response.function_call_arguments.done" => self.args_done(&v, index, &mut out),
-            "response.output_item.done" => self.item_done(&v, index),
+            "response.function_call_arguments.done" => self.args_done(v, index, &mut out),
+            "response.output_item.done" => self.item_done(v, index),
             kind @ ("response.completed" | "response.incomplete") => {
-                self.completed(&v, kind, &mut out)?;
+                self.completed(v, kind, &mut out)?;
             }
-            "response.failed" | "error" => return Err(stream_error(&v, data)),
+            "response.failed" | "error" => return Err(stream_error(v, &v.to_string())),
             _ => {}
         }
         Ok(out)
@@ -414,20 +481,10 @@ impl EventParser {
             Some("reasoning") => {
                 self.keep = true;
                 // Ids refer to stored items; this adapter stores nothing.
-                let mut r = item.clone();
-                if let Some(o) = r.as_object_mut() {
-                    o.remove("id");
-                    o.remove("status");
-                }
-                Some(r)
+                Some(reasoning_item(item))
             }
             Some("message") => {
-                let text: String = item["content"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|c| c["text"].as_str())
-                    .collect();
+                let text = message_text(item);
                 let mut m = json!({ "type": "message", "text": text });
                 if let Some(phase) = item.get("phase").filter(|p| p.is_string()) {
                     self.keep = true;
@@ -539,6 +596,7 @@ fn stream_error(v: &Value, data: &str) -> ProviderError {
     let msg = body_message(data);
     let code = v
         .pointer("/response/error/code")
+        .or_else(|| v.pointer("/error/code"))
         .or_else(|| v.get("code"))
         .and_then(Value::as_str)
         .unwrap_or_default();
@@ -555,6 +613,8 @@ fn stream_error(v: &Value, data: &str) -> ProviderError {
         );
     } else if code.contains("rate_limit") {
         ErrorKind::RateLimited { retry_after: None }
+    } else if let Some(status) = v["status"].as_u64().and_then(|n| u16::try_from(n).ok()) {
+        return ProviderError::from_status(status, None, data);
     } else {
         ErrorKind::ServerOverloaded
     };
@@ -1032,5 +1092,44 @@ mod tests {
         assert_eq!(u.cached_prompt_tokens, Some(80));
         assert_eq!(u.cache_write_tokens, Some(20));
         assert_eq!(u.reasoning_tokens, Some(30));
+    }
+
+    #[test]
+    fn explicit_breakpoints_split_session_context_on_first_user_turn() {
+        let req = ChatRequest {
+            model: "gpt-6.2-sol".into(),
+            messages: vec![
+                Message::System {
+                    content: "sys".into(),
+                },
+                Message::User {
+                    content: "<context>AGENTS.md</context>\n\nfix bug".into(),
+                    images: Vec::new(),
+                },
+            ],
+            prompt_cache: quack_config::provider::PromptCache {
+                explicit_breakpoints: true,
+                developer_instructions: true,
+                ..Default::default()
+            },
+            ..ChatRequest::default()
+        };
+        let body = build_body(&req, Route::Api);
+        let user = &body["input"][1]["content"];
+        assert_eq!(
+            user[0],
+            json!({
+                "type": "input_text",
+                "text": "<context>AGENTS.md</context>",
+                "prompt_cache_breakpoint": { "mode": "explicit" },
+            })
+        );
+        assert_eq!(
+            user[1],
+            json!({
+                "type": "input_text",
+                "text": "fix bug",
+            })
+        );
     }
 }

@@ -971,3 +971,80 @@ async fn affinity_header_only_omits_body_cache_key_and_tags_text_compaction() {
         );
     }
 }
+
+#[tokio::test]
+async fn shared_prompt_cache_key_env_applies_across_independent_sessions() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(text("ok"))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let user = tmp.path().join("user");
+    std::fs::create_dir_all(user.join("providers.d")).expect("mkdir");
+    std::fs::create_dir_all(tmp.path().join("ws")).expect("mkdir");
+    std::fs::write(
+        user.join("providers.d/kimi.toml"),
+        format!(
+            "base_url = \"{}/v1\"\n\
+             [prompt_cache]\n\
+             cache_key = true\n\
+             affinity_header = \"x-session-affinity\"\n\
+             [[models]]\n\
+             id = \"kimi-k3\"\n",
+            server.uri()
+        ),
+    )
+    .expect("provider");
+    std::fs::write(
+        user.join("config.toml"),
+        "[model]\ndefault = \"kimi/kimi-k3\"\n",
+    )
+    .expect("cfg");
+
+    for run in ["first", "second"] {
+        let mut vars = HashMap::<String, OsString>::new();
+        vars.insert("QUACK_CONFIG_DIR".into(), user.clone().into_os_string());
+        vars.insert("QUACK_PROMPT_CACHE_KEY".into(), "ci-repo-shared-key".into());
+        for (k, sub) in [
+            ("QUACK_SYSTEM_DIR", "system"),
+            ("QUACK_DATA_DIR", "data"),
+            ("QUACK_CACHE_DIR", "cache"),
+        ] {
+            vars.insert(k.into(), tmp.path().join(sub).into_os_string());
+        }
+        vars.insert(
+            "QUACK_DEFAULTS_DIR".into(),
+            defaults_bundle().into_os_string(),
+        );
+        let loaded = load_with(
+            &move |k| vars.get(k).cloned(),
+            &LoadOptions::new(tmp.path().join("ws")),
+        )
+        .expect("load");
+        let mut engine = Engine::spawn(Arc::new(loaded));
+        turn(&mut engine, run).await;
+        engine.shutdown().await;
+    }
+
+    let reqs: Vec<_> = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.url.path() == "/v1/chat/completions")
+        .collect();
+    assert_eq!(reqs.len(), 2);
+    for req in &reqs {
+        assert_eq!(
+            req.headers
+                .get("x-session-affinity")
+                .and_then(|v| v.to_str().ok()),
+            Some("ci-repo-shared-key")
+        );
+        let body: Value = serde_json::from_slice(&req.body).expect("json");
+        assert_eq!(body["prompt_cache_key"], "ci-repo-shared-key");
+    }
+}

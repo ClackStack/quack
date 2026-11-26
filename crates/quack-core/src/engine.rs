@@ -151,8 +151,8 @@ struct Conversation {
     editor: Option<Arc<Setup>>,
     /// History length at the planner's first turn: its messages come after it.
     plan_start: Option<usize>,
-    /// Last server response id seen in this conversation (Responses cache diagnostics).
-    last_response_id: Arc<Mutex<Option<String>>>,
+    /// Connection-local Responses state and the last response ID for diagnostics.
+    responses_session: Arc<quack_providers::ResponsesSession>,
     /// Last plan / working-files reminders written into append-only history.
     last_reminders: Arc<Mutex<turn::ReminderState>>,
     /// Remote Secret Shield vetting state across turns and model switches.
@@ -163,7 +163,7 @@ impl Conversation {
     /// Clear transient per-session / per-model tracking when switching sessions, rewinding,
     /// or changing models.
     fn reset_transient(&mut self) {
-        self.last_response_id = Arc::default();
+        self.responses_session = Arc::default();
         self.last_reminders = Arc::default();
         self.egress_guard = Arc::default();
     }
@@ -218,6 +218,9 @@ pub struct Engine {
     turns: u32,
     title: Option<String>,
     title_tasks: JoinSet<(SessionId, Result<String, title::TitleError>)>,
+    /// Title generation deferred until Turn 1 finishes when `model.small` targets a
+    /// local loopback server, avoiding concurrent KV-cache eviction mid-turn.
+    pending_title: Option<(Arc<Setup>, String)>,
     switch_tx: Option<mpsc::Sender<(Role, Result<Setup, String>)>>,
     /// A mode set before startup finished, applied once a model is ready.
     pending_mode: Option<PermissionMode>,
@@ -225,6 +228,8 @@ pub struct Engine {
     pending_approvals: Option<ApprovalPolicy>,
     saved_mode: Option<(WorkMode, ApprovalPolicy)>,
     saved_plan_start: Option<usize>,
+    /// Opening `<context>` text pinned on turn 1 or restored from a resumed session log.
+    saved_session_context: Option<String>,
     /// A `/sandbox` setting sent before startup finished.
     pending_sandbox: Option<bool>,
     /// Deferred scoped config-watcher changes that arrived while a turn was running.
@@ -311,12 +316,14 @@ impl Engine {
             turns: 0,
             title: None,
             title_tasks: JoinSet::new(),
+            pending_title: None,
             switch_tx: None,
             pending_mode: None,
             pending_work_mode: None,
             pending_approvals: None,
             saved_mode: None,
             saved_plan_start: None,
+            saved_session_context: None,
             pending_sandbox: None,
             pending_watch: None,
             notes: Vec::new(),
@@ -444,6 +451,9 @@ impl Engine {
                     self.sync_log();
                     if self.running.as_ref().is_some_and(|(t, _)| *t == turn) {
                         self.running = None;
+                    }
+                    if let Some((setup, prompt)) = self.pending_title.take() {
+                        self.generate_title(&setup, &prompt);
                     }
                     if let Some(ev) = self.pending_watch.take() {
                         self.apply_watch(ev).await;
@@ -690,7 +700,7 @@ impl Engine {
             history: Some(history),
             editor: None,
             plan_start: None,
-            last_response_id: Arc::default(),
+            responses_session: Arc::default(),
             last_reminders: Arc::default(),
             egress_guard: Arc::default(),
         });

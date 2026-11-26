@@ -27,6 +27,21 @@
         }
       ]
     },
+    "CacheControlMode": {
+      "description": "How Anthropic-style `cache_control` markers are emitted on `openai-chat` requests.",
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Top-level `cache_control` object (OpenRouter automatic caching across tools, system,\nand multi-step tool results without rewriting message content blocks).",
+          "type": "string"
+        },
+        {
+          "const": "breakpoints",
+          "description": "Explicit `cache_control` markers on content blocks (system prompt, opening session\ncontext, and recent user messages; accepted by Alibaba DashScope and OpenRouter).",
+          "type": "string"
+        }
+      ]
+    },
     "Cost": {
       "additionalProperties": false,
       "description": "US dollars per million tokens, for `/stats`.",
@@ -281,15 +296,35 @@
       "properties": {
         "affinity_header": {
           "default": null,
-          "description": "Optional HTTP request header name to carry the session's cache key for sticky\nreplica routing (for example `\"x-session-affinity\"` on Fireworks AI).",
+          "description": "Optional HTTP request header name to carry the session's cache key for sticky\nreplica routing (for example `\"x-session-affinity\"` on Fireworks AI,\n`\"x-session-id\"` on OpenRouter, or `\"x-grok-conv-id\"` on xAI chat completions).",
           "type": [
             "string",
             "null"
           ]
         },
+        "cache_control": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CacheControlMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Anthropic-style `cache_control` mode on `openai-chat` requests:\n`\"auto\"` emits a top-level `cache_control` object (OpenRouter automatic caching);\n`\"breakpoints\"` attaches `cache_control` markers to content blocks (DashScope Qwen\nand Anthropic-compatible gateways)."
+        },
+        "cache_control_models": {
+          "default": [],
+          "description": "When non-empty, only model ids matching one of these globs (for example\n`[\"anthropic/*\"]` on OpenRouter) receive `cache_control`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "cache_key": {
           "default": false,
-          "description": "Send the session's cache key as `prompt_cache_key` in the request body on\n`openai-chat` providers that support it (such as Fireworks AI).\n(`openai-responses` always sends `prompt_cache_key` when a cache key is set.)",
+          "description": "Send the session's cache key as `prompt_cache_key` in the request body on\n`openai-chat` providers that support it (such as Fireworks AI and Moonshot/Kimi).\n(`openai-responses` always sends `prompt_cache_key` when a cache key is set.)",
           "type": "boolean"
         },
         "developer_instructions": {
@@ -309,7 +344,7 @@
         },
         "ttl": {
           "default": null,
-          "description": "Optional cache retention TTL (`\"30m\"`, `\"12h\"` on `openai-responses`).",
+          "description": "Optional cache retention TTL (`\"30m\"`, `\"12h\"` on `openai-responses`; `\"5m\"`,\n`\"1h\"` on `anthropic-messages` and `openai-chat` providers such as Moonshot/Kimi;\n`keep_alive` duration such as `\"15m\"` on `ollama`).",
           "type": [
             "string",
             "null"
@@ -771,6 +806,8 @@
       "$ref": "#/$defs/PromptCache",
       "default": {
         "affinity_header": null,
+        "cache_control": null,
+        "cache_control_models": [],
         "cache_key": false,
         "developer_instructions": false,
         "diagnostics": false,
@@ -778,6 +815,11 @@
         "ttl": null
       },
       "description": "Prompt-caching wire options (`openai-responses` and `openai-chat`)."
+    },
+    "responses_websocket": {
+      "default": false,
+      "description": "Use Responses WebSocket continuation for interactive conversations.",
+      "type": "boolean"
     },
     "tls": {
       "$ref": "#/$defs/Tls",

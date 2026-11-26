@@ -53,6 +53,12 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<Image>,
     },
+    /// An internal mid-turn retry prompt (empty reply / output truncation) sent as
+    /// `role: "user"` on the wire without starting a new user turn, so
+    /// `preserve_in_history = "current_turn"` keeps earlier reasoning in the active chain.
+    Nudge {
+        content: String,
+    },
     /// A Responses checkpoint with a portable text summary for other setups.
     Compaction {
         content: String,
@@ -151,6 +157,37 @@ pub fn unseal(history: &mut [Message]) {
         if let Message::Assistant { sealed, .. } = m {
             *sealed = None;
         }
+    }
+}
+
+/// Split a leading `<context>...</context>\n\n<prompt>` prefix (from a profile's
+/// `context.md`) from the user's opening prompt so adapters with explicit breakpoints can
+/// place a cache boundary right after the shared workspace context.
+#[cfg_attr(
+    not(any(
+        feature = "proto-anthropic",
+        feature = "proto-openai-responses",
+        feature = "proto-openai-chat"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn split_session_context(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix("<context>")?;
+    let close = rest.find("</context>")?;
+    let end = "<context>".len() + close + "</context>".len();
+    let after = text[end..].strip_prefix("\n\n")?;
+    (!after.is_empty()).then_some((&text[..end], after))
+}
+
+/// Build an Anthropic-style `cache_control` object (`{"type": "ephemeral", "ttl"?: ...}`).
+#[cfg_attr(
+    not(any(feature = "proto-anthropic", feature = "proto-openai-chat")),
+    allow(dead_code)
+)]
+pub(crate) fn cache_control_object(ttl: Option<&str>) -> serde_json::Value {
+    match ttl.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(ttl) => serde_json::json!({ "type": "ephemeral", "ttl": ttl }),
+        None => serde_json::json!({ "type": "ephemeral" }),
     }
 }
 

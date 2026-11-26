@@ -7,6 +7,11 @@ base_url = "https://api.kimi.com/coding/v1"
 catalog = "kimi-code-plan-global"
 api_key = { env = "KIMI_API_KEY" }
 
+# Sticky routing for Kimi's implicit prompt cache; set `ttl = "1h"` in a user override
+# for longer idle gaps (default is `"5m"`).
+[prompt_cache]
+cache_key = true
+
 # The K3 family takes `reasoning_effort` `low`/`high`/`max`, default `max`. The K3
 # entries also take `none`, which turns thinking off for the cheaper plan models:
 # https://platform.kimi.ai/docs/guide/use-reasoning-effort

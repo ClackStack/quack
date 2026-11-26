@@ -203,17 +203,31 @@
 						{/if}
 
 						{#if summary.planTotal > 0}
+							{@const planComplete = summary.planDone === summary.planTotal}
 							<div class="j-plan">
 								<div class="j-plan-row">
 									<span>Plan</span>
-									<span class="j-plan-n">{summary.planDone}/{summary.planTotal}</span>
+									<span class={['j-plan-n', { complete: planComplete }]}>
+										{summary.planDone}/{summary.planTotal} · {summary.planPct}%
+									</span>
 								</div>
-								<div class="j-plan-track" aria-hidden="true">
-									<div
-										class="j-plan-fill"
-										style:width={`${Math.round((summary.planDone / summary.planTotal) * 100)}%`}
-									></div>
+								<div
+									class="j-plan-track"
+									role="progressbar"
+									aria-label="Plan progress"
+									aria-valuenow={summary.planDone}
+									aria-valuemin={0}
+									aria-valuemax={summary.planTotal}
+									aria-valuetext={`${summary.planDone} of ${summary.planTotal} steps complete (${summary.planPct}%)`}
+								>
+									<div class="j-plan-fill" style:width={`${summary.planPct}%`}></div>
 								</div>
+								{#if summary.planCurrent && summary.detail !== `Step: ${summary.planCurrent}`}
+									<p class="j-plan-step" title={summary.planCurrent}>
+										<span class="j-plan-now" aria-hidden="true">▸</span>
+										<span class="j-plan-step-text">{summary.planCurrent}</span>
+									</p>
+								{/if}
 							</div>
 						{/if}
 
@@ -683,6 +697,10 @@
 		color: var(--cloth-dim);
 	}
 
+	.j-plan-n.complete {
+		color: var(--cloth-ok);
+	}
+
 	.j-plan-track {
 		height: 4px;
 		border-radius: 999px;
@@ -694,6 +712,30 @@
 		height: 100%;
 		border-radius: 999px;
 		background: var(--cloth-ok);
+		transition: width 300ms ease-out;
+	}
+
+	.j-plan-step {
+		margin: 0;
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		min-width: 0;
+		font-size: 0.6875rem;
+		line-height: 1.3;
+		color: var(--cloth-ink);
+	}
+
+	.j-plan-now {
+		flex: none;
+		color: var(--duck);
+	}
+
+	.j-plan-step-text {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.j-meta {
@@ -802,7 +844,8 @@
 		.pill,
 		.j-card,
 		.x,
-		.act {
+		.act,
+		.j-plan-fill {
 			transition: none;
 		}
 	}

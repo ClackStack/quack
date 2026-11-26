@@ -93,7 +93,7 @@ impl Engine {
         nested: Arc<Nested>,
         cancel: CancellationToken,
         pool: Arc<crate::agent::Pool>,
-        last_response_id: Arc<Mutex<Option<String>>>,
+        responses_session: Arc<quack_providers::ResponsesSession>,
         last_reminders: Arc<Mutex<turn::ReminderState>>,
         egress_guard: Arc<Mutex<turn::EgressGuardState>>,
     ) -> TurnCtx {
@@ -121,7 +121,7 @@ impl Engine {
             network: self.config.settings.network.clone(),
             ledger: self.ledger.clone(),
             secret_allowlist: self.secret_allowlist.clone(),
-            last_response_id,
+            responses_session,
             last_reminders,
             egress_guard,
         }
@@ -147,7 +147,7 @@ impl Engine {
         let setup = convo.setup.clone();
         let perms = convo.perms.clone();
         let nested = convo.nested.clone();
-        let last_response_id = convo.last_response_id.clone();
+        let responses_session = convo.responses_session.clone();
         let last_reminders = convo.last_reminders.clone();
         let egress_guard = convo.egress_guard.clone();
         let ctx = TurnCtx {
@@ -159,7 +159,7 @@ impl Engine {
                 nested,
                 cancel,
                 pool,
-                last_response_id,
+                responses_session,
                 last_reminders,
                 egress_guard,
             )
@@ -298,7 +298,7 @@ impl Engine {
         let setup = convo.setup.clone();
         let perms = convo.perms.clone();
         let nested = convo.nested.clone();
-        let last_response_id = convo.last_response_id.clone();
+        let responses_session = convo.responses_session.clone();
         let last_reminders = convo.last_reminders.clone();
         let egress_guard = convo.egress_guard.clone();
         // `expand_skill` borrows the typed prompt; when it expands a skill the
@@ -360,7 +360,11 @@ impl Engine {
             self.set_title(first.map(|l| title::shorten(l, title::MAX_CHARS)));
         }
         if untitled && self.turns == 1 && !typed.trim().is_empty() && self.log.is_some() {
-            self.generate_title(&setup, &typed);
+            if self.title_targets_local(&setup) {
+                self.pending_title = Some((setup.clone(), typed.clone()));
+            } else {
+                self.generate_title(&setup, &typed);
+            }
         }
         let cancel = CancellationToken::new();
         self.running = Some((turn, cancel.clone()));
@@ -374,7 +378,7 @@ impl Engine {
                 nested,
                 cancel,
                 pool,
-                last_response_id,
+                responses_session,
                 last_reminders,
                 egress_guard,
             )
@@ -502,7 +506,8 @@ impl Engine {
                     self.log.as_ref(),
                     &self.tx,
                 );
-                let ctx_report = crate::context::report(&c.setup, Some(history));
+                let last_cache_hit = self.stats.lock().ok().and_then(|s| s.last_cache_hit());
+                let ctx_report = crate::context::report(&c.setup, Some(history), last_cache_hit);
                 Some((report, ctx_report))
             }
         }) else {

@@ -14,6 +14,8 @@
 //! `mode` remembers independent work mode and approval defaults (never session grants).
 //! `planner_start` marks the planner's history boundary for a resumed handoff.
 //! `reasoning_effort` remembers each model's session selection; null restores its default.
+//! `session_context` pins the opening `<context>` block so `/resume` reproduces turn 0
+//! byte-for-byte even if workspace files, git branch, memory notes, or the date changed.
 //! `request_start` / `agent_request_start` identify requests interrupted before usage
 //! could be saved. A `usage` / `agent_usage` record may have null usage when unreported.
 
@@ -137,6 +139,8 @@ pub(crate) struct Replayed {
     /// The plan's checklist (`Plan::restore`); empty when there is none.
     pub plan: String,
     pub planner_start: Option<usize>,
+    /// Pinned opening `<context>` text recorded at session start, when present.
+    pub session_context: Option<String>,
 }
 
 /// Rebuild model history, the display transcript and the plan from a session's records.
@@ -147,6 +151,7 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
     // A rewind leaves the plan as it was, as it does live.
     let mut plan = String::new();
     let mut planner_start: Option<usize> = None;
+    let mut session_context: Option<String> = None;
     // `(history index, items length)` at each user message, to cut the transcript on rewind.
     let mut marks: Vec<(usize, usize)> = Vec::new();
     for r in records {
@@ -292,6 +297,11 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
                     .and_then(|at| usize::try_from(at).ok())
                     .map(|at| at.min(history.len()));
             }
+            "session_context" => {
+                if let Some(text) = r.data.get("text").and_then(|v| v.as_str()) {
+                    session_context = Some(text.to_owned());
+                }
+            }
             "mode" if r.data.get("work_mode").and_then(|v| v.as_str()) == Some("edit") => {
                 planner_start = None;
             }
@@ -305,6 +315,7 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
         turns,
         plan,
         planner_start,
+        session_context,
     }
 }
 

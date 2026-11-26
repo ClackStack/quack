@@ -484,6 +484,8 @@ impl App {
                 if std::mem::take(&mut self.resuming) {
                     self.transcript.clear();
                     self.agents.clear();
+                    self.plan.clear();
+                    self.plan_expanded = false;
                     self.context = None;
                     self.growth.clear();
                 }
@@ -586,6 +588,9 @@ impl App {
                 }
                 if let Some(plan) = plan {
                     self.plan = plan;
+                    if self.plan.is_empty() {
+                        self.plan_expanded = false;
+                    }
                 }
             }
             Event::ApprovalRequest {
@@ -608,7 +613,12 @@ impl App {
                     },
                 });
             }
-            Event::Plan { checklist } => self.plan = parse_plan(&checklist),
+            Event::Plan { checklist } => {
+                self.plan = parse_plan(&checklist);
+                if self.plan.is_empty() {
+                    self.plan_expanded = false;
+                }
+            }
             Event::AgentStarted {
                 id,
                 agent,

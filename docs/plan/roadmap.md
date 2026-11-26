@@ -2,6 +2,37 @@
 
 Milestones are ordered by dependency and value. Each has **exit criteria** that must pass on **Linux, macOS and Windows** in CI before moving on. Dates are left out on purpose; scope is what's fixed.
 
+## Cross-provider prompt caching hardening — 2026-11-25
+
+Extended prompt-caching correctness and parity across all supported cloud and local providers (not just OpenAI/ChatGPT):
+
+- **Universal prefix & cache-stability fixes (`quack-core`, `quack-mcp`, `quack-context`, `quack-providers`):**
+  - Fixed `CacheStrategy::Auto` in `context.rs` so slow local GPUs with `serving.prefix_cache = true` no longer eager-prune and force full slow re-prefills on every step; added a 15% headroom floor (`PRUNE_HEADROOM_RATIO`) at `threshold` so non-native-compaction providers skip tiny half-measure prunes and compact once instead of thrashing the cache every 1–2 turns.
+  - Made MCP server and tool ordering deterministic (`spec.id`, then sorted tool/prompt/resource names), retained tool declarations across transient stdio reconnects and `/mcp restart` so restarts don't drop and re-append schemas, pinned late-connecting servers at the tail per session, moved `list_mcp_resources`/`read_mcp_resource` ahead of dynamically activated deferred tools, and kept `tool_search`'s description static over configured servers (moving live ready counts into tool results).
+  - Persisted the opening `<context>` block (`session_context` record in `events.jsonl`) so `/resume` and `/fork` reproduce turn 0 byte-for-byte even when workspace files, git branch, memory notes, or the UTC date changed (`fork --worktree` still refreshes for the new worktree).
+  - Introduced `Message::Nudge` for internal empty-reply and output-truncation retry prompts so mid-turn nudges go over the wire as `role: "user"` without resetting `preserve_in_history = "current_turn"` reasoning (DeepSeek), replay turns, rewind points, or compaction boundaries.
+  - Preserved Responses WebSocket continuation across non-prompt config hot-reloads (`commands/`, `grammars/`).
+- **Provider-specific wire & config parity (`quack-config`, `quack-providers`, `defaults/providers.d/`):**
+  - Added `[prompt_cache] cache_control = "auto" | "breakpoints"` and `cache_control_models` globs on `openai-chat`: `openrouter.toml` enables `cache_control = "auto"` for `anthropic/*` models (alongside `x-session-id` sticky routing) and `alibaba.toml` enables `cache_control = "breakpoints"` for DashScope Qwen models. Parsed DashScope/Anthropic `cache_creation_input_tokens` and `cache_read_input_tokens` in `openai_chat`.
+  - Updated `anthropic-messages` to honor `[prompt_cache] ttl` (`"1h"`), place a breakpoint on `tools` when `system` is empty (or within the 4-breakpoint budget), and split leading `<context>...</context>` into its own cached block on turn 0 (also mirrored for explicit breakpoints on `openai-responses`).
+  - Enabled `[prompt_cache] cache_key = true` on `moonshot.toml` and `kimi-code.toml` (with optional `prompt_cache_options.ttl` on `openai-chat`), and updated Mistral to prefer `req.cache_key` over hashing opening messages so keys survive compaction and parallel CI sharing.
+- **Local servers (`ollama`, `llama.cpp`, `quack-core`):**
+  - Wired `[prompt_cache] ttl` to Ollama's `keep_alive` (`defaults/providers.d/ollama.toml` defaults to `"15m"` so KV caches survive 5-minute pauses), parsed `prompt_eval_cached_count` into `Usage.cached_prompt_tokens`, added llama.cpp `timings.cache_n` fallback in `openai-chat`, and deferred loopback local `model.small` title generation until Turn 1 finishes to avoid mid-turn KV-slot eviction.
+- **Parallel workflows & telemetry (`quack-cli`, `quack-config`, `quack-core`):**
+  - Added `--cache-key`, `QUACK_PROMPT_CACHE_KEY`, and `[context] cache_key` for shared routing affinity across parallel `quack exec` / CI runs.
+  - Summed multi-step `prompt_tokens`, `cached_prompt_tokens`, and `cache_write_tokens` into `TurnComplete.usage` (fixing `quack exec --output-format json` reporting across tool loops), and grounded `/context` cached-vs-uncached zones in the server's reported `last_cache_hit` when available.
+
+## Responses WebSocket continuation
+
+Bundled ChatGPT and OpenAI conversations use a persistent, authenticated Responses socket.
+Quack sends append-only input with a connection-local response ID, replays full history on
+reconnect or resume, and falls back to HTTP on a refused upgrade. Mock tests cover tool
+continuation, an expired response ID, cancellation, disconnects after output and upgrade
+redirects. A live `chatgpt/sol` smoke test on 2026-11-25 completed four fixture reads over
+WebSocket with 9,216 of 16,837 input tokens cached. The OpenAI API-key route was covered by
+mock tests.
+[Provider details](02-providers.md#responses-websocket-continuation)
+
 ## Small-model session titles that actually land — 2026-11-20 (hardened 2026-11-24)
 
 Session titles from `[model] small` failed silently for reasoning models: the request capped output at 256 tokens, so thinking used it all and the reply held no title, and one 15 s timeout covered both setting up the small model (provider discovery alone may take 15 s) and the request. Title generation now lives in `quack-core/src/engine/title.rs`: separate setup (20 s) and request (30 s) timeouts, up to 4,096 output tokens (clamped by `context_window` and `max_output`), an 800-character prompt excerpt with instructions not to analyze the request, early stream cancellation once the first title line lands, and a cleaner that drops `Title:`, markdown, quotes, inline `<think>` and a final full stop and cuts at a word. `ChatRequest.utility` now strips provider- and model-level thinking/reasoning-summary `extra_body` fields after provider merging (`Provider::run_stream`, keeping non-thinking options like `fallbacks`). Setup/auth/404 failures still warn naming `model.small`, while generation failures (token exhaustion, empty replies, timeouts, transient errors) log quietly to `quack.log` and keep the shortened first-line fallback; the small model's calls go through the egress ledger. `quack-gui` sets the OS window title from the active job (`core:window:allow-set-title`), updates the open job's row in the saved list when its title changes, and preserves open streaming replies if a background warning arrives mid-turn.
@@ -446,6 +477,8 @@ Milestones: G1 desktop MVP (Welcome/recent folders, login-shell `PATH` & `.app` 
 - Docs updated with each feature (user docs live in `docs/`, separate from `docs/plan/`)
 
 - 2026-11-10: Refreshed `/config` Layers with status hints, spaced panes and more room for wrapped paths. Enter copies the full selected path through OSC 52 while keeping the modal open.
+- 2026-11-25: Desktop GUI sidebar (`Sidebar.svelte` and `JobsOverview.svelte`) pins the active `Plan` section directly below `Projects` with `done/total`, completion percentage, an accessible progress bar, completed-step checkmarks, and bounded scrolling for long plans, while `Jobs` overview cards show completion percentage and the active step ([15](15-desktop-client.md#the-ui)).
+- 2026-11-24: Wide-terminal TUI sidebar shows the active plan below Context (`Plan · done/total (%)`, progress meter, and steps with adaptive two-line wrapping or windowed overflow), moving the one-line plan strip out of the main pane while the sidebar displays it and falling back automatically on narrow or crowded screens ([06](06-tui.md#wide-terminal-sidebar-2026-11-11)).
 - 2026-11-11: Added a default-on, responsive right sidebar at 140×24 and above, showing session title, folder, Git branch, model/profile, context usage and speed. `ui.sidebar` disables it live through `/config` or `/reload`; narrow terminals keep the existing layout. Git HEAD refreshes off-thread ([06](06-tui.md#wide-terminal-sidebar-2026-11-11)).
 - 2026-11-12: Validated the rewritten `kimi-code` surface live on Fireworks `kimi-k3` ($0.31 total): 7/7 quick-suite tasks passed (`fix-typo`, `big-file-edit`, `find-caller`, `fix-off-by-one`, `new-module`, `shell-run-script`, plus a kept `big-file-edit` rerun), 0 parse failures, 0 edit failures. The kept session shows the model calling `Read`/`Edit`/`Grep` with the v2 argument shapes (`old_string`/`new_string`), so the rename works end to end.
 - 2026-11-12: Enabled `kimi-code` matches by user approval, skipping the usual `--repeat 3` comparison (the codex matches of 2026-11-11 set the precedent for explicit exceptions): `*kimi-k3*` plus the Kimi Code plan ids (`k3`, `k3-256k`, `kimi-for-coding`, `k3.1-pro`, `k3.1-pro-highspeed`), priority 50, guarded by a profiles.rs test over every bundled Kimi model id. The evidence is the surface re-check against the vendor's own harness (2026-11-11) and the $0.31 live validation above, not a `generic` comparison. `kimi-k2` (trained on the retired kimi-cli names) and the `kimi-latest` moving-target aliases stay on `generic`.

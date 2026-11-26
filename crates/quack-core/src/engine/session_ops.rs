@@ -33,8 +33,11 @@ impl Engine {
             turns,
             plan,
             planner_start,
+            session_context,
         } = session::replay(&records);
         self.saved_plan_start = planner_start;
+        self.saved_session_context = session_context;
+        setup.set_session_context(self.saved_session_context.clone());
         self.saved_mode = session::modes(&records);
         self.reasoning_efforts = session::reasoning_efforts(&records);
         self.stats = Arc::new(Mutex::new(crate::stats::Stats::from_log(&records)));
@@ -60,6 +63,7 @@ impl Engine {
         self.session.id = SessionId(entry.id.clone());
         self.turns = turns;
         self.title_tasks = JoinSet::new();
+        self.pending_title = None;
         self.set_title(Some(entry.title));
         self.configure_reasoning(setup);
         self.emit(Event::SessionResumed {
@@ -173,12 +177,13 @@ impl Engine {
         };
         let parent = std::mem::replace(&mut self.session.id, id);
         if let Some(c) = &mut self.convo {
-            c.last_response_id = Arc::default();
+            c.responses_session = Arc::default();
         }
         self.log = Some(Arc::new(Mutex::new(log)));
         self.sync_ledger_log();
         let title = self.title.as_ref().map(|t| format!("{t} (fork)"));
         self.title_tasks = JoinSet::new();
+        self.pending_title = None;
         self.set_title(title);
         self.sync_log();
         self.emit(Event::SessionConfigured {
@@ -247,10 +252,12 @@ impl Engine {
                         }),
                     )
                     .map_err(|e| format!("cannot write worktree session_start: {e}"))?;
-                    for r in records
-                        .iter()
-                        .filter(|r| !matches!(r.kind.as_str(), "session_start" | "resume"))
-                    {
+                    for r in records.iter().filter(|r| {
+                        !matches!(
+                            r.kind.as_str(),
+                            "session_start" | "resume" | "session_context"
+                        )
+                    }) {
                         log.copy(r)
                             .map_err(|e| format!("cannot copy session record: {e}"))?;
                     }
@@ -273,6 +280,7 @@ impl Engine {
         let wt_branch = wt.branch.clone();
         self.session.id = id.clone();
         self.session.cwd = wt_path.clone();
+        self.saved_session_context = None;
         self.log = new_log.map(|l| Arc::new(Mutex::new(l)));
         self.sync_ledger_log();
         let title = self
@@ -281,6 +289,7 @@ impl Engine {
             .map(|t| format!("{t} ({wt_name})"))
             .or_else(|| Some(format!("worktree {wt_name}")));
         self.title_tasks = JoinSet::new();
+        self.pending_title = None;
         self.set_title(title);
         self.sync_log();
 
@@ -330,10 +339,13 @@ impl Engine {
                 self.reasoning_efforts.clear();
                 self.saved_mode = None;
                 self.saved_plan_start = None;
+                self.saved_session_context = None;
+                setup.set_session_context(None);
                 self.session.id = new_session_id();
                 self.stats = Arc::default();
                 self.turns = 0;
                 self.title_tasks = JoinSet::new();
+                self.pending_title = None;
                 self.set_title(None);
                 self.emit(Event::EgressLedger {
                     entries: Vec::new(),
@@ -603,6 +615,22 @@ impl Engine {
                     }),
                 );
                 self.log = Some(log);
+                if let Some(ctx) = self
+                    .convo
+                    .as_ref()
+                    .map(|c| c.setup.effective_session_context())
+                    .filter(|c| !c.is_empty())
+                {
+                    session::record(
+                        self.log.as_ref(),
+                        "session_context",
+                        serde_json::json!({ "text": ctx }),
+                    );
+                    self.saved_session_context = Some(ctx.clone());
+                    if let Some(c) = &self.convo {
+                        c.setup.set_session_context(Some(ctx));
+                    }
+                }
                 self.sync_ledger_log();
                 let (pre_entries, _) = self.ledger.snapshot();
                 for entry in &pre_entries {
@@ -634,6 +662,7 @@ impl Engine {
 
     pub(super) fn set_session_title(&mut self, title: String) {
         self.title_tasks = JoinSet::new();
+        self.pending_title = None;
         self.save_title(title.trim().to_owned());
     }
 
@@ -645,6 +674,25 @@ impl Engine {
         );
         self.set_title(Some(title));
         self.sync_log();
+    }
+
+    pub(super) fn title_targets_local(&self, current: &Setup) -> bool {
+        let Some((provider, _)) = self.config.settings.model.small.trim().split_once('/') else {
+            return false;
+        };
+        if current.provider.id == provider {
+            return quack_config::is_loopback(current.provider.base_url());
+        }
+        quack_config::load_providers(&self.config)
+            .into_iter()
+            .find(|item| item.id == provider)
+            .and_then(|item| match item.state {
+                quack_config::ItemState::Loaded(file) => {
+                    Some(quack_config::is_loopback(&file.base_url))
+                }
+                _ => None,
+            })
+            .unwrap_or(false)
     }
 
     pub(super) fn generate_title(&mut self, current: &Arc<Setup>, prompt: &str) {
