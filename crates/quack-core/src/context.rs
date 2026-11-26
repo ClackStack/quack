@@ -439,6 +439,9 @@ fn finish_compaction(
         json!({ "cut": cut, "message": message, "reason": reason, "native": native }),
     );
     session::apply_compaction(history, cut, message, native);
+    if let Ok(mut loaded) = ctx.loaded_skills.lock() {
+        loaded.on_compaction(cut);
+    }
     // Earlier reminder messages may have been compacted away; let the next step refresh them.
     ctx.reset_reminders();
     ctx.emit(Event::Compacted {

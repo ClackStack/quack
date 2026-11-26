@@ -10,7 +10,7 @@ impl Engine {
         &mut self,
         resume: &Resume,
         setup: &Setup,
-    ) -> Option<(Vec<Message>, String)> {
+    ) -> Option<(Vec<Message>, String, session::LoadedSkills)> {
         let entry = match session::find(&self.config, resume) {
             Ok(Some(e)) => e,
             Ok(None) => return None,
@@ -32,6 +32,7 @@ impl Engine {
             items,
             turns,
             plan,
+            loaded_skills,
             planner_start,
             session_context,
         } = session::replay(&records);
@@ -72,7 +73,7 @@ impl Engine {
         });
         let (entries, stats) = self.ledger.snapshot();
         self.emit(Event::EgressLedger { entries, stats });
-        Some((history, plan))
+        Some((history, plan, loaded_skills))
     }
 
     /// `/export`: the transcript so far, from the session log. Reading and rendering
@@ -322,7 +323,8 @@ impl Engine {
         if let Some(end) = self.session_hooks(HookEvent::SessionEnd, "switch") {
             drop(end); // runs on; nothing waits for it
         }
-        let (history, plan) = match target {
+        let resumed = target.is_some();
+        let (history, plan, loaded_skills) = match target {
             Some(id) => {
                 self.sync_log();
                 match self.open_saved(&Resume::Id(id.0), &setup) {
@@ -351,13 +353,15 @@ impl Engine {
                     entries: Vec::new(),
                     stats: Default::default(),
                 });
-                (Vec::new(), String::new())
+                (Vec::new(), String::new(), session::LoadedSkills::default())
             }
         };
+        let skill_names = loaded_skills.names();
         if let Some(c) = &mut self.convo {
             // Session approvals and the plan belong to the session they were made in.
             c.perms = Arc::new(Mutex::new(c.setup.permissions.clone()));
             c.nested = nested(&self.config, &c.setup, &history);
+            c.loaded_skills = Arc::new(Mutex::new(loaded_skills));
             c.history = Some(history);
             c.setup.tool_ctx.plan.restore(&plan);
             c.reset_transient();
@@ -368,6 +372,9 @@ impl Engine {
         }
         self.restore_modes();
         self.emit(Event::Plan { checklist: plan });
+        self.emit(Event::LoadedSkills {
+            skills: skill_names,
+        });
         self.emit_mode();
         if self.in_plan_mode() {
             self.start_planner();
@@ -375,6 +382,9 @@ impl Engine {
         self.emit(Event::SessionConfigured {
             session: Box::new(self.session.clone()),
         });
+        if resumed {
+            self.stats_report();
+        }
         self.start_context = self.session_hooks(HookEvent::SessionStart, source);
     }
 
@@ -566,6 +576,11 @@ impl Engine {
             .count();
         history.truncate(point.index);
         c.nested = nested(&self.config, &c.setup, history);
+        let skills_changed = c
+            .loaded_skills
+            .lock()
+            .ok()
+            .and_then(|mut s| s.truncate(point.index).then(|| s.names()));
         self.turns = self
             .turns
             .saturating_sub(u32::try_from(dropped).unwrap_or(u32::MAX));
@@ -575,6 +590,9 @@ impl Engine {
             serde_json::json!({ "to": point.index }),
         );
         self.sync_log();
+        if let Some(skills) = skills_changed {
+            self.emit(Event::LoadedSkills { skills });
+        }
         self.emit(Event::Rewound {
             back,
             text: point.point.text,

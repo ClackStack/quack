@@ -38,6 +38,7 @@ import type {
 	WorkspaceSymbol
 } from '#lib/transport/types';
 import type { HookRunEntry } from './extensions';
+import { parsePlanSteps } from './jobs';
 import { recordModelSpeed } from './modelStats';
 import { formatTomlStringArray, parseTomlString, type SettingsSectionId } from './settings';
 
@@ -234,6 +235,8 @@ export class Session {
 	streaming = $state(false);
 	turnPending = $state(false);
 	speed = $state<SpeedState | null>(null);
+	/** Session-wide prompt cache hit percentage (`cached / prompt`, 0..=100). */
+	cacheHitPercent = $state<number | null>(null);
 	lastUsage = $state<{ prompt: number; completion: number; cached: number | null } | null>(null);
 	approval = $state<{ callId: string; request: ApprovalRequest; always: string[] } | null>(null);
 	questions = $state<{ callId: string; questions: Question[] } | null>(null);
@@ -267,6 +270,8 @@ export class Session {
 		note: string | null;
 	} | null>(null);
 	plan = $state('');
+	/** True after a planning turn finishes with a plan ready to review and carry out. */
+	planReviewReady = $state(false);
 	agents = $state<AgentRun[]>([]);
 	sessions = $state<SessionSummary[]>([]);
 	resumed = $state(false);
@@ -293,6 +298,8 @@ export class Session {
 	detecting = $state(false);
 	/** Skills the engine loaded for this project; arrives at startup. */
 	skills = $state<SkillInfo[]>([]);
+	/** Skills activated into this session so far (via `skill` tool or `/<skill>`). */
+	loadedSkills = $state<string[]>([]);
 	/** Custom slash commands loaded from command folders. */
 	commands = $state<CommandInfo[]>([]);
 	/** MCP prompt shortcuts (`/server:prompt`). */
@@ -378,6 +385,10 @@ export class Session {
 
 	#transport: Transport;
 	#progressSinceWarning = false;
+	#turnWorkMode: WorkMode | null = null;
+	#turnCompacting = false;
+	#turnPlanUpdated = false;
+	#planStaleForReview = false;
 	#pendingForkOpenPicker = false;
 	#pendingSettingSaves = 0;
 	#reloadAfterSettingSaved = false;
@@ -553,8 +564,15 @@ export class Session {
 				this.issue = null;
 				this.actionError = null;
 				this.#progressSinceWarning = false;
+				this.planReviewReady = false;
+				this.#turnWorkMode = this.workMode;
+				this.#turnCompacting = false;
+				this.#turnPlanUpdated = false;
 				break;
-			case 'turn_complete':
+			case 'compacting':
+				if (ev.reason === '/compact') this.#turnCompacting = true;
+				break;
+			case 'turn_complete': {
 				this.turnPending = false;
 				this.streaming = false;
 				this.#sealStreams();
@@ -562,6 +580,22 @@ export class Session {
 				this.questions = null;
 				this.stepLimit = null;
 				this.workspaceFiles = null;
+				const startedMode = this.#turnWorkMode ?? this.workMode;
+				const compactOnly = this.#turnCompacting;
+				const planUpdated = this.#turnPlanUpdated;
+				this.#turnWorkMode = null;
+				this.#turnCompacting = false;
+				this.#turnPlanUpdated = false;
+				if (startedMode === 'edit' && !compactOnly) {
+					this.#planStaleForReview = true;
+				}
+				const steps = parsePlanSteps(this.plan);
+				const hasUnfinished = steps.some((step) => step.state !== 'x');
+				this.planReviewReady =
+					this.workMode === 'plan' &&
+					startedMode === 'plan' &&
+					!compactOnly &&
+					(steps.length > 0 ? hasUnfinished && !this.#planStaleForReview : !planUpdated);
 				if (this.issue?.kind === 'warning' && this.#progressSinceWarning) this.issue = null;
 				this.lastUsage = {
 					prompt: ev.usage.prompt_tokens,
@@ -573,6 +607,7 @@ export class Session {
 				void this.refreshContext();
 				void this.listMemory();
 				break;
+			}
 			case 'step_limit_reached':
 				this.turnPending = false;
 				this.streaming = false;
@@ -588,6 +623,10 @@ export class Session {
 				this.approval = null;
 				this.questions = null;
 				this.stepLimit = null;
+				this.planReviewReady = false;
+				this.#turnWorkMode = null;
+				this.#turnCompacting = false;
+				this.#turnPlanUpdated = false;
 				if (this.issue?.kind !== 'error') this.issue = { kind: 'aborted', message: ev.reason };
 				this.items.push({
 					kind: 'system',
@@ -609,6 +648,9 @@ export class Session {
 					window: ev.window ?? null,
 					threshold: ev.threshold ?? null
 				};
+				if (ev.cache_hit_percent !== undefined) {
+					this.cacheHitPercent = ev.cache_hit_percent;
+				}
 				break;
 			case 'context_report':
 				this.contextReport = {
@@ -623,13 +665,25 @@ export class Session {
 					note: ev.report.note ?? null
 				};
 				break;
-			case 'plan':
+			case 'plan': {
 				this.plan = ev.checklist;
+				const steps = parsePlanSteps(ev.checklist);
+				const hasUnfinished = steps.some((step) => step.state !== 'x');
+				if (this.streaming) this.#turnPlanUpdated = true;
+				const activeMode = this.#turnWorkMode ?? this.workMode;
+				if (activeMode === 'plan' && hasUnfinished) {
+					this.#planStaleForReview = false;
+				}
+				if (!hasUnfinished) {
+					this.planReviewReady = false;
+				}
 				break;
+			}
 			case 'mode_changed':
 				// Authoritative for both controls; no need to remember a previous mode.
 				this.workMode = ev.work_mode;
 				this.approvals = ev.approvals;
+				if (ev.work_mode !== 'plan') this.planReviewReady = false;
 				break;
 			case 'permission_mode':
 				// Legacy single-control notification: `plan` named the work mode.
@@ -637,6 +691,7 @@ export class Session {
 				else {
 					this.workMode = 'edit';
 					this.approvals = ev.mode as ApprovalPolicy;
+					this.planReviewReady = false;
 				}
 				break;
 			case 'sign_in_url':
@@ -683,6 +738,9 @@ export class Session {
 				break;
 			case 'skills':
 				this.skills = ev.skills;
+				break;
+			case 'loaded_skills':
+				this.loadedSkills = ev.skills;
 				break;
 			case 'commands':
 				this.commands = ev.commands;
@@ -799,6 +857,12 @@ export class Session {
 				break;
 			case 'stats':
 				this.stats = ev.report;
+				if (ev.report.cache_reported > 0 && ev.report.prompt_tokens > 0) {
+					this.cacheHitPercent = Math.min(
+						100,
+						Math.round((ev.report.cached_tokens / ev.report.prompt_tokens) * 100)
+					);
+				}
 				break;
 			case 'provider_added':
 				this.setupNotice = ev.note ?? 'Provider saved. Choose a model to continue.';
@@ -873,6 +937,7 @@ export class Session {
 				break;
 			case 'rewound': {
 				this.#sealStreams();
+				this.planReviewReady = false;
 				this.rewindConflict = null;
 				this.rewindPoints = null;
 				this.rewindLoading = false;
@@ -1167,6 +1232,10 @@ export class Session {
 		this.#sealStreams();
 		this.approval = null;
 		this.questions = null;
+		this.planReviewReady = false;
+		this.#turnWorkMode = null;
+		this.#turnCompacting = false;
+		this.#turnPlanUpdated = false;
 		if (reason) this.items.push({ kind: 'system', id: nextId(), tone: 'error', text: reason });
 	}
 
@@ -1180,12 +1249,19 @@ export class Session {
 		this.items = [];
 		this.draft = '';
 		this.plan = '';
+		this.planReviewReady = false;
+		this.#turnWorkMode = null;
+		this.#turnCompacting = false;
+		this.#turnPlanUpdated = false;
+		this.#planStaleForReview = false;
 		this.agents = [];
 		this.context = null;
 		this.contextReport = null;
 		this.speed = null;
+		this.cacheHitPercent = null;
 		this.lastUsage = null;
 		this.stats = null;
+		this.loadedSkills = [];
 		this.egressEntries = [];
 		this.egressStats = null;
 		this.egressLoading = false;
@@ -1278,6 +1354,7 @@ export class Session {
 		if (!cleanText && files.length === 0 && images.length === 0) return false;
 		this.sending = true;
 		this.#sealStreams();
+		this.planReviewReady = false;
 		this.turnPending = true;
 		const id = nextId();
 		this.items.push({ kind: 'user', id, text: cleanText || text, files, images });
@@ -1398,6 +1475,8 @@ export class Session {
 		return this.#send({ op: 'set_approval_policy', policy });
 	}
 	async acceptPlan() {
+		this.planReviewReady = false;
+		this.#planStaleForReview = true;
 		// An empty mode keeps the current approvals; the engine performs the handoff.
 		return this.#send({ op: 'accept_plan', mode: '' });
 	}

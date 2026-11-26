@@ -101,6 +101,86 @@ async fn a_turn_is_counted_priced_and_kept_on_resume() {
 }
 
 #[tokio::test]
+async fn cache_hit_percent_streams_on_context_update_and_resume() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("\"role\":\"tool\""))
+        .respond_with(sse_raw(&[
+            r#"{"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}"#.into(),
+            r#"{"choices":[],"usage":{"prompt_tokens":3000,"completion_tokens":200,"prompt_tokens_details":{"cached_tokens":2000}}}"#.into(),
+        ]))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(sse_raw(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"ls","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#.into(),
+            r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":100}}"#.into(),
+        ]))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut engine = Engine::spawn(Arc::new(workspace(
+        tmp.path(),
+        &server.uri(),
+        r#"["tiny"]"#,
+        "",
+    )));
+    engine
+        .submit(Op::UserTurn {
+            items: vec![quack_core::protocol::InputItem::text("check")],
+            overrides: Default::default(),
+        })
+        .await;
+    let mut cache_percents = Vec::new();
+    loop {
+        let e = tokio::time::timeout(Duration::from_secs(10), engine.events.recv())
+            .await
+            .expect("event within 10s")
+            .expect("channel open");
+        match e {
+            Event::ContextUpdate {
+                cache_hit_percent, ..
+            } => cache_percents.push(cache_hit_percent),
+            Event::TurnComplete { .. } => break,
+            Event::Error { error } => panic!("engine error: {}", error.message),
+            _ => {}
+        }
+    }
+    // Step 1 reports no cache info -> None; step 2 reports 2000 cached out of 4000 prompt -> 50%.
+    assert!(
+        cache_percents.contains(&Some(50)),
+        "expected 50% session cache hit on ContextUpdate, got {cache_percents:?}"
+    );
+    engine.shutdown().await;
+
+    // Resuming pushes Event::Stats automatically so clients show cached % right away.
+    let loaded = workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    let mut engine = Engine::spawn_with(Arc::new(loaded), Resume::Latest);
+    let mut resumed_stats = None;
+    loop {
+        let e = tokio::time::timeout(Duration::from_secs(10), engine.events.recv())
+            .await
+            .expect("event within 10s")
+            .expect("channel open");
+        match e {
+            Event::Stats { report } => resumed_stats = Some(*report),
+            Event::StartupComplete => break,
+            _ => {}
+        }
+    }
+    let r = resumed_stats.expect("Event::Stats pushed on resume");
+    assert_eq!(
+        (r.cached_tokens, r.prompt_tokens, r.cache_reported),
+        (2000, 4000, 1)
+    );
+    engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn prices_listed_by_the_models_endpoint_are_used() {
     // Listed without a window or a cost: the models endpoint fills in both.
     priced_by_discovery(r#"["tiny"]"#).await;

@@ -375,3 +375,26 @@ async fn a_locked_plan_cannot_be_accepted_or_switched_to_edit() {
     );
     engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn plan_mode_prompt_guides_followup_and_finished_plans() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse_text(
+            "Everything is already complete; no changes needed.",
+        ))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    loaded.settings.permissions.work_mode = WorkMode::Plan;
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    turn(&mut engine, "check whether anything else is needed").await;
+    let first = bodies(&server).await.remove(0);
+    assert!(
+        first.contains("replace the checklist with the new pending follow-up steps")
+            && first.contains("do not leave pending steps in the checklist"),
+        "{first}"
+    );
+    engine.shutdown().await;
+}

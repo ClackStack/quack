@@ -422,15 +422,23 @@ impl Engine {
             }
             None => {
                 let resume = std::mem::take(&mut self.resume);
-                let (history, plan) = self.open_saved(&resume, &setup).unwrap_or_default();
+                let resumed = resume != Resume::New;
+                let (history, plan, loaded_skills) =
+                    self.open_saved(&resume, &setup).unwrap_or_default();
                 self.configure_reasoning(&setup);
                 if !plan.is_empty() {
                     setup.tool_ctx.plan.restore(&plan);
                     self.emit(Event::Plan { checklist: plan });
                 }
+                if !loaded_skills.is_empty() {
+                    self.emit(Event::LoadedSkills {
+                        skills: loaded_skills.names(),
+                    });
+                }
                 self.convo = Some(Conversation {
                     perms: Arc::new(Mutex::new(setup.permissions.clone())),
                     nested: nested(&self.config, &setup, &history),
+                    loaded_skills: Arc::new(Mutex::new(loaded_skills)),
                     setup: Arc::new(setup),
                     history: Some(history),
                     editor: None,
@@ -439,6 +447,9 @@ impl Engine {
                     last_reminders: Arc::default(),
                     egress_guard: Arc::default(),
                 });
+                if resumed && self.log.is_some() {
+                    self.stats_report();
+                }
                 self.restore_modes();
                 self.problem = None;
             }

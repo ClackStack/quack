@@ -577,6 +577,11 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "ts", ts(optional))]
         cache_hit_tokens: Option<u32>,
+        /// Session-wide prompt cache hit percentage (`cached / prompt`, 0..=100), when any
+        /// request in this session has reported cached prompt tokens.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        cache_hit_percent: Option<u8>,
         /// Above this the next request is pruned, then compacted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "ts", ts(optional))]
@@ -662,6 +667,11 @@ pub enum Event {
     /// Skills the model can load, and the user can run as `/<name> [args]`.
     Skills {
         skills: Vec<SkillInfo>,
+    },
+    /// Skills loaded into this session so far (via the `skill` tool or `/<skill>`),
+    /// in load order. Empty when none are loaded or after starting a new session.
+    LoadedSkills {
+        skills: Vec<String>,
     },
     /// User messages `/rewind` can go back to, most recent first.
     RewindPoints {
@@ -1908,6 +1918,24 @@ mod tests {
                 scope: Some(WriteScope::Project),
             }),
             r#"{"op":"add_mcp","id":"docs","url":"","command":"npx","args":["server"],"scope":"project"}"#
+        );
+
+        assert_eq!(
+            wire_json(&Event::LoadedSkills {
+                skills: vec!["release".into()],
+            }),
+            r#"{"event":"loaded_skills","skills":["release"]}"#
+        );
+        assert_eq!(
+            wire_json(&Event::ContextUpdate {
+                used: 1200,
+                budget: 8000,
+                window: Some(16000),
+                cache_hit_tokens: Some(900),
+                cache_hit_percent: Some(75),
+                threshold: None,
+            }),
+            r#"{"event":"context_update","used":1200,"budget":8000,"window":16000,"cache_hit_tokens":900,"cache_hit_percent":75}"#
         );
     }
 }

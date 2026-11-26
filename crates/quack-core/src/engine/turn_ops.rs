@@ -91,6 +91,7 @@ impl Engine {
         setup: Arc<Setup>,
         perms: Arc<Mutex<Permissions>>,
         nested: Arc<Nested>,
+        loaded_skills: Arc<Mutex<session::LoadedSkills>>,
         cancel: CancellationToken,
         pool: Arc<crate::agent::Pool>,
         responses_session: Arc<quack_providers::ResponsesSession>,
@@ -102,6 +103,7 @@ impl Engine {
             setup,
             perms,
             nested,
+            loaded_skills,
             approvals: self.approvals.clone(),
             questions: self.questions.clone(),
             tx: self.tx.clone(),
@@ -147,6 +149,7 @@ impl Engine {
         let setup = convo.setup.clone();
         let perms = convo.perms.clone();
         let nested = convo.nested.clone();
+        let loaded_skills = convo.loaded_skills.clone();
         let responses_session = convo.responses_session.clone();
         let last_reminders = convo.last_reminders.clone();
         let egress_guard = convo.egress_guard.clone();
@@ -157,6 +160,7 @@ impl Engine {
                 setup,
                 perms,
                 nested,
+                loaded_skills,
                 cancel,
                 pool,
                 responses_session,
@@ -295,20 +299,27 @@ impl Engine {
         } else {
             None
         };
+        let history_len = history.len();
         let setup = convo.setup.clone();
         let perms = convo.perms.clone();
         let nested = convo.nested.clone();
+        let loaded_skills = convo.loaded_skills.clone();
         let responses_session = convo.responses_session.clone();
         let last_reminders = convo.last_reminders.clone();
         let egress_guard = convo.egress_guard.clone();
         // `expand_skill` borrows the typed prompt; when it expands a skill the
         // expansion replaces the request body, so the original is kept once, not twice.
         let typed = prompt;
-        let (expanded, skill_error) = if mcp_prompt.is_some() {
-            (None, None)
+        let expansion = if mcp_prompt.is_some() {
+            PromptExpansion::default()
         } else {
             expand_skill(&setup, &typed)
         };
+        let PromptExpansion {
+            text: expanded,
+            skill: loaded_skill,
+            error: skill_error,
+        } = expansion;
         let notes = (!self.notes.is_empty()).then(|| std::mem::take(&mut self.notes).join("\n"));
         if let Some(e) = skill_error {
             self.warn(e);
@@ -345,6 +356,20 @@ impl Engine {
         };
         let manager = self.mcp.manager.clone();
         self.ensure_log().await;
+        if let Some(skill_name) = loaded_skill {
+            session::record(
+                self.log.as_ref(),
+                "skill",
+                serde_json::json!({ "name": skill_name }),
+            );
+            let updated = loaded_skills
+                .lock()
+                .ok()
+                .and_then(|mut s| s.record(history_len, skill_name).then(|| s.names()));
+            if let Some(skills) = updated {
+                self.emit(Event::LoadedSkills { skills });
+            }
+        }
         if let Some(at) = planner_start {
             session::record(
                 self.log.as_ref(),
@@ -376,6 +401,7 @@ impl Engine {
                 setup,
                 perms,
                 nested,
+                loaded_skills,
                 cancel,
                 pool,
                 responses_session,
@@ -543,12 +569,19 @@ pub(super) fn load_image(
     quack_protocol::Image::from_path(&resolved)
 }
 
+#[derive(Debug, Default)]
+pub(super) struct PromptExpansion {
+    pub(super) text: Option<String>,
+    pub(super) skill: Option<String>,
+    pub(super) error: Option<String>,
+}
+
 /// `/<skill> [args]` becomes the skill's instructions followed by the request. Anything
 /// else (including unknown `/words`) is sent as typed, so the expansion is `None` and
 /// the caller keeps the prompt it passed in.
-pub(super) fn expand_skill(setup: &Setup, prompt: &str) -> (Option<String>, Option<String>) {
+pub(super) fn expand_skill(setup: &Setup, prompt: &str) -> PromptExpansion {
     let Some(rest) = prompt.strip_prefix('/') else {
-        return (None, None);
+        return PromptExpansion::default();
     };
     let (name, args) = rest
         .split_once(char::is_whitespace)
@@ -556,12 +589,15 @@ pub(super) fn expand_skill(setup: &Setup, prompt: &str) -> (Option<String>, Opti
     let Some(skill) = setup.tool_ctx.skills.iter().find(|s| s.name == name) else {
         // A custom command: its prompt with the arguments filled in.
         return match quack_instructions::commands::expand(&setup.commands, prompt) {
-            Some(Ok(text)) => (Some(text), None),
-            Some(Err(e)) => {
-                let message = format!("/{name}: {e}");
-                (None, Some(message))
-            }
-            None => (None, None),
+            Some(Ok(text)) => PromptExpansion {
+                text: Some(text),
+                ..Default::default()
+            },
+            Some(Err(e)) => PromptExpansion {
+                error: Some(format!("/{name}: {e}")),
+                ..Default::default()
+            },
+            None => PromptExpansion::default(),
         };
     };
     match quack_tools::expand_skill(skill) {
@@ -571,11 +607,15 @@ pub(super) fn expand_skill(setup: &Setup, prompt: &str) -> (Option<String>, Opti
             } else {
                 args
             };
-            (Some(format!("{text}\n\n{request}")), None)
+            PromptExpansion {
+                text: Some(format!("{text}\n\n{request}")),
+                skill: Some(skill.name.clone()),
+                error: None,
+            }
         }
-        Err(e) => {
-            let message = format!("skill /{name}: {e}");
-            (None, Some(message))
-        }
+        Err(e) => PromptExpansion {
+            error: Some(format!("skill /{name}: {e}")),
+            ..Default::default()
+        },
     }
 }

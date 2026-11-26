@@ -418,7 +418,7 @@ impl Engine {
         }
         self.configure_reasoning(&setup);
         let mut perms = setup.permissions.clone();
-        let history = match self.convo.take() {
+        let (history, loaded_skills) = match self.convo.take() {
             Some(c) => {
                 self.saved_plan_start = c.plan_start;
                 if let Some(saved) = &self.saved_session_context
@@ -449,13 +449,14 @@ impl Engine {
                         self.emit(Event::Sandbox { off: false });
                     }
                 }
-                c.history.unwrap_or_default()
+                (c.history.unwrap_or_default(), c.loaded_skills)
             }
-            None => Vec::new(),
+            None => (Vec::new(), Arc::default()),
         };
         self.convo = Some(Conversation {
             perms: Arc::new(Mutex::new(perms)),
             nested: nested(&self.config, &setup, &history),
+            loaded_skills,
             setup: Arc::new(setup),
             history: Some(history),
             editor: None,

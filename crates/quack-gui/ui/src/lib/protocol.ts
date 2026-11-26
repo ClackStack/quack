@@ -642,6 +642,11 @@ always?: Array<string>, } | { "event": "questions", call_id: CallId, questions: 
  */
 limit: number, } | { "event": "turn_complete", turn: TurnId, usage: Usage, } | { "event": "turn_aborted", turn: TurnId, reason: string, } | { "event": "context_update", used: number, budget: number, window?: number, cache_hit_tokens?: number,
 /**
+ * Session-wide prompt cache hit percentage (`cached / prompt`, 0..=100), when any
+ * request in this session has reported cached prompt tokens.
+ */
+cache_hit_percent?: number,
+/**
  * Above this the next request is pruned, then compacted.
  */
 threshold?: number, } | { "event": "context_pruned", report: PruneReport, } | { "event": "speed", ttft_ms: number,
@@ -652,7 +657,7 @@ tokens_per_sec?: number, } | { "event": "compacting", reason: string, } | { "eve
 /**
  * How full the memory index is, as a percentage of `memory.index_max_tokens`.
  */
-index_fill: number, } | { "event": "doctor_report", checks: Array<DoctorCheck>, } | { "event": "mcp_servers", servers: Array<McpServerInfo>, } | { "event": "mcp_changed", id: string, message: string, } | { "event": "lsp_servers", servers: Array<LspServerInfo>, } | { "event": "servers_detected", servers: Array<DetectedServer>, } | { "event": "services", services: Array<ServiceInfo>, } | { "event": "sign_in_url", id: string, url: string, } | { "event": "sign_in_result", id: string, error?: string, } | { "event": "provider_added", id: string, path?: string, note?: string | null, } | { "event": "provider_connections", connections: Array<ProviderConnection>, } | { "event": "provider_connection_saved", connection: ProviderConnection, path: string, } | { "event": "skills", skills: Array<SkillInfo>, } | { "event": "rewind_points", points: Array<RewindPoint>, } | { "event": "rewound", back: number, text: string, } | { "event": "files_restored", restored: Array<string>, conflicts: Array<string>, } | { "event": "permission_mode", mode: PermissionMode, } | { "event": "mode_changed", work_mode: WorkMode, approvals: ApprovalPolicy, } | { "event": "sandbox", off: boolean, } | { "event": "compacted", summary_tokens: number,
+index_fill: number, } | { "event": "doctor_report", checks: Array<DoctorCheck>, } | { "event": "mcp_servers", servers: Array<McpServerInfo>, } | { "event": "mcp_changed", id: string, message: string, } | { "event": "lsp_servers", servers: Array<LspServerInfo>, } | { "event": "servers_detected", servers: Array<DetectedServer>, } | { "event": "services", services: Array<ServiceInfo>, } | { "event": "sign_in_url", id: string, url: string, } | { "event": "sign_in_result", id: string, error?: string, } | { "event": "provider_added", id: string, path?: string, note?: string | null, } | { "event": "provider_connections", connections: Array<ProviderConnection>, } | { "event": "provider_connection_saved", connection: ProviderConnection, path: string, } | { "event": "skills", skills: Array<SkillInfo>, } | { "event": "loaded_skills", skills: Array<string>, } | { "event": "rewind_points", points: Array<RewindPoint>, } | { "event": "rewound", back: number, text: string, } | { "event": "files_restored", restored: Array<string>, conflicts: Array<string>, } | { "event": "permission_mode", mode: PermissionMode, } | { "event": "mode_changed", work_mode: WorkMode, approvals: ApprovalPolicy, } | { "event": "sandbox", off: boolean, } | { "event": "compacted", summary_tokens: number,
 /**
  * History messages the summary replaced.
  */

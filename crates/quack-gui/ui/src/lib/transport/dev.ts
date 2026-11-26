@@ -560,6 +560,7 @@ export function devTransport(): Transport {
 			budget: 26214,
 			window: 32768,
 			cache_hit_tokens: 1024,
+			cache_hit_percent: 56,
 			threshold: 24576
 		});
 	}

@@ -452,3 +452,157 @@ async fn save_memory_op_creates_updates_renames_and_guards_collisions() {
 
     engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn loaded_skills_emit_events_and_follow_resume_rewind_and_new() {
+    use quack_core::Resume;
+    use quack_core::protocol::{Event, InputItem, Op, TurnOverrides};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("DEPLOY-STEPS"))
+        .respond_with(sse_text("deployed"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("RELEASE-STEPS"))
+        .respond_with(sse_text("released"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse_call(
+            "c1",
+            "skill",
+            serde_json::json!({"name": "release"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for (name, body) in [
+        ("release", "RELEASE-STEPS: tag the version."),
+        ("deploy", "DEPLOY-STEPS: push the build."),
+    ] {
+        let dir = tmp
+            .path()
+            .join("ws")
+            .join(".agents")
+            .join("skills")
+            .join(name);
+        std::fs::create_dir_all(&dir).expect("mkdir skill");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Run {name}\n---\n{body}\n"),
+        )
+        .expect("write skill");
+    }
+
+    let loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    let mut engine = Engine::spawn(Arc::new(loaded));
+
+    // Turn 1: model loads `release` via the `skill` tool.
+    engine
+        .submit(Op::UserTurn {
+            items: vec![InputItem::text("cut a release")],
+            overrides: TurnOverrides::default(),
+        })
+        .await;
+    let mut seen: Vec<Vec<String>> = Vec::new();
+    loop {
+        let e = tokio::time::timeout(std::time::Duration::from_secs(10), engine.events.recv())
+            .await
+            .expect("event")
+            .expect("open");
+        match e {
+            Event::LoadedSkills { skills } => seen.push(skills),
+            Event::TurnComplete { .. } => break,
+            Event::Error { error } => panic!("engine error: {}", error.message),
+            _ => {}
+        }
+    }
+    assert_eq!(seen, vec![vec!["release".to_owned()]]);
+
+    // Turn 2: user loads `deploy` via `/deploy`.
+    engine
+        .submit(Op::UserTurn {
+            items: vec![InputItem::text("/deploy now")],
+            overrides: TurnOverrides::default(),
+        })
+        .await;
+    seen.clear();
+    loop {
+        let e = tokio::time::timeout(std::time::Duration::from_secs(10), engine.events.recv())
+            .await
+            .expect("event")
+            .expect("open");
+        match e {
+            Event::LoadedSkills { skills } => seen.push(skills),
+            Event::TurnComplete { .. } => break,
+            Event::Error { error } => panic!("engine error: {}", error.message),
+            _ => {}
+        }
+    }
+    assert_eq!(seen, vec![vec!["release".to_owned(), "deploy".to_owned()]]);
+    engine.shutdown().await;
+
+    // Resuming restores both loaded skills.
+    let loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    let mut engine = Engine::spawn_with(Arc::new(loaded), Resume::Latest);
+    let mut resumed_skills = None;
+    loop {
+        let e = tokio::time::timeout(std::time::Duration::from_secs(10), engine.events.recv())
+            .await
+            .expect("event")
+            .expect("open");
+        match e {
+            Event::LoadedSkills { skills } => resumed_skills = Some(skills),
+            Event::StartupComplete => break,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        resumed_skills,
+        Some(vec!["release".to_owned(), "deploy".to_owned()])
+    );
+
+    // Rewinding 1 turn drops `deploy` and emits the updated list.
+    engine
+        .submit(Op::Rewind {
+            back: 1,
+            conversation: true,
+            files: false,
+            force: false,
+        })
+        .await;
+    let mut rewound_skills = None;
+    loop {
+        let e = tokio::time::timeout(std::time::Duration::from_secs(10), engine.events.recv())
+            .await
+            .expect("event")
+            .expect("open");
+        match e {
+            Event::LoadedSkills { skills } => rewound_skills = Some(skills),
+            Event::Rewound { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(rewound_skills, Some(vec!["release".to_owned()]));
+
+    // `/new` clears loaded skills.
+    engine.submit(Op::NewSession).await;
+    let mut cleared = None;
+    loop {
+        let e = tokio::time::timeout(std::time::Duration::from_secs(10), engine.events.recv())
+            .await
+            .expect("event")
+            .expect("open");
+        match e {
+            Event::LoadedSkills { skills } => cleared = Some(skills),
+            Event::SessionConfigured { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(cleared, Some(Vec::new()));
+    engine.shutdown().await;
+}

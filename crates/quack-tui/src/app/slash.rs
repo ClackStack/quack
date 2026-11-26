@@ -115,6 +115,7 @@ impl App {
     /// The engine preserves approvals and performs any planner handoff.
     pub(super) fn accept_plan(&mut self) {
         self.review = None;
+        self.plan_stale_for_review = true;
         self.startup_dismissed = true;
         self.transcript
             .push(Entry::User("Carry out the plan above.".into()));
@@ -286,8 +287,16 @@ impl App {
                 self.agents.clear();
                 self.plan.clear();
                 self.plan_expanded = false;
+                self.review = None;
+                self.turn_work_mode = None;
+                self.turn_compacting = false;
+                self.turn_plan_updated = false;
+                self.plan_stale_for_review = false;
                 self.context = None;
                 self.growth.clear();
+                self.speed = None;
+                self.cache_hit_percent = None;
+                self.loaded_skills.clear();
                 self.starting_new = true;
                 self.session_saved = false;
                 self.ops.push(Op::NewSession);

@@ -699,6 +699,7 @@ mod tests {
             budget: 88_400,
             window: Some(104_000),
             cache_hit_tokens: None,
+            cache_hit_percent: None,
             threshold: Some(83_200),
         });
         app.on_engine(Event::Speed {
@@ -730,6 +731,154 @@ mod tests {
         assert!(!render(&app, 140, 24).contains("Git branch"));
         app.on_engine(Event::SessionTitle { title: None });
         assert!(render(&app, 140, 24).contains("New session"));
+    }
+
+    #[test]
+    fn sidebar_shows_cache_hit_loaded_skills_and_active_lsp() {
+        use quack_protocol::{LspServerInfo, LspServerState};
+
+        let mut app = App::new(test_info());
+        app.info.model = Some("charm/qwen3.8-flash".into());
+        app.info.profile = "generic".into();
+        started(&mut app);
+        app.transcript.push(Entry::User("check the parser".into()));
+        app.on_engine(Event::SessionTitle {
+            title: Some("Fix the parser".into()),
+        });
+        app.on_engine(Event::ContextUpdate {
+            used: 60_000,
+            budget: 88_400,
+            window: Some(104_000),
+            cache_hit_tokens: Some(44_000),
+            cache_hit_percent: Some(73),
+            threshold: Some(83_200),
+        });
+        app.on_engine(Event::Speed {
+            ttft_ms: 120,
+            tokens_per_sec: Some(48.0),
+        });
+        app.on_engine(Event::LoadedSkills {
+            skills: vec!["rust-best-practices".into(), "release".into()],
+        });
+        app.on_engine(Event::LspServers {
+            servers: vec![
+                LspServerInfo {
+                    id: "rust-analyzer".into(),
+                    command: "rust-analyzer".into(),
+                    extensions: vec!["rs".into()],
+                    state: LspServerState::Ready,
+                    detail: String::new(),
+                    root: ".".into(),
+                    errors: 0,
+                    warnings: 0,
+                    log: Vec::new(),
+                },
+                LspServerInfo {
+                    id: "typescript".into(),
+                    command: "typescript-language-server --stdio".into(),
+                    extensions: vec!["ts".into()],
+                    state: LspServerState::Ready,
+                    detail: String::new(),
+                    root: "ui".into(),
+                    errors: 2,
+                    warnings: 1,
+                    log: Vec::new(),
+                },
+                LspServerInfo {
+                    id: "pyright".into(),
+                    command: "pyright-langserver --stdio".into(),
+                    extensions: vec!["py".into()],
+                    state: LspServerState::Indexing,
+                    detail: "analyzing".into(),
+                    root: ".".into(),
+                    errors: 0,
+                    warnings: 0,
+                    log: Vec::new(),
+                },
+                // Idle and uninstalled servers stay hidden from the sidebar.
+                LspServerInfo {
+                    id: "gopls".into(),
+                    command: "gopls".into(),
+                    extensions: vec!["go".into()],
+                    state: LspServerState::Idle,
+                    detail: "/usr/bin/gopls".into(),
+                    root: String::new(),
+                    errors: 0,
+                    warnings: 0,
+                    log: Vec::new(),
+                },
+                LspServerInfo {
+                    id: "clangd".into(),
+                    command: "clangd".into(),
+                    extensions: vec!["c".into()],
+                    state: LspServerState::NotInstalled,
+                    detail: "not installed".into(),
+                    root: String::new(),
+                    errors: 0,
+                    warnings: 0,
+                    log: Vec::new(),
+                },
+            ],
+        });
+
+        let s = render(&app, 140, 30);
+        for text in [
+            "48 tokens/s · 73% cache hit",
+            "Skills",
+            "✓ rust-best-practices",
+            "✓ release",
+            "LSP",
+            "✓ rust-analyzer  ready",
+            "✓ typescript (ui)  ✗2 ⚠1",
+            "pyright  indexing",
+        ] {
+            assert!(s.contains(text), "missing {text}: {s}");
+        }
+        assert!(
+            !s.contains("gopls") && !s.contains("clangd"),
+            "idle and uninstalled servers must stay hidden: {s}"
+        );
+        insta::assert_snapshot!("sidebar_cache_skills_lsp_140x30", s);
+
+        // Cache hit still renders even when speed wasn't measured yet.
+        app.speed = None;
+        let cache_only = render(&app, 140, 30);
+        assert!(
+            cache_only.contains("73% cache hit") && !cache_only.contains("tokens/s"),
+            "{cache_only}"
+        );
+
+        // ASCII mode uses ASCII separators and diagnostic markers.
+        app.speed = Some(48.0);
+        app.info.ui.ascii = true;
+        app.glyphs = crate::theme::Glyphs::new(true);
+        let ascii = render(&app, 140, 30);
+        assert!(
+            ascii.contains("48 tokens/s - 73% cache hit")
+                && ascii.contains("typescript (ui)  E2 W1"),
+            "{ascii}"
+        );
+
+        // Overflow capping keeps more than 3 skills/LSPs bounded.
+        app.on_engine(Event::LoadedSkills {
+            skills: vec!["s1".into(), "s2".into(), "s3".into(), "s4".into()],
+        });
+        let capped = render(&app, 140, 30);
+        assert!(
+            capped.contains("s3") && capped.contains("s4") && capped.contains("+2 earlier"),
+            "{capped}"
+        );
+
+        // Starting a new session clears cache hit, speed, and loaded skills, while keeping workspace LSPs.
+        app.execute("/new");
+        let after_new = render(&app, 140, 30);
+        assert!(
+            !after_new.contains("cache hit")
+                && !after_new.contains("tokens/s")
+                && !after_new.contains("Skills")
+                && after_new.contains("rust-analyzer"),
+            "{after_new}"
+        );
     }
 
     #[test]
@@ -805,6 +954,7 @@ mod tests {
             budget: 88_400,
             window: Some(104_000),
             cache_hit_tokens: None,
+            cache_hit_percent: None,
             threshold: Some(83_200),
         });
         app.on_engine(Event::Speed {
@@ -888,6 +1038,7 @@ mod tests {
             budget: 88_400,
             window: Some(104_000),
             cache_hit_tokens: None,
+            cache_hit_percent: None,
             threshold: Some(83_200),
         });
         app.on_engine(Event::Speed {
@@ -1545,6 +1696,45 @@ mod tests {
             "{s}"
         );
         insta::assert_snapshot!("plan_review_bar_100x30", s);
+    }
+
+    #[test]
+    fn plan_review_bar_displays_only_unfinished_followup_steps() {
+        use quack_protocol::{TurnId, Usage};
+        let mut app = started_app();
+        app.on_engine(Event::ModeChanged {
+            work_mode: quack_protocol::WorkMode::Plan,
+            approvals: quack_protocol::ApprovalPolicy::Ask,
+        });
+        app.on_engine(Event::TurnStarted { turn: TurnId(1) });
+        app.on_engine(Event::Plan {
+            checklist: "[x] old finished step\n[ ] follow-up step one\n[ ] follow-up step two"
+                .into(),
+        });
+        app.on_engine(Event::TurnComplete {
+            turn: TurnId(1),
+            usage: Usage::default(),
+        });
+        let s = render(&app, 100, 30);
+        assert!(
+            s.contains("Ready to carry out this plan?")
+                && s.contains("follow-up step one")
+                && s.contains("follow-up step two"),
+            "{s}"
+        );
+        assert!(!s.contains("old finished step"), "{s}");
+
+        app.on_engine(Event::TurnStarted { turn: TurnId(2) });
+        app.on_engine(Event::Plan {
+            checklist: "[x] old finished step\n[x] follow-up step one\n[x] follow-up step two"
+                .into(),
+        });
+        app.on_engine(Event::TurnComplete {
+            turn: TurnId(2),
+            usage: Usage::default(),
+        });
+        let s = render(&app, 100, 30);
+        assert!(!s.contains("Ready to carry out this plan?"), "{s}");
     }
 
     #[test]

@@ -521,6 +521,7 @@ pub(super) fn choices(app: &App, width: usize) -> Option<Choices<'_>> {
         let body: Vec<Line<'_>> = app
             .plan
             .iter()
+            .filter(|(state, _)| *state != PlanState::Done)
             .map(|(state, text)| {
                 let (mark, style) = plan_mark(app, *state);
                 Line::from(vec![

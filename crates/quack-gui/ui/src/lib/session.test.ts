@@ -278,6 +278,75 @@ describe('work mode and approvals', () => {
 		expect(session.workMode).toBe('edit');
 		expect(session.approvals).toBe('read-only');
 	});
+	it('only marks planReviewReady for unfinished follow-up plans, not finished or executed ones', async () => {
+		const { session } = fixture();
+		const usage = { prompt_tokens: 10, completion_tokens: 5 };
+		session.onEvent({ event: 'mode_changed', work_mode: 'plan', approvals: 'ask' });
+
+		// Initial planning turn with pending steps opens review.
+		session.onEvent({ event: 'turn_started', turn: 1 });
+		session.onEvent({ event: 'plan', checklist: '[ ] step 1\n[ ] step 2' });
+		session.onEvent({ event: 'turn_complete', turn: 1, usage });
+		expect(session.planReviewReady).toBe(true);
+
+		// Accepting and executing the plan to completion clears review.
+		await session.acceptPlan();
+		expect(session.planReviewReady).toBe(false);
+		session.onEvent({ event: 'mode_changed', work_mode: 'edit', approvals: 'ask' });
+		session.onEvent({ event: 'turn_started', turn: 2 });
+		session.onEvent({ event: 'plan', checklist: '[x] step 1\n[x] step 2' });
+		session.onEvent({ event: 'turn_complete', turn: 2, usage });
+		expect(session.planReviewReady).toBe(false);
+
+		// Switching back to Plan mode with a finished plan does not show review.
+		session.onEvent({ event: 'mode_changed', work_mode: 'plan', approvals: 'ask' });
+		expect(session.planReviewReady).toBe(false);
+
+		// Follow-up check turn with no new pending steps does not show review.
+		session.onEvent({ event: 'turn_started', turn: 3 });
+		session.onEvent({ event: 'turn_complete', turn: 3, usage });
+		expect(session.planReviewReady).toBe(false);
+
+		// Explicitly clearing the plan in a planning turn does not show review.
+		session.onEvent({ event: 'turn_started', turn: 4 });
+		session.onEvent({ event: 'plan', checklist: '' });
+		session.onEvent({ event: 'turn_complete', turn: 4, usage });
+		expect(session.planReviewReady).toBe(false);
+
+		// Creating a follow-up plan in Plan mode opens review again.
+		session.onEvent({ event: 'turn_started', turn: 5 });
+		session.onEvent({ event: 'plan', checklist: '[ ] follow-up step' });
+		session.onEvent({ event: 'turn_complete', turn: 5, usage });
+		expect(session.planReviewReady).toBe(true);
+
+		// Manual /compact in Plan mode does not reopen review after submitting/dismissing.
+		session.onEvent({ event: 'turn_started', turn: 6 });
+		session.onEvent({ event: 'compacting', reason: '/compact' });
+		session.onEvent({ event: 'turn_complete', turn: 6, usage });
+		expect(session.planReviewReady).toBe(false);
+	});
+	it('does not reopen planReviewReady when switching to plan mid-edit turn with stale steps', async () => {
+		const { session } = fixture();
+		const usage = { prompt_tokens: 10, completion_tokens: 5 };
+		session.onEvent({ event: 'mode_changed', work_mode: 'plan', approvals: 'allow' });
+		session.onEvent({ event: 'turn_started', turn: 1 });
+		session.onEvent({ event: 'plan', checklist: '[ ] edit file\n[ ] run tests' });
+		session.onEvent({ event: 'turn_complete', turn: 1, usage });
+		expect(session.planReviewReady).toBe(true);
+
+		await session.acceptPlan();
+		session.onEvent({ event: 'mode_changed', work_mode: 'edit', approvals: 'allow' });
+		session.onEvent({ event: 'turn_started', turn: 2 });
+		session.onEvent({ event: 'plan', checklist: '[x] edit file\n[~] run tests' });
+		session.onEvent({ event: 'mode_changed', work_mode: 'plan', approvals: 'allow' });
+		session.onEvent({ event: 'turn_complete', turn: 2, usage });
+		expect(session.planReviewReady).toBe(false);
+
+		// Even a subsequent Plan turn that leaves the stale checklist unchanged stays false.
+		session.onEvent({ event: 'turn_started', turn: 3 });
+		session.onEvent({ event: 'turn_complete', turn: 3, usage });
+		expect(session.planReviewReady).toBe(false);
+	});
 });
 
 describe('model thinking levels', () => {
@@ -1281,5 +1350,90 @@ describe('update checks', () => {
 		expect(session.settingSaving).toBe(false);
 		expect(session.info?.default_model).toBe('charm/glm-5.3');
 		expect(session.info?.small_model).toBe('charm/glm-5.3');
+	});
+
+	it('tracks live cache hit percent, loaded skills, and LSP servers across session lifecycle', () => {
+		const { session } = fixture();
+		session.onEvent({ event: 'startup_complete' });
+
+		session.onEvent({
+			event: 'context_update',
+			used: 12000,
+			budget: 24000,
+			window: 32000,
+			cache_hit_tokens: 9000,
+			cache_hit_percent: 75,
+			threshold: 20000
+		});
+		expect(session.cacheHitPercent).toBe(75);
+
+		// A follow-up context estimate without cache_hit_percent preserves the last known ratio.
+		session.onEvent({
+			event: 'context_update',
+			used: 12500,
+			budget: 24000,
+			window: 32000,
+			threshold: 20000
+		});
+		expect(session.cacheHitPercent).toBe(75);
+
+		// Stats report also updates cacheHitPercent (e.g. after resume).
+		session.onEvent({
+			event: 'stats',
+			report: {
+				model: 'mock/org/model',
+				turns: 2,
+				requests: 4,
+				unreported: 0,
+				prompt_tokens: 10000,
+				completion_tokens: 500,
+				cached_tokens: 8200,
+				cache_write_tokens: 0,
+				reasoning_tokens: 0,
+				cache_reported: 3,
+				unpriced: 0,
+				open_ms: 1000,
+				model_ms: 500,
+				tools_ms: 100,
+				approval_ms: 0,
+				tools: [],
+				compactions: 0,
+				pruned: 0,
+				resumed: false,
+				sampling: [],
+				history: []
+			}
+		});
+		expect(session.cacheHitPercent).toBe(82);
+
+		session.onEvent({ event: 'loaded_skills', skills: ['rust-best-practices', 'release'] });
+		expect(session.loadedSkills).toEqual(['rust-best-practices', 'release']);
+
+		session.onEvent({
+			event: 'lsp_servers',
+			servers: [
+				{
+					id: 'rust-analyzer',
+					command: 'rust-analyzer',
+					extensions: ['rs'],
+					state: 'ready',
+					detail: '',
+					root: '.',
+					errors: 0,
+					warnings: 0,
+					log: []
+				}
+			]
+		});
+		expect(session.lspServers).toHaveLength(1);
+
+		// Switching to a new session resets conversation-scoped metrics & loaded skills, not workspace LSPs.
+		session.onEvent({
+			event: 'session_configured',
+			session: { ...sessionInfo, id: 'fresh-session' }
+		});
+		expect(session.cacheHitPercent).toBeNull();
+		expect(session.loadedSkills).toEqual([]);
+		expect(session.lspServers).toHaveLength(1);
 	});
 });

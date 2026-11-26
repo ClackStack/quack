@@ -288,6 +288,7 @@ impl Engine {
         if !c.perms.lock().is_ok_and(|p| p.work_mode == WorkMode::Plan) {
             return self.warn("not in plan mode; /plan starts it".into());
         }
+        let mut skills_after_handoff = None;
         let brief = match (&c.editor, c.plan_start, c.history.as_mut()) {
             (Some(_), Some(start), Some(history)) => {
                 let planner = &c.setup;
@@ -296,10 +297,18 @@ impl Engine {
                 let ask = planner.surface.name_of("ask_user");
                 let text = handoff::brief(&history[start..], &note, ask, &planner.model_ref);
                 history.truncate(start);
+                skills_after_handoff = c
+                    .loaded_skills
+                    .lock()
+                    .ok()
+                    .and_then(|mut s| s.truncate(start).then(|| s.names()));
                 Some((start, planner.model_ref.clone(), text))
             }
             _ => None,
         };
+        if let Some(skills) = skills_after_handoff {
+            self.emit(Event::LoadedSkills { skills });
+        }
         if let Some(policy) = approvals {
             self.set_mode(PermissionMode::from(policy));
         }
@@ -349,7 +358,7 @@ pub(super) fn plan_note(setup: &Setup) -> String {
         (true, None) => String::new(),
     };
     let note = format!(
-        "{base} Only read and search while planning.{tool_guidance} Do not run tests, builds, scripts, edits or memory writes, even when an allow rule exists. Present a list of the exact test commands you propose to run, with what each verifies, for the user to review before implementation. If no tests apply, explain why. Keep proposed test steps pending in the checklist; do not execute them until the user accepts the plan."
+        "{base} Only read and search while planning.{tool_guidance} Do not run tests, builds, scripts, edits or memory writes, even when an allow rule exists. Present a list of the exact test commands you propose to run, with what each verifies, for the user to review before implementation. If no tests apply, explain why. Keep proposed test steps pending in the checklist; do not execute them until the user accepts the plan. If an earlier plan is already finished and there is follow-up work to propose, replace the checklist with the new pending follow-up steps. If the work is already finished and no further changes are needed, say so and do not leave pending steps in the checklist."
     );
     let explorers: Vec<&str> = setup
         .tool_ctx

@@ -105,6 +105,16 @@ pub struct App {
     pub(crate) step_limit: Option<StepLimit>,
     /// The plan review bar, with its highlighted choice.
     pub(crate) review: Option<usize>,
+    /// Work mode when the running turn started, so switching into Plan mode mid-turn
+    /// does not turn a finishing Edit turn into a plan review.
+    turn_work_mode: Option<WorkMode>,
+    /// Whether the running turn is a manual `/compact` rather than a model turn.
+    turn_compacting: bool,
+    /// Whether the checklist changed during the running turn.
+    turn_plan_updated: bool,
+    /// True once a plan was accepted or carried out in Edit mode, until a Plan-mode
+    /// turn writes new unfinished steps to the checklist.
+    plan_stale_for_review: bool,
     /// `(used, max)` tokens from the last response.
     pub(crate) context: Option<(u32, u32)>,
     /// Where compaction starts, in tokens.
@@ -113,6 +123,12 @@ pub struct App {
     pub(crate) growth: Vec<u32>,
     /// Generation speed of the last response, tokens per second.
     pub(crate) speed: Option<f32>,
+    /// Session-wide prompt cache hit percentage (`cached / prompt`, 0..=100).
+    pub(crate) cache_hit_percent: Option<u8>,
+    /// Skills loaded into the current session, in load order.
+    pub(crate) loaded_skills: Vec<String>,
+    /// Latest language server snapshot pushed by the engine.
+    pub(crate) lsp_servers: Vec<quack_protocol::LspServerInfo>,
     /// Errors and warnings the language servers report.
     pub(crate) diagnostics: (u32, u32),
     /// When the running turn started, and how many tools it has called.
@@ -268,10 +284,17 @@ impl App {
             asking: None,
             step_limit: None,
             review: None,
+            turn_work_mode: None,
+            turn_compacting: false,
+            turn_plan_updated: false,
+            plan_stale_for_review: false,
             context: None,
             compact_at: None,
             growth: Vec::new(),
             speed: None,
+            cache_hit_percent: None,
+            loaded_skills: Vec::new(),
+            lsp_servers: Vec::new(),
             diagnostics: (0, 0),
             turn_started: None,
             turn_tools: 0,
@@ -600,7 +623,14 @@ impl App {
             || self
                 .startup
                 .iter()
-                .any(|(_, s)| matches!(s, LoadState::Running { .. }));
+                .any(|(_, s)| matches!(s, LoadState::Running { .. }))
+            || self.lsp_servers.iter().any(|s| {
+                matches!(
+                    s.state,
+                    quack_protocol::LspServerState::Starting
+                        | quack_protocol::LspServerState::Indexing
+                )
+            });
         if animating && !self.info.ui.reduced_motion && self.frame.is_multiple_of(SPIN_EVERY) {
             self.dirty = true;
         }

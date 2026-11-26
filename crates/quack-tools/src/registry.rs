@@ -45,8 +45,8 @@ pub enum Subject {
     Memory {
         write: bool,
     },
-    /// Loading an installed skill's instructions.
-    Skill,
+    /// Loading an installed skill's instructions, carrying its canonical name.
+    Skill(String),
     /// Turning on deferred MCP tools, or listing MCP resources; changes nothing.
     ToolSearch,
     /// Updating the model's own plan (`todo`); changes nothing.

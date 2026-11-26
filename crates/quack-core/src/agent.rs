@@ -334,6 +334,7 @@ async fn start(parent: &TurnCtx, call_key: &str, req: TaskRequest) -> TaskReport
         setup,
         perms,
         nested,
+        loaded_skills: Arc::default(),
         approvals: parent.approvals.clone(),
         questions: parent.questions.clone(),
         continues: parent.continues.clone(),

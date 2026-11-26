@@ -110,6 +110,7 @@ pub(crate) struct TurnCtx {
     pub setup: Arc<Setup>,
     pub perms: Arc<Mutex<Permissions>>,
     pub nested: Arc<quack_instructions::agents_md::Nested>,
+    pub loaded_skills: Arc<Mutex<session::LoadedSkills>>,
     pub approvals: Approvals,
     pub questions: Questions,
     pub continues: Continues,
@@ -438,6 +439,7 @@ impl TurnCtx {
             budget: self.setup.budget.unwrap_or(0),
             window: self.setup.model.context_window,
             cache_hit_tokens: None,
+            cache_hit_percent: self.stats.lock().ok().and_then(|s| s.cache_hit_percent()),
             threshold: crate::context::threshold(&self.setup),
         });
     }
@@ -862,6 +864,7 @@ pub(crate) async fn run(ctx: TurnCtx, mut history: Vec<Message>, prompt: Prompt)
                     budget: ctx.setup.budget.unwrap_or(0),
                     window: ctx.setup.model.context_window,
                     cache_hit_tokens: u.cached_prompt_tokens,
+                    cache_hit_percent: ctx.stats.lock().ok().and_then(|s| s.cache_hit_percent()),
                     threshold: crate::context::threshold(&ctx.setup),
                 });
             }
@@ -981,7 +984,7 @@ async fn run_tool_calls(
                 .iter()
                 .map(|c| recent.record(&c.name, &c.arguments))
                 .collect();
-            let outs = futures::future::join_all(batch.iter().map(|c| run_call(ctx, c))).await;
+            let outs = futures::future::join_all(batch.iter().map(|c| run_call(ctx, c, at))).await;
             let end = i + together == calls.len();
             for (n, ((call, (trailing, _)), out)) in batch.iter().zip(repeats).zip(outs).enumerate()
             {
@@ -1023,7 +1026,7 @@ async fn run_tool_calls(
         let call = &calls[i];
         i += 1;
         let (repeats, same_count) = recent.record(&call.name, &call.arguments);
-        let mut out = run_call(ctx, call).await;
+        let mut out = run_call(ctx, call, at).await;
         let target = failure_target(&ctx.setup, call);
         let target_fails = recent.record_outcome(&call.name, target.as_deref(), out.ok);
         if repeats >= REPEAT_LIMIT {
@@ -1844,7 +1847,7 @@ fn parallel(ctx: &TurnCtx, call: &ToolCall) -> bool {
 }
 
 /// Run one tool call through mapping, permissions and approval.
-async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
+async fn run_call(ctx: &TurnCtx, call: &ToolCall, history_index: usize) -> ToolOutput {
     let s = &ctx.setup;
     let call_id = CallId(ctx.key(&call.id));
     let plan_version = s.tool_ctx.plan.version();
@@ -1883,7 +1886,19 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall) -> ToolOutput {
         Ok(passed) => passed,
         Err(e) => return done(ToolOutput::error(e)),
     };
-    done(execute(ctx, &tool, &call_id, tctx, args, subject, plan_version).await)
+    done(
+        execute(
+            ctx,
+            &tool,
+            &call_id,
+            tctx,
+            args,
+            subject,
+            plan_version,
+            history_index,
+        )
+        .await,
+    )
 }
 
 /// The permission side of a call: the pre-tool hook (which can deny the call or
@@ -2013,6 +2028,7 @@ async fn permit(
 /// itself — with the questions it asks and the sub-agents it starts answered along
 /// the way — then the undo records, post-edit diagnostics, nested AGENTS.md context
 /// and the post-tool hook. Returns the raw output; the caller finishes it.
+#[allow(clippy::too_many_arguments)]
 async fn execute(
     ctx: &TurnCtx,
     tool: &Arc<dyn Tool>,
@@ -2021,6 +2037,7 @@ async fn execute(
     args: Value,
     subject: Subject,
     plan_version: u64,
+    history_index: usize,
 ) -> ToolOutput {
     let s = &ctx.setup;
     let root = &s.tool_ctx.root;
@@ -2125,6 +2142,20 @@ async fn execute(
             session::record(ctx.log.as_ref(), "plan", json!({ "checklist": checklist }));
         }
         ctx.emit(Event::Plan { checklist });
+    }
+    if out.ok
+        && ctx.agent.is_none()
+        && let Subject::Skill(name) = &subject
+    {
+        session::record(ctx.log.as_ref(), "skill", json!({ "name": name }));
+        let updated = ctx
+            .loaded_skills
+            .lock()
+            .ok()
+            .and_then(|mut s| s.record(history_index, name.clone()).then(|| s.names()));
+        if let Some(skills) = updated {
+            ctx.emit(Event::LoadedSkills { skills });
+        }
     }
     drop(tctx);
     let _ = forward.await;

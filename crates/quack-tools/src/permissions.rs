@@ -1723,7 +1723,7 @@ impl Permissions {
         // Installed skills are instructions the user put there.
         if matches!(
             subject,
-            Subject::Agent { .. } | Subject::Skill | Subject::ToolSearch | Subject::Plan
+            Subject::Agent { .. } | Subject::Skill(_) | Subject::ToolSearch | Subject::Plan
         ) {
             return Decision::Allow;
         }

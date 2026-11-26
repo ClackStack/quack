@@ -29,7 +29,8 @@
 		onReopenJob,
 		onCloseJob,
 		onNewTab,
-		onOpenMemory = () => {}
+		onOpenMemory = () => {},
+		onOpenDiagnostics = () => {}
 	}: {
 		session: Session;
 		sessions: Session[];
@@ -46,6 +47,7 @@
 		onCloseJob: (tab: number) => void;
 		onNewTab: () => void;
 		onOpenMemory?: (target?: { scope: string; name: string; create?: boolean }) => void;
+		onOpenDiagnostics?: () => void;
 	} = $props();
 
 	const sortedMemory = $derived(sortMemoryNotes(session.memoryNotes));
@@ -106,6 +108,18 @@
 		if (!stats || stats.prompt_tokens === 0 || stats.cache_reported === 0) return null;
 		return stats.cached_tokens / stats.prompt_tokens;
 	});
+	const liveTokensPerSec = $derived(session.speed?.tokensPerSec ?? stats?.tokens_per_sec ?? null);
+	const liveCacheHitPercent = $derived.by(() => {
+		if (cachedShare !== null) return Math.min(100, Math.round(cachedShare * 100));
+		return session.cacheHitPercent;
+	});
+
+	// ---- loaded skills & LSP ----
+	const skillByName = $derived(new Map(session.skills.map((skill) => [skill.name, skill])));
+	const loadedSkillSet = $derived(new Set(session.loadedSkills));
+	const loadedLsp = $derived(
+		session.lspServers.filter((srv) => srv.state !== 'idle' && srv.state !== 'not installed')
+	);
 
 	// ---- files ----
 	const files = $derived(session.editedFiles);
@@ -449,6 +463,19 @@
 		{:else}
 			<p class="s-note">no context yet — start a job</p>
 		{/if}
+		{#if liveTokensPerSec !== null || liveCacheHitPercent !== null}
+			<div class="g-meta">
+				{#if liveTokensPerSec !== null}
+					<span>{liveTokensPerSec.toFixed(0)} tokens/s</span>
+				{/if}
+				{#if liveTokensPerSec !== null && liveCacheHitPercent !== null}
+					<span class="g-sep" aria-hidden="true">·</span>
+				{/if}
+				{#if liveCacheHitPercent !== null}
+					<span class="g-cache">{liveCacheHitPercent}% cache hit</span>
+				{/if}
+			</div>
+		{/if}
 	</section>
 
 	{#if stats}
@@ -459,7 +486,7 @@
 				<div><dt>turns</dt><dd>{stats.turns}</dd></div>
 				<div><dt>sent</dt><dd>{fmtTokens(stats.prompt_tokens + stats.completion_tokens)}</dd></div>
 				<div>
-					<dt>from cache</dt>
+					<dt>cache hit</dt>
 					<dd>{cachedShare !== null ? `${Math.round(cachedShare * 100)}%` : '—'}</dd>
 				</div>
 				{#if (stats.cache_write_tokens ?? 0) > 0}
@@ -469,7 +496,7 @@
 					<div><dt>reasoning</dt><dd>{fmtTokens(stats.reasoning_tokens ?? 0)}</dd></div>
 				{/if}
 				{#if stats.tokens_per_sec}
-					<div><dt>speed</dt><dd>{stats.tokens_per_sec.toFixed(0)} tok/s</dd></div>
+					<div><dt>speed</dt><dd>{stats.tokens_per_sec.toFixed(0)} tokens/s</dd></div>
 				{/if}
 				{#if session.speed}
 					<div><dt>last call</dt><dd>{session.speed.ttftMs} ms to first token</dd></div>
@@ -553,19 +580,125 @@
 		</section>
 	{/if}
 
-	{#if session.skills.length > 0}
-		<section>
-			<details class="kit">
-				<summary><h2>Skills<span class="count">{session.skills.length}</span></h2></summary>
-				<ul class="skills">
-					{#each session.skills as skill (skill.name)}
-						<li>
-							<span class="k-name">{skill.name}</span>
-							<span class="k-desc">{skill.description}</span>
+	{#if session.loadedSkills.length > 0 || session.skills.length > 0}
+		<section aria-labelledby="rail-skills-heading">
+			{#if session.loadedSkills.length > 0}
+				<h2 id="rail-skills-heading">
+					Skills
+					<span class="count active-count">{session.loadedSkills.length} loaded</span>
+				</h2>
+				<ul class="loaded-list">
+					{#each session.loadedSkills as name (name)}
+						{@const info = skillByName.get(name)}
+						<li class="loaded-row" title={info?.description || name}>
+							<span class="status-dot ready" aria-hidden="true"></span>
+							<span class="loaded-main">
+								<span class="k-name">{name}</span>
+								{#if info?.description}
+									<span class="k-desc">{info.description}</span>
+								{/if}
+							</span>
 						</li>
 					{/each}
 				</ul>
-			</details>
+				{#if session.skills.length > 0}
+					<details class="kit">
+						<summary>
+							<span class="kit-label">Available skills<span class="count">{session.skills.length}</span></span>
+						</summary>
+						<ul class="skills">
+							{#each session.skills as skill (skill.name)}
+								<li>
+									<span class="k-head">
+										<span class="k-name">{skill.name}</span>
+										{#if loadedSkillSet.has(skill.name)}
+											<span class="k-loaded">loaded</span>
+										{/if}
+									</span>
+									<span class="k-desc">{skill.description}</span>
+								</li>
+							{/each}
+						</ul>
+					</details>
+				{/if}
+			{:else}
+				<details class="kit">
+					<summary><h2 id="rail-skills-heading">Skills<span class="count">{session.skills.length}</span></h2></summary>
+					<ul class="skills">
+						{#each session.skills as skill (skill.name)}
+							<li>
+								<span class="k-name">{skill.name}</span>
+								<span class="k-desc">{skill.description}</span>
+							</li>
+						{/each}
+					</ul>
+				</details>
+			{/if}
+		</section>
+	{/if}
+
+	{#if loadedLsp.length > 0}
+		<section aria-labelledby="rail-lsp-heading">
+			<h2 id="rail-lsp-heading">
+				LSP
+				<span class="count">{loadedLsp.length}</span>
+				<button
+					type="button"
+					class="mini"
+					disabled={session.closed}
+					onclick={onOpenDiagnostics}
+					title="Inspect LSP diagnostics"
+				>
+					Diagnostics
+				</button>
+			</h2>
+			<ul class="loaded-list">
+				{#each loadedLsp as srv (`${srv.id}:${srv.root}`)}
+					<li class="loaded-row" title={srv.detail || srv.command}>
+						<span
+							class={[
+								'status-dot',
+								{
+									ready: srv.state === 'ready',
+									busy: srv.state === 'starting' || srv.state === 'indexing',
+									fail: srv.state === 'failed' || srv.state === 'exited'
+								}
+							]}
+							aria-hidden="true"
+						></span>
+						<span class="loaded-main">
+							<span class="k-name">
+								{srv.root && srv.root !== '.' ? `${srv.id} · ${srv.root}` : srv.id}
+							</span>
+							{#if srv.state === 'indexing' && srv.detail}
+								<span class="k-desc">{srv.detail}</span>
+							{/if}
+						</span>
+						<span class="lsp-meta">
+							{#if srv.errors > 0}
+								<span class="lsp-err">{srv.errors}e</span>
+							{/if}
+							{#if srv.warnings > 0}
+								<span class="lsp-warn">{srv.warnings}w</span>
+							{/if}
+							{#if srv.errors === 0 && srv.warnings === 0}
+								<span
+									class={[
+										'lsp-state',
+										{
+											ready: srv.state === 'ready',
+											busy: srv.state === 'starting' || srv.state === 'indexing',
+											fail: srv.state === 'failed' || srv.state === 'exited'
+										}
+									]}
+								>
+									{srv.state}
+								</span>
+							{/if}
+						</span>
+					</li>
+				{/each}
+			</ul>
 		</section>
 	{/if}
 
@@ -1190,6 +1323,7 @@
 	@media (prefers-reduced-motion: reduce) {
 		.tab-dot.working,
 		.p-stat-dot.working,
+		.status-dot.busy,
 		.dot {
 			animation: none;
 		}
@@ -1301,6 +1435,24 @@
 	.g-note {
 		font-size: 0.6875rem;
 		color: var(--cloth-mut);
+	}
+
+	.g-meta {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 5px;
+		font-family: var(--font-mono);
+		font-size: 0.6875rem;
+		color: var(--cloth-dim);
+	}
+
+	.g-sep {
+		color: var(--cloth-mut);
+	}
+
+	.g-cache {
+		color: var(--cloth-ink);
 	}
 
 	.segments {
@@ -1480,7 +1632,126 @@
 		color: var(--term-text);
 	}
 
-	/* skills */
+	/* skills and LSP */
+	.active-count {
+		color: var(--cloth-ok);
+	}
+
+	.loaded-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: grid;
+		gap: 4px;
+	}
+
+	.loaded-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 6px 8px;
+		border-radius: var(--r-sm);
+		background: rgba(240, 248, 252, 0.04);
+		border: 1px solid rgba(219, 228, 233, 0.14);
+	}
+
+	.loaded-main {
+		flex: 1;
+		min-width: 0;
+		display: grid;
+		gap: 1px;
+	}
+
+	.loaded-main .k-name,
+	.loaded-main .k-desc {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.status-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		flex: none;
+		background: var(--cloth-mut);
+	}
+
+	.status-dot.ready {
+		background: var(--cloth-ok);
+	}
+
+	.status-dot.busy {
+		background: var(--duck);
+		animation: pulse 1.1s ease-out infinite alternate;
+	}
+
+	.status-dot.fail {
+		background: var(--cloth-fail);
+	}
+
+	.lsp-meta {
+		flex: none;
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		font-family: var(--font-mono);
+		font-size: 0.65625rem;
+	}
+
+	.lsp-err {
+		color: var(--cloth-fail);
+	}
+
+	.lsp-warn {
+		color: var(--duck);
+	}
+
+	.lsp-state {
+		color: var(--cloth-mut);
+	}
+
+	.lsp-state.ready {
+		color: var(--cloth-ok);
+	}
+
+	.lsp-state.busy {
+		color: var(--duck);
+	}
+
+	.lsp-state.fail {
+		color: var(--cloth-fail);
+	}
+
+	.kit-label {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 0.6875rem;
+		font-weight: 500;
+		color: var(--cloth-dim);
+		transition: color 120ms ease-out;
+	}
+
+	.kit summary:hover .kit-label {
+		color: var(--cloth-ink);
+	}
+
+	.k-head {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+	}
+
+	.k-loaded {
+		font-family: var(--font-mono);
+		font-size: 0.625rem;
+		color: var(--cloth-ok);
+		flex: none;
+	}
+
 	.kit summary {
 		display: flex;
 		align-items: center;

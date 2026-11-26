@@ -22,10 +22,7 @@ Plan refuses file changes, memory writes, tests, builds, arbitrary scripts, and 
 MCP tools or sub-agents. Allow rules, remembered approvals and yolo cannot override
 these restrictions. MCP tools are eligible only when their server marks them read-only.
 
-After a planning turn, choose **Implement plan** in the review bar or run `/plan accept`.
-This switches to Edit and starts implementation with the same approvals. **Keep planning**
-lets you revise the plan. `/edit` or `/plan off` leaves planning without starting a turn;
-`/edit <task>` switches to Edit and submits that task.
+After a planning turn with pending work (or a follow-up plan), choose **Implement plan** in the review bar or run `/plan accept`. If the previous plan is already finished and no follow-up plan is proposed, the review bar stays hidden. This switches to Edit and starts implementation with the same approvals. **Keep planning** lets you revise the plan. `/edit` or `/plan off` leaves planning without starting a turn; `/edit <task>` switches to Edit and submits that task.
 
 ## Controls
 

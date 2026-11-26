@@ -345,3 +345,63 @@ async fn shell_mutation_notifies_lsp_did_change_watched_files() {
     );
     engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn lsp_servers_event_pushes_live_when_server_loads() {
+    use quack_core::protocol::LspServerState;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"role\":\"tool\""))
+        .respond_with(sse_text("Done."))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse_call(
+            "c1",
+            "lsp",
+            serde_json::json!({"operation": "symbols", "path": "a.fx"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    install_fixture(tmp.path());
+    let loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    std::fs::write(loaded.dirs.workspace_root.join("a.fx"), "fn helper() {}\n").expect("write");
+
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    engine
+        .submit(Op::UserTurn {
+            items: vec![InputItem::text("list symbols")],
+            overrides: TurnOverrides::default(),
+        })
+        .await;
+    let mut saw_ready = false;
+    loop {
+        let e = tokio::time::timeout(std::time::Duration::from_secs(20), engine.events.recv())
+            .await
+            .expect("event within 20s")
+            .expect("channel open");
+        match e {
+            Event::LspServers { servers } => {
+                if servers
+                    .iter()
+                    .any(|s| s.id == "fixture" && s.state == LspServerState::Ready)
+                {
+                    saw_ready = true;
+                }
+            }
+            Event::TurnComplete { .. } => break,
+            Event::Error { error } => panic!("engine error: {}", error.message),
+            Event::TurnAborted { reason, .. } => panic!("aborted: {reason}"),
+            _ => {}
+        }
+    }
+    assert!(
+        saw_ready,
+        "engine must push live Event::LspServers once a server becomes ready without Op::ListLsp"
+    );
+    engine.shutdown().await;
+}

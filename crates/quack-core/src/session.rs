@@ -10,7 +10,8 @@
 //! them), `approval` and `questions` (what the user answered; replay skips them, since
 //! the tool results carry the answers), `model_switch` (also skipped), `agent` (a sub-agent
 //! run started; its own records are in `agents/<id>.jsonl`, which replay never reads),
-//! `plan` (the `todo` checklist after a change; the last one is the plan on resume).
+//! `plan` (the `todo` checklist after a change; the last one is the plan on resume),
+//! `skill` (a skill loaded into the session via the `skill` tool or `/<skill>`).
 //! `mode` remembers independent work mode and approval defaults (never session grants).
 //! `planner_start` marks the planner's history boundary for a resumed handoff.
 //! `reasoning_effort` remembers each model's session selection; null restores its default.
@@ -127,6 +128,69 @@ pub(crate) fn egress_entries(records: &[Record]) -> Vec<quack_protocol::EgressEn
         .collect()
 }
 
+/// Skills loaded into a session, in first-load order, keyed by the history index where
+/// each skill entered the conversation so rewind and compaction keep the list accurate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LoadedSkills {
+    entries: Vec<(usize, String)>,
+}
+
+impl LoadedSkills {
+    /// Record `name` at `history_index` if it is not already loaded. Returns whether the
+    /// visible list changed.
+    pub(crate) fn record(&mut self, history_index: usize, name: String) -> bool {
+        if name.is_empty() || self.entries.iter().any(|(_, n)| n == &name) {
+            return false;
+        }
+        self.entries.push((history_index, name));
+        true
+    }
+
+    /// Drop skills loaded at or after `to` (after `/rewind` or planner handoff). Returns
+    /// whether the visible list changed.
+    pub(crate) fn truncate(&mut self, to: usize) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|(idx, _)| *idx < to);
+        self.entries.len() != before
+    }
+
+    /// Adjust recorded indices after `history[..cut]` is replaced by one summary at index 0.
+    pub(crate) fn on_compaction(&mut self, cut: usize) {
+        for (idx, _) in &mut self.entries {
+            *idx = if *idx >= cut { *idx - cut + 1 } else { 0 };
+        }
+    }
+
+    pub(crate) fn names(&self) -> Vec<String> {
+        self.entries.iter().map(|(_, n)| n.clone()).collect()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Fallback for session logs written before `skill` records existed: scan user and
+    /// tool messages for `<skill name="..." directory="...">` headers from `expand_skill`.
+    pub(crate) fn from_history(history: &[Message]) -> Self {
+        let mut loaded = Self::default();
+        for (idx, m) in history.iter().enumerate() {
+            let content = match m {
+                Message::User { content, .. } | Message::Tool { content, .. } => content.as_str(),
+                _ => continue,
+            };
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("<skill name=\"")
+                    && let Some((name, after)) = rest.split_once("\" directory=\"")
+                    && after.ends_with("\">")
+                {
+                    loaded.record(idx, name.to_owned());
+                }
+            }
+        }
+        loaded
+    }
+}
+
 /// A session rebuilt from its records.
 #[derive(Debug, Default)]
 pub(crate) struct Replayed {
@@ -138,6 +202,8 @@ pub(crate) struct Replayed {
     pub turns: u32,
     /// The plan's checklist (`Plan::restore`); empty when there is none.
     pub plan: String,
+    /// Skills loaded in this session, in load order.
+    pub loaded_skills: LoadedSkills,
     pub planner_start: Option<usize>,
     /// Pinned opening `<context>` text recorded at session start, when present.
     pub session_context: Option<String>,
@@ -150,6 +216,8 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
     let mut turns: u32 = 0;
     // A rewind leaves the plan as it was, as it does live.
     let mut plan = String::new();
+    let mut loaded_skills = LoadedSkills::default();
+    let mut saw_skill_record = false;
     let mut planner_start: Option<usize> = None;
     let mut session_context: Option<String> = None;
     // `(history index, items length)` at each user message, to cut the transcript on rewind.
@@ -242,6 +310,7 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
                         <quack_providers::Sealed as serde::Deserialize>::deserialize(v).ok()
                     });
                     apply_compaction(&mut history, cut, msg, native);
+                    loaded_skills.on_compaction(cut);
                     planner_start =
                         planner_start.map(|start| if start >= cut { start - cut + 1 } else { 0 });
                     marks.retain(|(i, _)| *i >= cut);
@@ -267,6 +336,7 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
                 marks.retain(|(i, _)| *i < to);
                 turns = turns.saturating_sub(u32::try_from(dropped).unwrap_or(u32::MAX));
                 history.truncate(to);
+                loaded_skills.truncate(to);
                 planner_start = planner_start.map(|start| start.min(history.len()));
             }
             "handoff" => {
@@ -279,6 +349,7 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
                 {
                     marks.retain(|(i, _)| *i < to);
                     history.truncate(to);
+                    loaded_skills.truncate(to);
                 }
             }
             // The live session repaired its history when it resumed; do the same at the
@@ -287,6 +358,12 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
             "plan" => {
                 if let Some(c) = r.data.get("checklist").and_then(|v| v.as_str()) {
                     c.clone_into(&mut plan);
+                }
+            }
+            "skill" => {
+                saw_skill_record = true;
+                if let Some(name) = r.data.get("name").and_then(|v| v.as_str()) {
+                    loaded_skills.record(history.len(), name.to_owned());
                 }
             }
             "planner_start" => {
@@ -309,11 +386,15 @@ pub(crate) fn replay(records: &[Record]) -> Replayed {
         }
     }
     repair_dangling_calls(&mut history);
+    if !saw_skill_record {
+        loaded_skills = LoadedSkills::from_history(&history);
+    }
     Replayed {
         history,
         items,
         turns,
         plan,
+        loaded_skills,
         planner_start,
         session_context,
     }
@@ -569,5 +650,61 @@ mod tests {
         ];
         repair_dangling_calls(&mut h);
         assert!(matches!(&h[2], Message::Tool { call_id, .. } if call_id == "a"));
+    }
+
+    #[test]
+    fn replay_tracks_loaded_skills_across_compaction_and_rewind() {
+        let msg = |m: Message| rec("message", json!({ "message": m }));
+        let user = |s: &str| Message::User {
+            content: s.into(),
+            images: Vec::new(),
+        };
+        let asst = |s: &str| Message::Assistant {
+            content: s.into(),
+            reasoning: None,
+            tool_calls: Vec::new(),
+            sealed: None,
+        };
+        let records = vec![
+            rec("skill", json!({ "name": "rust-best-practices" })),
+            msg(user("/rust-best-practices check")),
+            msg(asst("checked")),
+            rec("skill", json!({ "name": "release" })),
+            msg(user("/release now")),
+            msg(asst("ready")),
+            // Rewind to before the second user message (index 2) drops `release`.
+            rec("rewind", json!({ "to": 2 })),
+            // Compacting the first turn keeps `rust-best-practices` at index 0.
+            rec(
+                "compaction",
+                json!({ "cut": 2, "message": user("[compaction summary] S") }),
+            ),
+            msg(user("next")),
+            rec("skill", json!({ "name": "svelte-code-writer" })),
+            msg(asst("done")),
+        ];
+        let replayed = replay(&records);
+        assert_eq!(
+            replayed.loaded_skills.names(),
+            vec!["rust-best-practices", "svelte-code-writer"]
+        );
+
+        // Legacy logs without `skill` records recover skills from expanded `<skill ...>` blocks.
+        let legacy = vec![
+            msg(user(
+                "<skill name=\"deploy\" directory=\"/skills/deploy\">\nPaths...\n\nRun it.\n</skill>\n\nship",
+            )),
+            msg(Message::Tool {
+                call_id: "c1".into(),
+                content:
+                    "<skill name=\"lint\" directory=\"/skills/lint\">\nPaths...\n\nCheck.\n</skill>"
+                        .into(),
+                images: Vec::new(),
+            }),
+        ];
+        assert_eq!(
+            replay(&legacy).loaded_skills.names(),
+            vec!["deploy", "lint"]
+        );
     }
 }

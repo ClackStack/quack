@@ -165,6 +165,16 @@ impl Stats {
         self.last_cache_hit
     }
 
+    /// Session-wide prompt cache hit percentage (`cached / prompt`, 0..=100), when any
+    /// request has reported cached prompt tokens.
+    pub(crate) fn cache_hit_percent(&self) -> Option<u8> {
+        if self.cache_reported == 0 || self.prompt == 0 {
+            return None;
+        }
+        let pct = (self.cached.saturating_mul(100) + self.prompt / 2) / self.prompt;
+        Some(u8::try_from(pct.min(100)).unwrap_or(100))
+    }
+
     pub(crate) fn observe(&mut self, e: &Event) {
         match e {
             Event::Speed {
@@ -422,5 +432,25 @@ mod tests {
         let resumed = Stats::from_log(&[rec]).report("chatgpt/sol", 1);
         assert_eq!(resumed.cache_write_tokens, 250);
         assert_eq!(resumed.reasoning_tokens, 180);
+    }
+
+    #[test]
+    fn cache_hit_percent_rounds_and_ignores_unreported() {
+        let mut s = Stats::default();
+        assert_eq!(s.cache_hit_percent(), None);
+        // Requests without cached_prompt_tokens do not fabricate a 0% cache hit.
+        s.request(Some(&usage(1_000, 100, None)), None, Duration::ZERO);
+        assert_eq!(s.cache_hit_percent(), None);
+        // Explicit 0 cached tokens reports 0%.
+        s.request(Some(&usage(1_000, 100, Some(0))), None, Duration::ZERO);
+        assert_eq!(s.cache_hit_percent(), Some(0));
+        // 2000 cached out of 3000 total prompt tokens -> 67% (rounded).
+        let mut s2 = Stats::default();
+        s2.request(Some(&usage(3_000, 200, Some(2_000))), None, Duration::ZERO);
+        assert_eq!(s2.cache_hit_percent(), Some(67));
+        // Over-reported cached tokens clamp cleanly to 100%.
+        let mut s3 = Stats::default();
+        s3.request(Some(&usage(100, 10, Some(150))), None, Duration::ZERO);
+        assert_eq!(s3.cache_hit_percent(), Some(100));
     }
 }

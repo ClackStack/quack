@@ -33,13 +33,14 @@ pub(crate) fn manager(config: &Loaded, specs: Vec<ServerSpec>) -> Arc<LspManager
     LspManager::new(specs, config.dirs.workspace_root.clone(), prepare)
 }
 
-/// Keep the startup row for language servers, and the error and warning counts, up to
-/// date.
+/// Keep the startup row for language servers, the live server list, and the error and
+/// warning counts up to date.
 pub(crate) fn report(manager: Arc<LspManager>, tx: broadcast::Sender<Event>) {
     let mut rx = manager.subscribe();
     tokio::spawn(async move {
         let mut last = None;
-        let mut counts = (0, 0);
+        let mut last_servers: Option<Vec<LspServerInfo>> = None;
+        let mut counts = (0u32, 0u32);
         loop {
             let state = startup_state(&manager);
             if last.as_ref() != Some(&state) {
@@ -49,16 +50,21 @@ pub(crate) fn report(manager: Arc<LspManager>, tx: broadcast::Sender<Event>) {
                 });
                 last = Some(state);
             }
-            let now = manager
-                .status()
-                .iter()
-                .fold((0, 0), |(e, w), s| (e + s.errors, w + s.warnings));
+            let servers = info(&manager);
+            let now = servers.iter().fold((0u32, 0u32), |(e, w), s| {
+                (e.saturating_add(s.errors), w.saturating_add(s.warnings))
+            });
+            if last_servers.as_ref() != Some(&servers) {
+                let _ = tx.send(Event::LspServers {
+                    servers: servers.clone(),
+                });
+                last_servers = Some(servers);
+            }
             if now != counts {
                 counts = now;
-                let n = |x: usize| u32::try_from(x).unwrap_or(u32::MAX);
                 let _ = tx.send(Event::Diagnostics {
-                    errors: n(now.0),
-                    warnings: n(now.1),
+                    errors: now.0,
+                    warnings: now.1,
                 });
             }
             if rx.changed().await.is_err() {

@@ -66,6 +66,43 @@ impl App {
         true
     }
 
+    fn apply_plan(&mut self, plan: Vec<(PlanState, String)>) {
+        let has_unfinished = plan.iter().any(|(s, _)| *s != PlanState::Done);
+        self.plan = plan;
+        if self.plan.is_empty() {
+            self.plan_expanded = false;
+        }
+        if self.turn_running {
+            self.turn_plan_updated = true;
+        }
+        let active_mode = self.turn_work_mode.unwrap_or(self.info.work_mode);
+        if active_mode == WorkMode::Plan && has_unfinished {
+            self.plan_stale_for_review = false;
+        }
+        if !has_unfinished {
+            self.review = None;
+        }
+    }
+
+    fn should_offer_plan_review(
+        &self,
+        started_mode: WorkMode,
+        compact_only: bool,
+        plan_updated: bool,
+    ) -> bool {
+        if self.info.work_mode != WorkMode::Plan || started_mode != WorkMode::Plan || compact_only {
+            return false;
+        }
+        if self.plan.is_empty() {
+            // Allow prose-only plans when no checklist was created, unless this turn
+            // explicitly cleared the checklist.
+            return !plan_updated;
+        }
+        // Only offer to carry out a checklist that has unfinished work and was not
+        // already accepted or carried out in Edit mode.
+        !self.plan_stale_for_review && self.plan.iter().any(|(s, _)| *s != PlanState::Done)
+    }
+
     pub(super) fn on_engine_event(&mut self, event: Event) {
         match event {
             Event::StartupProgress { subsystem, state } => {
@@ -234,6 +271,9 @@ impl App {
                 self.skills = skills;
                 self.popup_epoch = self.popup_epoch.wrapping_add(1);
             }
+            Event::LoadedSkills { skills } => {
+                self.loaded_skills = skills;
+            }
             Event::Commands { commands } => {
                 let (hidden, kept): (Vec<_>, Vec<_>) = commands
                     .into_iter()
@@ -286,6 +326,7 @@ impl App {
                 if let Some(i) = at {
                     self.transcript.truncate(i);
                 }
+                self.review = None;
                 self.context = None;
                 self.growth.clear();
                 if self.input.is_empty() {
@@ -309,7 +350,8 @@ impl App {
                 self.note(message);
             }
             Event::LspServers { servers } => {
-                self.refresh_modal("LSP", |app| modal::lsp(Some(&servers), &app.theme));
+                self.lsp_servers = servers;
+                self.refresh_modal("LSP", |app| modal::lsp(Some(&app.lsp_servers), &app.theme));
             }
             Event::ServersDetected { servers } => {
                 self.setup.local = modal::Scan::Found(servers);
@@ -402,6 +444,11 @@ impl App {
                 });
             }
             Event::Stats { report } => {
+                if report.cache_reported > 0 && report.prompt_tokens > 0 {
+                    let pct = (report.cached_tokens.saturating_mul(100) + report.prompt_tokens / 2)
+                        / report.prompt_tokens;
+                    self.cache_hit_percent = Some(u8::try_from(pct.min(100)).unwrap_or(100));
+                }
                 self.refresh_modal("Stats", |app| {
                     modal::stats(Some(&report), app.info.ui.ascii, &app.theme)
                 });
@@ -486,8 +533,16 @@ impl App {
                     self.agents.clear();
                     self.plan.clear();
                     self.plan_expanded = false;
+                    self.review = None;
+                    self.turn_work_mode = None;
+                    self.turn_compacting = false;
+                    self.turn_plan_updated = false;
+                    self.plan_stale_for_review = false;
                     self.context = None;
                     self.growth.clear();
+                    self.speed = None;
+                    self.cache_hit_percent = None;
+                    self.loaded_skills.clear();
                 }
                 self.startup_dismissed = true;
                 self.starting_new = false;
@@ -529,6 +584,10 @@ impl App {
                 self.turn_running = true;
                 self.turn_started = Some(Instant::now());
                 self.turn_tools = 0;
+                self.review = None;
+                self.turn_work_mode = Some(self.info.work_mode);
+                self.turn_compacting = false;
+                self.turn_plan_updated = false;
             }
             Event::AssistantDelta { text } => append_delta(
                 &mut self.transcript,
@@ -587,10 +646,7 @@ impl App {
                     }
                 }
                 if let Some(plan) = plan {
-                    self.plan = plan;
-                    if self.plan.is_empty() {
-                        self.plan_expanded = false;
-                    }
+                    self.apply_plan(plan);
                 }
             }
             Event::ApprovalRequest {
@@ -614,10 +670,7 @@ impl App {
                 });
             }
             Event::Plan { checklist } => {
-                self.plan = parse_plan(&checklist);
-                if self.plan.is_empty() {
-                    self.plan_expanded = false;
-                }
+                self.apply_plan(parse_plan(&checklist));
             }
             Event::AgentStarted {
                 id,
@@ -666,12 +719,16 @@ impl App {
                 used,
                 budget,
                 window,
+                cache_hit_percent,
                 threshold,
                 ..
             } => {
                 let max = window.filter(|w| *w > 0).unwrap_or(budget);
                 self.context = Some((used, max));
                 self.compact_at = threshold;
+                if cache_hit_percent.is_some() {
+                    self.cache_hit_percent = cache_hit_percent;
+                }
             }
             Event::Speed { tokens_per_sec, .. } => {
                 if tokens_per_sec.is_some() {
@@ -685,7 +742,10 @@ impl App {
                 report.removed_tokens
             )),
             Event::Compacting { reason } => {
-                self.note(format!("summarizing earlier conversation ({reason})…"))
+                if reason == "/compact" {
+                    self.turn_compacting = true;
+                }
+                self.note(format!("summarizing earlier conversation ({reason})…"));
             }
             Event::Compacted {
                 summary_tokens,
@@ -719,7 +779,13 @@ impl App {
                 }
                 self.asking = None;
                 self.step_limit = None;
-                if self.info.work_mode == WorkMode::Plan {
+                let started_mode = self.turn_work_mode.take().unwrap_or(self.info.work_mode);
+                let compact_only = std::mem::take(&mut self.turn_compacting);
+                let plan_updated = std::mem::take(&mut self.turn_plan_updated);
+                if started_mode == WorkMode::Edit && !compact_only {
+                    self.plan_stale_for_review = true;
+                }
+                if self.should_offer_plan_review(started_mode, compact_only, plan_updated) {
                     self.review = Some(0);
                 }
             }
@@ -760,6 +826,9 @@ impl App {
                 self.approval = None;
                 self.asking = None;
                 self.step_limit = None;
+                self.turn_work_mode = None;
+                self.turn_compacting = false;
+                self.turn_plan_updated = false;
                 self.note(reason);
             }
             Event::HookRan {

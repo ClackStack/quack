@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { summarizeJobs, type JobActionTarget } from '#lib/jobs';
+	import { parsePlanSteps, summarizeJobs, type JobActionTarget } from '#lib/jobs';
 	import { isHttpUrl, type Session } from '#lib/session.svelte';
 	import type { SidebarProject } from '#lib/workspaces.svelte';
 	import { theme } from '#lib/theme.svelte';
@@ -86,8 +86,17 @@
 	});
 	const attentionCount = $derived(summarizeJobs(sessions).attention);
 
+	const pendingPlanText = $derived(
+		parsePlanSteps(session.plan)
+			.filter((step) => step.state !== 'x')
+			.map((step) => `[${step.state}] ${step.text}`)
+			.join('\n')
+	);
 	const planReady = $derived(
-		session.workMode === 'plan' && session.plan.trim().length > 0 && !session.streaming
+		session.planReviewReady &&
+			session.workMode === 'plan' &&
+			!session.streaming &&
+			!session.turnPending
 	);
 	// While a decision is on the table, the rest of the room steps back: the log,
 	// the rail and the composer dim so the specimen plate holds the only full-strength ink.
@@ -165,6 +174,12 @@
 				sidebarOpen = false;
 				openMemory(target);
 			}}
+			onOpenDiagnostics={() => {
+				sidebarOpen = false;
+				void session.refreshLsp();
+				void session.refreshLspDiagnostics();
+				activeModal = 'diagnostics';
+			}}
 		/>
 	</div>
 	<div class="pane">
@@ -239,7 +254,7 @@
 				{#if planReady}
 					<div class="plan-bar">
 						<span class="pill pill-live">Plan ready</span>
-						<p>{session.plan}</p>
+						<p>{pendingPlanText || 'Review the plan above before implementing.'}</p>
 						<div class="grow"></div>
 						<button class="btn btn-primary" onclick={() => session.acceptPlan()}>
 							Carry out the plan

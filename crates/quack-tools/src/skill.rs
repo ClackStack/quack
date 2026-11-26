@@ -46,8 +46,8 @@ impl Tool for LoadSkill {
     }
 
     fn subject(&self, args: &Value, ctx: &ToolCtx) -> Result<Subject, String> {
-        find(args, ctx)?;
-        Ok(Subject::Skill)
+        let skill = find(args, ctx)?;
+        Ok(Subject::Skill(skill.name.clone()))
     }
 
     fn summary(&self, args: &Value, _ctx: &ToolCtx) -> String {

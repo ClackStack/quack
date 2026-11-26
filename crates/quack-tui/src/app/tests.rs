@@ -335,6 +335,131 @@ fn plan_review_bar_accepts_or_takes_a_revision() {
 }
 
 #[test]
+fn finished_or_executed_plan_does_not_open_review_bar_unless_followup_created() {
+    use quack_protocol::TurnId;
+    let mut app = App::new(info());
+    app.on_engine(Event::ModeChanged {
+        work_mode: WorkMode::Plan,
+        approvals: quack_protocol::ApprovalPolicy::Ask,
+    });
+    // Initial planning turn creates pending steps -> review bar opens.
+    app.on_engine(Event::TurnStarted { turn: TurnId(1) });
+    app.on_engine(Event::Plan {
+        checklist: "[ ] step 1\n[ ] step 2".into(),
+    });
+    plan_turn_ends(&mut app);
+    assert_eq!(app.review, Some(0));
+
+    // Accept the plan and carry it out in Edit mode until every step is done.
+    press(&mut app, KeyCode::Enter);
+    let _ = app.take_ops();
+    app.on_engine(Event::ModeChanged {
+        work_mode: WorkMode::Edit,
+        approvals: quack_protocol::ApprovalPolicy::Ask,
+    });
+    app.on_engine(Event::TurnStarted { turn: TurnId(2) });
+    app.on_engine(Event::Plan {
+        checklist: "[x] step 1\n[x] step 2".into(),
+    });
+    plan_turn_ends(&mut app);
+    assert_eq!(app.review, None);
+
+    // Returning to Plan mode and checking in when the plan is finished does not reopen review.
+    app.on_engine(Event::ModeChanged {
+        work_mode: WorkMode::Plan,
+        approvals: quack_protocol::ApprovalPolicy::Ask,
+    });
+    assert_eq!(app.review, None);
+    app.on_engine(Event::TurnStarted { turn: TurnId(3) });
+    plan_turn_ends(&mut app);
+    assert_eq!(app.review, None);
+
+    // Explicitly clearing the checklist during a planning turn also does not open review.
+    app.on_engine(Event::TurnStarted { turn: TurnId(4) });
+    app.on_engine(Event::Plan {
+        checklist: String::new(),
+    });
+    plan_turn_ends(&mut app);
+    assert_eq!(app.review, None);
+
+    // Creating a follow-up plan in Plan mode opens the review bar for the new steps.
+    app.on_engine(Event::TurnStarted { turn: TurnId(5) });
+    app.on_engine(Event::Plan {
+        checklist: "[ ] add caching\n[ ] add regression test".into(),
+    });
+    plan_turn_ends(&mut app);
+    assert_eq!(app.review, Some(0));
+}
+
+#[test]
+fn stale_plan_edit_turn_all_done_plan_and_compact_do_not_open_review_bar() {
+    use quack_protocol::TurnId;
+    let mut app = App::new(info());
+    app.on_engine(Event::ModeChanged {
+        work_mode: WorkMode::Plan,
+        approvals: quack_protocol::ApprovalPolicy::Allow,
+    });
+    app.on_engine(Event::TurnStarted { turn: TurnId(1) });
+    app.on_engine(Event::Plan {
+        checklist: "[ ] edit parser\n[ ] run tests".into(),
+    });
+    plan_turn_ends(&mut app);
+    assert_eq!(app.review, Some(0));
+
+    // Accept the plan; while the Edit turn runs, the user switches back to Plan mode early,
+    // and the model finishes without ticking the last step.
+    press(&mut app, KeyCode::Enter);
+    let _ = app.take_ops();
+    app.on_engine(Event::ModeChanged {
+        work_mode: WorkMode::Edit,
+        approvals: quack_protocol::ApprovalPolicy::Allow,
+    });
+    app.on_engine(Event::TurnStarted { turn: TurnId(2) });
+    app.on_engine(Event::Plan {
+        checklist: "[x] edit parser\n[~] run tests".into(),
+    });
+    app.on_engine(Event::ModeChanged {
+        work_mode: WorkMode::Plan,
+        approvals: quack_protocol::ApprovalPolicy::Allow,
+    });
+    plan_turn_ends(&mut app);
+    assert_eq!(app.review, None, "finishing Edit turn must not open review");
+
+    // A follow-up check in Plan mode that leaves the stale checklist untouched still does not reopen it.
+    app.on_engine(Event::TurnStarted { turn: TurnId(3) });
+    plan_turn_ends(&mut app);
+    assert_eq!(
+        app.review, None,
+        "stale pre-execution checklist must not reopen review"
+    );
+
+    // A Plan turn whose steps are all completed (read-only audit) does not open review.
+    app.on_engine(Event::TurnStarted { turn: TurnId(4) });
+    app.on_engine(Event::Plan {
+        checklist: "[x] inspect auth\n[x] summarize findings".into(),
+    });
+    plan_turn_ends(&mut app);
+    assert_eq!(app.review, None);
+
+    // Manual /compact in Plan mode with a pending plan does not open review.
+    app.on_engine(Event::TurnStarted { turn: TurnId(5) });
+    app.on_engine(Event::Plan {
+        checklist: "[ ] follow-up step".into(),
+    });
+    plan_turn_ends(&mut app);
+    assert_eq!(app.review, Some(0));
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.review, None);
+
+    app.on_engine(Event::TurnStarted { turn: TurnId(6) });
+    app.on_engine(Event::Compacting {
+        reason: "/compact".into(),
+    });
+    plan_turn_ends(&mut app);
+    assert_eq!(app.review, None, "/compact must not open plan review");
+}
+
+#[test]
 fn step_limit_bar_continues_stops_or_takes_a_redirect() {
     use quack_protocol::TurnId;
     let ask = |app: &mut App| {

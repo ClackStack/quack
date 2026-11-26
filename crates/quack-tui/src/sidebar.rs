@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use quack_protocol::LoadState;
+use quack_protocol::{LoadState, LspServerInfo, LspServerState};
 
 use crate::app::{App, PlanState};
 use crate::theme::{meter, tokens};
@@ -173,8 +173,30 @@ pub(crate) fn build(app: &App, area: Rect) -> Sidebar {
         }
         None => rows.push(Line::styled("Usage not reported yet", t.dim)),
     }
-    if let Some(speed) = app.speed {
-        rows.push(Line::styled(format!("{speed:.0} tokens/s"), t.dim));
+    let sep = if ascii { " - " } else { " · " };
+    let metrics = match (app.speed, app.cache_hit_percent) {
+        (Some(speed), Some(pct)) => Some(format!("{speed:.0} tokens/s{sep}{pct}% cache hit")),
+        (Some(speed), None) => Some(format!("{speed:.0} tokens/s")),
+        (None, Some(pct)) => Some(format!("{pct}% cache hit")),
+        (None, None) => None,
+    };
+    if let Some(metrics) = metrics {
+        rows.push(Line::styled(clip(&metrics, width, ascii), t.dim));
+    }
+    if !app.loaded_skills.is_empty() {
+        rows.push(Line::raw(""));
+        rows.push(Line::styled("Skills", heading));
+        draw_loaded_skills(app, &mut rows, width, ascii);
+    }
+    let active_lsp: Vec<&LspServerInfo> = app
+        .lsp_servers
+        .iter()
+        .filter(|s| !matches!(s.state, LspServerState::Idle | LspServerState::NotInstalled))
+        .collect();
+    if !active_lsp.is_empty() {
+        rows.push(Line::raw(""));
+        rows.push(Line::styled("LSP", heading));
+        draw_lsp(app, &active_lsp, &mut rows, width, ascii);
     }
     let shows_plan = if !app.plan.is_empty() {
         let remaining = height.saturating_sub(rows.len());
@@ -183,6 +205,105 @@ pub(crate) fn build(app: &App, area: Rect) -> Sidebar {
         false
     };
     Sidebar { rows, shows_plan }
+}
+
+/// Skills loaded in the current session, newest visible when more than three are loaded.
+fn draw_loaded_skills(app: &App, rows: &mut Vec<Line<'static>>, width: usize, ascii: bool) {
+    const MAX_VISIBLE: usize = 3;
+    let t = &app.theme;
+    let icon = app.glyphs.ok;
+    let room = width.saturating_sub(icon.width() + 1);
+    let total = app.loaded_skills.len();
+    let skip = if total > MAX_VISIBLE {
+        total - (MAX_VISIBLE - 1)
+    } else {
+        0
+    };
+    for name in app.loaded_skills.iter().skip(skip) {
+        rows.push(Line::from(vec![
+            Span::styled(format!("{icon} "), t.ok),
+            Span::raw(clip(name, room, ascii)),
+        ]));
+    }
+    if skip > 0 {
+        let dots = if ascii { "..." } else { "…" };
+        rows.push(Line::styled(format!("  +{skip} earlier{dots}"), t.dim));
+    }
+}
+
+/// Active/loaded language servers (excluding idle and uninstalled ones).
+fn draw_lsp(
+    app: &App,
+    servers: &[&LspServerInfo],
+    rows: &mut Vec<Line<'static>>,
+    width: usize,
+    ascii: bool,
+) {
+    const MAX_VISIBLE: usize = 3;
+    let t = &app.theme;
+    let total = servers.len();
+    let shown = if total > MAX_VISIBLE {
+        MAX_VISIBLE - 1
+    } else {
+        total
+    };
+    let (err_mark, warn_mark) = if ascii { ("E", "W") } else { ("✗", "⚠") };
+    for s in servers.iter().take(shown) {
+        let (icon, icon_style) = match s.state {
+            LspServerState::Starting => (app.spinner(), t.accent),
+            LspServerState::Indexing => (app.spinner(), t.warn),
+            LspServerState::Ready => (app.glyphs.ok, t.ok),
+            LspServerState::Failed | LspServerState::Exited => (app.glyphs.fail, t.error),
+            LspServerState::Idle | LspServerState::NotInstalled => (app.glyphs.pending, t.dim),
+        };
+        let label = if s.root.is_empty() || s.root == "." {
+            s.id.clone()
+        } else {
+            format!("{} ({})", s.id, s.root)
+        };
+        let mut tail_spans: Vec<Span<'static>> = Vec::new();
+        let mut tail_width = 0usize;
+        if s.errors > 0 || s.warnings > 0 {
+            tail_spans.push(Span::raw("  "));
+            tail_width += 2;
+            if s.errors > 0 {
+                let text = format!("{err_mark}{}", s.errors);
+                tail_width += text.width();
+                tail_spans.push(Span::styled(text, t.error));
+            }
+            if s.errors > 0 && s.warnings > 0 {
+                tail_spans.push(Span::raw(" "));
+                tail_width += 1;
+            }
+            if s.warnings > 0 {
+                let text = format!("{warn_mark}{}", s.warnings);
+                tail_width += text.width();
+                tail_spans.push(Span::styled(text, t.warn));
+            }
+        } else {
+            let state_text = s.state.label();
+            let state_style = match s.state {
+                LspServerState::Failed | LspServerState::Exited => t.error,
+                LspServerState::Indexing => t.warn,
+                _ => t.dim,
+            };
+            tail_spans.push(Span::raw("  "));
+            tail_spans.push(Span::styled(state_text, state_style));
+            tail_width += 2 + state_text.width();
+        }
+        let lead = icon.width() + 1;
+        let name_room = width.saturating_sub(lead + tail_width);
+        let mut spans = vec![
+            Span::styled(format!("{icon} "), icon_style),
+            Span::raw(clip(&label, name_room, ascii)),
+        ];
+        spans.extend(tail_spans);
+        rows.push(Line::from(spans));
+    }
+    let hidden = total.saturating_sub(shown);
+    if hidden > 0 {
+        rows.push(Line::styled(format!("  +{hidden} more"), t.dim));
+    }
 }
 
 /// The session's plan: progress summary, meter, and steps. Fits within `remaining` rows
