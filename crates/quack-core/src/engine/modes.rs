@@ -40,6 +40,9 @@ impl Engine {
                 WorkMode::Plan => self.start_planner(),
                 WorkMode::Edit => {
                     self.saved_plan_start = None;
+                    if let Some(c) = &mut self.convo {
+                        c.plan_start = None;
+                    }
                     self.restore_editor();
                 }
             }
@@ -108,10 +111,15 @@ impl Engine {
             if mode == WorkMode::Edit {
                 self.saved_plan_start = None;
             }
-            if let Some(c) = &self.convo
-                && let Ok(mut p) = c.perms.lock()
-            {
-                p.work_mode = mode;
+            if let Some(c) = &mut self.convo {
+                if let Ok(mut p) = c.perms.lock() {
+                    p.work_mode = mode;
+                }
+                if mode == WorkMode::Plan && c.plan_start.is_none() {
+                    c.plan_start = self.saved_plan_start;
+                } else if mode == WorkMode::Edit {
+                    c.plan_start = None;
+                }
             }
             self.set_approval_policy(approvals);
         }
@@ -225,7 +233,7 @@ impl Engine {
         setup.provider.set_ledger(self.ledger.clone());
         setup.tool_ctx.plan = c.setup.tool_ctx.plan.clone();
         c.editor = Some(std::mem::replace(&mut c.setup, Arc::new(setup)));
-        c.plan_start = self.saved_plan_start.take();
+        c.plan_start = c.plan_start.or_else(|| self.saved_plan_start.take());
         self.announce_model("planner");
     }
 
@@ -262,11 +270,12 @@ impl Engine {
     }
 
     /// `/plan accept`: leave plan mode for `mode` and carry out the plan. After a planner,
-    /// its messages give way to one brief, so the session's model reads only that on top of
-    /// the history it already has cached.
+    /// or when `clear_context` is true, the planning messages give way to one brief, so the
+    /// implementing model reads only that on top of the history it already has cached.
     pub(super) async fn accept_plan(
         &mut self,
         mode: &str,
+        clear_context: bool,
         done: mpsc::Sender<(TurnId, Vec<Message>)>,
     ) {
         let approvals = (!mode.is_empty())
@@ -289,22 +298,52 @@ impl Engine {
             return self.warn("not in plan mode; /plan starts it".into());
         }
         let mut skills_after_handoff = None;
-        let brief = match (&c.editor, c.plan_start, c.history.as_mut()) {
-            (Some(_), Some(start), Some(history)) => {
-                let planner = &c.setup;
-                let start = start.min(history.len());
-                let note = plan_note(planner);
-                let ask = planner.surface.name_of("ask_user");
-                let text = handoff::brief(&history[start..], &note, ask, &planner.model_ref);
-                history.truncate(start);
-                skills_after_handoff = c
-                    .loaded_skills
-                    .lock()
-                    .ok()
-                    .and_then(|mut s| s.truncate(start).then(|| s.names()));
-                Some((start, planner.model_ref.clone(), text))
+        let same_model = c.editor.is_none();
+        let brief = if c.editor.is_some() || clear_context {
+            let start = c.plan_start.or_else(|| {
+                clear_context.then(|| {
+                    c.history
+                        .as_ref()
+                        .and_then(|h| h.iter().rposition(|m| matches!(m, Message::User { .. })))
+                        .unwrap_or(0)
+                })
+            });
+            match (start, c.history.as_mut()) {
+                (Some(start), Some(history)) if start < history.len() => {
+                    let planner = &c.setup;
+                    let planner_ref = planner.model_ref.clone();
+                    let start = start.min(history.len());
+                    let note = plan_note(planner);
+                    let ask = planner.surface.name_of("ask_user");
+                    let todo = c
+                        .editor
+                        .as_deref()
+                        .unwrap_or(planner)
+                        .surface
+                        .name_of("todo");
+                    let text = handoff::brief(
+                        &history[start..],
+                        &note,
+                        ask,
+                        todo,
+                        &planner_ref,
+                        same_model,
+                    );
+                    history.truncate(start);
+                    skills_after_handoff = c
+                        .loaded_skills
+                        .lock()
+                        .ok()
+                        .and_then(|mut s| s.truncate(start).then(|| s.names()));
+                    if same_model {
+                        c.reset_transient();
+                    }
+                    Some((start, planner_ref, text))
+                }
+                _ => None,
             }
-            _ => None,
+        } else {
+            None
         };
         if let Some(skills) = skills_after_handoff {
             self.emit(Event::LoadedSkills { skills });

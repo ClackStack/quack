@@ -242,6 +242,84 @@ pub(crate) fn hooks(
     .with_scope(scope)
 }
 
+pub(crate) fn compat(folders: Option<&[quack_protocol::CompatFolder]>, theme: &Theme) -> Modal {
+    use quack_protocol::CompatKind;
+    let mut items: Vec<_> = folders
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .map(|(i, folder)| {
+            let path = std::path::Path::new(&folder.path);
+            let label = path
+                .parent()
+                .and_then(|p| p.parent())
+                .and_then(|base| path.strip_prefix(base).ok())
+                .unwrap_or(path)
+                .display()
+                .to_string();
+            let kind = match folder.kind {
+                CompatKind::Skills => "skills",
+                CompatKind::Commands => "commands",
+            };
+            let project = folder.scope == WriteScope::Project;
+            let origin = if project { "project" } else { "user" };
+            let save = if folder.can_save {
+                if project {
+                    "^s load and save in .quack/config.toml"
+                } else {
+                    "^s load and save in user config.toml"
+                }
+            } else {
+                "Saving is unavailable for this project."
+            };
+            ModalItem {
+                label,
+                hint: format!("{origin} {kind}"),
+                detail: vec![
+                    field(theme, "folder", folder.path.clone()),
+                    Line::raw(""),
+                    Line::raw("Only load prompt files you trust."),
+                    Line::raw("Matching names can replace existing ones."),
+                    Line::raw(""),
+                    Line::raw("⏎ load for this run without saving"),
+                    Line::raw(save),
+                ],
+                action: Some(format!("/compat load {i}")),
+                run: true,
+                alt: folder.can_save.then(|| format!("/compat save {i}")),
+                charts: Vec::new(),
+            }
+        })
+        .collect();
+    if items.is_empty() {
+        items.push(if folders.is_none() {
+            placeholder(
+                "Looking for folders",
+                "Startup is still checking for other agents’ folders.",
+                theme,
+            )
+        } else {
+            placeholder(
+                "No new folders",
+                "Use /skills or /commands to see what is already loaded.",
+                theme,
+            )
+        });
+    }
+    let modal = Modal::new(
+        "Other agents’ folders",
+        vec![ModalTab {
+            title: "Folders".into(),
+            items,
+        }],
+    );
+    if folders.is_some_and(|folders| folders.iter().any(|f| f.can_save)) {
+        modal.with_alt("load and save")
+    } else {
+        modal
+    }
+}
+
 pub(crate) fn skills(skills: &[quack_protocol::SkillInfo], theme: &Theme) -> Modal {
     let items = if skills.is_empty() {
         vec![placeholder(

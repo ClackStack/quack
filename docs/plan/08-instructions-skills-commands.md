@@ -77,11 +77,10 @@ At load time, frontmatter is validated (`name` matches the directory, `descripti
 - **`/<name> [request]`** works in the TUI (also in the slash popup) and in `exec`. The engine replaces it with the skill block plus the request. The session title keeps what the user typed.
 - **`/skills`** lists them, with where each came from.
 - **Other agents' instruction files (2026-10-18):** read by default rather than offered first. The names come from `[instructions]` in `compat.toml` (defaults bundle, system, user or trusted project folder; the highest present wins) and are tried after `[instructions] files` in each folder, so a folder with AGENTS.md uses only that, and duplicates are never loaded. The user's global file falls back to `~/.claude/CLAUDE.md` / `~/.gemini/GEMINI.md` when there is no AGENTS.md in the config folder. Files that are links to, copies of, or just `@AGENTS.md` pointers to the root AGENTS.md don't count. When the root has others, a startup notice offers `/init`, which runs a turn asking the model to merge them into AGENTS.md (without touching the originals, then suggesting a one-line `@AGENTS.md` in each); with no others it updates or writes AGENTS.md. `[instructions] other_agents = false` turns this off. Folder rules (`.cursor/rules/`) are not read yet.
-- **Not done yet:** the detection prompt for other harnesses' skill and command folders.
 
 ## Other harnesses' files
 
-By default only the open standards are loaded: `AGENTS.md` and `.agents/skills/` (project and `~/.agents/skills/`). Files belonging to other harnesses are **detected, never loaded silently**.
+Quack reads other agents' instruction files as fallbacks as described above. Other agents' skill and command folders are **detected but not loaded** unless opted into.
 
 ### Detected locations
 
@@ -90,25 +89,21 @@ By default only the open standards are loaded: `AGENTS.md` and `.agents/skills/`
 | Instructions | `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `.cursor/rules/`, `.github/copilot-instructions.md`, `CONVENTIONS.md`, `.windsurfrules` | `~/.claude/CLAUDE.md`, `~/.gemini/GEMINI.md` |
 | Skills | `.claude/skills/`, `.codex/skills/`, `.goose/skills/`, `.maki/skills/` | `~/.claude/skills/`, `~/.codex/skills/`, … |
 | Commands | `.claude/commands/` | `~/.claude/commands/` |
-| MCP configs (info only) | `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json` | `~/.claude.json`, … |
 
-The detection list is data (`defaults/compat.toml`), so it can be extended or emptied. Detection is just a few `stat` calls run during the async startup phase, so it adds nothing to the first frame.
+The detection list is data (`defaults/compat.toml`), so it can be extended or emptied. Startup checks folder paths off-thread without reading their prompt files. Links to a folder already loaded (e.g. `.claude/skills` linked to `.agents/skills`) are not offered again. The `[mcp_configs]` section is reserved for a future review/conversion flow; it is not acted on.
 
 ### Prompt
 
-When something new is detected, a startup panel row appears and stays until the user answers. It never blocks input.
+The terminal startup panel points to `/compat` when there are folders to review. The picker lists each folder's path, kind, and scope. Discovery never blocks input or opens a modal by itself.
 
 ```
- ? compat        found CLAUDE.md, .claude/skills (4 skills) · [L]oad · [I]gnore · [D]etails
+ ? compat        1 folder · /compat
 ```
 
-- **Load** adds the paths to `[instructions] files` / `[skills] compat_paths`. Scope is chosen like any modal write (*project* by default for project files, *user* for user-level files).
-- **Ignore** records the decision, so the prompt doesn't come back for those paths until new ones appear.
-- **Details** opens a modal listing each file with its size and token cost, so items can be loaded or ignored individually.
-- Decisions are stored next to trust records (`<user data>/trust.toml`), keyed by path.
-- **Duplicate guard**: if a detected file has the same content as, or is a symlink to, an already-loaded `AGENTS.md`, it is marked "same as AGENTS.md" and never offered.
-- **MCP config files** are reported only ("found .mcp.json with 3 servers"), with an action to **convert** them into `mcp.d/*.toml` files that the user reviews. They are never executed in place.
-- Headless mode never prompts. It loads only what config says, and `-v` lists the detected-but-ignored files.
+- **Enter** loads the selected folder for this run, across `/reload`, without writing any settings.
+- **Ctrl-S** loads it and appends its path to `[skills] compat_paths` or `[commands] compat_paths`. Home paths are saved in user settings; workspace paths are saved project-relative in `.quack/config.toml`. Saving never grants extension trust and is unavailable when project settings are untrusted, changed or disabled.
+- **Esc** leaves everything unchanged. There is no permanent ignore list.
+- The normal Markdown loaders read files in place. Later folders can replace a matching skill or custom command; built-in commands still take precedence. Import does not run scripts or change tool permissions. Headless mode uses configured paths and never asks.
 
 ## Custom slash commands
 

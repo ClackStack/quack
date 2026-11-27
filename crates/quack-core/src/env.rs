@@ -1,7 +1,7 @@
 //! Session-start facts for the system prompt: date, git branch, folder listing, AGENTS.md.
 //! Captured once so the rendered prompt stays byte-stable for the whole session.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use quack_config::Loaded;
 use quack_config::settings::MemoryScope;
@@ -84,8 +84,7 @@ pub(crate) fn folder_listing(root: &Path) -> String {
 /// the cwd (docs/plan/08-instructions-skills-commands.md#discovery).
 pub(crate) fn instructions(config: &Loaded) -> agents_md::Loaded {
     let d = &config.dirs;
-    let mut globals: Vec<(std::path::PathBuf, std::path::PathBuf)> =
-        vec![(d.system.join("AGENTS.md"), d.system.clone())];
+    let mut globals: Vec<(PathBuf, PathBuf)> = vec![(d.system.join("AGENTS.md"), d.system.clone())];
     // The user's own AGENTS.md, or else another agent's global file (~/.claude/CLAUDE.md…).
     let own = d.user_config.join("AGENTS.md");
     let get = |k: &str| std::env::var_os(k);
@@ -111,7 +110,7 @@ pub(crate) fn other_agents(config: &Loaded) -> Compat {
     if !config.settings.instructions.other_agents {
         return Compat::default();
     }
-    let dirs: Vec<std::path::PathBuf> = config.item_layers().into_iter().map(|(_, d)| d).collect();
+    let dirs: Vec<PathBuf> = config.item_layers().into_iter().map(|(_, d)| d).collect();
     Compat::load(&dirs)
 }
 
@@ -139,7 +138,7 @@ pub(crate) fn rules(config: &Loaded) -> agents_md::Rules {
 }
 
 /// Resolved `(global, project)` memory directories for this config and workspace.
-pub fn memory_dirs(config: &Loaded) -> (std::path::PathBuf, std::path::PathBuf) {
+pub fn memory_dirs(config: &Loaded) -> (PathBuf, PathBuf) {
     let store = memory_store(config);
     (store.global, store.project)
 }
@@ -163,8 +162,6 @@ pub(crate) fn memory_store(config: &Loaded) -> MemoryStore {
     MemoryStore::new(global, project).with_index_cap(m.index_max_tokens as usize * 7 / 2)
 }
 
-/// Skill folders, lowest precedence first: system, user, `~/.agents/skills`, the project
-/// (`.quack/skills` when trusted, `.agents/skills`), then `[skills] compat_paths`.
 /// Custom slash commands from each layer's `commands/` folder (the project's only when
 /// trusted).
 pub(crate) fn commands(
@@ -173,15 +170,25 @@ pub(crate) fn commands(
     Vec<quack_instructions::commands::CustomCommand>,
     Vec<String>,
 ) {
-    let roots: Vec<(String, std::path::PathBuf)> = config
+    quack_instructions::commands::discover(&command_roots(config))
+}
+
+pub(crate) fn command_roots(config: &Loaded) -> Vec<(String, PathBuf)> {
+    let mut roots: Vec<_> = config
         .item_layers()
         .into_iter()
         .map(|(kind, dir)| (kind.to_string(), dir.join("commands")))
         .collect();
-    quack_instructions::commands::discover(&roots)
+    roots.extend(compat_roots(config, &config.settings.commands.compat_paths));
+    roots
 }
 
 pub(crate) fn skills(config: &Loaded) -> skills::Found {
+    skills::discover(&skill_roots(config), &config.settings.skills.disabled)
+}
+
+/// Skill folders in precedence order, with configured compatibility folders last.
+pub(crate) fn skill_roots(config: &Loaded) -> Vec<(String, PathBuf)> {
     let d = &config.dirs;
     // A layer's enabled bundles come just before the layer, which wins over them.
     let bundles = |layer: quack_config::LayerKind| {
@@ -191,7 +198,7 @@ pub(crate) fn skills(config: &Loaded) -> skills::Found {
             .filter(move |b| b.enabled && b.layer == layer)
             .map(move |b| (format!("{layer} bundle {}", b.id), b.dir.join("skills")))
     };
-    let mut roots: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut roots: Vec<(String, PathBuf)> = Vec::new();
     roots.extend(bundles(quack_config::LayerKind::System));
     roots.push(("system".into(), d.system.join("skills")));
     roots.extend(bundles(quack_config::LayerKind::User));
@@ -214,11 +221,23 @@ pub(crate) fn skills(config: &Loaded) -> skills::Found {
         "project (.agents/skills)".into(),
         d.workspace_root.join(".agents").join("skills"),
     ));
-    for p in &config.settings.skills.compat_paths {
-        let path = quack_config::expand_home(p, &|k| std::env::var_os(k));
-        roots.push((format!("compat ({p})"), d.workspace_root.join(path)));
-    }
-    skills::discover(&roots, &config.settings.skills.disabled)
+    roots.extend(compat_roots(config, &config.settings.skills.compat_paths));
+    roots
+}
+
+fn compat_roots<'a>(
+    config: &'a Loaded,
+    paths: &'a [String],
+) -> impl Iterator<Item = (String, PathBuf)> + 'a {
+    paths.iter().map(|p| {
+        let path = quack_config::expand_home(p, &|_| {
+            config.dirs.home.as_ref().map(|h| h.as_os_str().to_owned())
+        });
+        (
+            format!("compat ({p})"),
+            config.dirs.workspace_root.join(path),
+        )
+    })
 }
 
 /// The defaults bundle's sub-agents, compiled in so the `task` tool works without the

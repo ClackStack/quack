@@ -243,6 +243,7 @@ async fn approval_changes_acceptance_reload_and_resume_preserve_both_controls() 
     engine
         .submit(Op::AcceptPlan {
             mode: String::new(),
+            clear_context: false,
         })
         .await;
     loop {
@@ -352,6 +353,7 @@ async fn a_locked_plan_cannot_be_accepted_or_switched_to_edit() {
     engine
         .submit(Op::AcceptPlan {
             mode: "allow".into(),
+            clear_context: false,
         })
         .await;
     loop {
@@ -396,5 +398,47 @@ async fn plan_mode_prompt_guides_followup_and_finished_plans() {
             && first.contains("do not leave pending steps in the checklist"),
         "{first}"
     );
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn plan_mode_shell_denial_lists_only_profiles_read_only_tools() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("permission denied:"))
+        .respond_with(sse_text("Proposed tests: cargo test."))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse_call(
+            "run-test",
+            "shell",
+            serde_json::json!({"command": ["bash", "-lc", "cargo test"]}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut loaded = common::workspace(
+        tmp.path(),
+        &server.uri(),
+        r#"[{ id = "tiny", profile = "codex" }]"#,
+        "",
+    );
+    loaded.dirs.defaults =
+        Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults"));
+    loaded.settings.permissions.work_mode = WorkMode::Plan;
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    turn(&mut engine, "run tests").await;
+    let second = &bodies(&server).await[1];
+    assert!(second.contains("permission denied: plan mode:"), "{second}");
+    let expected = if quack_tools::outline::supported(std::path::Path::new("a.rs")) {
+        "the dedicated read-only tools (read, index)"
+    } else {
+        "the dedicated read-only tools (read)"
+    };
+    assert!(second.contains(expected), "{second}");
+    assert!(!second.contains("list_dir"), "{second}");
+    assert!(!second.contains(", glob"), "{second}");
     engine.shutdown().await;
 }

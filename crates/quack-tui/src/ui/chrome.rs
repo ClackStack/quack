@@ -231,6 +231,7 @@ pub(super) fn draw_status(
             left.push(Span::styled(format!(" · {tps:.0} t/s"), t.dim));
         }
     }
+    let copied = app.copied();
     let mut right: Vec<Span<'_>> = Vec::new();
     if app.approval.is_some() {
         right.push(Span::styled("waiting for approval", t.warn));
@@ -247,15 +248,18 @@ pub(super) fn draw_status(
             format!("{} {}{clock}", app.spinner(), activity(app)),
             t.accent,
         ));
-        right.push(Span::styled(" · esc to interrupt", t.dim));
+        if copied.is_none() {
+            right.push(Span::styled(" · esc to interrupt", t.dim));
+        }
     } else if app.queued {
         right.push(Span::styled(format!("{} queued", app.spinner()), t.warn));
     } else if !app.startup_done {
         right.push(Span::styled(format!("{} starting", app.spinner()), t.dim));
     }
-    if let Some(n) = app.copied() {
+    if let Some(n) = copied {
         let s = if n == 1 { "" } else { "s" };
-        right.push(Span::styled(format!("  copied {n} char{s}"), t.ok));
+        let lead = if right.is_empty() { "" } else { "  " };
+        right.push(Span::styled(format!("{lead}copied {n} char{s}"), t.ok));
     }
     let (errors, warnings) = app.diagnostics;
     if errors > 0 || warnings > 0 {
@@ -283,13 +287,46 @@ pub(super) fn draw_status(
         ));
     }
     right.push(Span::styled("  /help ", t.dim));
-    let right_w: usize = right.iter().map(|s| s.content.width()).sum();
-    let left_w: usize = left.iter().map(|s| s.content.width()).sum();
-    let pad = usize::from(area.width).saturating_sub(left_w + right_w);
+    let width = usize::from(area.width);
+    let mut right_w: usize = right.iter().map(|s| s.content.width()).sum();
+    let mut left_w: usize = left.iter().map(|s| s.content.width()).sum();
+    if copied.is_some() && left_w + right_w > width {
+        // Keep the copy confirmation visible even while a turn runs or on narrow terminals.
+        right.pop();
+        right.push(Span::raw(" "));
+        right_w = right.iter().map(|s| s.content.width()).sum();
+        if left_w + right_w + 1 > width {
+            left = fit_spans(left, width.saturating_sub(right_w + 1));
+            left_w = left.iter().map(|s| s.content.width()).sum();
+        }
+    }
+    let pad = width.saturating_sub(left_w + right_w);
     let mut spans = left;
     spans.push(Span::raw(" ".repeat(pad)));
     spans.extend(right);
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn fit_spans<'a>(spans: Vec<Span<'a>>, max: usize) -> Vec<Span<'a>> {
+    let mut out = Vec::with_capacity(spans.len());
+    let mut used = 0usize;
+    for span in spans {
+        let w = span.content.width();
+        if used + w <= max {
+            used += w;
+            out.push(span);
+        } else {
+            let rem = max.saturating_sub(used);
+            if rem > 0 {
+                out.push(Span::styled(
+                    truncate(span.content.as_ref(), rem),
+                    span.style,
+                ));
+            }
+            break;
+        }
+    }
+    out
 }
 
 /// What the model is doing right now, for the status bar.

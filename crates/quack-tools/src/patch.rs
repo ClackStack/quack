@@ -194,12 +194,20 @@ enum Op {
 
 #[derive(Debug, Default, PartialEq)]
 struct Hunk {
-    /// `@@ <line>`: a line to find first.
-    anchor: Option<String>,
+    /// `@@ <line>` headers to find in order before the hunk.
+    anchors: Vec<String>,
     old: Vec<String>,
     new: Vec<String>,
     /// `*** End of File`: the hunk ends the file.
     eof: bool,
+}
+
+impl Hunk {
+    /// A context-only hunk (`@@\n <ctx>\n@@ ...`) has no edits; its role is to advance
+    /// the cursor so the next hunk is anchored right after it.
+    fn is_context_only(&self) -> bool {
+        !self.old.is_empty() && self.old == self.new
+    }
 }
 
 fn parse(patch: &str) -> Result<Vec<Op>, String> {
@@ -259,7 +267,9 @@ fn parse(patch: &str) -> Result<Vec<Op>, String> {
                 } else if let Some(anchor) = l.strip_prefix("@@") {
                     flush(&mut cur, &mut hunks);
                     let a = anchor.trim();
-                    cur.anchor = (!a.is_empty()).then(|| a.to_owned());
+                    if !a.is_empty() {
+                        cur.anchors.push(a.to_owned());
+                    }
                 } else if let Some(t) = l.strip_prefix('-') {
                     cur.old.push(t.to_owned());
                 } else if let Some(t) = l.strip_prefix('+') {
@@ -338,35 +348,69 @@ fn seek(lines: &[String], old: &[String], from: usize, eof: bool) -> Option<usiz
     seek_all(lines, old, from, eof).into_iter().next()
 }
 
+fn format_match_lines(hits: &[usize]) -> String {
+    const MAX: usize = 8;
+    let listed = hits
+        .iter()
+        .take(MAX)
+        .map(|i| (i + 1).to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match hits.len().checked_sub(MAX) {
+        Some(more) if more > 0 => format!("{listed} (+{more} more)"),
+        _ => listed,
+    }
+}
+
 fn apply_hunks(text: &str, hunks: &[Hunk], shown: &str) -> Result<String, String> {
     let trailing = text.ends_with('\n');
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     let mut at = 0;
+    let mut prev_anchored = false;
     for (n, h) in hunks.iter().enumerate() {
-        let mut anchored = false;
+        let is_context_only = h.is_context_only();
+        let mut header_anchored = false;
         let mut missing_anchor = None;
-        if let Some(anchor) = &h.anchor {
-            match lines[at.min(lines.len())..]
+        let mut anchor_at = at;
+        for anchor in &h.anchors {
+            match lines[anchor_at.min(lines.len())..]
                 .iter()
                 .position(|l| l.trim() == anchor.trim())
             {
                 Some(i) => {
-                    at += i + 1;
-                    anchored = true;
+                    anchor_at += i + 1;
+                    header_anchored = true;
                 }
                 // The anchor is only a hint (`@@ -1,3 +1,4 @@` headers end up here too).
                 None => {
                     tracing::debug!(anchor, "patch anchor not found");
                     missing_anchor = Some(anchor.as_str());
+                    header_anchored = false;
+                    break;
                 }
             }
         }
+        if header_anchored {
+            at = anchor_at;
+        }
+        let anchored = missing_anchor.is_none() && (header_anchored || prev_anchored);
         let start = if anchored && let Some(i) = seek(&lines, &h.old, at, h.eof) {
             i
         } else {
             // Without a matched anchor (or on whole-file fallback), require a unique match
             // so duplicate contexts in different functions are never patched silently.
-            let hits = seek_all(&lines, &h.old, 0, h.eof);
+            // Check at/after `at` first so an earlier hunk's region cannot collide with a
+            // hunk that is unique in the remainder of the file.
+            let hits = if at > 0 && missing_anchor.is_none() {
+                let forward = seek_all(&lines, &h.old, at, h.eof);
+                if forward.is_empty() {
+                    seek_all(&lines, &h.old, 0, h.eof)
+                } else {
+                    forward
+                }
+            } else {
+                seek_all(&lines, &h.old, 0, h.eof)
+            };
             match hits.as_slice() {
                 [only] => *only,
                 [] => {
@@ -378,7 +422,6 @@ fn apply_hunks(text: &str, hunks: &[Hunk], shown: &str) -> Result<String, String
                     ));
                 }
                 many => {
-                    let places: Vec<String> = many.iter().map(|i| (i + 1).to_string()).collect();
                     let note = match missing_anchor {
                         Some(a) => format!(" (anchor `{a}` was not found)"),
                         None => String::new(),
@@ -387,14 +430,17 @@ fn apply_hunks(text: &str, hunks: &[Hunk], shown: &str) -> Result<String, String
                         "hunk {} of {shown} is ambiguous{note}: matches lines {}; \
                          add an exact `@@ <context>` header or more surrounding lines",
                         n + 1,
-                        places.join(", ")
+                        format_match_lines(many)
                     ));
                 }
             }
         };
-        let end = start + h.old.len();
-        lines.splice(start..end, h.new.iter().cloned());
+        if !is_context_only {
+            let end = start + h.old.len();
+            lines.splice(start..end, h.new.iter().cloned());
+        }
         at = start + h.new.len();
+        prev_anchored = is_context_only;
     }
     let mut out = lines.join("\n");
     if trailing || !out.is_empty() {
@@ -606,7 +652,7 @@ mod tests {
             panic!("{ops:?}");
         };
         assert_eq!((path.as_str(), to.as_deref()), ("c.txt", Some("d.txt")));
-        assert_eq!(hunks[0].anchor.as_deref(), Some("fn x"));
+        assert_eq!(hunks[0].anchors, ["fn x"]);
         assert_eq!(hunks[0].old, ["ctx", "old"]);
         assert_eq!(hunks[0].new, ["ctx", "new"]);
     }
@@ -658,6 +704,258 @@ mod tests {
         assert!(
             err.contains("ambiguous") && err.contains("fn missing() {") && err.contains("2, 6"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn context_only_hunks_anchor_the_following_hunk() {
+        let file = "\
+enum A {
+    One,
+}
+
+pub enum WriteScope {
+    User,
+}
+
+enum B {
+    Two,
+}
+";
+        let patch = "\
+*** Begin Patch
+*** Update File: f
+@@
+ pub enum WriteScope {
+@@
+ }
+ 
++pub enum CompatKind {
++    Skills,
++}
++
+*** End Patch";
+        let out = apply_hunks(file, &hunks(patch), "f").expect("anchored by context-only hunk");
+        assert_eq!(
+            out,
+            "\
+enum A {
+    One,
+}
+
+pub enum WriteScope {
+    User,
+}
+
+pub enum CompatKind {
+    Skills,
+}
+
+enum B {
+    Two,
+}
+"
+        );
+
+        // Multi-line and chained context-only hunks narrow sequentially.
+        let nested = "\
+impl A {
+    fn save(&self) {
+        x();
+    }
+}
+
+impl B {
+    fn save(&self) {
+        x();
+    }
+}
+";
+        let multi = "\
+*** Begin Patch
+*** Update File: f
+@@
+ impl B {
+     fn save(&self) {
+@@
+-        x();
++        y();
+*** End Patch";
+        let out = apply_hunks(nested, &hunks(multi), "f").expect("multi-line context anchor");
+        assert!(out.contains("impl A {\n    fn save(&self) {\n        x();"));
+        assert!(out.contains("impl B {\n    fn save(&self) {\n        y();"));
+
+        let chained = "\
+*** Begin Patch
+*** Update File: f
+@@
+ impl B {
+@@
+     fn save(&self) {
+@@
+-        x();
++        z();
+*** End Patch";
+        let out = apply_hunks(nested, &hunks(chained), "f").expect("chained context anchors");
+        assert!(out.contains("impl A {\n    fn save(&self) {\n        x();"));
+        assert!(out.contains("impl B {\n    fn save(&self) {\n        z();"));
+    }
+
+    #[test]
+    fn rejects_ambiguous_context_only_hunk_and_missing_explicit_anchor_after_context_hunk() {
+        let file = "\
+impl A {
+    fn save(&self) {
+        x();
+    }
+}
+
+impl B {
+    fn save(&self) {
+        x();
+    }
+}
+";
+        let ambiguous_ctx = "\
+*** Begin Patch
+*** Update File: f
+@@
+     fn save(&self) {
+@@
+-        x();
++        y();
+*** End Patch";
+        let err =
+            apply_hunks(file, &hunks(ambiguous_ctx), "f").expect_err("ambiguous context-only hunk");
+        assert!(err.contains("hunk 1") && err.contains("2, 8"), "{err}");
+
+        let bad_explicit = "\
+*** Begin Patch
+*** Update File: f
+@@
+ impl B {
+@@ fn missing() {
+-        x();
++        y();
+*** End Patch";
+        let err = apply_hunks(file, &hunks(bad_explicit), "f")
+            .expect_err("failed explicit anchor must not trust prior context hunk");
+        assert!(
+            err.contains("ambiguous") && err.contains("fn missing() {"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn stacked_anchor_headers_narrow_in_order() {
+        let file = "\
+impl A {
+    fn new() {
+        x();
+    }
+}
+
+impl B {
+    fn new() {
+        x();
+    }
+}
+";
+        let stacked = "\
+*** Begin Patch
+*** Update File: f
+@@ impl B {
+@@ fn new() {
+-        x();
++        y();
+*** End Patch";
+        let out = apply_hunks(file, &hunks(stacked), "f").expect("stacked anchors");
+        assert!(out.contains("impl A {\n    fn new() {\n        x();"));
+        assert!(out.contains("impl B {\n    fn new() {\n        y();"));
+
+        // A bare `@@` right after `@@ <ctx>` must not discard the anchor.
+        let with_bare = "\
+*** Begin Patch
+*** Update File: f
+@@ impl B {
+@@
+-        x();
++        z();
+*** End Patch";
+        let out = apply_hunks(file, &hunks(with_bare), "f").expect("anchor survives bare @@");
+        assert!(out.contains("impl A {\n    fn new() {\n        x();"));
+        assert!(out.contains("impl B {\n    fn new() {\n        z();"));
+
+        // If the second anchor in a stack is missing, do not silently patch after the first.
+        let half_missing = "\
+*** Begin Patch
+*** Update File: f
+@@ impl A {
+@@ fn missing() {
+-        x();
++        y();
+*** End Patch";
+        let err = apply_hunks(file, &hunks(half_missing), "f")
+            .expect_err("missing second stacked anchor");
+        assert!(
+            err.contains("ambiguous") && err.contains("fn missing() {"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn subsequent_unanchored_hunk_prefers_unique_match_after_cursor() {
+        let file = "\
+fn a() {
+    x();
+}
+
+fn b() {
+    first();
+    x();
+}
+";
+        let patch = "\
+*** Begin Patch
+*** Update File: f
+@@
+-    first();
++    second();
+@@
+-    x();
++    y();
+*** End Patch";
+        let out = apply_hunks(file, &hunks(patch), "f").expect("unique match after cursor");
+        assert!(out.contains("fn a() {\n    x();\n}"));
+        assert!(out.contains("fn b() {\n    second();\n    y();\n}"));
+
+        // Multiple matches remaining after `at` are still rejected as ambiguous.
+        let dup_after = "\
+fn a() {
+    first();
+}
+
+fn b() {
+    x();
+}
+
+fn c() {
+    x();
+}
+";
+        let err = apply_hunks(dup_after, &hunks(patch), "f")
+            .expect_err("multiple matches after cursor stay ambiguous");
+        assert!(err.contains("ambiguous") && err.contains("6, 10"), "{err}");
+    }
+
+    #[test]
+    fn ambiguity_error_caps_listed_lines() {
+        let file = "}\n".repeat(12);
+        let patch = "*** Begin Patch\n*** Update File: f\n@@\n-}\n+};\n*** End Patch";
+        let err = apply_hunks(&file, &hunks(patch), "f").expect_err("ambiguous");
+        assert!(
+            err.contains("1, 2, 3, 4, 5, 6, 7, 8 (+4 more)"),
+            "expected capped list: {err}"
         );
     }
 }

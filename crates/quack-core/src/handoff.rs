@@ -5,15 +5,18 @@
 
 use quack_providers::Message;
 
-/// The brief that replaces the planner's messages: the user's requests, their answers to
-/// the planner's questions, and the planner's last reply (its summary of the plan).
+/// The brief that replaces the planning messages: the user's requests, their answers to
+/// clarifying questions, and the last assistant reply (the summary of the plan).
 /// `plan_note` is the plan-mode request appended to each user message, taken off again;
-/// `ask` is the name the planner's profile gives `ask_user`.
+/// `ask` is the name the profile gives `ask_user`; `todo` is the name the implementing
+/// profile gives `todo`; `same_model` is true for a single-model fresh-context handoff.
 pub(crate) fn brief(
     segment: &[Message],
     plan_note: &str,
     ask: Option<&str>,
+    todo: Option<&str>,
     planner: &str,
+    same_model: bool,
 ) -> String {
     let suffix = format!("\n\n{plan_note}");
     let mut requests = Vec::new();
@@ -51,12 +54,18 @@ pub(crate) fn brief(
             _ => {}
         }
     }
-    let mut out = format!(
-        "[Plan handoff] {planner} explored the code with read-only tools and wrote the plan \
-         below; you carry it out. Its exploration is not repeated here, so read a file before \
-         you change it.\n\nRequest:\n{}",
-        requests.join("\n\n")
-    );
+    let lead = if same_model {
+        "[Plan handoff] Exploration from plan mode was cleared to start implementation with a \
+         fresh context. Read any file you need before changing it."
+            .to_owned()
+    } else {
+        format!(
+            "[Plan handoff] {planner} explored the code with read-only tools and wrote the plan \
+             below; you carry it out. Its exploration is not repeated here, so read a file before \
+             you change it."
+        )
+    };
+    let mut out = format!("{lead}\n\nRequest:\n{}", requests.join("\n\n"));
     if !answers.is_empty() {
         out.push_str(&format!(
             "\n\nThe user's answers to its questions:\n{}",
@@ -66,7 +75,14 @@ pub(crate) fn brief(
     if !summary.is_empty() {
         out.push_str(&format!("\n\nPlan:\n{summary}"));
     }
-    out.push_str("\n\nCarry out the plan, and keep the todo list up to date as you go.");
+    match todo {
+        Some(tool) => out.push_str(&format!(
+            "\n\nCarry out the plan, and keep the todo list up to date with `{tool}` as you go."
+        )),
+        None => {
+            out.push_str("\n\nCarry out the plan, and keep the todo list up to date as you go.");
+        }
+    }
     out
 }
 
@@ -114,7 +130,9 @@ mod tests {
             &segment,
             "[Plan mode] plan first",
             Some("AskUserQuestion"),
+            Some("update_plan"),
             "big/model",
+            false,
         );
         assert!(b.starts_with("[Plan handoff] big/model"), "{b}");
         assert!(
@@ -129,7 +147,19 @@ mod tests {
             b.contains("Plan:\n1. Wrap fetch in a loop."),
             "the last reply is the plan: {b}"
         );
+        assert!(b.contains("`update_plan`"), "{b}");
         assert!(!b.contains("fn fetch"), "tool output stays behind: {b}");
         assert!(!b.contains("Looking around"), "{b}");
+
+        let fresh = brief(
+            &segment,
+            "[Plan mode] plan first",
+            Some("AskUserQuestion"),
+            None,
+            "same/model",
+            true,
+        );
+        assert!(fresh.contains("fresh context"), "{fresh}");
+        assert!(!fresh.contains("fn fetch"), "{fresh}");
     }
 }

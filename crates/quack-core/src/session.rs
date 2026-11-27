@@ -130,39 +130,61 @@ pub(crate) fn egress_entries(records: &[Record]) -> Vec<quack_protocol::EgressEn
 
 /// Skills loaded into a session, in first-load order, keyed by the history index where
 /// each skill entered the conversation so rewind and compaction keep the list accurate.
+/// Each entry also tracks whether its verbatim `<skill>` body is still present in the
+/// active history (cleared when compaction summarizes past its index).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LoadedSkills {
-    entries: Vec<(usize, String)>,
+    entries: Vec<(usize, String, bool)>,
 }
 
 impl LoadedSkills {
-    /// Record `name` at `history_index` if it is not already loaded. Returns whether the
-    /// visible list changed.
+    /// Record `name` at `history_index` if it is not already loaded. If it was previously
+    /// compacted away, mark its body verbatim again at `history_index`. Returns whether
+    /// the visible list changed.
     pub(crate) fn record(&mut self, history_index: usize, name: String) -> bool {
-        if name.is_empty() || self.entries.iter().any(|(_, n)| n == &name) {
+        if name.is_empty() {
             return false;
         }
-        self.entries.push((history_index, name));
+        if let Some((idx, _, verbatim)) = self.entries.iter_mut().find(|(_, n, _)| n == &name) {
+            if !*verbatim {
+                *idx = history_index;
+                *verbatim = true;
+            }
+            return false;
+        }
+        self.entries.push((history_index, name, true));
         true
+    }
+
+    /// True when `name`'s verbatim skill instructions are still in the current history.
+    pub(crate) fn is_verbatim(&self, name: &str) -> bool {
+        self.entries
+            .iter()
+            .any(|(_, n, verbatim)| n == name && *verbatim)
     }
 
     /// Drop skills loaded at or after `to` (after `/rewind` or planner handoff). Returns
     /// whether the visible list changed.
     pub(crate) fn truncate(&mut self, to: usize) -> bool {
         let before = self.entries.len();
-        self.entries.retain(|(idx, _)| *idx < to);
+        self.entries.retain(|(idx, _, _)| *idx < to);
         self.entries.len() != before
     }
 
     /// Adjust recorded indices after `history[..cut]` is replaced by one summary at index 0.
     pub(crate) fn on_compaction(&mut self, cut: usize) {
-        for (idx, _) in &mut self.entries {
-            *idx = if *idx >= cut { *idx - cut + 1 } else { 0 };
+        for (idx, _, verbatim) in &mut self.entries {
+            if *idx >= cut {
+                *idx = *idx - cut + 1;
+            } else {
+                *idx = 0;
+                *verbatim = false;
+            }
         }
     }
 
     pub(crate) fn names(&self) -> Vec<String> {
-        self.entries.iter().map(|(_, n)| n.clone()).collect()
+        self.entries.iter().map(|(_, n, _)| n.clone()).collect()
     }
 
     pub(crate) fn is_empty(&self) -> bool {

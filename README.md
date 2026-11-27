@@ -141,7 +141,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 
 ### Tools & Editing
 
-- **Core tool suite**: `read` (500-line default cap with automatic outlining for large files), `write`, `glob`, `grep` (`content`/`files`/`count` modes, context lines, and match limits), `list_dir`, `shell` (including managed background jobs via `background: true` and `job_action: "output" | "stop" | "list"`), `lsp`, and `index`. Allowed read-only tools execute in parallel while preserving result order.
+- **Core tool suite**: `read` (500-line default cap with automatic outlining for large files and `symbol` reads), `write`, `glob`, `grep` (`content`/`files`/`count` modes, context lines, and match limits), `list_dir`, `shell` (including managed background jobs via `background: true`, `job_action: "wait" | "output" | "stop" | "list"`, blocking `wait_secs`, and delta output on polls), `lsp`, and `index`. Allowed read-only tools execute in parallel while preserving result order.
 - **Intelligent code indexing**: `index` generates Tree-sitter symbol outlines (functions, types, methods, and line ranges, cached per file snapshot) for Rust, Python, Go, TypeScript, JavaScript, C, C++, and Bash. Large file reads automatically return outlines so the model reads only relevant definition spans.
 - **Flexible edit formats**: Configurable via `[tools] edit_format`:
   - `str_replace`: Forgiving single-snippet replacement (with optional `symbol` scoping), or batch independent exact replacements in one file with `edits`.
@@ -152,7 +152,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 - On OpenAI-compatible Responses and ChatGPT plan routes, optional tool arguments can be omitted. An `edit` batch can send just `path` and `edits`.
 - **Transactional guarantees**: Multi-file refactors check all changes before writing. If any single change fails, all touched files roll back to their original state.
 - `str_replace` and `apply_patch` require a prior read or write before changing an existing file and reject a stale read. Hashline tracks file versions and the numbered ranges shown to the model.
-- **Distilled test output**: Build and test outputs (Cargo, Pytest, unittest, Go test, Jest, TAP, and compiler progress lines) fold passing tests (`[... 42 passed tests omitted ...]`), spill truncated output to a temp file when trimmed, and retain assertion failures and stack traces while preserving context space.
+- **Distilled test output**: Build and test outputs (Cargo, Pytest, unittest, Go test, Jest, TAP, and compiler progress lines) strip ANSI escape codes, fold passing tests (`[... 42 passed tests omitted ...]`), collapse Cargo file-lock waits and repeated manifest warnings, spill truncated output to a temp file when trimmed, and retain assertion failures and stack traces while preserving context space.
 
 ### Code Intelligence (LSP)
 
@@ -191,11 +191,12 @@ quack --mode edit --approvals ask     # implement with approvals
 ```
 
 In the TUI, **Shift-Tab** toggles Plan/Edit; `/permissions ask` or `/permissions allow` changes
-approvals. `/plan accept` implements the plan with the current approvals; `/edit` leaves planning
+approvals. `/plan accept` implements the plan with the current approvals (`/plan accept fresh`
+clears planning exploration into a concise handoff brief first); `/edit` leaves planning
 without starting implementation. See [work modes and approvals](docs/modes.md) for commands,
 configuration and migration from older modes.
 
-- **Interactive plan review**: `/plan` reads and searches, asks clarifying questions, and presents proposed changes and tests. The review bar offers **Implement plan** or **Keep planning**. Work mode and approvals survive reload and resume, subject to system policy.
+- **Interactive plan review**: `/plan` reads and searches, asks clarifying questions, and presents proposed changes and tests. The review bar offers **Implement plan**, **Implement plan (fresh context)**, or **Keep planning**. Work mode and approvals survive reload and resume, subject to system policy.
 - **Dual-model planning**: Use a large model to architect the plan (`[model] planner = "..."`) while your daily model carries out the implementation steps.
 - **Sub-agents**: Delegate work to isolated sub-agents using the `task` tool:
   - `explore`: Read-only scout that searches the codebase and returns file paths and line ranges, keeping exploratory reads out of the primary context.
@@ -219,6 +220,7 @@ configuration and migration from older modes.
 - **Event hooks**: Run custom scripts on session events (`session_start`, `user_prompt`, `pre_tool`, `post_tool`, `turn_end`) configured in `hooks.d/`. `/hooks` configures linked Jira issues and GitHub, GitLab, Gitea/Forgejo or Bitbucket reviews, including private repositories and multiple self-hosted instances. Enter credentials in a masked field, then **Save and enable**; the next prompt uses them. [Setup and examples](defaults/hooks.d/README.md).
 - **Standard Agent Skills (`SKILL.md`)**: Reads generic, standard Agent Skills (`SKILL.md` with YAML frontmatter) automatically from `.agents/skills/` (project) and `~/.agents/skills/` (user), alongside `skills/` in your config layers and bundles—plus extra folders such as `.claude/skills` via `[skills] compat_paths`. Only names and descriptions sit in the prompt index; the model loads full instructions on demand with the `skill` tool, or you can browse and invoke them via `/skills` and `/<name>`.
 - **Custom slash commands**: Place markdown prompt templates in `commands/` (e.g. `commands/git/pr.md` becomes `/git:pr`).
+- **Import from other coding agents**: If Quack finds folders such as `.claude/skills` or `.claude/commands`, the terminal startup panel points to `/compat`. Review a folder, then press **Enter** to load it for this run or **Ctrl-S** to load it and save its path for future runs. Workspace paths are saved in `.quack/config.toml` when project settings are allowed; home paths are saved in your user config. Nothing is imported automatically or copied. Only load prompt files you trust.
 - **Bundles**: Group skills, commands, MCP servers, and hooks into shareable directory bundles.
 
 ### Interface
@@ -226,7 +228,7 @@ configuration and migration from older modes.
 - **Full-screen Ratatui TUI**: Markdown formatting, syntax-highlighted code blocks, tables, and optional ASCII mode (`--ascii`).
 - **Wide-terminal sidebar**: At 140 columns × 24 rows and above, a right sidebar shows the session title, working folder, Git branch, running sub-agents, model, profile, context usage, generation speed and, when a plan is active, its progress and steps. It grows from 36 up to 48 columns on wider terminals and adapts as you resize; set `ui.sidebar = false` to disable it, or toggle it in `/config`.
 - **Window title**: The terminal's title shows the duck and what the session is about (`_(•)> fix the login bug`), and marks when a turn runs or quack needs you. If `[model] small` is configured, quack makes one background request to title the session (3–6 words, at most 50 characters) from the first message; thinking overhead is minimized while still leaving reasoning models room to think, broken `model.small` setups warn, and generation hiccups quietly keep the first-line fallback. The title also appears in the sidebar, `/resume` and `quack-gui` (its window title, header and job list). The first line of the message serves as the fallback, and `/title` sets it manually. `ui.terminal_title = false` turns it off.
-- **Smooth scrolling and selection**: Mouse wheel scrolling, click-to-position cursor, and OSC 52 terminal copy integration.
+- **Smooth scrolling and selection**: Mouse wheel scrolling, click-to-position cursor, drag-to-select copying (`Ctrl-Shift-C` or `Ctrl-C` with a selection copies without interrupting a running turn; `Shift`-drag uses the terminal's own selection), and native system clipboard (`wl-copy`, `xclip`/`xsel`, `pbcopy`, Windows clipboard) alongside OSC 52.
 - **Interactive pickers**: Fast, fuzzy-filtered modals for `/models`, `/providers`, `/config`, `/context`, `/stats`, `/doctor`, `/probe` (synthetic tool-calling probe), `/gui` (hand off session to `quack-gui`), and `/help`. In `/models` (and `quack-gui`'s model selector), set any model as the **Large** default (`[model] default`), **Small** helper (`[model] small`, used for session titles and `explore` sub-agents), or **Both** (`Ctrl-S` in `/models`, or `/models default [large|small|both] <provider>/<model>`). In `/config` → Layers, inspect each layer’s status and file path, then press Enter to copy the selected path. In `/config`, `/models`, `/profiles`, `/theme`, `/bundles`, `/hooks`, `/mcp` (including MCP add prompts), and approval prompts (`always`), press `Ctrl-L` (or `/scope [user|project]` / `--project` / `--user`) to choose whether writes go to user config or the project's `.quack/` folder.
 - **Status bar**: Separate work mode and approval indicators, context window utilization, model generation speed, and background tasks.
 
@@ -483,7 +485,7 @@ WSL, try the full hostname and check [Microsoft's WSL VPN and DNS tunneling guid
 | `sidebar` | `true` | Show session details on the right at 140 columns × 24 rows and above, growing from 36 up to 48 columns on wider terminals; `false` uses the full width for the conversation |
 | `gui_restore_tabs` | `true` | Reopen previously open workspace tabs (`session-tabs.json`) when starting `quack-gui` unless `--no-restore` is passed |
 
-**`[instructions]`, `[skills]`, `[memory]`, `[sessions]`**
+**`[instructions]`, `[skills]`, `[commands]`, `[memory]`, `[sessions]`**
 | Key | Default | Description |
 |---|---|---|
 | `instructions.files` | `["AGENTS.md"]` | Instruction filenames checked in workspace root |
@@ -492,6 +494,7 @@ WSL, try the full hostname and check [Microsoft's WSL VPN and DNS tunneling guid
 | `skills.compat_paths` | `[]` | Extra `SKILL.md` directories beyond `.agents/skills/`, `~/.agents/skills/`, and `skills/` (e.g. `.claude/skills`) |
 | `skills.disabled` | `[]` | Skill names to skip |
 | `skills.index_max_tokens` | `1500` | Maximum token budget for the skill index in the prompt |
+| `commands.compat_paths` | `[]` | Extra Markdown command folders (e.g. `.claude/commands`); relative paths are from the workspace root |
 | `memory.path` | `""` | Directory for persistent memory files (defaults to user data directory) |
 | `memory.project_scope` | `"data-dir"` | Memory storage scope: `data-dir` or `repo` (`.quack/memory`) |
 | `memory.writes` | `"auto"` | Approval policy for new memory notes: `auto` or `ask` |

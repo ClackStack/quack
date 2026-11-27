@@ -113,8 +113,8 @@ pub(crate) const COMMANDS: &[Command] = &[
     c(
         "plan",
         &[],
-        "[task|accept|off]",
-        "Read/search and propose changes plus tests for review; accept or keep planning",
+        "[task|accept [fresh]|off]",
+        "Read/search and propose changes plus tests for review; accept (or accept fresh) or keep planning",
         None,
     ),
     c("title", &[], "<text>", "Rename the session", None),
@@ -214,6 +214,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         &[],
         "",
         "Custom commands from the commands/ folders",
+        None,
+    ),
+    c(
+        "compat",
+        &[],
+        "",
+        "Review skills and commands found in other agents’ folders",
         None,
     ),
     c(
@@ -328,7 +335,18 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Enter", "Send the message"),
     ("Shift-Enter / Alt-Enter / Ctrl-J", "New line"),
     ("Esc", "Close modal or popup; otherwise interrupt the turn"),
-    ("Ctrl-C", "Clear input, interrupt, or press twice to quit"),
+    (
+        "Ctrl-C",
+        "Copy selection, clear input, interrupt, or press twice to quit",
+    ),
+    (
+        "Ctrl-Shift-C",
+        "Copy selection without interrupting a running turn",
+    ),
+    (
+        "Drag text",
+        "Select and copy from transcript or input (Shift-drag for terminal)",
+    ),
     ("Up / Down", "Move between input rows, then through history"),
     ("PageUp / PageDown", "Scroll the transcript a page"),
     ("Shift-Up / Shift-Down", "Scroll the transcript a line"),

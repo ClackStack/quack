@@ -223,12 +223,13 @@ impl TurnCtx {
     /// For an append-only provider, append plan and working-file reminders to the step's
     /// last tool result only when they changed since last emitted, and leave them in
     /// history so the next request strictly extends this one without mutating its tail.
-    fn keep_plan(&self, content: &mut String, last: bool) {
+    fn keep_plan(&self, content: &mut String, last: bool, is_todo: bool) {
         if !last || !self.setup.provider.append_only() {
             return;
         }
         let wf = working_files_reminder(self);
-        let plan = self.setup.tool_ctx.plan.reminder();
+        let todo_name = self.setup.surface.name_of("todo").unwrap_or("todo");
+        let plan = self.setup.tool_ctx.plan.reminder_for(todo_name);
         let Ok(mut state) = self.last_reminders.lock() else {
             return;
         };
@@ -241,6 +242,13 @@ impl TurnCtx {
         }
         if plan != state.plan {
             if let Some(text) = &plan {
+                if is_todo && let Some(rest) = content.strip_prefix("Plan updated:\n") {
+                    let suffix = rest
+                        .find("\n\n")
+                        .map(|i| rest[i..].to_owned())
+                        .unwrap_or_default();
+                    *content = format!("Plan updated.{suffix}");
+                }
                 content.push_str("\n\n");
                 content.push_str(text);
             }
@@ -1010,7 +1018,8 @@ async fn run_tool_calls(
                     ));
                 }
                 content = apply_tool_guard(ctx, call, content).await;
-                ctx.keep_plan(&mut content, end && n + 1 == together);
+                let is_todo = ctx.setup.surface.name_of("todo") == Some(call.name.as_str());
+                ctx.keep_plan(&mut content, end && n + 1 == together, is_todo);
                 ctx.push(
                     history,
                     Message::Tool {
@@ -1050,7 +1059,8 @@ async fn run_tool_calls(
             ));
         }
         out.model = apply_tool_guard(ctx, call, out.model).await;
-        ctx.keep_plan(&mut out.model, i == calls.len());
+        let is_todo = ctx.setup.surface.name_of("todo") == Some(call.name.as_str());
+        ctx.keep_plan(&mut out.model, i == calls.len(), is_todo);
         ctx.push(
             history,
             Message::Tool {
@@ -1839,6 +1849,10 @@ fn parallel(ctx: &TurnCtx, call: &ToolCall) -> bool {
     if internal == "task" {
         return subject == Subject::Agent { read_only: true };
     }
+    // Keep `skill` serialized so duplicate calls to the same skill in one step deduplicate.
+    if internal == "skill" {
+        return false;
+    }
     tool.kind() == ToolKind::ReadOnly
         && ctx
             .perms
@@ -1943,10 +1957,14 @@ async fn permit(
         }
         hooked = h.verdict.map(|(v, _)| v);
     }
+    let read_tools: Vec<&str> = ["read", "grep", "glob", "list_dir", "index", "lsp"]
+        .into_iter()
+        .filter_map(|t| ctx.setup.surface.name_of(t))
+        .collect();
     let decision = ctx
         .perms
         .lock()
-        .map(|p| p.check(&subject))
+        .map(|p| p.check_with_tools(&subject, Some(&read_tools)))
         .unwrap_or(Decision::Ask);
     // A deny rule beats a hook's allow, and a command outside the sandbox always asks.
     let decision = match (hooked, decision) {
@@ -2017,7 +2035,7 @@ async fn permit(
     // The user may have entered Plan while an approval dialog was open. Recheck
     // restrictions before any checkpoint or tool execution, without asking twice.
     if let Ok(p) = ctx.perms.lock()
-        && let Decision::Deny(reason) = p.check(&subject)
+        && let Decision::Deny(reason) = p.check_with_tools(&subject, Some(&read_tools))
     {
         return Err(format!("permission denied: {reason}"));
     }
@@ -2115,9 +2133,30 @@ async fn execute(
     tctx.ask = Some(atx);
     let (stx, mut srx) = mpsc::unbounded_channel();
     tctx.spawn = Some(stx);
+    // Deduplicate `skill` calls when the skill's verbatim instructions are already in context.
+    let dedup_skill = match &subject {
+        Subject::Skill(name)
+            if ctx
+                .loaded_skills
+                .lock()
+                .ok()
+                .is_some_and(|s| s.is_verbatim(name)) =>
+        {
+            Some(name.clone())
+        }
+        _ => None,
+    };
     // The call runs until done; questions it asks on the way go to the user, and
     // sub-agents it starts run here.
-    let mut out = {
+    let mut out = if let Some(name) = &dedup_skill {
+        ToolOutput::ok(
+            format!(
+                "Skill `{name}` is already loaded in this conversation; follow the instructions \
+                 already in context."
+            ),
+            format!("skill {name} already loaded"),
+        )
+    } else {
         let run = tool.run(args, &tctx);
         tokio::pin!(run);
         loop {
@@ -2144,16 +2183,20 @@ async fn execute(
         ctx.emit(Event::Plan { checklist });
     }
     if out.ok
-        && ctx.agent.is_none()
+        && dedup_skill.is_none()
         && let Subject::Skill(name) = &subject
     {
-        session::record(ctx.log.as_ref(), "skill", json!({ "name": name }));
+        if ctx.agent.is_none() {
+            session::record(ctx.log.as_ref(), "skill", json!({ "name": name }));
+        }
         let updated = ctx
             .loaded_skills
             .lock()
             .ok()
             .and_then(|mut s| s.record(history_index, name.clone()).then(|| s.names()));
-        if let Some(skills) = updated {
+        if ctx.agent.is_none()
+            && let Some(skills) = updated
+        {
             ctx.emit(Event::LoadedSkills { skills });
         }
     }

@@ -165,6 +165,7 @@ pub struct App {
     skills: Vec<quack_protocol::SkillInfo>,
     /// Custom slash commands, minus any that a built-in command's name hides.
     custom: Vec<quack_protocol::CommandInfo>,
+    compat_folders: Option<Vec<quack_protocol::CompatFolder>>,
     /// Prompts of the ready MCP servers, runnable as `/<server>:<prompt>`.
     mcp_prompts: Vec<quack_protocol::CommandInfo>,
     /// Workspace relative file paths for `@file` completion.
@@ -313,6 +314,7 @@ impl App {
             starting_new: false,
             skills: Vec::new(),
             custom: Vec::new(),
+            compat_folders: None,
             mcp_prompts: Vec::new(),
             files: Vec::new(),
             hook_runs: Vec::new(),

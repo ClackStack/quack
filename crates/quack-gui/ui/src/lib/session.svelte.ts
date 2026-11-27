@@ -1474,11 +1474,15 @@ export class Session {
 	async setApprovals(policy: ApprovalPolicy) {
 		return this.#send({ op: 'set_approval_policy', policy });
 	}
-	async acceptPlan() {
+	async acceptPlan(clearContext = false) {
 		this.planReviewReady = false;
 		this.#planStaleForReview = true;
 		// An empty mode keeps the current approvals; the engine performs the handoff.
-		return this.#send({ op: 'accept_plan', mode: '' });
+		return this.#send({
+			op: 'accept_plan',
+			mode: '',
+			...(clearContext ? { clear_context: true } : {})
+		});
 	}
 	/** Starts a browser subscription sign-in, or cancels the pending one with `null`. */
 	async signIn(id: string | null) {

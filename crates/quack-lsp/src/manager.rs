@@ -170,18 +170,33 @@ impl LspManager {
 
     /// The nearest folder at or above the file holding one of the server's root markers,
     /// not going above the workspace root; else the workspace root.
+    ///
+    /// For Cargo projects (`Cargo.toml` marker), if a nested member crate's `Cargo.toml`
+    /// does not declare `[workspace]`, continue walking up to `self.root` for the nearest
+    /// enclosing Cargo workspace root so one `rust-analyzer` instance serves the whole
+    /// workspace instead of spawning one per member crate.
     fn project_root(&self, spec: &ServerSpec, path: &Path) -> PathBuf {
         let markers = &spec.file.root_markers;
         let inside = path.starts_with(&self.root);
+        let wants_cargo = markers.iter().any(|m| m == "Cargo.toml");
         let mut dir = path.parent();
+        let mut first_match: Option<PathBuf> = None;
         while let Some(d) = dir {
             if !markers.is_empty() && has_marker(d, markers) {
-                return d.to_path_buf();
+                if !wants_cargo || has_non_cargo_marker(d, markers) || is_cargo_workspace_root(d) {
+                    return d.to_path_buf();
+                }
+                if first_match.is_none() {
+                    first_match = Some(d.to_path_buf());
+                }
             }
             if inside && d == self.root {
                 break;
             }
             dir = d.parent();
+        }
+        if let Some(root) = first_match {
+            return root;
         }
         if inside {
             self.root.clone()
@@ -595,9 +610,131 @@ fn has_marker(dir: &Path, markers: &[String]) -> bool {
     })
 }
 
+fn has_non_cargo_marker(dir: &Path, markers: &[String]) -> bool {
+    markers
+        .iter()
+        .filter(|m| m.as_str() != "Cargo.toml")
+        .any(|m| {
+            if m.contains('*') {
+                std::fs::read_dir(dir).is_ok_and(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .any(|e| quack_config::glob_match(m, &e.file_name().to_string_lossy()))
+                })
+            } else {
+                dir.join(m).exists()
+            }
+        })
+}
+
+fn is_cargo_workspace_root(dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+        return false;
+    };
+    text.parse::<toml::Table>()
+        .is_ok_and(|table| table.contains_key("workspace"))
+}
+
 fn toml_to_json(t: &toml::Table) -> Value {
     if t.is_empty() {
         return Value::Null;
     }
     serde_json::to_value(t).unwrap_or(Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rust_spec() -> ServerSpec {
+        let file: LspServerFile = toml::from_str(
+            r#"
+            command = "rust-analyzer"
+            extensions = ["rs"]
+            root_markers = ["Cargo.toml", "rust-project.json"]
+            "#,
+        )
+        .expect("lsp server file");
+        ServerSpec {
+            id: "rust".into(),
+            file,
+            program: Ok(PathBuf::from("rust-analyzer")),
+            env: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn cargo_member_resolves_to_enclosing_workspace_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
+        )
+        .expect("root cargo");
+        let a_src = root.join("crates/a/src");
+        let b_src = root.join("crates/b/src");
+        std::fs::create_dir_all(&a_src).expect("mkdir a");
+        std::fs::create_dir_all(&b_src).expect("mkdir b");
+        std::fs::write(
+            root.join("crates/a/Cargo.toml"),
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("a cargo");
+        std::fs::write(
+            root.join("crates/b/Cargo.toml"),
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("b cargo");
+
+        let spec = rust_spec();
+        let mgr = LspManager::new(vec![spec.clone()], root.to_path_buf(), None);
+        assert_eq!(mgr.project_root(&spec, &a_src.join("lib.rs")), root);
+        assert_eq!(mgr.project_root(&spec, &b_src.join("lib.rs")), root);
+    }
+
+    #[test]
+    fn nested_standalone_workspace_and_single_crate_keep_their_own_roots() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/a\"]\nexclude = [\"tools/sub\"]\n",
+        )
+        .expect("root cargo");
+        let sub_src = root.join("tools/sub/crates/x/src");
+        std::fs::create_dir_all(&sub_src).expect("mkdir sub");
+        std::fs::write(
+            root.join("tools/sub/Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/x\"]\n",
+        )
+        .expect("sub workspace");
+        std::fs::write(
+            root.join("tools/sub/crates/x/Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("x cargo");
+
+        let spec = rust_spec();
+        let mgr = LspManager::new(vec![spec.clone()], root.to_path_buf(), None);
+        assert_eq!(
+            mgr.project_root(&spec, &sub_src.join("lib.rs")),
+            root.join("tools/sub")
+        );
+
+        // Single crate with no enclosing `[workspace]` keeps its crate directory.
+        let single_tmp = tempfile::tempdir().expect("single");
+        let crate_dir = single_tmp.path().join("app");
+        std::fs::create_dir_all(crate_dir.join("src")).expect("mkdir app");
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("app cargo");
+        let single_mgr = LspManager::new(vec![spec.clone()], single_tmp.path().to_path_buf(), None);
+        assert_eq!(
+            single_mgr.project_root(&spec, &crate_dir.join("src/main.rs")),
+            crate_dir
+        );
+    }
 }

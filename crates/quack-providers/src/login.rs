@@ -113,6 +113,16 @@ fn auth(msg: impl Into<String>) -> ProviderError {
     ProviderError::new(ErrorKind::Auth, msg)
 }
 
+fn account_key(c: &Credentials) -> String {
+    if !c.subject.is_empty() {
+        c.subject.clone()
+    } else if !c.client_id.is_empty() {
+        c.client_id.clone()
+    } else {
+        c.email.clone()
+    }
+}
+
 impl Login {
     /// `data_dir` is the user data directory; credentials go in its `auth` folder.
     pub fn new(
@@ -153,12 +163,19 @@ impl Login {
 
     /// An access token for the next request, renewed when it is about to expire.
     pub async fn bearer(&self) -> Result<String, ProviderError> {
+        self.bearer_with_account().await.map(|(token, _)| token)
+    }
+
+    /// Like [`bearer`](Self::bearer), also returning a stable account identifier (never a
+    /// secret token) so persistent transports can distinguish a routine token refresh from
+    /// an account switch.
+    pub(crate) async fn bearer_with_account(&self) -> Result<(String, String), ProviderError> {
         let mut cached = self.cached.lock().await;
         if let Some(c) = cached.as_ref()
             && c.signed_in()
             && c.expires_at > now() + EARLY_SECS
         {
-            return Ok(c.access_token.clone());
+            return Ok((c.access_token.clone(), account_key(c)));
         }
         let not_signed_in = || {
             auth(format!(
@@ -198,8 +215,9 @@ impl Login {
             }
         };
         let token = c.access_token.clone();
+        let account = account_key(&c);
         *cached = Some(c);
-        Ok(token)
+        Ok((token, account))
     }
 
     async fn refresh(&self, mut c: Credentials) -> Result<Credentials, ProviderError> {

@@ -12,7 +12,8 @@ use reqwest::header::{self, HeaderMap};
 use ring::digest;
 use serde::Serialize;
 use serde_json::{Map, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::{
@@ -21,17 +22,32 @@ use tokio_tungstenite::tungstenite::{
 
 use super::{
     EgressDraft, EgressKind, ErrorKind, Provider, ProviderError, RequestHeaders, ResponsesSession,
+    SocketAuth,
 };
 use super::{StreamEvent, StreamLedgerGuard, forward, responses};
 
 const PROTOCOL: &str = "openai-responses-websocket";
 const RECONNECT_DELAY: Duration = Duration::from_secs(60);
 const MAX_SOCKET_AGE: Duration = Duration::from_secs(55 * 60);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+const KEEPALIVE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 pub(super) struct SessionSocket {
-    connection: Option<Connection>,
+    connection: Option<ParkedConnection>,
     retry_after: Option<Instant>,
+    #[cfg(test)]
+    keepalive_override: Option<Duration>,
+}
+
+impl SessionSocket {
+    fn keepalive_interval(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(d) = self.keepalive_override {
+            return d;
+        }
+        KEEPALIVE_INTERVAL
+    }
 }
 
 impl fmt::Debug for SessionSocket {
@@ -43,19 +59,121 @@ impl fmt::Debug for SessionSocket {
     }
 }
 
+/// An idle Responses WebSocket kept warm by a background task that sends periodic Ping
+/// frames, flushes Pong replies to server Pings, and drops the socket promptly on Close.
+struct ParkedWire {
+    stop: Option<oneshot::Sender<()>>,
+    task: JoinHandle<Option<WebSocketStream<reqwest::Upgraded>>>,
+}
+
+impl ParkedWire {
+    fn park(mut wire: WebSocketStream<reqwest::Upgraded>, interval: Duration) -> Self {
+        let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut stop_rx => return Some(wire),
+                    _ = tick.tick() => {
+                        if !matches!(
+                            timeout(
+                                KEEPALIVE_WRITE_TIMEOUT,
+                                wire.send(Message::Ping(Default::default())),
+                            )
+                            .await,
+                            Ok(Ok(()))
+                        ) {
+                            return None;
+                        }
+                    }
+                    incoming = wire.next() => match incoming {
+                        Some(Ok(Message::Ping(_))) => {
+                            if !matches!(
+                                timeout(KEEPALIVE_WRITE_TIMEOUT, wire.flush()).await,
+                                Ok(Ok(()))
+                            ) {
+                                return None;
+                            }
+                        }
+                        Some(Ok(Message::Pong(_))) => {}
+                        _ => return None,
+                    }
+                }
+            }
+        });
+        Self {
+            stop: Some(stop_tx),
+            task,
+        }
+    }
+
+    async fn take(mut self) -> Option<WebSocketStream<reqwest::Upgraded>> {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        match timeout(KEEPALIVE_WRITE_TIMEOUT, &mut self.task).await {
+            Ok(Ok(wire)) => wire,
+            _ => {
+                self.task.abort();
+                None
+            }
+        }
+    }
+}
+
+impl Drop for ParkedWire {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+struct ParkedConnection {
+    wire: ParkedWire,
+    opened: Instant,
+    provider: Arc<quack_config::ProviderFile>,
+    auth: SocketAuth,
+    previous: Option<Continuation>,
+}
+
+impl ParkedConnection {
+    fn belongs_to(&self, provider: &Provider, auth: &SocketAuth) -> bool {
+        self.opened.elapsed() < MAX_SOCKET_AGE
+            && Arc::ptr_eq(&self.provider, &provider.file)
+            && &self.auth == auth
+    }
+
+    async fn into_active(self) -> Option<Connection> {
+        let wire = self.wire.take().await?;
+        Some(Connection {
+            wire,
+            opened: self.opened,
+            provider: self.provider,
+            auth: self.auth,
+            previous: self.previous,
+        })
+    }
+}
+
 struct Connection {
     wire: WebSocketStream<reqwest::Upgraded>,
     opened: Instant,
     provider: Arc<quack_config::ProviderFile>,
-    headers: RequestHeaders,
+    auth: SocketAuth,
     previous: Option<Continuation>,
 }
 
 impl Connection {
-    fn belongs_to(&self, provider: &Provider, headers: &RequestHeaders) -> bool {
-        self.opened.elapsed() < MAX_SOCKET_AGE
-            && Arc::ptr_eq(&self.provider, &provider.file)
-            && &self.headers == headers
+    fn park(self, interval: Duration) -> ParkedConnection {
+        ParkedConnection {
+            wire: ParkedWire::park(self.wire, interval),
+            opened: self.opened,
+            provider: self.provider,
+            auth: self.auth,
+            previous: self.previous,
+        }
     }
 }
 
@@ -207,10 +325,11 @@ impl Provider {
         }
 
         let url = self.url(responses::RESPONSES_PATH);
+        let keepalive = state.keepalive_interval();
         // Take ownership until completion so cancellation drops any partial exchange.
         let existing = state.connection.take();
-        let headers = match self.request_headers().await {
-            Ok(headers) => headers,
+        let (headers, auth) = match self.websocket_auth().await {
+            Ok(resolved) => resolved,
             Err(error) => {
                 self.record_ledger(
                     EgressDraft::new(EgressKind::Inference, &url, PROTOCOL)
@@ -220,12 +339,18 @@ impl Provider {
                 return true;
             }
         };
-        let mut connection = existing.filter(|socket| socket.belongs_to(self, &headers));
+        let mut connection = match existing {
+            Some(parked) if parked.belongs_to(self, &auth) => parked.into_active().await,
+            _ => None,
+        };
         loop {
             let reused = connection.is_some();
             let mut socket = match connection.take() {
                 Some(socket) => socket,
-                None => match self.open_websocket(&url, headers.clone()).await {
+                None => match self
+                    .open_websocket(&url, headers.clone(), auth.clone())
+                    .await
+                {
                     Ok(socket) => socket,
                     Err(error) => {
                         self.record_ledger(
@@ -266,7 +391,7 @@ impl Provider {
             {
                 Outcome::Completed(previous) => {
                     socket.previous = previous;
-                    state.connection = Some(socket);
+                    state.connection = Some(socket.park(keepalive));
                     state.retry_after = None;
                     return true;
                 }
@@ -302,6 +427,7 @@ impl Provider {
         &self,
         url: &str,
         headers: RequestHeaders,
+        auth: SocketAuth,
     ) -> Result<Connection, ProviderError> {
         // HTTP/1.1 upgrade, with the same TLS and proxy configuration as inference.
         // Never follow an upgrade redirect with authentication or a conversation body.
@@ -367,7 +493,7 @@ impl Provider {
             wire: WebSocketStream::from_raw_socket(io, Role::Client, None).await,
             opened: Instant::now(),
             provider: self.file.clone(),
-            headers,
+            auth,
             previous: None,
         })
     }
@@ -836,5 +962,199 @@ mod tests {
         assert!(rx.recv().await.is_none());
         server.await.expect("server assertions");
         assert_eq!(ledger.snapshot().0.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn idle_keepalive_answers_server_ping_and_sends_client_ping() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let p = provider(&format!(
+            "http://{}",
+            listener.local_addr().expect("address")
+        ));
+        let session = Arc::new(ResponsesSession::default());
+        session.socket.lock().await.keepalive_override = Some(Duration::from_millis(40));
+
+        let server = tokio::spawn(async move {
+            let mut wire = accept(&listener).await;
+            let first = next_frame(&mut wire).await;
+            assert!(first.get("previous_response_id").is_none());
+            complete(&mut wire, "resp_warm", json!([])).await;
+
+            // Send a server ping while the client is idle; expect Pong AND a client Ping.
+            wire.send(Message::Ping(b"hi".to_vec().into()))
+                .await
+                .expect("server ping");
+            let mut saw_pong = false;
+            let mut saw_client_ping = false;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !(saw_pong && saw_client_ping) {
+                let frame = timeout_at(deadline, wire.next())
+                    .await
+                    .expect("keepalive frame within 2s")
+                    .expect("stream open")
+                    .expect("valid frame");
+                match frame {
+                    Message::Pong(p) if p.as_ref() == b"hi" => saw_pong = true,
+                    Message::Ping(p) => {
+                        saw_client_ping = true;
+                        wire.send(Message::Pong(p)).await.expect("server pong");
+                    }
+                    other => panic!("unexpected idle frame: {other:?}"),
+                }
+            }
+
+            // Second turn arrives on the same live socket with continuation intact.
+            let second = loop {
+                match wire.next().await.expect("frame").expect("valid") {
+                    Message::Text(t) => {
+                        break serde_json::from_str::<Value>(t.as_str()).expect("json");
+                    }
+                    Message::Ping(p) => wire.send(Message::Pong(p)).await.expect("pong"),
+                    Message::Pong(_) => {}
+                    other => panic!("unexpected frame: {other:?}"),
+                }
+            };
+            assert_eq!(second["previous_response_id"], "resp_warm");
+            complete(&mut wire, "resp_second", json!([])).await;
+        });
+
+        stream(&p, &session, vec![user("turn one")]).await;
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let events = stream(&p, &session, vec![user("turn one"), user("turn two")]).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ResponseId(id) if id == "resp_second"))
+        );
+        server.await.expect("server assertions");
+    }
+
+    #[tokio::test]
+    async fn server_close_while_idle_reopens_cleanly_without_http_fallback() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let p = provider(&format!(
+            "http://{}",
+            listener.local_addr().expect("address")
+        ));
+        let session = Arc::new(ResponsesSession::default());
+
+        let server = tokio::spawn(async move {
+            let mut first_wire = accept(&listener).await;
+            next_frame(&mut first_wire).await;
+            complete(&mut first_wire, "resp_one", json!([])).await;
+            first_wire.close(None).await.expect("close idle socket");
+
+            let mut second_wire = accept(&listener).await;
+            let replay = next_frame(&mut second_wire).await;
+            assert!(replay.get("previous_response_id").is_none());
+            complete(&mut second_wire, "resp_two", json!([])).await;
+        });
+
+        stream(&p, &session, vec![user("turn one")]).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let events = stream(&p, &session, vec![user("turn one"), user("turn two")]).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ResponseId(id) if id == "resp_two"))
+        );
+        server.await.expect("server assertions");
+    }
+
+    #[cfg(feature = "auth-chatgpt")]
+    #[expect(
+        clippy::result_large_err,
+        reason = "tungstenite fixes the handshake callback's error type"
+    )]
+    #[tokio::test]
+    async fn oauth_token_refresh_for_same_account_preserves_live_socket() {
+        use std::sync::atomic::AtomicUsize;
+
+        let issuer = MockServer::start().await;
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let counter = refreshes.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/accounts/oauth/token"))
+            .respond_with(move |_req: &wiremock::Request| {
+                let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                // `expires_in: 10` is under `EARLY_SECS` (120), so each turn refreshes immediately.
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "access_token": format!("access-token-{n}"),
+                    "refresh_token": format!("refresh-token-{n}"),
+                    "expires_in": 10,
+                    "scope": "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
+                }))
+            })
+            .mount(&issuer)
+            .await;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("address"));
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let auth_dir = data_dir.path().join("auth");
+        std::fs::create_dir_all(&auth_dir).expect("mkdir auth");
+        std::fs::write(
+            auth_dir.join("chatgpt.json"),
+            serde_json::to_string(&crate::login::Credentials {
+                client_id: "client-1".into(),
+                subject: "acct-same".into(),
+                email: "dev@example.com".into(),
+                access_token: "stale-token".into(),
+                refresh_token: "refresh-token-0".into(),
+                id_token: String::new(),
+                expires_at: 1,
+                scopes: vec!["chatgpt.tokens.use.direct".into()],
+            })
+            .expect("creds json"),
+        )
+        .expect("write creds");
+
+        let file = serde_json::from_value(json!({
+            "api": "openai-responses",
+            "base_url": format!("{base}/v1"),
+            "auth": { "type": "chatgpt", "issuer": issuer.uri() },
+            "responses_websocket": true,
+            "http": { "no_proxy": true }
+        }))
+        .expect("provider config");
+        let data_os = data_dir.path().as_os_str().to_os_string();
+        let p = Provider::new("chatgpt", file, &Default::default(), &|k| {
+            (k == "QUACK_DATA_DIR").then(|| data_os.clone())
+        })
+        .expect("provider");
+        let session = Arc::new(ResponsesSession::default());
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("connect");
+            let mut wire = accept_hdr_async(stream, |req: &UpgradeRequest, response| {
+                assert_eq!(
+                    req.headers()[header::AUTHORIZATION],
+                    "Bearer access-token-1"
+                );
+                Ok(response)
+            })
+            .await
+            .expect("upgrade");
+
+            let first = next_frame(&mut wire).await;
+            assert!(first.get("previous_response_id").is_none());
+            complete(&mut wire, "resp_oauth_1", json!([])).await;
+
+            // Turn 2 must stay on the SAME socket even though the OAuth bearer token rotated.
+            let second = next_frame(&mut wire).await;
+            assert_eq!(second["previous_response_id"], "resp_oauth_1");
+            complete(&mut wire, "resp_oauth_2", json!([])).await;
+        });
+
+        stream(&p, &session, vec![user("turn one")]).await;
+        let events = stream(&p, &session, vec![user("turn one"), user("turn two")]).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ResponseId(id) if id == "resp_oauth_2"))
+        );
+        assert_eq!(refreshes.load(Ordering::SeqCst), 2);
+        server.await.expect("server assertions");
     }
 }

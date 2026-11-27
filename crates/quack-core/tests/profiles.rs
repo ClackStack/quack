@@ -161,12 +161,12 @@ async fn every_shipped_profile_loads_cleanly() {
             .rfind(|b| b.to_string().contains(&format!("hello {profile}")))
             .expect("request");
         let offered = tools(&body);
-        // Skills, language servers, and vision are capability-gated.
-        for t in file
-            .tools
-            .iter()
-            .filter(|t| !matches!(t.maps_to.as_deref(), Some("skill" | "lsp" | "view_image")))
-        {
+        // Skills, language servers, vision, and tree-sitter outlines are capability-gated.
+        let index_supported = quack_tools::outline::supported(Path::new("a.rs"));
+        for t in file.tools.iter().filter(|t| {
+            !matches!(t.maps_to.as_deref(), Some("skill" | "lsp" | "view_image"))
+                && (t.maps_to.as_deref() != Some("index") || index_supported)
+        }) {
             assert!(
                 offered.contains_key(&t.name),
                 "{profile}: `{}` not offered",
@@ -464,6 +464,11 @@ async fn codex_exposes_task_and_gates_view_image_on_vision() {
         );
         assert!(offered.contains_key("update_plan"), "{offered:?}");
         assert_eq!(offered.contains_key("view_image"), vision, "{offered:?}");
+        assert_eq!(
+            offered.contains_key("index"),
+            quack_tools::outline::supported(Path::new("a.rs")),
+            "{offered:?}"
+        );
         for name in [
             "spawn_agent",
             "wait",
@@ -506,11 +511,12 @@ async fn codex_shell_takes_an_argument_list() {
     let offered = tools(&bodies[0]);
     let mut names: Vec<&str> = offered.keys().map(String::as_str).collect();
     names.sort_unstable();
-    // Exclusive: only its own tools (memory and skill are offered when available).
+    // Exclusive: only its own tools (index, memory and skill are offered when available).
     assert!(
         names.iter().all(|n| [
             "apply_patch",
             "ask_user",
+            "index",
             "memory",
             "read",
             "shell",

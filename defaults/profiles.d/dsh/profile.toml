@@ -16,7 +16,7 @@ edit_format = "str_replace"
 [[tools]]
 name = "read"
 maps_to = "read"
-description = "Reads a file, with line numbers. Long files are clipped; when that happens, search inside the file for the lines you need and read that range with `offset` and `limit`."
+description = "Reads a file, with line numbers. A large source file read without `offset`/`limit` returns its symbol outline; then read the lines you need with `offset` and `limit`, or pass `symbol` (e.g. `parse` or `Type::method`) to read one definition."
 
 [[tools]]
 name = "write"
@@ -31,7 +31,7 @@ description = "Replaces an exact literal string in a file: `old_string` must mat
 [[tools]]
 name = "bash"
 maps_to = "shell"
-description = "Runs a shell command in the workspace and returns its output with the exit status. Batch related exploration into one command (grep -n, sed -n ranges, head/tail) instead of many small calls. Before editing or overwriting an existing file, use `read` on it; shell output does not satisfy the tracked-read guard."
+description = "Runs a shell command in the workspace and returns its output with the exit status. Batch related exploration into one command (grep -n, sed -n ranges, head/tail) instead of many small calls. For long-running commands, pass `background: true` (returns a `job_id`), then use `job_action: \"wait\" | \"output\" | \"stop\" | \"list\"` with `job_id` and `wait_secs` (blocks until exit or timeout and returns only new output; avoid overlapping builds on the same build directory). Before editing or overwriting an existing file, use `read` on it; shell output does not satisfy the tracked-read guard."
 
 [[tools]]
 name = "todo_write"

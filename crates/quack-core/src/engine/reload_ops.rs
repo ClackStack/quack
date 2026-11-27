@@ -27,7 +27,7 @@ impl Engine {
         });
         if need_setup_refresh && let Some(c) = &mut self.convo {
             let old = c.setup.clone();
-            let cfg = self.config.clone();
+            let cfg = self.extension_config.clone();
             let tx = self.tx.clone();
             if let Ok(fresh) =
                 tokio::task::spawn_blocking(move || startup::refresh_extensions(&old, &cfg, &tx))
@@ -36,6 +36,7 @@ impl Engine {
                 let prompt_changed = fresh.system != c.setup.system
                     || fresh.effective_session_context() != c.setup.effective_session_context()
                     || fresh.surface.tools != c.setup.surface.tools;
+                self.skills_changed |= fresh.vars.skills != c.setup.vars.skills;
                 c.setup = Arc::new(fresh);
                 if prompt_changed {
                     c.responses_session = Arc::default();
@@ -68,7 +69,8 @@ impl Engine {
                     tokio::time::timeout(Duration::from_secs(3), self.mcp.manager.shutdown()).await;
                 self.start_mcp().await;
                 if let Some(c) = &mut self.convo {
-                    let mut setup = startup::refresh_extensions(&c.setup, &self.config, &self.tx);
+                    let mut setup =
+                        startup::refresh_extensions(&c.setup, &self.extension_config, &self.tx);
                     setup.mcp = self.mcp.clone();
                     c.setup = Arc::new(setup);
                 }
@@ -350,8 +352,8 @@ impl Engine {
                 });
             }
         };
-        self.config = config.clone();
-        self.config_tx.send_replace(config.clone());
+        self.imports.on_reload();
+        self.replace_config(config);
         let _ = tokio::time::timeout(
             Duration::from_secs(3),
             futures::future::join(self.mcp.manager.shutdown(), self.lsp.shutdown()),
@@ -383,6 +385,7 @@ impl Engine {
             (s.provider.id.clone(), s.model.id.clone())
         });
         let tx = self.tx.clone();
+        let config = self.extension_config.clone();
         let mcp = self.mcp.clone();
         let lsp = self.lsp.clone();
         let reload = reload.clone();
@@ -421,11 +424,13 @@ impl Engine {
         let (history, loaded_skills) = match self.convo.take() {
             Some(c) => {
                 self.saved_plan_start = c.plan_start;
+                let old_setup = c.editor.as_ref().unwrap_or(&c.setup);
                 if let Some(saved) = &self.saved_session_context
-                    && setup.profile.id == c.setup.profile.id
-                    && setup.tool_ctx.root == c.setup.tool_ctx.root
+                    && setup.profile.id == old_setup.profile.id
+                    && setup.tool_ctx.root == old_setup.tool_ctx.root
                 {
                     setup.set_session_context(Some(saved.clone()));
+                    self.skills_changed |= setup.vars.skills != old_setup.vars.skills;
                 }
                 if let Ok(old) = c.perms.lock() {
                     // A locked mode keeps the configured one from `setup`.
@@ -453,6 +458,9 @@ impl Engine {
             }
             None => (Vec::new(), Arc::default()),
         };
+        let plan_start = (perms.work_mode == WorkMode::Plan)
+            .then_some(self.saved_plan_start)
+            .flatten();
         self.convo = Some(Conversation {
             perms: Arc::new(Mutex::new(perms)),
             nested: nested(&self.config, &setup, &history),
@@ -460,7 +468,7 @@ impl Engine {
             setup: Arc::new(setup),
             history: Some(history),
             editor: None,
-            plan_start: None,
+            plan_start,
             responses_session: Arc::default(),
             last_reminders: Arc::default(),
             egress_guard: Arc::default(),

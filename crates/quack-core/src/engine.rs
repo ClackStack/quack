@@ -42,6 +42,7 @@ and how to check the result. The user will accept the plan or ask for changes.";
 const OP_CAPACITY: usize = 64;
 
 /// A client's connection to a running engine.
+mod compat_ops;
 mod modes;
 mod reload_ops;
 mod session_ops;
@@ -128,13 +129,21 @@ enum Queued {
     Prune(Option<Vec<usize>>),
     /// `/reload`, or a trust decision.
     Reload(Option<(String, String)>),
-    /// `/plan accept`, into this mode.
-    Accept(String),
+    /// `/plan accept`, into this mode, optionally clearing planning context.
+    Accept {
+        mode: String,
+        clear_context: bool,
+    },
     /// `/fork`.
     Fork,
     /// `/fork --worktree [name]`.
     ForkWorktree(Option<String>),
     HookSave(Box<Op>),
+    ImportCompat {
+        kind: quack_protocol::CompatKind,
+        path: String,
+        save: bool,
+    },
     ReasoningEffort(Option<String>),
 }
 
@@ -198,6 +207,8 @@ fn nested(config: &Loaded, setup: &Setup, history: &[Message]) -> Arc<Nested> {
 pub struct Engine {
     config: Arc<Loaded>,
     config_tx: watch::Sender<Arc<Loaded>>,
+    imports: crate::compat::Imports,
+    extension_config: Arc<Loaded>,
     /// A reload is reading files or rebuilding the session; turns wait for it.
     reloading: bool,
     /// The planner's setup is being built; turns wait for it.
@@ -238,6 +249,8 @@ pub struct Engine {
     pending_watch: Option<crate::watch::WatchEvent>,
     /// Told to the model at the start of the next turn, e.g. that the user undid an edit.
     notes: Vec<String>,
+    /// The pinned opening context no longer describes the current skills.
+    skills_changed: bool,
     /// MCP servers, shared by every model the session switches to.
     mcp: Arc<crate::mcp::Mcp>,
     /// Language servers, likewise.
@@ -297,8 +310,10 @@ impl Engine {
         let prompt_lock = Arc::default();
         wire_ledger(&ledger, &tx, &ledger_log);
         let engine = Self {
+            extension_config: config.clone(),
             config,
             config_tx,
+            imports: Default::default(),
             reloading: false,
             switching: false,
             tx: tx.clone(),
@@ -329,6 +344,7 @@ impl Engine {
             pending_sandbox: None,
             pending_watch: None,
             notes: Vec::new(),
+            skills_changed: false,
             stats: Arc::default(),
             hooks: Arc::default(),
             start_context: None,
@@ -430,8 +446,7 @@ impl Engine {
                             self.reloading = false;
                             match result {
                                 Ok((config, note)) => {
-                                    self.config = Arc::new(*config);
-                                    self.config_tx.send_replace(self.config.clone());
+                                    self.replace_config(Arc::new(*config));
                                     self.load_hooks().await;
                                     self.emit(Event::ConfigReloaded);
                                     match crate::hook_setup::inspect(&self.config, &id) {
@@ -753,10 +768,10 @@ impl Engine {
     /// The sub-agent pool, made again when a reload replaced the config or the servers.
     fn pool(&mut self) -> Arc<crate::agent::Pool> {
         match &self.pool {
-            Some(p) if p.current(&self.config, &self.mcp, &self.lsp) => p.clone(),
+            Some(p) if p.current(&self.extension_config, &self.mcp, &self.lsp) => p.clone(),
             _ => {
                 let p = Arc::new(crate::agent::Pool::new(
-                    self.config.clone(),
+                    self.extension_config.clone(),
                     self.mcp.clone(),
                     self.lsp.clone(),
                     self.agent_runs.clone(),
@@ -842,10 +857,14 @@ impl Engine {
     async fn queue_accept_plan(
         &mut self,
         mode: String,
+        clear_context: bool,
         done: &mpsc::Sender<(TurnId, Vec<Message>)>,
         reload: &mpsc::Sender<Reload>,
     ) {
-        self.queued.push_back(Queued::Accept(mode));
+        self.queued.push_back(Queued::Accept {
+            mode,
+            clear_context,
+        });
         self.next_queued(done, reload).await;
     }
 
@@ -1020,7 +1039,13 @@ impl Engine {
             Op::SetApprovalPolicy { policy } => self.set_approval_policy(policy),
             Op::SetSandbox { off } if !self.started => self.pending_sandbox = Some(off),
             Op::SetSandbox { off } => self.set_sandbox(off),
-            Op::AcceptPlan { mode } => self.queue_accept_plan(mode, done, reload).await,
+            Op::AcceptPlan {
+                mode,
+                clear_context,
+            } => {
+                self.queue_accept_plan(mode, clear_context, done, reload)
+                    .await
+            }
             Op::SaveMemory {
                 scope,
                 name,
@@ -1045,6 +1070,11 @@ impl Engine {
             Op::SaveSetting { key, value, scope } => self.save_setting(&key, &value, &scope).await,
             Op::ReloadConfig => self.queue_reload(done, reload).await,
             Op::TrustProject { decision } => self.trust_project(decision, done, reload).await,
+            Op::ImportCompat { kind, path, save } => {
+                self.queued
+                    .push_back(Queued::ImportCompat { kind, path, save });
+                self.next_queued(done, reload).await;
+            }
             Op::EnableHook {
                 id,
                 replace_payload,
@@ -1086,10 +1116,16 @@ impl Engine {
                 Some(Queued::Compact(focus)) => self.start_compact(focus, done.clone()),
                 Some(Queued::Prune(indices)) => self.prune_context(indices),
                 Some(Queued::Reload(hook)) => self.begin_reload(reload.clone(), hook),
-                Some(Queued::Accept(mode)) => self.accept_plan(&mode, done.clone()).await,
+                Some(Queued::Accept {
+                    mode,
+                    clear_context,
+                }) => self.accept_plan(&mode, clear_context, done.clone()).await,
                 Some(Queued::Fork) => self.fork_session().await,
                 Some(Queued::ForkWorktree(name)) => self.fork_worktree(name, reload.clone()).await,
                 Some(Queued::HookSave(op)) => self.begin_hook_save(*op, reload.clone()),
+                Some(Queued::ImportCompat { kind, path, save }) => {
+                    self.import_compat(kind, path, save).await
+                }
                 Some(Queued::ReasoningEffort(effort)) => self.set_reasoning_effort(effort),
                 None => break,
             }
@@ -1152,6 +1188,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::Rewind { .. } => "rewind",
         Op::ReloadConfig => "reload_config",
         Op::TrustProject { .. } => "trust_project",
+        Op::ImportCompat { .. } => "import_compat",
         Op::EnableHook { .. } => "enable_hook",
         Op::InspectHookSetup { .. } => "inspect_hook_setup",
         Op::SaveHookSetup { .. } => "save_hook_setup",

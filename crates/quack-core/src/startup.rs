@@ -18,7 +18,6 @@ use quack_shell::ShellKind;
 use quack_store::memory::Scope;
 use quack_tools::{Permissions, ReadTracker, Registry, ToolCtx};
 use tokio::sync::broadcast;
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::env;
@@ -190,18 +189,6 @@ pub(crate) async fn run(
         ),
     });
 
-    let mut placeholders = JoinSet::new();
-    let compat = reporter(Subsystem::Compat);
-    placeholders.spawn(async move {
-        compat.send(LoadState::Running {
-            detail: "looking for other harnesses' files".into(),
-        });
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        compat.send(LoadState::Disabled {
-            reason: "not implemented yet (M2)".into(),
-        });
-    });
-
     // Instructions (AGENTS.md) are cheap; read them while providers load.
     let instr = reporter(Subsystem::Instructions);
     instr.send(LoadState::Running {
@@ -216,7 +203,11 @@ pub(crate) async fn run(
     });
     let cfg_for_skills = config.clone();
     let skills = tokio::task::spawn_blocking(move || {
-        (env::skills(&cfg_for_skills), env::commands(&cfg_for_skills))
+        (
+            env::skills(&cfg_for_skills),
+            env::commands(&cfg_for_skills),
+            crate::compat::discover(&cfg_for_skills),
+        )
     });
 
     // Config + providers.
@@ -263,9 +254,10 @@ pub(crate) async fn run(
         }
     });
 
-    let (skills, (commands, bad_commands)) = skills.await.unwrap_or_default();
+    let (skills, (commands, bad_commands), candidates) = skills.await.unwrap_or_default();
     report_skills(&tx, &skills);
     report_commands(&tx, &commands, &bad_commands);
+    crate::compat::report(&tx, candidates);
 
     let kept = match keep {
         Some((pid, mid)) => match named(&config, &providers, &pid, &mid, &prov, &tx).await {
@@ -288,7 +280,6 @@ pub(crate) async fn run(
             reporter(Subsystem::Profile).send(LoadState::Disabled {
                 reason: "no model selected".into(),
             });
-            while placeholders.join_next().await.is_some() {}
             return StartupOutcome {
                 setup: None,
                 problem: Some(problem),
@@ -327,7 +318,6 @@ pub(crate) async fn run(
         &tx,
     )
     .await;
-    while placeholders.join_next().await.is_some() {}
     StartupOutcome {
         problem: setup
             .is_none()
@@ -1115,7 +1105,11 @@ fn edit_format(setting: EditFormat, profile: &Profile) -> EditFormat {
     }
 }
 
-fn report_commands(tx: &broadcast::Sender<Event>, commands: &[CustomCommand], failed: &[String]) {
+pub(crate) fn report_commands(
+    tx: &broadcast::Sender<Event>,
+    commands: &[CustomCommand],
+    failed: &[String],
+) {
     for f in failed {
         warn(tx, format!("command skipped: {f}"));
     }
@@ -1133,7 +1127,7 @@ fn report_commands(tx: &broadcast::Sender<Event>, commands: &[CustomCommand], fa
     });
 }
 
-fn report_skills(tx: &broadcast::Sender<Event>, found: &skills::Found) {
+pub(crate) fn report_skills(tx: &broadcast::Sender<Event>, found: &skills::Found) {
     let rep = Reporter {
         tx: tx.clone(),
         subsystem: Subsystem::Skills,

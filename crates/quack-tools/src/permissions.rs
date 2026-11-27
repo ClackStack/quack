@@ -1671,11 +1671,21 @@ impl Permissions {
     }
 
     pub fn check(&self, subject: &Subject) -> Decision {
+        self.check_with_tools(subject, None)
+    }
+
+    /// Like [`check`](Self::check), but when `read_only_tools` is provided, plan-mode shell
+    /// denial messages list only the read-only tools actually exposed by the active profile.
+    pub fn check_with_tools(
+        &self,
+        subject: &Subject,
+        read_only_tools: Option<&[&str]>,
+    ) -> Decision {
         // Several files: the strictest answer for any of them.
         if let Subject::Edits(paths) = subject {
             let mut out = Decision::Allow;
             for p in paths {
-                match self.check(&Subject::Edit(p.clone())) {
+                match self.check_with_tools(&Subject::Edit(p.clone()), read_only_tools) {
                     deny @ Decision::Deny(_) => return deny,
                     Decision::Ask => out = Decision::Ask,
                     Decision::Allow => {}
@@ -1708,8 +1718,18 @@ impl Permissions {
                     "plan mode runs only read-only agents; accept the plan to use this one"
                         .to_owned()
                 } else if let Some(why) = shell.as_ref().and_then(ShellLine::read_only_violation) {
+                    let tools = match read_only_tools {
+                        Some(list) if !list.is_empty() => {
+                            format!("the dedicated read-only tools ({})", list.join(", "))
+                        }
+                        Some(_) => "read-only inspection".to_owned(),
+                        None => {
+                            "the dedicated read-only tools (read, grep, glob, list_dir, index, lsp)"
+                                .to_owned()
+                        }
+                    };
                     format!(
-                        "plan mode: no changes or test/build commands ({why}); prefer the dedicated read-only tools (read, grep, glob, list_dir, index, lsp) or read-only shell inspection commands (rg, grep, find, sed -n, awk, head, tail, cat, wc, sort, uniq, cut, jq, diff, git status/diff/log/show), and list any proposed test/build commands for the user to accept before running them"
+                        "plan mode: no changes or test/build commands ({why}); prefer {tools} or read-only shell inspection commands (rg, grep, find, sed -n, awk, head, tail, cat, wc, sort, uniq, cut, jq, diff, git status/diff/log/show), and list any proposed test/build commands for the user to accept before running them"
                     )
                 } else {
                     "plan mode: no changes or test/build commands; list the proposed tests for the user and accept the plan before running them"

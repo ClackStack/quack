@@ -269,6 +269,12 @@ describe('work mode and approvals', () => {
 		expect(send).toHaveBeenCalledWith(3, { op: 'set_approval_policy', policy: 'auto-edit' });
 		await session.acceptPlan();
 		expect(send).toHaveBeenCalledWith(3, { op: 'accept_plan', mode: '' });
+		await session.acceptPlan(true);
+		expect(send).toHaveBeenCalledWith(3, {
+			op: 'accept_plan',
+			mode: '',
+			clear_context: true
+		});
 	});
 	it('maps the legacy permission_mode notification onto both controls', () => {
 		const { session } = fixture();

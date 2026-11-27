@@ -19,7 +19,7 @@ edit_format = "str_replace"
 [[tools]]
 name = "read_file"
 maps_to = "read"
-description = "Reads a file from the workspace. For large files, read a part with `offset` (0-based line number) and `limit` (number of lines)."
+description = "Reads a file from the workspace. A large source file read without `offset`/`limit` returns its symbol outline; then read a part with `offset` (0-based line number) and `limit` (number of lines), or pass `symbol` (e.g. `parse` or `Type::method`) for one definition."
 [tools.params]
 absolute_path = { to = "path", transform = "abs_to_workspace" }
 offset = { to = "offset", transform = "zero_to_one_based" }

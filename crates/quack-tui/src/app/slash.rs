@@ -112,15 +112,20 @@ impl App {
         self.set_mode("edit");
     }
 
-    /// The engine preserves approvals and performs any planner handoff.
-    pub(super) fn accept_plan(&mut self) {
+    /// The engine preserves approvals and performs any planner/fresh-context handoff.
+    pub(super) fn accept_plan(&mut self, clear_context: bool) {
         self.review = None;
         self.plan_stale_for_review = true;
         self.startup_dismissed = true;
-        self.transcript
-            .push(Entry::User("Carry out the plan above.".into()));
+        let label = if clear_context {
+            "Carry out the plan above (fresh context)."
+        } else {
+            "Carry out the plan above."
+        };
+        self.transcript.push(Entry::User(label.into()));
         self.ops.push(Op::AcceptPlan {
             mode: String::new(),
+            clear_context,
         });
     }
 
@@ -513,6 +518,27 @@ impl App {
                 force: args == "--force",
             }),
             "skills" => self.modal = Some(modal::skills(&self.skills, &self.theme)),
+            "compat" => {
+                let action = args.split_once(' ').and_then(|(mode, index)| {
+                    let save = match mode {
+                        "load" => false,
+                        "save" => true,
+                        _ => return None,
+                    };
+                    let index: usize = index.parse().ok()?;
+                    let folder = self.compat_folders.as_ref()?.get(index)?;
+                    (!save || folder.can_save).then(|| Op::ImportCompat {
+                        kind: folder.kind,
+                        path: folder.path.clone(),
+                        save,
+                    })
+                });
+                if let Some(op) = action {
+                    self.ops.push(op);
+                } else {
+                    self.modal = Some(modal::compat(self.compat_folders.as_deref(), &self.theme));
+                }
+            }
             "bundles" => {
                 let (scope, rest) = take_scope_flag(args, self.write_scope);
                 if rest.is_empty() {
@@ -592,7 +618,7 @@ impl App {
                     _ => ("the last response", text),
                 };
                 self.note(format!(
-                    "copied {what} ({} characters) through the terminal",
+                    "copied {what} ({} characters)",
                     text.chars().count()
                 ));
                 self.clipboard = Some(text);
@@ -620,7 +646,13 @@ impl App {
                     if self.info.work_mode != WorkMode::Plan {
                         return self.note("not in plan mode; /plan starts it".into());
                     }
-                    self.accept_plan();
+                    self.accept_plan(false);
+                }
+                "accept fresh" | "accept clean" | "fresh" => {
+                    if self.info.work_mode != WorkMode::Plan {
+                        return self.note("not in plan mode; /plan starts it".into());
+                    }
+                    self.accept_plan(true);
                 }
                 "off" | "exit" => self.end_plan(),
                 task => {

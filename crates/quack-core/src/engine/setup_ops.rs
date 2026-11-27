@@ -98,8 +98,7 @@ impl Engine {
         .and_then(|r| r);
         match outcome {
             Ok((updated, path, note)) => {
-                self.config = Arc::new(updated);
-                self.config_tx.send_replace(self.config.clone());
+                self.replace_config(Arc::new(updated));
                 self.emit(Event::SettingSaved {
                     key: key.to_owned(),
                     value: value.to_owned(),
@@ -218,7 +217,7 @@ impl Engine {
     /// `on_planner`) gets it.
     pub(super) fn switch_to(&self, role: Role, provider: String, model: String) {
         if let Some(done) = self.switch_tx.clone() {
-            let config = self.config.clone();
+            let config = self.extension_config.clone();
             let tx = self.tx.clone();
             let mcp = self.mcp.clone();
             let lsp = self.lsp.clone();
@@ -289,9 +288,7 @@ impl Engine {
             "model.profile={}",
             serde_json::Value::String(value)
         ));
-        let config = Arc::new(config);
-        self.config = config.clone();
-        self.config_tx.send_replace(config);
+        self.replace_config(Arc::new(config));
         self.switch_to(Role::Session, provider, model);
     }
 

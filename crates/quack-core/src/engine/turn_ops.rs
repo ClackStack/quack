@@ -293,7 +293,11 @@ impl Engine {
         let Some(history) = convo.history.take() else {
             return;
         };
-        let planner_start = if convo.editor.is_some() && convo.plan_start.is_none() {
+        let in_plan = convo
+            .perms
+            .lock()
+            .is_ok_and(|p| p.work_mode == WorkMode::Plan);
+        let planner_start = if in_plan && convo.plan_start.is_none() {
             convo.plan_start = Some(history.len());
             convo.plan_start
         } else {
@@ -320,6 +324,15 @@ impl Engine {
             skill: loaded_skill,
             error: skill_error,
         } = expansion;
+        // Keep the opening context byte-stable; tell the model about edits to the index
+        // in the next user message rather than changing a message it has already seen.
+        if std::mem::take(&mut self.skills_changed) && self.saved_session_context.is_some() {
+            self.notes.push(if setup.vars.skills.is_empty() {
+                "The earlier skill index no longer applies.".into()
+            } else {
+                format!("The available skills have changed:\n{}", setup.vars.skills)
+            });
+        }
         let notes = (!self.notes.is_empty()).then(|| std::mem::take(&mut self.notes).join("\n"));
         if let Some(e) = skill_error {
             self.warn(e);

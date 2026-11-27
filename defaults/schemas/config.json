@@ -65,6 +65,17 @@
       },
       "type": "object"
     },
+    "CommandSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "compat_paths": {
+          "$ref": "#/$defs/ListOrAppend",
+          "default": [],
+          "description": "More Markdown command folders, e.g. `.claude/commands` once you accept it.\nRelative paths are from the workspace root."
+        }
+      },
+      "type": "object"
+    },
     "ContextSettings": {
       "additionalProperties": false,
       "properties": {
@@ -676,6 +687,12 @@
       "default": {
         "refresh": false,
         "url": ""
+      }
+    },
+    "commands": {
+      "$ref": "#/$defs/CommandSettings",
+      "default": {
+        "compat_paths": []
       }
     },
     "context": {

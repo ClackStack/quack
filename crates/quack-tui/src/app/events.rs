@@ -107,7 +107,12 @@ impl App {
         match event {
             Event::StartupProgress { subsystem, state } => {
                 if let Some(row) = self.startup.iter_mut().find(|(s, _)| *s == subsystem) {
-                    row.1 = state;
+                    row.1 = match (subsystem, state) {
+                        (Subsystem::Compat, LoadState::NeedsAttention { detail }) => {
+                            LoadState::NeedsAttention { detail: format!("{detail} · /compat") }
+                        }
+                        (_, state) => state,
+                    };
                 }
             }
             Event::StartupComplete => {
@@ -170,6 +175,13 @@ impl App {
                     self.modal = Some(modal::trust(Some(&prompt), &self.theme));
                 }
                 self.trust = Some(prompt);
+            }
+            Event::CompatFolders { folders } => {
+                self.compat_folders = Some(folders);
+                self.refresh_modal("Other agents’ folders", |app| {
+                    modal::compat(app.compat_folders.as_deref(), &app.theme)
+                        .keep_place(app.modal.as_ref())
+                });
             }
             Event::TurnQueued { waiting_for } => {
                 self.queued = true;
@@ -325,6 +337,7 @@ impl App {
                     .map(|(i, _)| i);
                 if let Some(i) = at {
                     self.transcript.truncate(i);
+                    self.selection = None;
                 }
                 self.review = None;
                 self.context = None;
@@ -530,6 +543,7 @@ impl App {
             Event::SessionResumed { session, items } => {
                 if std::mem::take(&mut self.resuming) {
                     self.transcript.clear();
+                    self.selection = None;
                     self.agents.clear();
                     self.plan.clear();
                     self.plan_expanded = false;
@@ -918,6 +932,13 @@ impl App {
             "ui.sidebar" => {
                 self.info.ui.sidebar = value == "true";
                 self.selection = None;
+                true
+            }
+            "ui.mouse" => {
+                self.info.ui.mouse = value == "true";
+                if !self.info.ui.mouse {
+                    self.selection = None;
+                }
                 true
             }
             "ui.theme" => {

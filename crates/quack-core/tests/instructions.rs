@@ -606,3 +606,106 @@ async fn loaded_skills_emit_events_and_follow_resume_rewind_and_new() {
     assert_eq!(cleared, Some(Vec::new()));
     engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn repeated_skill_load_deduplicates_until_compacted() {
+    use quack_core::protocol::Op;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("You summarize a coding session"))
+        .respond_with(sse_text("Summary of prior work."))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("Summary of prior work."))
+        .and(body_string_contains("RELEASE-STEPS"))
+        .respond_with(sse_text("reloaded after compact"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("Summary of prior work."))
+        .and(body_string_contains("after compact"))
+        .respond_with(sse_call(
+            "c3",
+            "skill",
+            serde_json::json!({"name": "release"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("already loaded in this conversation"))
+        .respond_with(sse_text("using existing skill"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("RELEASE-STEPS"))
+        .and(body_string_contains("load again"))
+        .respond_with(sse_call(
+            "c2",
+            "skill",
+            serde_json::json!({"name": "release"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("RELEASE-STEPS"))
+        .respond_with(sse_text("loaded once"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse_call(
+            "c1",
+            "skill",
+            serde_json::json!({"name": "release"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp
+        .path()
+        .join("ws")
+        .join(".agents")
+        .join("skills")
+        .join("release");
+    std::fs::create_dir_all(&dir).expect("mkdir skill");
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: release\ndescription: Run release\n---\nRELEASE-STEPS: tag the version.\n",
+    )
+    .expect("write skill");
+
+    let loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+    let mut engine = Engine::spawn(Arc::new(loaded));
+
+    // Turn 1 loads `release` verbatim.
+    turn(&mut engine, "cut a release").await;
+    // Turn 2 calls `skill("release")` again: deduplicated (body not injected a second time).
+    turn(&mut engine, "load again").await;
+    // Compact away turn 1 & 2, then call `skill("release")` in turn 3: reloads verbatim.
+    engine.submit(Op::Compact { focus: None }).await;
+    common::until_done(&mut engine).await;
+    turn(&mut engine, "after compact").await;
+    engine.shutdown().await;
+
+    let reqs: Vec<String> = bodies(&server)
+        .await
+        .into_iter()
+        .filter(|b| !b.contains("You summarize a coding session"))
+        .collect();
+    // Request after c2 (the duplicate call) has the short dedup message and only 1 copy of RELEASE-STEPS.
+    let after_c2 = reqs
+        .iter()
+        .find(|b| b.contains("already loaded in this conversation"))
+        .expect("dedup response");
+    assert_eq!(after_c2.matches("RELEASE-STEPS").count(), 1, "{after_c2}");
+
+    // Request after compaction + c3 reloads the full body verbatim.
+    let after_c3 = reqs.last().expect("last request");
+    assert!(after_c3.contains("Summary of prior work."), "{after_c3}");
+    assert!(after_c3.contains("RELEASE-STEPS"), "{after_c3}");
+}

@@ -18,7 +18,7 @@ project = [
 ]
 user = ["~/.claude/CLAUDE.md", "~/.gemini/GEMINI.md"]
 
-# Detected only, not used yet:
+# Offered at startup for review in /compat. Not loaded until you choose a folder.
 [skills]
 project = [".claude/skills/", ".codex/skills/", ".goose/skills/", ".maki/skills/"]
 user = ["~/.claude/skills/", "~/.codex/skills/", "~/.goose/skills/", "~/.maki/skills/"]
@@ -27,7 +27,7 @@ user = ["~/.claude/skills/", "~/.codex/skills/", "~/.goose/skills/", "~/.maki/sk
 project = [".claude/commands/"]
 user = ["~/.claude/commands/"]
 
-# Reported only, with an offer to convert into mcp.d/*.toml. Never executed in place.
+# Reserved for a future review/conversion flow. Never loaded or executed in place.
 [mcp_configs]
 project = [".mcp.json", ".cursor/mcp.json", ".vscode/mcp.json"]
 user = ["~/.claude.json"]

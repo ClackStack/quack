@@ -101,6 +101,7 @@ async fn the_planner_plans_and_the_session_model_gets_a_brief() {
     engine
         .submit(Op::AcceptPlan {
             mode: "auto-edit".into(),
+            clear_context: false,
         })
         .await;
     until_done(&mut engine).await;
@@ -238,6 +239,7 @@ async fn a_plan_resumed_after_reload_still_hands_the_editor_only_a_brief() {
     resumed
         .submit(Op::AcceptPlan {
             mode: String::new(),
+            clear_context: false,
         })
         .await;
     until_done(&mut resumed).await;
@@ -265,4 +267,91 @@ async fn a_plan_resumed_after_reload_still_hands_the_editor_only_a_brief() {
             .all(|m| m["role"] != "tool" && m.get("tool_calls").is_none()),
         "{after:#?}"
     );
+}
+
+#[tokio::test]
+async fn accept_plan_with_clear_context_hands_off_single_model_and_replays_cleanly() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("EXPLORE-SECRET-PAYLOAD"))
+        .respond_with(sse_text("1. Update a.rs to return 42."))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("[Plan mode]"))
+        .respond_with(sse_call(
+            "inspect",
+            "read",
+            serde_json::json!({"path":"a.rs"}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse_text("done"))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spawn = |resume| {
+        let loaded = common::workspace(tmp.path(), &server.uri(), r#"["tiny"]"#, "");
+        std::fs::write(
+            loaded.dirs.workspace_root.join("a.rs"),
+            "fn f() { /* EXPLORE-SECRET-PAYLOAD */ }\n",
+        )
+        .expect("source");
+        Engine::spawn_with(Arc::new(loaded), resume)
+    };
+
+    let mut engine = spawn(Resume::New);
+    turn(&mut engine, "hello").await;
+    engine
+        .submit(Op::SetWorkMode {
+            mode: quack_core::protocol::WorkMode::Plan,
+        })
+        .await;
+    turn(&mut engine, "plan changing f").await;
+    engine
+        .submit(Op::AcceptPlan {
+            mode: String::new(),
+            clear_context: true,
+        })
+        .await;
+    until_done(&mut engine).await;
+    engine.shutdown().await;
+
+    let bodies = chat_bodies(&server).await;
+    // 0: "hello", 1: plan start (read tool call), 2: plan finish (plan text), 3: handoff brief.
+    assert_eq!(bodies.len(), 4, "{bodies:#?}");
+    let before = messages(&bodies[0]);
+    let after = messages(&bodies[3]);
+    assert_eq!(after.len(), before.len() + 2, "{after:#?}");
+    assert_eq!(after[..before.len()], before[..]);
+    assert_eq!(after[before.len()]["content"], "done");
+    let brief = after[before.len() + 1]["content"].as_str().expect("text");
+    assert!(brief.contains("[Plan handoff]"), "{brief}");
+    assert!(brief.contains("fresh context"), "{brief}");
+    assert!(brief.contains("Request:\nplan changing f"), "{brief}");
+    assert!(
+        brief.contains("Plan:\n1. Update a.rs to return 42."),
+        "{brief}"
+    );
+    assert!(
+        !brief.contains("EXPLORE-SECRET-PAYLOAD"),
+        "planning exploration should be dropped: {brief}"
+    );
+    assert!(
+        after
+            .iter()
+            .all(|m| m["role"] != "tool" && m.get("tool_calls").is_none()),
+        "{after:#?}"
+    );
+
+    // Resuming replays the handoff boundary cleanly.
+    let mut resumed = spawn(Resume::Latest);
+    turn(&mut resumed, "next").await;
+    resumed.shutdown().await;
+    let bodies = chat_bodies(&server).await;
+    let last = messages(bodies.last().expect("request"));
+    assert_eq!(last[..after.len()], after[..], "{last:#?}");
 }

@@ -412,6 +412,7 @@ impl Asking {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReviewChoice {
     Accept,
+    AcceptFresh,
     KeepPlanning,
 }
 

@@ -1,14 +1,21 @@
-//! Other harnesses' instruction files, listed in `compat.toml` (defaults bundle, system or
-//! user folder; the highest one present wins). Delete the file to stop reading them.
+//! Other harnesses' files, listed in `compat.toml` (the highest layer with a file wins).
 
 use std::path::{Path, PathBuf};
 
-/// Instruction file names from `[instructions]` in `compat.toml`.
+/// Instruction file names and optional extension folders from `compat.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Compat {
     /// Relative to each folder, e.g. `CLAUDE.md`, `.github/copilot-instructions.md`.
     pub project: Vec<String>,
     /// Global files, e.g. `~/.claude/CLAUDE.md`.
+    pub user: Vec<String>,
+    pub skills: Folders,
+    pub commands: Folders,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Folders {
+    pub project: Vec<String>,
     pub user: Vec<String>,
 }
 
@@ -26,24 +33,30 @@ impl Compat {
         let Ok(table) = text.parse::<toml::Table>() else {
             return Self::default();
         };
-        let list = |key: &str| -> Vec<String> {
+        let list = |section: &str, key: &str| -> Vec<String> {
             table
-                .get("instructions")
+                .get(section)
                 .and_then(|i| i.get(key))
                 .and_then(toml::Value::as_array)
                 .map(|a| {
                     a.iter()
                         .filter_map(toml::Value::as_str)
-                        // Folders of rules (e.g. `.cursor/rules/`) are not single files.
-                        .filter(|s| !s.ends_with('/'))
+                        .filter(|s| section != "instructions" || !s.ends_with('/'))
                         .map(str::to_owned)
                         .collect()
                 })
                 .unwrap_or_default()
         };
+        let folders = |section| Folders {
+            project: list(section, "project"),
+            user: list(section, "user"),
+        };
+        let instructions = folders("instructions");
         Self {
-            project: list("project"),
-            user: list("user"),
+            project: instructions.project,
+            user: instructions.user,
+            skills: folders("skills"),
+            commands: folders("commands"),
         }
     }
 
@@ -87,6 +100,8 @@ mod tests {
         assert!(c.project.contains(&"CLAUDE.md".to_owned()));
         assert!(!c.project.iter().any(|p| p.ends_with('/')));
         assert!(c.user.contains(&"~/.claude/CLAUDE.md".to_owned()));
+        assert!(c.skills.project.contains(&".claude/skills/".to_owned()));
+        assert!(c.commands.user.contains(&"~/.claude/commands/".to_owned()));
     }
 
     #[test]
@@ -103,7 +118,7 @@ mod tests {
                 "GEMINI.md".into(),
                 ".cursorrules".into(),
             ],
-            user: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(c.found(d, &d.join("AGENTS.md")), [".cursorrules"]);
     }

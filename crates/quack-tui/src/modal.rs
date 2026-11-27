@@ -31,7 +31,7 @@ mod pickers;
 mod providers;
 
 pub(crate) use extensions::{
-    bundles, custom_commands, hook_payload, hooks, instructions, lsp, mcp, profiles, skills,
+    bundles, compat, custom_commands, hook_payload, hooks, instructions, lsp, mcp, profiles, skills,
 };
 pub(crate) use inspectors::{context, doctor, stats, tool_probe};
 pub(crate) use pickers::{

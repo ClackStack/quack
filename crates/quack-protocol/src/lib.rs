@@ -119,13 +119,16 @@ pub enum Op {
         off: bool,
     },
     /// Switch to Edit and carry out the plan, preserving approvals when `mode` is empty.
-    /// When a `[model] planner` wrote
-    /// it, the session's model gets the requests, the user's answers and the plan in one
-    /// message instead of the planner's transcript.
+    /// When a `[model] planner` wrote it, or when `clear_context` is true, the planning
+    /// transcript is replaced with one concise handoff brief.
     AcceptPlan {
         /// Empty preserves the current approval policy; legacy callers may choose one.
         #[serde(default)]
         mode: String,
+        /// Replace the planning messages with a concise handoff brief even when no
+        /// separate `[model] planner` is configured.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clear_context: bool,
     },
     /// Run the environment checks; answered with `Event::DoctorReport`.
     RunDoctor,
@@ -318,6 +321,12 @@ pub enum Op {
     TrustProject {
         decision: String,
     },
+    /// Enable a folder reported by `CompatFolders`, optionally saving the setting.
+    ImportCompat {
+        kind: CompatKind,
+        path: String,
+        save: bool,
+    },
     /// Enable a hook and reload, or ask how to handle an existing payload.
     EnableHook {
         id: String,
@@ -508,6 +517,10 @@ pub enum Event {
         path: String,
         summary: String,
         changed: bool,
+    },
+    /// Other agents' folders that have not been loaded or configured yet.
+    CompatFolders {
+        folders: Vec<CompatFolder>,
     },
     // turn
     TurnStarted {
@@ -863,6 +876,23 @@ pub enum WriteScope {
     Session,
     Project,
     User,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum CompatKind {
+    Skills,
+    Commands,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CompatFolder {
+    pub kind: CompatKind,
+    pub path: String,
+    pub scope: WriteScope,
+    pub can_save: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

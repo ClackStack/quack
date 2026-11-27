@@ -184,7 +184,10 @@ impl App {
         let Some(mut form) = self.hook_form.take() else {
             return;
         };
-        let key = if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
+        let key = if key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::SHIFT)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+            && key.code == KeyCode::Char('c')
         {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
         } else {
@@ -270,16 +273,31 @@ impl App {
     }
 
     pub(super) fn on_key(&mut self, key: KeyEvent) {
+        // Standalone modifier presses (Ctrl, Shift) must not clear a selection before the
+        // copy chord finishes.
+        if matches!(key.code, KeyCode::Modifier(_)) {
+            return;
+        }
         self.dirty = true;
         if let Focus::HookForm = self.focus() {
             // The hook form takes every key, including Ctrl-C (as Esc); no selection is
             // released on the way in.
             return self.on_hook_key(key);
         }
-        // Any key lets go of a selection. Ctrl-C, out of habit, copies it again rather than
-        // interrupting or quitting — this wins over every focus below.
+        // Any key lets go of a selection. Dedicated copy chords (Ctrl-Shift-C, Super-C,
+        // Ctrl-Insert) copy it and never interrupt or quit, even with nothing selected.
+        // Plain Ctrl-C copies an active selection instead of interrupting or quitting.
         let selection = self.selection.take().filter(|s| s.dragged);
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        if is_copy_key(key) {
+            if let Some(sel) = selection {
+                self.copy_selection(&sel);
+            }
+            return;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+            && key.code == KeyCode::Char('c')
+        {
             return match selection {
                 Some(sel) => self.copy_selection(&sel),
                 None => self.ctrl_c(),
@@ -855,6 +873,13 @@ impl App {
                 ReviewChoice::Accept,
                 format!("Implement plan · {} approvals", self.info.permission_mode),
             ),
+            (
+                ReviewChoice::AcceptFresh,
+                format!(
+                    "Implement plan (fresh context) · {} approvals",
+                    self.info.permission_mode
+                ),
+            ),
             (ReviewChoice::KeepPlanning, "Keep planning".into()),
         ]
     }
@@ -889,7 +914,8 @@ impl App {
         };
         self.review = None;
         match choices[pick].0 {
-            ReviewChoice::Accept => self.accept_plan(),
+            ReviewChoice::Accept => self.accept_plan(false),
+            ReviewChoice::AcceptFresh => self.accept_plan(true),
             ReviewChoice::KeepPlanning => {
                 self.note("still planning · say what to change, or /plan off to leave".into());
             }
@@ -1073,6 +1099,21 @@ impl App {
         }
         true
     }
+}
+
+/// Dedicated copy shortcuts that must never interrupt a running turn:
+/// `Ctrl-Shift-C`, `Super/Cmd-C`, and `Ctrl-Insert`.
+fn is_copy_key(key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let super_key = key.modifiers.contains(KeyModifiers::SUPER);
+    (ctrl && shift && matches!(key.code, KeyCode::Char('c' | 'C')))
+        || (ctrl && key.code == KeyCode::Char('C'))
+        || (super_key && !ctrl && matches!(key.code, KeyCode::Char('c' | 'C')))
+        || (ctrl && !shift && key.code == KeyCode::Insert)
 }
 
 /// The image files a paste names, as attachments with their byte lengths, when it names nothing

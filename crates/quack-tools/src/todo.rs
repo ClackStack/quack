@@ -126,12 +126,17 @@ impl Plan {
 
     /// The plan to show the model with the next step, while anything is left to do.
     pub fn reminder(&self) -> Option<String> {
+        self.reminder_for("todo")
+    }
+
+    /// Same as [`reminder`](Self::reminder), naming the profile's tool for updating the plan.
+    pub fn reminder_for(&self, tool_name: &str) -> Option<String> {
         let items = self.items.lock().ok()?;
         if items.is_empty() || items.iter().all(|(_, s)| *s == Status::Done) {
             return None;
         }
         Some(format!(
-            "[Your plan; update it with the todo tool as you go]\n{}",
+            "[Your plan; update it with the {tool_name} tool as you go]\n{}",
             Self::render(&items)
         ))
     }

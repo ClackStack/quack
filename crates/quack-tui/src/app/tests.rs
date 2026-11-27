@@ -220,7 +220,16 @@ fn work_mode_and_approvals_change_independently() {
     assert_eq!(
         app.take_ops(),
         vec![Op::AcceptPlan {
-            mode: String::new()
+            mode: String::new(),
+            clear_context: false,
+        }]
+    );
+    app.execute("/plan accept fresh");
+    assert_eq!(
+        app.take_ops(),
+        vec![Op::AcceptPlan {
+            mode: String::new(),
+            clear_context: true,
         }]
     );
     press(&mut app, KeyCode::BackTab);
@@ -308,8 +317,9 @@ fn plan_review_bar_accepts_or_takes_a_revision() {
     });
     plan_turn_ends(&mut app);
     assert_eq!(app.review, Some(0));
-    assert_eq!(app.review_choices().len(), 2);
-    // The second choice keeps planning without changing approvals.
+    assert_eq!(app.review_choices().len(), 3);
+    // The third choice keeps planning without changing approvals.
+    press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     assert!(app.take_ops().is_empty());
@@ -329,7 +339,17 @@ fn plan_review_bar_accepts_or_takes_a_revision() {
     assert_eq!(
         app.take_ops(),
         vec![Op::AcceptPlan {
-            mode: String::new()
+            mode: String::new(),
+            clear_context: false,
+        }]
+    );
+    plan_turn_ends(&mut app);
+    press(&mut app, KeyCode::Char('2'));
+    assert_eq!(
+        app.take_ops(),
+        vec![Op::AcceptPlan {
+            mode: String::new(),
+            clear_context: true,
         }]
     );
 }
@@ -656,6 +676,46 @@ fn trust_prompt_opens_and_sends_the_decision() {
     type_str(&mut app, "/reload");
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.take_ops(), vec![Op::ReloadConfig]);
+}
+
+#[test]
+fn compat_review_loads_only_after_enter_or_save() {
+    use quack_protocol::{CompatFolder, CompatKind};
+
+    let mut app = App::new(info());
+    let path = "/r/.claude/commands";
+    app.on_engine(Event::CompatFolders {
+        folders: vec![CompatFolder {
+            kind: CompatKind::Commands,
+            path: path.into(),
+            scope: WriteScope::Project,
+            can_save: true,
+        }],
+    });
+    assert!(app.modal.is_none());
+    assert!(app.take_ops().is_empty());
+    for save in [false, true] {
+        type_str(&mut app, "/compat");
+        press(&mut app, KeyCode::Enter);
+        assert!(app.modal.is_some());
+        assert!(app.take_ops().is_empty());
+        if save {
+            app.on_terminal(TermEvent::Key(KeyEvent::new(
+                KeyCode::Char('s'),
+                KeyModifiers::CONTROL,
+            )));
+        } else {
+            press(&mut app, KeyCode::Enter);
+        }
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::ImportCompat {
+                kind: CompatKind::Commands,
+                path: path.into(),
+                save
+            }]
+        );
+    }
 }
 
 #[test]

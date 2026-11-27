@@ -1,5 +1,5 @@
 //! Mouse text selection in the transcript and the input box. A drag selects, and letting
-//! go copies the text through the terminal (OSC 52).
+//! go copies the text to the system clipboard and through the terminal (OSC 52).
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -107,6 +107,9 @@ pub(crate) fn cut(line: &str, from: usize, to: usize) -> String {
 /// Selected transcript rows, each with the width of its lead (`gutter`), as text. Leads
 /// and trailing blanks go, and so does the indent every row shares, keeping code's own.
 pub(crate) fn transcript_text(rows: &[(String, usize)], sel: &Selection) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
     let ((r0, _), (r1, _)) = sel.bounds();
     let lead = |s: &str| s.len() - s.trim_start_matches(' ').len();
     // `(row past its lead, first selected column there, its selected text)`.

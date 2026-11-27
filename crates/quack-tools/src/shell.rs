@@ -70,7 +70,7 @@ fn is_background(args: &Value) -> bool {
     }
 }
 
-/// Optional background job control action (`"output"`, `"stop"`, `"list"`).
+/// Optional background job control action (`"wait"`, `"output"`, `"stop"`, `"list"`).
 fn job_action(args: &Value) -> Option<&str> {
     opt_str(args, &["job_action", "action"])
         .map(str::trim)
@@ -89,12 +89,16 @@ fn format_bg_status(st: &quack_shell::BgStatus) -> String {
     let mut out = format!("job {} · {state}\ncommand: {}", st.id, st.command);
     if st.dropped_bytes > 0 {
         out.push_str(&format!(
-            "\n[{} earlier bytes evicted from ring buffer]",
+            "\n[{} earlier unread bytes evicted from ring buffer]",
             st.dropped_bytes
         ));
     }
     if st.output.trim().is_empty() {
-        out.push_str("\n(no output)");
+        if st.is_delta {
+            out.push_str("\n(no new output since last check)");
+        } else {
+            out.push_str("\n(no output)");
+        }
     } else {
         let distilled = distill_output(&st.output);
         let trimmed = trim_middle(&distilled, HEAD, TAIL);
@@ -129,8 +133,10 @@ impl Tool for Shell {
             "Run a command with {shell} on {os} in the workspace root and return its exit code and \
              combined output. Write commands for {shell}. There is no stdin, so interactive \
              commands fail; pass non-interactive flags. Default timeout {}s, maximum {}s. \
-             Pass `background: true` to start a long-running server/watcher (returns a `job_id`), \
-             then inspect or stop it with `job_action: \"output\" | \"stop\" | \"list\"` and `job_id`.{sandbox}",
+             Pass `background: true` to start a long-running command or watcher (returns a `job_id`), \
+             then wait for it or inspect/stop it with `job_action: \"wait\" | \"output\" | \"stop\" | \"list\"`, \
+             `job_id`, and `wait_secs` (blocks until exit or timeout and returns only new output; \
+             avoid polling in a loop or running overlapping builds on the same build directory).{sandbox}",
             ctx.default_timeout.as_secs(),
             ctx.max_timeout.as_secs()
         )
@@ -144,9 +150,10 @@ impl Tool for Shell {
                 "timeout_secs": { "type": "integer", "description": "Timeout in seconds" },
                 "sandbox": { "type": "boolean", "description": "Set false only to rerun a command the sandbox blocked" },
                 "background": { "type": "boolean", "description": "Start the command in the background and return a job_id" },
-                "job_action": { "type": "string", "enum": ["output", "stop", "list"], "description": "Inspect, stop, or list background jobs started in this session" },
-                "job_id": { "type": "string", "description": "Background job id returned by `background: true` (for output/stop)" },
-                "tail_bytes": { "type": "integer", "description": "Max tail bytes to return for `job_action: \"output\"`" }
+                "job_action": { "type": "string", "enum": ["wait", "output", "stop", "list"], "description": "Wait for, inspect, stop, or list background jobs started in this session" },
+                "job_id": { "type": "string", "description": "Background job id returned by `background: true` (for wait/output/stop)" },
+                "wait_secs": { "type": "integer", "description": "Seconds to wait for the job to finish before returning new output (`job_action: \"wait\"` defaults to 30, `\"output\"` defaults to 0)" },
+                "tail_bytes": { "type": "integer", "description": "Max new output bytes to return for `job_action: \"wait\"` or `\"output\"`" }
             },
             "required": []
         })
@@ -155,9 +162,9 @@ impl Tool for Shell {
     fn subject(&self, args: &Value, ctx: &ToolCtx) -> Result<Subject, String> {
         if let Some(action) = job_action(args) {
             return match action {
-                "list" | "output" | "stop" => Ok(Subject::Read(ctx.root.clone())),
+                "list" | "output" | "wait" | "stop" => Ok(Subject::Read(ctx.root.clone())),
                 other => Err(format!(
-                    "unknown job_action `{other}`; use `output`, `stop`, or `list`"
+                    "unknown job_action `{other}`; use `wait`, `output`, `stop`, or `list`"
                 )),
             };
         }
@@ -233,16 +240,21 @@ impl Tool for Shell {
                             )
                         }
                     }
-                    "output" => {
+                    "output" | "wait" => {
                         let Some(id) = opt_str(&args, &["job_id", "id"]) else {
-                            return ToolOutput::error(
-                                "`job_id` is required for `job_action: \"output\"`",
-                            );
+                            return ToolOutput::error(format!(
+                                "`job_id` is required for `job_action: \"{action}\"`"
+                            ));
                         };
                         let tail = opt_u64(&args, &["tail_bytes"])
                             .and_then(|n| usize::try_from(n).ok())
                             .map(|n| n.clamp(256, 64 * 1024));
-                        match ctx.bg.output(id, tail) {
+                        let default_wait = if action == "wait" { 30 } else { 0 };
+                        let wait = Duration::from_secs(
+                            opt_u64(&args, &["wait_secs", "wait"]).unwrap_or(default_wait),
+                        )
+                        .min(ctx.max_timeout);
+                        match ctx.bg.wait_output(id, tail, wait, ctx.cancel.clone()).await {
                             Ok(st) => {
                                 let text = format_bg_status(&st);
                                 ToolOutput {
@@ -281,7 +293,7 @@ impl Tool for Shell {
                         }
                     }
                     other => ToolOutput::error(format!(
-                        "unknown job_action `{other}`; use `output`, `stop`, or `list`"
+                        "unknown job_action `{other}`; use `wait`, `output`, `stop`, or `list`"
                     )),
                 };
             }
@@ -299,9 +311,12 @@ impl Tool for Shell {
                         Ok(id) => id,
                         Err(e) => return ToolOutput::error(e),
                     };
-                // Give fast-failing commands a brief window to emit an error or startup banner.
-                tokio::time::sleep(Duration::from_millis(150)).await;
-                return match ctx.bg.output(&id, None) {
+                // Give fast-failing commands a brief window to finish or emit a startup banner.
+                return match ctx
+                    .bg
+                    .wait_output(&id, None, Duration::from_millis(150), ctx.cancel.clone())
+                    .await
+                {
                     Ok(st) => {
                         let ok = st.running || st.exit_code == Some(0);
                         let summary = if st.running {
@@ -401,7 +416,54 @@ impl Tool for Shell {
 enum LineKind {
     PassTest,
     Compiling,
+    LockWait,
     Other,
+}
+
+/// Strip ANSI CSI (`\x1b[...`) and OSC (`\x1b]...`) escape sequences from terminal output.
+fn strip_ansi(input: &str) -> std::borrow::Cow<'_, str> {
+    if !input.contains('\x1b') {
+        return std::borrow::Cow::Borrowed(input);
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                while let Some(next) = chars.next() {
+                    if next == '\x07' {
+                        break;
+                    }
+                    if next == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+fn is_manifest_warning(trimmed: &str) -> bool {
+    trimmed.starts_with("warning:") && trimmed.contains("Cargo.toml:")
 }
 
 fn classify_line(line: &str) -> LineKind {
@@ -419,6 +481,10 @@ fn classify_line(line: &str) -> LineKind {
         || trimmed.contains("failures:")
     {
         return LineKind::Other;
+    }
+
+    if trimmed.starts_with("Blocking waiting for file lock") {
+        return LineKind::LockWait;
     }
 
     if (trimmed.starts_with("test ")
@@ -441,6 +507,8 @@ fn classify_line(line: &str) -> LineKind {
         || trimmed.starts_with("Downloaded ")
         || trimmed.starts_with("Fresh ")
         || trimmed.starts_with("Updating ")
+        || trimmed.starts_with("Locking ")
+        || trimmed.starts_with("Adding ")
         || (trimmed.starts_with('[')
             && trimmed.contains(']')
             && (trimmed.contains("Building ") || trimmed.contains("Compiling ")))
@@ -452,11 +520,26 @@ fn classify_line(line: &str) -> LineKind {
 }
 
 pub(crate) fn distill_output(raw: &str) -> String {
-    let lines: Vec<&str> = raw.lines().collect();
-    if lines.len() <= 10 {
-        return raw.to_string();
+    let clean = strip_ansi(raw);
+    let lines: Vec<&str> = clean
+        .lines()
+        .map(|l| {
+            if l.contains('\r') {
+                l.split('\r').rev().find(|s| !s.is_empty()).unwrap_or("")
+            } else {
+                l
+            }
+        })
+        .collect();
+    let has_noise = lines
+        .iter()
+        .any(|l| matches!(classify_line(l), LineKind::LockWait) || is_manifest_warning(l.trim()));
+    if lines.len() <= 10 && !has_noise {
+        return clean.into_owned();
     }
 
+    let mut seen_manifest_warnings = std::collections::HashSet::new();
+    let mut dup_manifest_warnings = 0usize;
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut i = 0;
     while i < lines.len() {
@@ -481,7 +564,7 @@ pub(crate) fn distill_output(raw: &str) -> String {
                     i += 1;
                 }
                 let count = i - start;
-                if count >= 4 {
+                if count >= 3 {
                     out.push(format!("[... compiled {count} packages ...]"));
                 } else {
                     for line in &lines[start..i] {
@@ -489,11 +572,55 @@ pub(crate) fn distill_output(raw: &str) -> String {
                     }
                 }
             }
+            LineKind::LockWait => {
+                let start = i;
+                while i < lines.len() && matches!(classify_line(lines[i]), LineKind::LockWait) {
+                    i += 1;
+                }
+                let count = i - start;
+                if count >= 2 {
+                    out.push(format!("[... waited for file lock ({count} notices) ...]"));
+                } else {
+                    out.push(lines[start].to_string());
+                }
+            }
             LineKind::Other => {
-                out.push(lines[i].to_string());
-                i += 1;
+                let trimmed = lines[i].trim();
+                if is_manifest_warning(trimmed) {
+                    if !seen_manifest_warnings.insert(trimmed) {
+                        dup_manifest_warnings += 1;
+                        i += 1;
+                        continue;
+                    }
+                    out.push(lines[i].to_string());
+                    i += 1;
+                    continue;
+                }
+                if !trimmed.is_empty() {
+                    let start = i;
+                    while i < lines.len() && lines[i].trim() == trimmed {
+                        i += 1;
+                    }
+                    let count = i - start;
+                    out.push(lines[start].to_string());
+                    if count >= 3 {
+                        out.push(format!("[... repeated {} more times ...]", count - 1));
+                    } else {
+                        for line in &lines[start + 1..i] {
+                            out.push((*line).to_string());
+                        }
+                    }
+                } else {
+                    out.push(lines[i].to_string());
+                    i += 1;
+                }
             }
         }
+    }
+    if dup_manifest_warnings > 0 {
+        out.push(format!(
+            "[... {dup_manifest_warnings} duplicate Cargo manifest warning(s) omitted ...]"
+        ));
     }
     let mut result = out.join("\n");
     if raw.ends_with('\n') {
@@ -562,5 +689,63 @@ mod tests {
         let saved = spill_output(&big).expect("spills to temp file");
         assert_eq!(std::fs::read_to_string(&saved).expect("read spill"), big);
         let _ = std::fs::remove_file(saved);
+    }
+
+    #[test]
+    fn strips_ansi_and_collapses_lock_wait_and_manifest_warnings() {
+        let mut raw = String::new();
+        raw.push_str("\x1b[1;33mwarning\x1b[0m: /repo/Cargo.toml: unused manifest key: foo\n");
+        for _ in 0..4 {
+            raw.push_str(
+                "    \x1b[1;36mBlocking\x1b[0m waiting for file lock on build directory\n",
+            );
+        }
+        for i in 1..=3 {
+            raw.push_str(&format!("   \x1b[1;32mCompiling\x1b[0m crate_{i} v0.1.0\n"));
+        }
+        raw.push_str("warning: /repo/Cargo.toml: unused manifest key: foo\n");
+        raw.push_str("warning: /repo/Cargo.toml: unused manifest key: foo\n");
+        raw.push_str("\x1b[1;31merror[E0308]\x1b[0m: mismatched types\n");
+
+        let distilled = distill_output(&raw);
+        assert!(!distilled.contains('\x1b'), "ANSI leaked: {distilled:?}");
+        assert!(
+            distilled.contains("[... waited for file lock (4 notices) ...]"),
+            "{distilled}"
+        );
+        assert!(
+            distilled.contains("[... compiled 3 packages ...]"),
+            "{distilled}"
+        );
+        assert_eq!(
+            distilled.matches("unused manifest key: foo").count(),
+            1,
+            "{distilled}"
+        );
+        assert!(
+            distilled.contains("[... 2 duplicate Cargo manifest warning(s) omitted ...]"),
+            "{distilled}"
+        );
+        assert!(
+            distilled.contains("error[E0308]: mismatched types"),
+            "{distilled}"
+        );
+    }
+
+    #[test]
+    fn format_bg_status_distinguishes_initial_and_delta_empty() {
+        let mut st = quack_shell::BgStatus {
+            id: "bg-1".into(),
+            command: "cargo test".into(),
+            running: true,
+            exit_code: None,
+            elapsed_secs: 5,
+            output: String::new(),
+            dropped_bytes: 0,
+            is_delta: false,
+        };
+        assert!(format_bg_status(&st).contains("(no output)"));
+        st.is_delta = true;
+        assert!(format_bg_status(&st).contains("(no new output since last check)"));
     }
 }

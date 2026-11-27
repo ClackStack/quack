@@ -18,7 +18,7 @@ The startup diagnostics (one row per subsystem, fed by `Event::StartupProgress`)
  ✓ provider      corp-vllm · qwen3-coder (262k ctx)                  84ms
  ⠋ tokenizer     loading qwen3-coder.json
  ✓ instructions  AGENTS.md (2) · 5 skills · 3 commands               9ms
- ? compat        found CLAUDE.md, .claude/skills (4) · [L]oad [I]gnore [D]etails
+ ? compat        1 folder · /compat
  ⠋ mcp           github: starting · jira: ready (14 tools)
  ✗ lsp           rust-analyzer: not found on PATH  (disable: lsp.d/rust-analyzer.toml)
  – web_fetch     disabled (offline)
@@ -198,7 +198,7 @@ All configuration UIs share one modal widget, so they look and behave the same:
 | `/stats` | | Session usage: tokens sent and received, cache hits, cost (when priced), where the time went (model, tools, approvals, between turns), latency and speed, per-tool calls and failures. Drawn with ratatui charts: figure tiles, bars, meters, per-request sparklines (the engine keeps the last 200 requests) and a line of the running cost |
 | `/reload` | | Read config, providers, MCP servers, instructions and skills again, keeping the conversation ([01](01-configuration.md#hot-reload)) |
 | `/trust` | `[trusted\|settings-only\|ignored]` | Decide whether this repo's `.quack/` loads; opens on its own when a decision is needed ([01](01-configuration.md#as-implemented-2026-10-18)) |
-| `/copy` | | Copy the last response (or pick a code block) to the clipboard. Implemented as `/copy [code]` through OSC 52: no clipboard library is needed, and it works over SSH. Inside tmux it needs `set -g set-clipboard on` |
+| `/copy` | | Copy the last response (or pick a code block) to the clipboard. Implemented as `/copy [code]` through both OSC 52 (works over SSH) and the local OS clipboard helper (`wl-copy`, `xclip`/`xsel`, `pbcopy`, PowerShell `Set-Clipboard`, plus `tmux load-buffer -w` fallback inside tmux) so terminals without OSC 52 such as GNOME Terminal work out of the box |
 | `/help` | `?` | Commands and keys |
 | `/quit` | `/exit` | Quit |
 
@@ -243,8 +243,8 @@ Defaults are listed in `quack keys --print`. Users override them in `config.toml
 - Supported: Windows 10 1809+ and Windows 11, on x64 and ARM64. VT processing is required. On legacy conhost without VT, print a clear message suggesting Windows Terminal.
 - Unicode width: use `unicode-width` and avoid ambiguous-width glyphs in chrome. Provide `ui.ascii = true` for fonts that lack box-drawing or spinner glyphs.
 - Window title: the reply duck and the session title (`_(•)> fix the login bug`, or `_(•)> quack` before the first prompt), led by the thinking glyph while a turn runs and `?` when an approval or question waits. The engine sends `Event::SessionTitle` whenever the title changes (first prompt, `/title`, `/new`, `/resume`, `/fork`). quack saves the user's title on the xterm title stack at start and restores it on exit; terminals without the stack keep quack's title until something else sets one. `ui.terminal_title = false` leaves the title alone; `/config set ui.terminal_title false` applies it at once, as does `/reload`.
-- Clipboard: OSC 52 where supported, with `arboard` as a fallback (Windows clipboard API) for "copy last response" and "copy code block".
-- Mouse: on by default (`ui.mouse = true`): the wheel scrolls the transcript and a left click places the input cursor. Capture breaks native text selection in most terminals, so quack selects itself (`select.rs`): a drag in the transcript or the input marks the text, and letting go copies it through OSC 52, with "copied N chars" in the status bar. The selection is kept in content rows, so it stays on its text while the view scrolls (dragging past the top or bottom edge scrolls along). Copied transcript text leaves out each row's lead (duck, `›`, tool icon) and the indent the rows share; input text keeps its real line breaks, not the wrapping. Any key, click or resize clears it, and Ctrl-C while it shows copies it again instead of interrupting. Shift-drag still gives the terminal's own selection, and `ui.mouse = false` turns capture off; `/reload` follows the setting.
+- Clipboard: writes both OSC 52 (instant, works over SSH) and the local OS clipboard helper (`wl-copy`, `xclip`/`xsel`, `pbcopy`, PowerShell `Set-Clipboard` on Windows/WSL, and `tmux load-buffer -w` fallback inside tmux) on a serialized background worker with no extra dependencies.
+- Mouse: on by default (`ui.mouse = true`): the wheel scrolls the transcript and a left click places the input cursor. Capture breaks native text selection in most terminals, so quack selects itself (`select.rs`): a drag in the transcript or the input marks the text, and letting go copies it to the system clipboard and through OSC 52, with "copied N chars" kept visible in the status bar even while a turn runs. The selection is kept in content rows and pins the viewport while streaming so text stays put under the cursor (dragging past the top or bottom edge scrolls along). Copied transcript text leaves out each row's lead (duck, `›`, tool icon) and the indent the rows share; input text keeps its real line breaks, not the wrapping. Any key, click or resize clears it (standalone modifier presses leave it intact); `Ctrl-Shift-C` (plus `Super-C` / `Ctrl-Insert`) copies an active selection and never interrupts a running turn, and `Ctrl-C` while a selection shows copies it again instead of interrupting. Shift-drag still gives the terminal's own selection, and `ui.mouse = false` turns capture off live (`/config set ui.mouse false` or `/reload`).
 
 ## Accessibility
 

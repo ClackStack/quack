@@ -5,6 +5,7 @@
 
 mod agent;
 pub mod checks;
+mod compat;
 mod context;
 pub mod doctor;
 mod engine;

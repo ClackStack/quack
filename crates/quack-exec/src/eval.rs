@@ -889,7 +889,12 @@ async fn drive_turn(
                 planning = false;
                 answer.clear();
                 let mode = "full-auto".to_owned();
-                engine.submit(Op::AcceptPlan { mode }).await;
+                engine
+                    .submit(Op::AcceptPlan {
+                        mode,
+                        clear_context: false,
+                    })
+                    .await;
             }
             Event::TurnComplete { .. } => break,
             Event::TurnAborted { reason, .. } => {

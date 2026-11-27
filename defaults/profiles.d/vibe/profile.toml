@@ -27,7 +27,7 @@ edit_format = "str_replace"
 [[tools]]
 name = "read_file"
 maps_to = "read"
-description = "Reads a file, line-numbered. `offset` is the 1-based line to start from and `limit` caps the lines returned; long reads are clipped, so locate what you need with `grep` first and read that range."
+description = "Reads a file, line-numbered. A large source file read without `offset`/`limit` returns its symbol outline; then pass `offset` (1-based line) and `limit`, or `symbol` (e.g. `parse` or `Type::method`) to read one definition."
 
 [[tools]]
 name = "write_file"
@@ -42,7 +42,7 @@ description = "Replaces an exact string in a file. Whitespace matters: copy `old
 [[tools]]
 name = "bash"
 maps_to = "shell"
-description = "Runs a shell command and returns its output with the exit status. Prefer the dedicated file and search tools over shell utilities when one fits (`read_file` over cat, `grep` over grep/sed/awk, `edit`/`write_file` over sed and redirects); fall back to the shell only when a dedicated tool cannot do it."
+description = "Runs a shell command and returns its output with the exit status. Prefer the dedicated file and search tools over shell utilities when one fits (`read_file` over cat, `grep` over grep/sed/awk, `index` for symbol outlines, `edit`/`write_file` over sed and redirects); fall back to the shell only when a dedicated tool cannot do it. For long-running commands, pass `background: true` (returns a `job_id`), then use `job_action: \"wait\" | \"output\" | \"stop\" | \"list\"` with `job_id` and `wait_secs` (blocks until exit or timeout and returns only new output)."
 
 [[tools]]
 name = "grep"

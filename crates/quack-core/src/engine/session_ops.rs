@@ -357,12 +357,14 @@ impl Engine {
             }
         };
         let skill_names = loaded_skills.names();
+        self.skills_changed = false;
         if let Some(c) = &mut self.convo {
             // Session approvals and the plan belong to the session they were made in.
             c.perms = Arc::new(Mutex::new(c.setup.permissions.clone()));
             c.nested = nested(&self.config, &c.setup, &history);
             c.loaded_skills = Arc::new(Mutex::new(loaded_skills));
             c.history = Some(history);
+            c.plan_start = None;
             c.setup.tool_ctx.plan.restore(&plan);
             c.reset_transient();
         }

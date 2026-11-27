@@ -22,7 +22,7 @@ Plan refuses file changes, memory writes, tests, builds, arbitrary scripts, and 
 MCP tools or sub-agents. Allow rules, remembered approvals and yolo cannot override
 these restrictions. MCP tools are eligible only when their server marks them read-only.
 
-After a planning turn with pending work (or a follow-up plan), choose **Implement plan** in the review bar or run `/plan accept`. If the previous plan is already finished and no follow-up plan is proposed, the review bar stays hidden. This switches to Edit and starts implementation with the same approvals. **Keep planning** lets you revise the plan. `/edit` or `/plan off` leaves planning without starting a turn; `/edit <task>` switches to Edit and submits that task.
+After a planning turn with pending work (or a follow-up plan), choose **Implement plan** in the review bar or run `/plan accept`, or choose **Implement plan (fresh context)** / `/plan accept fresh` to replace the planning exploration with one concise handoff brief before implementing. If the previous plan is already finished and no follow-up plan is proposed, the review bar stays hidden. This switches to Edit and starts implementation with the same approvals. **Keep planning** lets you revise the plan. `/edit` or `/plan off` leaves planning without starting a turn; `/edit <task>` switches to Edit and submits that task.
 
 ## Controls
 
@@ -37,6 +37,7 @@ The TUI shows work mode and approvals separately.
 | `/plan [task]` | Enter Plan, optionally submitting a task |
 | `/edit [task]` | Enter Edit, optionally submitting a task |
 | `/plan accept` | Implement the plan, keeping approvals |
+| `/plan accept fresh` | Implement the plan with a fresh context brief, keeping approvals |
 | `/permissions` | Pick Ask/Allow and inspect permission rules |
 | `/permissions ask` | Ask before unapproved actions, keeping work mode |
 | `/permissions allow` | Automatically approve eligible actions, keeping work mode |

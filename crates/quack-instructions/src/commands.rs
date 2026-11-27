@@ -154,15 +154,19 @@ pub fn discover(roots: &[(String, PathBuf)]) -> (Vec<CustomCommand>, Vec<String>
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            walk(&path, out);
-        } else if path.extension().is_some_and(|e| e == "md") {
-            out.push(path);
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Following linked directories can cycle or walk outside the command root.
+            if entry.file_type().is_ok_and(|ty| ty.is_dir()) {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "md") && path.is_file() {
+                out.push(path);
+            }
         }
     }
 }

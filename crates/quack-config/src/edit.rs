@@ -11,7 +11,7 @@ use toml::Value;
 use crate::load::{Loaded, Origin, ProjectStatus, parse_override};
 use crate::merge;
 use crate::paths::LayerKind;
-use crate::settings::Settings;
+use crate::settings::{ProjectConfigPolicy, Settings};
 use crate::trust::{self, TrustDecision};
 
 /// Which family of the settings tree a key belongs to. `[policy]` is only honoured in
@@ -160,6 +160,61 @@ impl Loaded {
         )
         .is_some_and(|f| f.current)
         .then_some(decision)
+    }
+
+    /// Append a compatibility folder without replacing lower-layer lists or granting
+    /// project extension trust.
+    pub fn save_compat_path(
+        &self,
+        layer: LayerKind,
+        key: &str,
+        path: &str,
+    ) -> Result<PathBuf, String> {
+        if !matches!(key, "commands.compat_paths" | "skills.compat_paths") {
+            return Err(format!("`{key}` is not a compatibility path setting"));
+        }
+        if self.settings.policy.locks(key) {
+            return Err(format!("`{key}` is locked by the system policy"));
+        }
+        let project = layer == LayerKind::Project;
+        if project {
+            if self.settings.policy.project_config == ProjectConfigPolicy::Never
+                || !matches!(
+                    self.project,
+                    ProjectStatus::None | ProjectStatus::Trusted | ProjectStatus::SettingsOnly
+                )
+            {
+                return Err("Project settings are not active; load once or review /trust.".into());
+            }
+            if self.dirs.project.is_symlink() {
+                return Err("The project config directory is a link; load once instead.".into());
+            }
+        }
+        let file = self
+            .layer_file(layer)
+            .ok_or_else(|| format!("the {layer} layer has no directory"))?;
+        let decision =
+            if !project || self.settings.policy.project_config == ProjectConfigPolicy::Always {
+                None
+            } else if let Some(decision) = self.active_project_trust(layer) {
+                Some(decision)
+            } else if self.project_summary().is_empty() {
+                // A text-only project was already trusted; keep its skills and commands active.
+                Some(if self.project == ProjectStatus::Trusted {
+                    TrustDecision::Trusted
+                } else {
+                    TrustDecision::SettingsOnly
+                })
+            } else {
+                return Err(
+                    "Project settings changed; run /reload and review /trust before saving.".into(),
+                );
+            };
+        add_to_list(&file, key, &[path.to_owned()])?;
+        if let Some(decision) = decision {
+            self.trust_project(decision)?;
+        }
+        Ok(file)
     }
 
     /// Add "always allow" rules to `[permissions] allow`: in the project's

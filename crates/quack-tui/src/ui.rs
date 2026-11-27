@@ -1929,6 +1929,204 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_shift_c_copies_selection_and_never_interrupts_running_turn() {
+        use crossterm::event::{
+            Event as TermEvent, KeyCode, KeyModifiers, ModifierKeyCode, MouseButton, MouseEvent,
+            MouseEventKind,
+        };
+        let mut info = test_info();
+        info.model = Some("charm-hyper/claude-sonnet-4-thinking".into());
+        let mut app = App::new(info);
+        started(&mut app);
+        app.on_engine(Event::TurnStarted {
+            turn: quack_protocol::TurnId(1),
+        });
+        app.on_engine(Event::AssistantDelta {
+            text: "alpha beta\n\ngamma delta".into(),
+        });
+        app.input.set("draft");
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).expect("terminal");
+        terminal.draw(|f| draw(f, &app)).expect("draw");
+        let find = |terminal: &Terminal<TestBackend>, word: &str| -> (u16, u16) {
+            let buf = terminal.backend().buffer();
+            (0..buf.area.height)
+                .find_map(|y| {
+                    let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                    row.find(word)
+                        .map(|x| (u16::try_from(row[..x].width()).expect("narrow"), y))
+                })
+                .expect(word)
+        };
+        let mouse = |app: &mut App, kind, (column, row): (u16, u16)| {
+            app.on_terminal(TermEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+        let left = MouseButton::Left;
+        let beta = find(&terminal, "beta");
+        let delta = find(&terminal, "delta");
+
+        // Highlighting while a turn runs copies on release and keeps the confirmation visible.
+        mouse(&mut app, MouseEventKind::Down(left), beta);
+        mouse(&mut app, MouseEventKind::Drag(left), (delta.0 + 4, delta.1));
+        mouse(&mut app, MouseEventKind::Up(left), (delta.0 + 4, delta.1));
+        assert_eq!(app.take_clipboard().as_deref(), Some("beta\n\ngamma delta"));
+        let frame = render(&app, 80, 16);
+        assert!(frame.contains("copied 17 chars"), "{frame}");
+
+        // Standalone modifier presses must not clear the selection before the copy chord lands.
+        key(
+            &mut app,
+            KeyCode::Modifier(ModifierKeyCode::LeftControl),
+            KeyModifiers::CONTROL,
+        );
+        key(
+            &mut app,
+            KeyCode::Modifier(ModifierKeyCode::LeftShift),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert!(app.selection.is_some());
+
+        // Ctrl-Shift-C (uppercase 'C') copies without interrupting the running turn.
+        key(
+            &mut app,
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(app.take_clipboard().as_deref(), Some("beta\n\ngamma delta"));
+        assert!(app.take_ops().is_empty());
+        assert_eq!(app.input.text(), "draft");
+
+        // Ctrl-Shift-c (lowercase 'c') also copies without interrupting.
+        mouse(&mut app, MouseEventKind::Down(left), beta);
+        mouse(&mut app, MouseEventKind::Drag(left), (beta.0 + 3, beta.1));
+        mouse(&mut app, MouseEventKind::Up(left), (beta.0 + 3, beta.1));
+        assert_eq!(app.take_clipboard().as_deref(), Some("beta"));
+        key(
+            &mut app,
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(app.take_clipboard().as_deref(), Some("beta"));
+        assert!(app.take_ops().is_empty());
+
+        // With no active selection, dedicated copy chords never interrupt, clear input, or quit.
+        for (code, mods) in [
+            (
+                KeyCode::Char('C'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            (
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            (KeyCode::Char('c'), KeyModifiers::SUPER),
+            (KeyCode::Insert, KeyModifiers::CONTROL),
+        ] {
+            key(&mut app, code, mods);
+            assert_eq!(app.take_clipboard(), None);
+            assert!(app.take_ops().is_empty());
+            assert_eq!(app.input.text(), "draft");
+            assert!(!app.should_quit());
+        }
+
+        // Plain Ctrl-C with a selection copies instead of interrupting or clearing input.
+        mouse(&mut app, MouseEventKind::Down(left), beta);
+        mouse(&mut app, MouseEventKind::Drag(left), (beta.0 + 3, beta.1));
+        mouse(&mut app, MouseEventKind::Up(left), (beta.0 + 3, beta.1));
+        assert_eq!(app.take_clipboard().as_deref(), Some("beta"));
+        key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(app.take_clipboard().as_deref(), Some("beta"));
+        assert!(app.take_ops().is_empty());
+        assert_eq!(app.input.text(), "draft");
+    }
+
+    #[test]
+    fn streaming_while_selecting_holds_the_transcript_viewport_steady() {
+        use crossterm::event::{
+            Event as TermEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        let mut app = App::new(test_info());
+        started(&mut app);
+        app.on_engine(Event::TurnStarted {
+            turn: quack_protocol::TurnId(1),
+        });
+        let initial: String = (1..=20)
+            .map(|i| format!("- line-{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.on_engine(Event::AssistantDelta { text: initial });
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).expect("terminal");
+        terminal.draw(|f| draw(f, &app)).expect("draw");
+        assert_eq!(app.scroll.get(), 0);
+
+        let target = {
+            let buf = terminal.backend().buffer();
+            (0..buf.area.height)
+                .find_map(|y| {
+                    let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                    row.find("line-18")
+                        .map(|x| (u16::try_from(row[..x].width()).expect("narrow"), y))
+                })
+                .expect("line-18")
+        };
+        app.on_terminal(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: target.0,
+            row: target.1,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.on_terminal(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: target.0 + 6,
+            row: target.1,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        // More output arrives while dragging: the viewport pins so the target stays put.
+        app.on_engine(Event::AssistantDelta {
+            text: "\n- line-21\n- line-22\n- line-23".into(),
+        });
+        terminal.draw(|f| draw(f, &app)).expect("draw");
+        assert_eq!(app.scroll.get(), 3);
+
+        app.on_terminal(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: target.0 + 6,
+            row: target.1,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.take_clipboard().as_deref(), Some("line-18"));
+    }
+
+    #[test]
+    fn ui_mouse_setting_applies_live_and_clears_selection() {
+        let mut app = App::new(test_info());
+        assert!(app.wants_mouse());
+        app.selection = Some(crate::select::Selection::new(Pane::Transcript, (0, 0)));
+        app.on_engine(Event::SettingSaved {
+            key: "ui.mouse".into(),
+            value: "false".into(),
+            path: "/tmp/config.toml".into(),
+            note: None,
+        });
+        assert!(!app.wants_mouse());
+        assert_eq!(app.selection, None);
+        app.on_engine(Event::SettingSaved {
+            key: "ui.mouse".into(),
+            value: "true".into(),
+            path: "/tmp/config.toml".into(),
+            note: None,
+        });
+        assert!(app.wants_mouse());
+    }
+
+    #[test]
     fn slash_popup_highlights_matched_letters() {
         let mut app = App::new(test_info());
         started(&mut app);

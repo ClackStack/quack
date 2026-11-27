@@ -27,6 +27,7 @@ pub struct Settings {
     pub updates: UpdateSettings,
     pub instructions: InstructionSettings,
     pub skills: SkillSettings,
+    pub commands: CommandSettings,
     pub telemetry: TelemetrySettings,
     /// Disable provider files from lower layers without deleting them.
     pub providers: ItemToggles,
@@ -487,6 +488,16 @@ impl Default for SkillSettings {
             index_max_tokens: 1_500,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct CommandSettings {
+    /// More Markdown command folders, e.g. `.claude/commands` once you accept it.
+    /// Relative paths are from the workspace root.
+    #[serde(deserialize_with = "list::de")]
+    #[schemars(with = "ListOrAppend")]
+    pub compat_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

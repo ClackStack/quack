@@ -259,6 +259,9 @@
 						<button class="btn btn-primary" onclick={() => session.acceptPlan()}>
 							Carry out the plan
 						</button>
+						<button class="btn" onclick={() => session.acceptPlan(true)}>
+							Carry out (fresh context)
+						</button>
 						<button class="btn" onclick={() => session.setWorkMode('edit')}>Back to Edit</button>
 					</div>
 				{/if}

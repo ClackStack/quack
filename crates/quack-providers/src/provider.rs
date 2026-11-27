@@ -418,6 +418,39 @@ impl Provider {
         Ok(RequestHeaders::Shared(self.headers()))
     }
 
+    /// Resolve headers and persistent-socket identity for Responses WebSockets.
+    /// Signed-in OAuth providers still validate/refresh their bearer token on every turn,
+    /// while identifying the socket by static headers + account so routine token refreshes
+    /// preserve the live connection and `previous_response_id`.
+    #[cfg(feature = "proto-openai-responses")]
+    async fn websocket_auth(&self) -> Result<(RequestHeaders, SocketAuth), ProviderError> {
+        #[cfg(feature = "auth-chatgpt")]
+        if let Some(login) = &self.login {
+            let base = self.headers();
+            let mut h = (*base).clone();
+            let (token, account) = login.bearer_with_account().await?;
+            if let Ok(mut dyn_s) = self.dynamic_secrets.write()
+                && token.len() >= 8
+                && !dyn_s.contains(&token)
+            {
+                if dyn_s.len() >= 16 {
+                    dyn_s.remove(0);
+                }
+                dyn_s.push(token.clone());
+            }
+            insert_header(&mut h, "Authorization", &format!("Bearer {token}"), true)?;
+            return Ok((
+                RequestHeaders::Owned(h),
+                SocketAuth::OAuth {
+                    base_headers: base,
+                    account,
+                },
+            ));
+        }
+        let headers = RequestHeaders::Shared(self.headers());
+        Ok((headers.clone(), SocketAuth::Static(headers)))
+    }
+
     fn has_login(&self) -> bool {
         #[cfg(feature = "auth-chatgpt")]
         {
@@ -1118,6 +1151,17 @@ enum RequestHeaders {
     /// Only a signed-in provider builds a per-request map.
     #[cfg_attr(not(feature = "auth-chatgpt"), allow(dead_code))]
     Owned(HeaderMap),
+}
+
+#[cfg(feature = "proto-openai-responses")]
+#[derive(Clone, PartialEq)]
+enum SocketAuth {
+    Static(RequestHeaders),
+    #[cfg(feature = "auth-chatgpt")]
+    OAuth {
+        base_headers: Arc<HeaderMap>,
+        account: String,
+    },
 }
 
 impl RequestHeaders {

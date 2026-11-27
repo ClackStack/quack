@@ -17,7 +17,7 @@ edit_format = "str_replace"
 [[tools]]
 name = "Read"
 maps_to = "read"
-description = "Reads a file. `file_path` may be absolute or relative to the workspace. By default the whole file is read; for long files pass `offset` (1-based line to start at) and `limit`. Lines come back numbered."
+description = "Reads a file. `file_path` may be absolute or relative to the workspace. A large source file read without `offset`/`limit` returns its symbol outline; then pass `offset` (1-based line) and `limit`, or `symbol` (e.g. `parse` or `Type::method`) to read one definition. Lines come back numbered."
 [tools.params]
 file_path = { to = "path" }
 

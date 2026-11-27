@@ -9,17 +9,17 @@ use std::path::PathBuf;
 
 use quack_protocol::{
     Answer, ApprovalDecision, ApprovalPolicy, ApprovalRequest, CallId, CheckStatus, CheckpointId,
-    CommandInfo, ContextItem, ContextReport, ContextSegment, ContextZone, DetectedServer,
-    DoctorCheck, EgressEntry, EgressKind, EgressStats, EngineError, EngineErrorKind, Event,
-    EventIndex, ExportFormat, HookConnection, HookConnectionDraft, HookConnectionInfo,
-    HookCredentialChange, HookDescriptor, HookField, HookOutcome, HookPreset, HookSetupInfo, Image,
-    InputItem, InstructionFile, KeySource, LoadState, LspDiagnosticItem, LspServerInfo,
-    LspServerState, McpSecretValue, McpServerInfo, McpServerState, MemoryNote, ModelId, ModelInfo,
-    Op, PermissionMode, ProfileInfo, ProviderConnection, ProviderHttpVersion, ProviderId,
-    ProviderModels, PruneReport, Question, QuestionOption, ReplayItem, RequestStat, RewindPoint,
-    SecretFinding, SecretText, ServiceInfo, SessionId, SessionInfo, SessionSummary, SkillInfo,
-    StatsReport, Subsystem, ToolCallInfo, ToolProbeCase, ToolProbeReport, ToolResultSummary,
-    ToolStat, TurnId, TurnOverrides, Usage, WorkMode, WriteScope,
+    CommandInfo, CompatFolder, CompatKind, ContextItem, ContextReport, ContextSegment, ContextZone,
+    DetectedServer, DoctorCheck, EgressEntry, EgressKind, EgressStats, EngineError,
+    EngineErrorKind, Event, EventIndex, ExportFormat, HookConnection, HookConnectionDraft,
+    HookConnectionInfo, HookCredentialChange, HookDescriptor, HookField, HookOutcome, HookPreset,
+    HookSetupInfo, Image, InputItem, InstructionFile, KeySource, LoadState, LspDiagnosticItem,
+    LspServerInfo, LspServerState, McpSecretValue, McpServerInfo, McpServerState, MemoryNote,
+    ModelId, ModelInfo, Op, PermissionMode, ProfileInfo, ProviderConnection, ProviderHttpVersion,
+    ProviderId, ProviderModels, PruneReport, Question, QuestionOption, ReplayItem, RequestStat,
+    RewindPoint, SecretFinding, SecretText, ServiceInfo, SessionId, SessionInfo, SessionSummary,
+    SkillInfo, StatsReport, Subsystem, ToolCallInfo, ToolProbeCase, ToolProbeReport,
+    ToolResultSummary, ToolStat, TurnId, TurnOverrides, Usage, WorkMode, WriteScope,
 };
 use ts_rs::TS;
 
@@ -86,6 +86,16 @@ fn export_protocol_ts() {
             "WriteScope",
             WriteScope::docs().unwrap_or_default(),
             WriteScope::decl(&cfg),
+        ),
+        (
+            "CompatKind",
+            CompatKind::docs().unwrap_or_default(),
+            CompatKind::decl(&cfg),
+        ),
+        (
+            "CompatFolder",
+            CompatFolder::docs().unwrap_or_default(),
+            CompatFolder::decl(&cfg),
         ),
         (
             "CheckStatus",

@@ -2,6 +2,17 @@
 
 Milestones are ordered by dependency and value. Each has **exit criteria** that must pass on **Linux, macOS and Windows** in CI before moving on. Dates are left out on purpose; scope is what's fixed.
 
+## Session efficiency, profile outlines, shell waits, and WebSocket keepalive — 2026-11-26
+
+Reduced redundant context growth and reconnect churn across long coding sessions while preserving prefix-cache stability:
+
+- **Tree-sitter outlines & profiles (`defaults/profiles.d/*`):** exposed `index` on the exclusive `codex` profile, removed `codex`'s unconditional 250-line chunking instruction that bypassed unranged auto-outlines, and updated `read`/`Read`/`read_file` descriptions and `system.md` guidance across all eight shipped profiles (`codex`, `generic`, `cc-style`, `zcode`, `qwen-code`, `dsh`, `vibe`, `kimi-code`) to use `index`, unranged source outlines, and `symbol` reads.
+- **Background shell waits, delta polls, and log distillation (`quack-shell`, `quack-tools`):** added blocking `wait_secs` and `job_action: "wait"` (default 30 s) to `BackgroundManager::wait_output` with per-job read cursors so polls return only new delta output (or `(no new output since last check)`), updated `shell`/`bash` profile descriptions accordingly, and extended `distill_output` to strip ANSI CSI/OSC escapes and collapse Cargo file-lock notices, compilation progress runs (`>= 3`), and duplicate Cargo manifest warnings.
+- **Optional Plan → Edit fresh-context handoff (`quack-protocol`, `quack-core`, `quack-tui`, `quack-gui`):** added `clear_context` to `Op::AcceptPlan`, tracked `plan_start` across single-model Plan sessions (and reload/resume), added **Implement plan (fresh context)** to the TUI review bar alongside `/plan accept fresh`, and added **Carry out (fresh context)** to `quack-gui`'s plan bar.
+- **Skill deduplication, plan reminders, and Plan-mode denials (`quack-core`, `quack-tools`):** tracked verbatim-in-context skills on `LoadedSkills` so repeated `skill` calls return a concise acknowledgement until compacted or rewound; fixed plan reminders to name the active profile's `todo` tool (`Plan::reminder_for`) without double-printing the checklist on `todo`'s own result; and made Plan-mode shell denials list only the active profile's read-only tools.
+- **Responses WebSocket keepalive & OAuth continuity (`quack-providers`):** parked idle Responses sockets in a background Ping/Pong keepalive task (`ParkedWire`) that answers server Pings, sends periodic client Pings, and drops server-closed sockets cleanly; keyed OAuth socket reuse on static headers plus account identity so routine hourly bearer refreshes preserve the live socket and `previous_response_id`.
+- **Cargo workspace LSP root (`quack-lsp`):** updated `LspManager::project_root` to walk upward from member-crate `Cargo.toml` files to the nearest enclosing `[workspace]` root (while respecting `rust-project.json` and nested standalone workspaces) so one `rust-analyzer` serves the workspace instead of one per member crate.
+
 ## Cross-provider prompt caching hardening — 2026-11-25
 
 Extended prompt-caching correctness and parity across all supported cloud and local providers (not just OpenAI/ChatGPT):
@@ -477,6 +488,7 @@ Milestones: G1 desktop MVP (Welcome/recent folders, login-shell `PATH` & `.app` 
 - Docs updated with each feature (user docs live in `docs/`, separate from `docs/plan/`)
 
 - 2026-11-10: Refreshed `/config` Layers with status hints, spaced panes and more room for wrapped paths. Enter copies the full selected path through OSC 52 while keeping the modal open.
+- 2026-11-26: Replaced the `compat` startup placeholder with opt-in discovery of other agents' skill and command folders. TUI `/compat` reviews each folder and loads it for the run or saves the path to user or project settings ([08](08-instructions-skills-commands.md#other-harnesses-files)).
 - 2026-11-25: Desktop GUI sidebar (`Sidebar.svelte` and `JobsOverview.svelte`) pins the active `Plan` section directly below `Projects` with `done/total`, completion percentage, an accessible progress bar, completed-step checkmarks, and bounded scrolling for long plans, while `Jobs` overview cards show completion percentage and the active step ([15](15-desktop-client.md#the-ui)).
 - 2026-11-24: Wide-terminal TUI sidebar shows the active plan below Context (`Plan · done/total (%)`, progress meter, and steps with adaptive two-line wrapping or windowed overflow), moving the one-line plan strip out of the main pane while the sidebar displays it and falling back automatically on narrow or crowded screens ([06](06-tui.md#wide-terminal-sidebar-2026-11-11)).
 - 2026-11-11: Added a default-on, responsive right sidebar at 140×24 and above, showing session title, folder, Git branch, model/profile, context usage and speed. `ui.sidebar` disables it live through `/config` or `/reload`; narrow terminals keep the existing layout. Git HEAD refreshes off-thread ([06](06-tui.md#wide-terminal-sidebar-2026-11-11)).

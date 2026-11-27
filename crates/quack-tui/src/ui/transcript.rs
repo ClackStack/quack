@@ -546,10 +546,12 @@ pub(super) fn draw_transcript(f: &mut Frame<'_>, app: &App, area: Rect) {
         .map(|p| p.rows.len() + usize::from(p.blank))
         .sum();
     let max = total.saturating_sub(height);
-    // Scrolled up while a reply streams in: move with the new rows so the view holds still.
+    // Scrolled up or selecting text while a reply streams in: move with the new rows so the
+    // view holds still instead of sliding out from under the cursor.
     let (drawn, _) = app.view.get();
     let mut scroll = app.scroll.get();
-    if scroll > 0 && drawn > 0 && total > drawn {
+    let pinned = scroll > 0 || app.selection.is_some_and(|s| s.pane == Pane::Transcript);
+    if pinned && drawn > 0 && total > drawn {
         scroll = scroll.saturating_add(total - drawn);
     }
     let scroll = scroll.min(max);
