@@ -104,8 +104,25 @@ fn main() {
             "tools/call" => {
                 let args = &params["arguments"];
                 match params["name"].as_str().unwrap_or_default() {
-                    "echo" => Ok(json!({"content": [{"type": "text",
-                        "text": format!("echo: {}", args["text"].as_str().unwrap_or_default())}]})),
+                    "echo" => {
+                        if let Some(tok) = params.get("_meta").and_then(|m| m.get("progressToken"))
+                        {
+                            let note = json!({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/progress",
+                                "params": {
+                                    "progressToken": tok,
+                                    "progress": 1.0,
+                                    "total": 2.0,
+                                    "message": "echoing"
+                                }
+                            });
+                            let _ = writeln!(out, "{note}");
+                            let _ = out.flush();
+                        }
+                        Ok(json!({"content": [{"type": "text",
+                            "text": format!("echo: {}", args["text"].as_str().unwrap_or_default())}]}))
+                    }
                     "fail" => Ok(
                         json!({"content": [{"type": "text", "text": "it broke"}], "isError": true}),
                     ),

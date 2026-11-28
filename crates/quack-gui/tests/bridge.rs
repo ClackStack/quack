@@ -69,11 +69,8 @@ async fn appinfo_snapshot_carries_the_static_facts() {
         "{:?}",
         info.layers
     );
-    assert!(
-        info.permission_mode == "ask" || info.permission_mode == "read-only",
-        "the default permission mode labels as ask, got {}",
-        info.permission_mode
-    );
+    assert_eq!(info.work_mode, "plan");
+    assert_eq!(info.permission_mode, "allow");
     assert!(info.settings.iter().any(|s| s.key == "model.default"));
     assert!(info.settings.iter().any(|s| s.key == "memory.path"));
     assert!(info.paths.memory_global.ends_with("memory"));
@@ -162,6 +159,13 @@ async fn approval_round_trip_over_send_op() {
         .await;
 
     let tmp = tempfile::tempdir().expect("tempdir");
+    let user = tmp.path().join("user");
+    std::fs::create_dir_all(&user).expect("user config dir");
+    std::fs::write(
+        user.join("config.toml"),
+        "[permissions]\nwork_mode = \"edit\"\nmode = \"ask\"\n",
+    )
+    .expect("config");
     let (registry, tab, mut rx) = open(tmp.path(), &server).await;
     registry
         .send_op(

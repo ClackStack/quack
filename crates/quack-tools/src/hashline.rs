@@ -2021,6 +2021,27 @@ mod tests {
         assert_eq!(on_disk(&c), "x = 1\ntotal = 3\n");
     }
 
+    #[tokio::test]
+    async fn grep_only_marks_unclipped_hashline_hits_as_shown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("a.py");
+        let text = format!("{}needle\nneedle\n", "x".repeat(350));
+        std::fs::write(&path, &text).expect("write");
+        let c = ctx(dir.path());
+        let out = crate::search::Grep
+            .run(json!({"pattern": "needle"}), &c)
+            .await;
+        let tag = file_tag(&text);
+        assert!(
+            out.model.starts_with(&format!("[a.py#{tag}]\na.py:1: …")),
+            "{out:?}"
+        );
+        let views = c.reads.views(&path);
+        let view = views.last().expect("tracked file version");
+        assert!(!view.covers(1));
+        assert!(view.covers(2));
+    }
+
     #[test]
     fn crlf_and_a_missing_final_newline_are_kept() {
         let dir = tempfile::tempdir().expect("tempdir");

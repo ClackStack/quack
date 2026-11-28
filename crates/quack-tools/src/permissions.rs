@@ -1361,12 +1361,18 @@ enum Rule {
     Read(globset::GlobMatcher),
     /// `mcp:<server>/<tool>` globs, e.g. `mcp:github/get_*`.
     Mcp(String),
+    /// `web_fetch:<url-or-host-glob>` globs, e.g. `web_fetch:https://docs.rs/*` or `web_fetch:docs.rs`.
+    WebFetch(String),
+    /// `tool:<name>` globs, e.g. `tool:web_fetch`.
+    Tool(String),
 }
 
 impl Rule {
     fn parse(s: &str) -> Result<Self, String> {
         let (kind, pattern) = s.split_once(':').ok_or_else(|| {
-            format!("rule `{s}` needs a kind prefix: shell:, edit:, read: or mcp:")
+            format!(
+                "rule `{s}` needs a kind prefix: shell:, edit:, read:, mcp:, web_fetch: or tool:"
+            )
         })?;
         let glob = |p: &str| {
             globset::GlobBuilder::new(p.trim())
@@ -1381,6 +1387,8 @@ impl Rule {
             "edit" | "write" => Ok(Self::Edit(glob(pattern)?)),
             "read" => Ok(Self::Read(glob(pattern)?)),
             "mcp" => Ok(Self::Mcp(pattern.trim().to_owned())),
+            "web_fetch" | "fetch" => Ok(Self::WebFetch(pattern.trim().to_owned())),
+            "tool" => Ok(Self::Tool(pattern.trim().to_owned())),
             other => Err(format!("rule `{s}`: unknown kind `{other}`")),
         }
     }
@@ -1394,6 +1402,10 @@ impl Rule {
             (Self::Mcp(pat), Subject::Mcp { server, tool, .. }) => {
                 glob_match(pat, &format!("{server}/{tool}"))
             }
+            (Self::WebFetch(pat), Subject::WebFetch(url)) => {
+                glob_match(pat, url) || glob_match(pat, quack_config::url_host(url))
+            }
+            (Self::Tool(pat), Subject::WebFetch(_)) => glob_match(pat, "web_fetch"),
             _ => false,
         }
     }
@@ -1666,6 +1678,14 @@ impl Permissions {
             Subject::Mcp { server, tool, .. } if !format!("{server}{tool}").contains('*') => {
                 vec![format!("mcp:{server}/{tool}")]
             }
+            Subject::WebFetch(url) => {
+                let host = quack_config::url_host(url);
+                if !host.is_empty() && !host.contains('*') {
+                    vec![format!("web_fetch:{host}")]
+                } else {
+                    Vec::new()
+                }
+            }
             _ => Vec::new(),
         }
     }
@@ -1833,10 +1853,10 @@ mod tests {
     fn perms(mode: PermissionMode, allow: &[&str], deny: &[&str]) -> Permissions {
         let settings = PermissionSettings {
             mode,
+            work_mode: WorkMode::Edit,
             allow: allow.iter().map(|s| (*s).to_owned()).collect(),
             ask: Vec::new(),
             deny: deny.iter().map(|s| (*s).to_owned()).collect(),
-            ..Default::default()
         };
         let (p, warnings) = Permissions::new(&settings, Path::new("/repo"));
         assert!(warnings.is_empty(), "{warnings:?}");

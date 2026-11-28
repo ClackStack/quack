@@ -16,7 +16,7 @@ edit_format = "apply_patch"
 [[tools]]
 name = "shell"
 maps_to = "shell"
-description = "Runs a command in the workspace and returns its exit code and output. `command` is an argument list, for example [\"bash\", \"-lc\", \"rg -n parse src\"]. Each call is a fresh process, with no stdin or persistent session; use non-interactive flags. `timeout_secs` sets the timeout within configured limits. Pass `background: true` to start a long-running command or watcher (returns a `job_id`), then wait for it or inspect/stop it with `job_action: \"wait\" | \"output\" | \"stop\" | \"list\"`, `job_id`, and `wait_secs` (blocks until exit or timeout and returns only new output; avoid polling in a loop or running overlapping builds on the same build directory). Commands use the configured sandbox; only retry with `sandbox: false` after a sandbox denial, subject to user approval."
+description = "Runs a command in the workspace and returns its exit code and output. `command` is an argument list, for example [\"bash\", \"-lc\", \"echo ready\"]. Each call is a fresh process, with no stdin or persistent session; use non-interactive flags. `timeout_secs` sets the timeout within configured limits. Pass `background: true` to start a long-running command or watcher (returns a `job_id`), then wait for it or inspect/stop it with `job_action: \"wait\" | \"output\" | \"stop\" | \"list\"`, `job_id`, and `wait_secs` (blocks until exit or timeout and returns only new output; avoid polling in a loop or running overlapping builds on the same build directory). Commands use the configured sandbox; only retry with `sandbox: false` after a sandbox denial, subject to user approval."
 [tools.params]
 command = { to = "command", transform = "argv" }
 
@@ -27,6 +27,14 @@ maps_to = "read"
 [[tools]]
 name = "index"
 maps_to = "index"
+
+[[tools]]
+name = "grep"
+maps_to = "grep"
+
+[[tools]]
+name = "glob"
+maps_to = "glob"
 
 [[tools]]
 name = "apply_patch"

@@ -49,7 +49,11 @@ fn spawner(root: &Path, base_url: &str) -> Spawn {
         opts.mcp = start.mcp;
         let loaded = load_with(&|k| vars.get(k).cloned(), &opts)
             .map_err(|e| quack_acp::SessionError::Other(e.to_string()))?;
-        Ok(Engine::spawn_with(Arc::new(loaded), start.resume))
+        Ok(Engine::spawn_with_bridge(
+            Arc::new(loaded),
+            start.resume,
+            start.client_bridge,
+        ))
     })
 }
 
@@ -186,7 +190,7 @@ async fn a_prompt_streams_the_answer_and_ends_the_turn() {
         .as_str()
         .expect("session id")
         .to_owned();
-    assert_eq!(new["result"]["modes"]["currentModeId"], "edit", "{new}");
+    assert_eq!(new["result"]["modes"]["currentModeId"], "plan", "{new}");
 
     let id = editor
         .request(
@@ -213,7 +217,10 @@ async fn a_prompt_streams_the_answer_and_ends_the_turn() {
         .and_then(|m| m.iter().rev().find(|m| m["role"] == "user"))
         .and_then(|m| m["content"].as_str())
         .unwrap_or_default();
-    assert!(user.ends_with("hi"), "the prompt reached the model: {user}");
+    assert!(
+        user.contains("hi\n\n[Plan mode]"),
+        "the prompt reached the model in Plan mode: {user}"
+    );
 
     let unknown = editor.call("session/fork", json!({})).await;
     assert_eq!(unknown["error"]["code"], -32601, "{unknown}");
@@ -221,6 +228,66 @@ async fn a_prompt_streams_the_answer_and_ends_the_turn() {
         .call("session/prompt", json!({"sessionId": "nope", "prompt": []}))
         .await;
     assert_eq!(missing["error"]["code"], -32602, "{missing}");
+    editor.close().await;
+}
+
+#[tokio::test]
+async fn secret_shield_explains_findings_in_editor_permissions() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"content":"Received."},"finish_reason":"stop"}]}"#,
+        ]))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ws = workspace(tmp.path());
+    let spawn = spawner(tmp.path(), &server.uri());
+    std::fs::write(
+        tmp.path().join("user/config.toml"),
+        "[network]\nsecret_guard_local = true\n",
+    )
+    .expect("enable Secret Shield on the loopback provider");
+    let mut editor = Editor::connect(spawn);
+    editor
+        .call("initialize", json!({"protocolVersion": 1}))
+        .await;
+    let new = editor
+        .call("session/new", json!({"cwd": ws, "mcpServers": []}))
+        .await;
+    let session = new["result"]["sessionId"].as_str().expect("session id");
+    let secret = "ghp_SYNTHETICREVOKED00000000000000000000";
+    let id = editor
+        .request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [{"type": "text", "text": format!("Private note\n{secret}")}]}),
+        )
+        .await;
+    let (seen, reply) = editor.until(id, "redact").await;
+    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+    let ask = &seen
+        .iter()
+        .find(|m| m["method"] == "session/request_permission")
+        .expect("Secret Shield approval")["params"];
+    assert_eq!(
+        ask["toolCall"]["title"],
+        format!(
+            "Secret Shield paused before sending to mock ({})",
+            server.address()
+        )
+    );
+    let detail = ask["toolCall"]["content"][0]["content"]["text"]
+        .as_str()
+        .expect("approval detail");
+    assert!(detail.contains("Possible GitHub token · Prompt text, scanned line 2"));
+    assert!(detail.contains("within the token's permissions"));
+    assert!(detail.contains("may include unredacted text again"));
+    assert!(detail.contains("ghp_••••0000"));
+    assert!(!detail.contains(secret));
+    assert!(!detail.contains("Private note"));
+    assert_eq!(ask["options"][0]["optionId"], "redact");
+    assert_eq!(ask["options"][1]["name"], "Send unredacted");
     editor.close().await;
 }
 
@@ -248,6 +315,11 @@ async fn approvals_go_to_the_editor_and_load_replays_the_session() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let ws = workspace(tmp.path());
     let spawn = spawner(tmp.path(), &server.uri());
+    std::fs::write(
+        tmp.path().join("user/config.toml"),
+        "[permissions]\nwork_mode = \"edit\"\nmode = \"ask\"\n",
+    )
+    .expect("config");
     let mut editor = Editor::connect(spawn.clone());
     editor
         .call("initialize", json!({"protocolVersion": 1}))
@@ -486,5 +558,337 @@ async fn approvals_can_change_without_leaving_plan_mode() {
     let second = String::from_utf8_lossy(&chat[1].body);
     assert!(first.contains("exact test commands"), "{first}");
     assert!(second.contains("plan mode: no changes"), "{second}");
+    editor.close().await;
+}
+
+/// Valid 1x1 transparent PNG encoded as base64.
+const PNG_1X1_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==";
+
+#[tokio::test]
+async fn images_commands_titles_and_session_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"content":"Saw the image."},"finish_reason":"stop"}]}"#,
+        ]))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ws = workspace(tmp.path());
+    let user = tmp.path().join("user");
+    std::fs::create_dir_all(user.join("providers.d")).expect("mkdir");
+    std::fs::create_dir_all(user.join("commands")).expect("mkdir");
+    std::fs::write(
+        user.join("providers.d").join("mock.toml"),
+        format!(
+            "base_url = \"{}/v1\"\n[[models]]\nid = \"tiny\"\nvision = true\n",
+            server.uri()
+        ),
+    )
+    .expect("provider");
+    std::fs::write(
+        user.join("commands").join("deploy.md"),
+        "---\ndescription: Deploy the app\n---\nDeploy now.\n",
+    )
+    .expect("command");
+    let mut vars: HashMap<String, OsString> = HashMap::new();
+    vars.insert("QUACK_CONFIG_DIR".into(), user.into_os_string());
+    for (k, sub) in [
+        ("QUACK_SYSTEM_DIR", "system"),
+        ("QUACK_DATA_DIR", "data"),
+        ("QUACK_CACHE_DIR", "cache"),
+    ] {
+        vars.insert(k.into(), tmp.path().join(sub).into_os_string());
+    }
+    vars.insert("QUACK_DEFAULTS_DIR".into(), "none".into());
+    let spawn: Spawn = Arc::new(move |start: SessionStart| {
+        let mut opts = LoadOptions::new(start.cwd);
+        opts.mcp = start.mcp;
+        let loaded = load_with(&|k| vars.get(k).cloned(), &opts)
+            .map_err(|e| quack_acp::SessionError::Other(e.to_string()))?;
+        Ok(Engine::spawn_with_bridge(
+            Arc::new(loaded),
+            start.resume,
+            start.client_bridge,
+        ))
+    });
+
+    let mut editor = Editor::connect(spawn);
+    let init = editor
+        .call("initialize", json!({"protocolVersion": 1}))
+        .await;
+    assert_eq!(
+        init["result"]["agentCapabilities"]["promptCapabilities"]["image"],
+        true
+    );
+    assert!(
+        init["result"]["agentCapabilities"]["sessionCapabilities"]["list"].is_object(),
+        "{init}"
+    );
+
+    let new = editor
+        .call("session/new", json!({"cwd": ws, "mcpServers": []}))
+        .await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+
+    let id = editor
+        .request(
+            "session/prompt",
+            json!({
+                "sessionId": session,
+                "prompt": [
+                    {"type": "text", "text": "describe this screenshot"},
+                    {"type": "image", "data": PNG_1X1_B64, "mimeType": "image/png"}
+                ]
+            }),
+        )
+        .await;
+    let (seen, reply) = editor.until(id, "deny").await;
+    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+
+    // Slash commands and session title were announced.
+    let cmd_updates = updates(&seen, "available_commands_update");
+    assert!(
+        cmd_updates.iter().any(|u| u["availableCommands"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|c| c["name"] == "deploy"))),
+        "{seen:?}"
+    );
+    let title_updates = updates(&seen, "session_info_update");
+    assert!(
+        title_updates
+            .iter()
+            .any(|u| u["title"].as_str().is_some_and(|t| t.contains("describe"))),
+        "{seen:?}"
+    );
+
+    // The image reached the vision model as an image_url content block.
+    let requests = server.received_requests().await.expect("requests");
+    let chat = requests
+        .iter()
+        .find(|r| r.url.path().ends_with("/chat/completions"))
+        .expect("chat");
+    let body = String::from_utf8_lossy(&chat.body);
+    assert!(body.contains("data:image/png;base64,"), "{body}");
+
+    // `session/list` returns the saved session.
+    let listed = editor.call("session/list", json!({"cwd": ws})).await;
+    let sessions = listed["result"]["sessions"].as_array().expect("sessions");
+    assert!(
+        sessions.iter().any(|s| s["sessionId"] == session),
+        "{listed}"
+    );
+
+    editor.close().await;
+}
+
+#[tokio::test]
+async fn editor_fs_and_terminal_bridge_delegates_when_enabled() {
+    let server = MockServer::start().await;
+    // Step 3: after terminal result, finish.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("from editor terminal"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"content":"All verified."},"finish_reason":"stop"}]}"#,
+        ]))
+        .mount(&server)
+        .await;
+    // Step 2: after reading unsaved buffer, run a shell command.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("unsaved buffer"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c2","function":{"name":"shell","arguments":"{\"command\":\"echo hi\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ]))
+        .mount(&server)
+        .await;
+    // Step 1: read a file.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ]))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ws = workspace(tmp.path());
+    std::fs::write(ws.join("a.txt"), "old disk content\n").expect("write");
+    let user = tmp.path().join("user");
+    std::fs::create_dir_all(user.join("providers.d")).expect("mkdir");
+    std::fs::write(
+        user.join("config.toml"),
+        "[permissions]\nwork_mode = \"edit\"\nmode = \"allow\"\n[tools]\nacp_client_fs = true\nacp_client_terminal = true\n",
+    )
+    .expect("config");
+    let spawn = spawner(tmp.path(), &server.uri());
+    let mut editor = Editor::connect(spawn);
+
+    editor
+        .call(
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {
+                    "fs": { "readTextFile": true, "writeTextFile": true },
+                    "terminal": true
+                }
+            }),
+        )
+        .await;
+    let new = editor
+        .call("session/new", json!({"cwd": ws, "mcpServers": []}))
+        .await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+
+    let id = editor
+        .request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [{"type": "text", "text": "check file and run"}]}),
+        )
+        .await;
+
+    let mut fs_reads = 0;
+    let mut term_creates = 0;
+    let mut term_releases = 0;
+    let reply = loop {
+        let msg = editor.next().await;
+        if msg.get("method").is_none() && msg["id"] == id {
+            break msg;
+        }
+        match msg["method"].as_str() {
+            Some("fs/read_text_file") => {
+                fs_reads += 1;
+                editor
+                    .send(json!({
+                        "jsonrpc": "2.0",
+                        "id": msg["id"],
+                        "result": { "content": "unsaved buffer\n" }
+                    }))
+                    .await;
+            }
+            Some("terminal/create") => {
+                term_creates += 1;
+                editor
+                    .send(json!({
+                        "jsonrpc": "2.0",
+                        "id": msg["id"],
+                        "result": { "terminalId": "term-1" }
+                    }))
+                    .await;
+            }
+            Some("terminal/wait_for_exit") => {
+                editor
+                    .send(json!({
+                        "jsonrpc": "2.0",
+                        "id": msg["id"],
+                        "result": { "exitCode": 0 }
+                    }))
+                    .await;
+            }
+            Some("terminal/output") => {
+                editor
+                    .send(json!({
+                        "jsonrpc": "2.0",
+                        "id": msg["id"],
+                        "result": { "output": "from editor terminal\n", "exitStatus": { "exitCode": 0 } }
+                    }))
+                    .await;
+            }
+            Some("terminal/release") => {
+                term_releases += 1;
+                editor
+                    .send(json!({"jsonrpc": "2.0", "id": msg["id"], "result": {}}))
+                    .await;
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+    assert_eq!(fs_reads, 1);
+    assert_eq!(term_creates, 1);
+    assert_eq!(term_releases, 1);
+    editor.close().await;
+}
+
+#[tokio::test]
+async fn subagent_tool_calls_stream_to_editor() {
+    let server = MockServer::start().await;
+    // Parent step 2: after task report returns, finish.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("Sub-agent found hello"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"content":"Parent done."},"finish_reason":"stop"}]}"#,
+        ]))
+        .mount(&server)
+        .await;
+    // Sub-agent step 2: after reading `a.txt`, return report.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("hello from disk"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"content":"Sub-agent found hello"},"finish_reason":"stop"}]}"#,
+        ]))
+        .mount(&server)
+        .await;
+    // Sub-agent step 1: read `a.txt`.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("inspect a.txt"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"sub1","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ]))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    // Parent step 1: spawn explore sub-agent.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(sse(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"p1","function":{"name":"task","arguments":"{\"agent\":\"explore\",\"description\":\"Inspect file\",\"prompt\":\"inspect a.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ]))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ws = workspace(tmp.path());
+    std::fs::write(ws.join("a.txt"), "hello from disk\n").expect("write");
+    let mut editor = Editor::connect(spawner(tmp.path(), &server.uri()));
+    editor
+        .call("initialize", json!({"protocolVersion": 1}))
+        .await;
+    let new = editor
+        .call("session/new", json!({"cwd": ws, "mcpServers": []}))
+        .await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+    let id = editor
+        .request(
+            "session/prompt",
+            json!({"sessionId": session, "prompt": [{"type": "text", "text": "delegate reading"}]}),
+        )
+        .await;
+    let (seen, reply) = editor.until(id, "deny").await;
+    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+    let tool_calls = updates(&seen, "tool_call");
+    assert!(
+        tool_calls.iter().any(|u| u["title"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("[explore] read"))),
+        "sub-agent tool call should stream to editor: {tool_calls:?}"
+    );
     editor.close().await;
 }

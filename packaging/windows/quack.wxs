@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v4/v5 MSI installer for the quack CLI and its shared defaults bundle.
+
+  Defaults to per-machine installation into %ProgramFiles%\quack\ (ALLUSERS=2) for
+  GPO / MDM / Intune deployment, and supports per-user installation without admin
+  rights via `msiexec /i quack-<target>.msi MSIINSTALLPERUSER=1`.
+
+  Enterprise administrators can customize or omit the defaults bundle with an MST
+  transform or `REMOVE=DefaultsFeature`, and lock settings via
+  HKLM\SOFTWARE\Policies\quack (see docs/enterprise.md).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="quack"
+      Manufacturer="ClackStack"
+      Version="$(var.Version)"
+      UpgradeCode="7B2A3C4E-5F1A-4D8C-9E3B-1A6C8D2E4F50"
+      Scope="perMachineOrUser"
+      Compressed="yes">
+    <MajorUpgrade
+        DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+        AllowSameVersionUpgrades="yes" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/ClackStack/quack" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/ClackStack/quack" />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="quack">
+        <Directory Id="DEFAULTSFOLDER" Name="defaults" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature
+        Id="MainFeature"
+        Title="quack CLI"
+        Description="The quack terminal coding agent binary and PATH entry."
+        Level="1"
+        AllowAbsent="no">
+      <ComponentGroupRef Id="CliComponents" />
+      <Feature
+          Id="DefaultsFeature"
+          Title="Defaults Bundle"
+          Description="Editable TOML providers, model profiles, agents, themes, schemas, and examples."
+          Level="1">
+        <ComponentGroupRef Id="DefaultsComponents" />
+      </Feature>
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="CliComponents" Directory="INSTALLFOLDER">
+      <Component Id="QuackBinary" Guid="A93F48C2-71B5-4C94-8E2D-3F61B50C9A11">
+        <File Id="QuackExe" Source="!(bindpath.Bin)\quack.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="QuackNotices" Guid="B41E92D6-38A4-47F2-9C51-6E82A14D7B22">
+        <File Id="LicenseFile" Source="!(bindpath.Repo)\LICENSE" KeyPath="yes" />
+        <File Id="NoticeFile" Source="!(bindpath.Repo)\NOTICE" />
+      </Component>
+      <Component Id="QuackPathEntry" Guid="C82D19E7-54C3-4A68-B104-9D37E25F8C33">
+        <Environment
+            Id="QuackPath"
+            Name="PATH"
+            Value="[INSTALLFOLDER]"
+            Permanent="no"
+            Part="last"
+            Action="set"
+            System="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="DefaultsComponents" Directory="DEFAULTSFOLDER">
+      <Files Include="!(bindpath.Defaults)\**" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>

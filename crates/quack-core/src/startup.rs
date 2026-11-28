@@ -24,6 +24,17 @@ use crate::env;
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 
+pub(crate) fn configured_permissions(config: &Loaded, ctx: &ToolCtx) -> (Permissions, Vec<String>) {
+    let mut settings = config.settings.permissions.clone();
+    if let Some(cap) = config.settings.policy.max_permission_mode {
+        settings.mode = settings.mode.min(cap);
+    }
+    let (mut permissions, warnings) = Permissions::new(&settings, &ctx.root);
+    permissions.memory_writes_ask = config.settings.memory.writes == MemoryWrites::Ask;
+    permissions.powershell = matches!(ctx.shell, ShellKind::Pwsh(_) | ShellKind::PowerShell(_));
+    (permissions, warnings)
+}
+
 /// Everything a turn needs, resolved once per session.
 #[derive(Debug)]
 pub(crate) struct Setup {
@@ -127,6 +138,56 @@ impl Reporter {
             state,
         });
     }
+}
+
+/// Opt-in SSRF-protected fetcher wired into `ToolCtx` only when `tools.web_fetch.enabled`
+/// is true and `network.offline` is false.
+#[derive(Debug)]
+struct CoreWebFetcher {
+    settings: quack_config::Settings,
+    provider: Provider,
+}
+
+impl quack_tools::WebFetcher for CoreWebFetcher {
+    fn fetch<'a>(
+        &'a self,
+        url: &'a str,
+        max_chars: usize,
+        cancel: CancellationToken,
+    ) -> futures::future::BoxFuture<'a, Result<quack_tools::WebFetchResponse, String>> {
+        Box::pin(async move {
+            let ledger = self.provider.ledger();
+            let outcome = quack_providers::web_fetch::fetch(
+                &self.settings,
+                &|k| std::env::var_os(k),
+                url,
+                max_chars,
+                cancel,
+                ledger.as_deref(),
+            )
+            .await?;
+            Ok(quack_tools::WebFetchResponse {
+                final_url: outcome.final_url,
+                status: outcome.status,
+                content_type: outcome.content_type,
+                body: outcome.body,
+                truncated: outcome.truncated,
+            })
+        })
+    }
+}
+
+fn build_web_fetcher(
+    config: &Loaded,
+    provider: &Provider,
+) -> Option<Arc<dyn quack_tools::WebFetcher>> {
+    if !config.settings.tools.web_fetch.enabled || config.settings.network.offline {
+        return None;
+    }
+    Some(Arc::new(CoreWebFetcher {
+        settings: config.settings.clone(),
+        provider: provider.clone(),
+    }))
 }
 
 fn warn(tx: &broadcast::Sender<Event>, message: impl Into<String>) {
@@ -756,6 +817,8 @@ async fn build_setup(
             config.item_layers().iter().map(|(_, d)| d.as_path()),
         )),
         bg: Arc::default(),
+        web_fetch: build_web_fetcher(config, &provider),
+        client_bridge: None,
     };
     let registry = Arc::new(Registry::builtin());
     let vars = PromptVars {
@@ -804,13 +867,7 @@ async fn build_setup(
     };
     let surface = shaped.surface;
     tool_ctx.edit_format = shaped.edit_format;
-    let mut settings = config.settings.permissions.clone();
-    if let Some(cap) = config.settings.policy.max_permission_mode {
-        settings.mode = settings.mode.min(cap);
-    }
-    let (mut permissions, perm_warnings) = Permissions::new(&settings, &root);
-    permissions.memory_writes_ask = config.settings.memory.writes == MemoryWrites::Ask;
-    permissions.powershell = matches!(shell, ShellKind::Pwsh(_) | ShellKind::PowerShell(_));
+    let (permissions, perm_warnings) = configured_permissions(config, &tool_ctx);
     for w in perm_warnings {
         warn(tx, format!("[permissions]: {w}"));
     }
@@ -824,8 +881,8 @@ async fn build_setup(
                 (None, id) => format!("{id} (built in)"),
             },
             surface.tools.len(),
-            settings.work_mode.label(),
-            settings.mode.label()
+            permissions.work_mode.label(),
+            permissions.mode.label()
         ),
     });
     let budget = model.context_window.map(|c| {

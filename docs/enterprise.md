@@ -39,12 +39,9 @@ separate `-plucked` binaries or packages:
   hosted providers can remove
   or replace `/usr/share/quack/defaults` or override it via the system policy/bundle below.
 - **macOS and Linux with Homebrew**: each release carries `quack.rb` for a tap.
-- **SBOMs**: `quack.cdx.json` and `quack-gui.cdx.json` (CycloneDX 1.5) list every crate in
-  the CLI and GUI binaries.
+- **Windows**: `quack-<target>.msi` (`x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`, WiX v5) installs `quack.exe`, `LICENSE`, `NOTICE`, PATH registration, and the editable `defaults\` bundle into `%ProgramFiles%\quack\` per-machine by default (`ALLUSERS=2`, GPO/MDM/Intune ready) or per-user via `msiexec /i quack-<target>.msi MSIINSTALLPERUSER=1`. Enterprise transforms (`.mst`) or `REMOVE=DefaultsFeature` can customize or omit the defaults bundle. Builds are currently unsigned (Authenticode signing activates automatically in `scripts/package-msi.ps1` once a certificate is configured).
+- **SBOMs & Attestations**: `quack.cdx.json` and `quack-gui.cdx.json` (CycloneDX 1.5) list every crate in the CLI and GUI binaries, and every release asset in `dist/*` carries a keyless GitHub SLSA build provenance attestation (`gh attestation verify <file> --repo ClackStack/quack`).
 - `SHA256SUMS` covers every release asset.
-
-An MSI for Windows is not built yet; use the zip/setup exe with `install.ps1`, or your own
-packaging.
 
 The binary finds its shared defaults bundle relative to itself (`<exe>/../share/quack/defaults`,
 `<exe dir>/defaults`), beside `$APPIMAGE` on Linux, in Homebrew/user share folders
@@ -107,9 +104,14 @@ hosts = ["*.corp.example"]
   pointing anywhere else does not load. The same goes for remote MCP servers.
 - Hooks in the system layer's `hooks.d/` always run; users cannot turn them off. Use them
   for logging or extra checks on tool calls.
-- On Windows, `%ProgramData%` is an environment variable a user can change, so there a
-  policy that must hold against the user also needs the folder protected by other means.
-  quack has no registry location for policy yet.
+- **Windows machine-level registry policy (`HKLM\SOFTWARE\Policies\quack`)**: on Windows, quack reads `HKLM\SOFTWARE\Policies\quack` directly from the registry (`RegGetValueW` with `RRF_NOEXPAND`):
+  - `SystemDir` (`REG_SZ`, absolute path): pins the system configuration folder so neither `%ProgramData%` nor `QUACK_SYSTEM_DIR` can redirect policy.
+  - `PolicyToml` (`REG_SZ` or `REG_MULTI_SZ`): TOML policy text merged into the system layer ahead of user/project config and locks.
+  - `quack doctor` reports active system policy locks, registry policy presence, and audit log configuration.
+- **Enterprise JSONL audit log (`[audit]`)**: set `[audit] path = "/var/log/quack/audit.jsonl"` (and lock `audit` in `[policy] locked`) to append structured JSONL records (`ts`, `session_id`, `agent`, `call_id`, `tool`, `subject`, `decision`, `decided_by`, `ok`, `duration_ms`) for every allowed, denied, hook-blocked, or interrupted tool execution. Set `include_content = true` only if you want tool arguments and summaries included; by default content is omitted.
+- **Multi-endpoint failover (`base_urls`)**: internal clusters (vLLM, SGLang, llama.cpp) can list `base_urls = ["https://gpu-1.corp.example/v1", "https://gpu-2.corp.example/v1"]` in `providers.d/<id>.toml` for round-robin balancing and automatic health cooldown failover; `[policy.providers] hosts` validates every URL in `base_urls`.
+- **Session retention**: configure `[sessions] retention_days = 30` (lockable via `[policy]`) for automatic background cleanup on startup, or run `quack sessions prune --older-than 30d [--all] [--dry-run]`.
+- **Opt-in `web_fetch`**: disabled by default (`[tools.web_fetch] enabled = false`), unregistered whenever `[network] offline = true`, blocks loopback/private/link-local/CGNAT/metadata IPs with DNS-pinning against rebinding, validates every redirect hop against `[network]`/`[policy]`, and logs to the session egress ledger.
 - Check the result on a client with `quack doctor` and `quack config show --origin`, which
   shows each setting's layer.
 

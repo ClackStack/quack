@@ -1,10 +1,14 @@
 //! Read-only session details; the conversation keeps at least 104 columns.
 
+use std::collections::HashSet;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Padding, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use quack_protocol::{LoadState, LspServerInfo, LspServerState};
@@ -39,6 +43,13 @@ pub(crate) fn areas(screen: Rect, enabled: bool) -> (Rect, Option<Rect>) {
     (main, Some(sidebar))
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct View {
+    pub(crate) area: Rect,
+    pub(crate) height: usize,
+    pub(crate) max_scroll: usize,
+}
+
 #[derive(Debug)]
 pub(crate) struct Sidebar {
     rows: Vec<Line<'static>>,
@@ -49,7 +60,39 @@ pub(crate) struct Sidebar {
 
 impl Sidebar {
     pub(crate) fn draw(self, f: &mut Frame<'_>, app: &App, area: Rect) {
-        f.render_widget(Paragraph::new(self.rows).block(sidebar_block(app)), area);
+        let block = sidebar_block(app);
+        let inner = block.inner(area);
+        let height = usize::from(inner.height);
+        let max_scroll = if app.startup_status_visible() {
+            0
+        } else {
+            self.rows.len().saturating_sub(height)
+        };
+        let offset = app.sidebar_scroll.get().min(max_scroll);
+        app.sidebar_scroll.set(offset);
+        app.sidebar_view.set(View {
+            area,
+            height,
+            max_scroll,
+        });
+        let visible: Vec<_> = self.rows.into_iter().skip(offset).take(height).collect();
+        f.render_widget(Paragraph::new(visible).block(block), area);
+        if max_scroll > 0 {
+            let mut state = ScrollbarState::new(max_scroll + 1)
+                .position(offset)
+                .viewport_content_length(height);
+            f.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None)
+                    .thumb_symbol(app.glyphs.scroll[0])
+                    .thumb_style(app.theme.dim)
+                    .track_symbol(Some(app.glyphs.scroll[1]))
+                    .track_style(app.theme.border),
+                Rect::new(area.x, inner.y, area.width, inner.height),
+                &mut state,
+            );
+        }
     }
 }
 
@@ -113,11 +156,6 @@ pub(crate) fn build(app: &App, area: Rect) -> Sidebar {
             Span::styled("Git branch  ", t.dim),
             Span::styled(clip(branch, width.saturating_sub(12), ascii), t.magenta),
         ]));
-    }
-    if !app.agents.is_empty() {
-        rows.push(Line::raw(""));
-        rows.push(Line::styled("Sub-agents", heading));
-        draw_agents(app, &mut rows, width, ascii);
     }
     rows.push(Line::raw(""));
     let mut model_heading = vec![Span::styled("Model", heading)];
@@ -183,10 +221,11 @@ pub(crate) fn build(app: &App, area: Rect) -> Sidebar {
     if let Some(metrics) = metrics {
         rows.push(Line::styled(clip(&metrics, width, ascii), t.dim));
     }
-    if !app.loaded_skills.is_empty() {
-        rows.push(Line::raw(""));
-        rows.push(Line::styled("Skills", heading));
-        draw_loaded_skills(app, &mut rows, width, ascii);
+    let mut details = Vec::new();
+    if !app.agents.is_empty() {
+        details.push(Line::raw(""));
+        details.push(Line::styled("Sub-agents", heading));
+        draw_agents(app, &mut details, width, ascii);
     }
     let active_lsp: Vec<&LspServerInfo> = app
         .lsp_servers
@@ -194,40 +233,54 @@ pub(crate) fn build(app: &App, area: Rect) -> Sidebar {
         .filter(|s| !matches!(s.state, LspServerState::Idle | LspServerState::NotInstalled))
         .collect();
     if !active_lsp.is_empty() {
-        rows.push(Line::raw(""));
-        rows.push(Line::styled("LSP", heading));
-        draw_lsp(app, &active_lsp, &mut rows, width, ascii);
+        details.push(Line::raw(""));
+        details.push(Line::styled("LSP", heading));
+        draw_lsp(app, &active_lsp, &mut details, width, ascii);
+    }
+    if !app.skills.is_empty() || !app.loaded_skills.is_empty() {
+        details.push(Line::raw(""));
+        details.push(Line::styled("Skills", heading));
+        draw_skills(app, &mut details, width, ascii);
     }
     let shows_plan = if !app.plan.is_empty() {
         let remaining = height.saturating_sub(rows.len());
-        draw_plan(app, &mut rows, heading, width, remaining, ascii)
+        // Give the lists below the plan room before expanding it. Long lists scroll
+        // instead of squeezing out the compact plan.
+        let plan_room = remaining
+            .saturating_sub(details.len())
+            .max(remaining.min(3));
+        draw_plan(app, &mut rows, heading, width, plan_room, ascii)
     } else {
         false
     };
+    rows.extend(details);
     Sidebar { rows, shows_plan }
 }
 
-/// Skills loaded in the current session, newest visible when more than three are loaded.
-fn draw_loaded_skills(app: &App, rows: &mut Vec<Line<'static>>, width: usize, ascii: bool) {
-    const MAX_VISIBLE: usize = 3;
-    let t = &app.theme;
-    let icon = app.glyphs.ok;
-    let room = width.saturating_sub(icon.width() + 1);
-    let total = app.loaded_skills.len();
-    let skip = if total > MAX_VISIBLE {
-        total - (MAX_VISIBLE - 1)
-    } else {
-        0
-    };
-    for name in app.loaded_skills.iter().skip(skip) {
+/// List every available skill, marking the ones already loaded. Keep loaded skills
+/// that are no longer in the catalog (for example after a reload).
+fn draw_skills(app: &App, rows: &mut Vec<Line<'static>>, width: usize, ascii: bool) {
+    let mut loaded: HashSet<&str> = app.loaded_skills.iter().map(String::as_str).collect();
+    let mut push = |name, is_loaded| {
+        let (icon, style) = if is_loaded {
+            (app.glyphs.ok, app.theme.ok)
+        } else {
+            (app.glyphs.pending, app.theme.dim)
+        };
+        let room = width.saturating_sub(icon.width() + 1);
         rows.push(Line::from(vec![
-            Span::styled(format!("{icon} "), t.ok),
+            Span::styled(format!("{icon} "), style),
             Span::raw(clip(name, room, ascii)),
         ]));
+    };
+    for skill in &app.skills {
+        let name = skill.name.as_str();
+        push(name, loaded.remove(name));
     }
-    if skip > 0 {
-        let dots = if ascii { "..." } else { "…" };
-        rows.push(Line::styled(format!("  +{skip} earlier{dots}"), t.dim));
+    for name in &app.loaded_skills {
+        if loaded.remove(name.as_str()) {
+            push(name, true);
+        }
     }
 }
 
@@ -485,18 +538,10 @@ fn push_plan_step_single(
 }
 
 /// The session's sub-agent runs: the running ones live with their step count, the
-/// finished ones as their result. Newest last; only the last few finished runs stay,
-/// so a long session keeps room for the rest of the panel. `/tasks` has the detail.
+/// finished ones as their result. Newest last; `/tasks` has the detail.
 fn draw_agents(app: &App, rows: &mut Vec<Line<'static>>, width: usize, ascii: bool) {
     let t = &app.theme;
-    /// How many finished runs stay listed after new ones push them down.
-    const KEPT_DONE: usize = 2;
-    let done = app.agents.iter().filter(|a| a.ok.is_some()).count();
-    let first_done = done.saturating_sub(KEPT_DONE);
-    for (i, a) in app.agents.iter().enumerate() {
-        if a.ok.is_some() && i < first_done {
-            continue;
-        }
+    for a in &app.agents {
         let (icon, style) = match a.ok {
             None => (app.spinner().to_owned(), t.accent),
             Some(true) => (app.glyphs.ok.to_owned(), t.ok),
@@ -522,13 +567,6 @@ fn draw_agents(app: &App, rows: &mut Vec<Line<'static>>, width: usize, ascii: bo
                     ascii
                 )
             ),
-            t.dim,
-        ));
-    }
-    if first_done > 0 {
-        let dots = if ascii { "..." } else { "…" };
-        rows.push(Line::styled(
-            format!("  +{first_done} earlier{dots}"),
             t.dim,
         ));
     }

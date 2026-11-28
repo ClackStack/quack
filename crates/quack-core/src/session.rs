@@ -71,6 +71,50 @@ pub fn list_sessions(config: &Loaded) -> (PathBuf, Vec<IndexEntry>) {
     (ps.dir, list)
 }
 
+/// Remove saved sessions older than `older_than_secs` (for `quack sessions prune` and
+/// automatic `[sessions] retention_days` enforcement).
+pub fn prune_sessions(
+    config: &Loaded,
+    older_than_secs: u64,
+    all_projects: bool,
+    dry_run: bool,
+    keep_id: Option<&str>,
+) -> std::io::Result<quack_store::session::PruneReport> {
+    let cutoff = quack_store::time::unix_now().saturating_sub(older_than_secs);
+    if all_projects {
+        let root = sessions_root_dir(config);
+        quack_store::session::prune_all_projects(&root, cutoff, dry_run, keep_id)
+    } else {
+        project_sessions(config).prune_older_than(cutoff, dry_run, keep_id)
+    }
+}
+
+/// Automatically prune expired sessions in the current workspace when
+/// `[sessions] retention_days > 0`, protecting an active/resuming session id.
+pub(crate) fn spawn_retention_prune(config: Arc<Loaded>, keep_id: Option<String>) {
+    let days = config.settings.sessions.retention_days;
+    if days == 0 {
+        return;
+    }
+    let older_than_secs = u64::from(days).saturating_mul(86_400);
+    tokio::task::spawn_blocking(move || {
+        match prune_sessions(&config, older_than_secs, false, false, keep_id.as_deref()) {
+            Ok(report) if !report.removed.is_empty() => {
+                tracing::info!(
+                    removed = report.removed.len(),
+                    bytes_freed = report.bytes_freed,
+                    retention_days = days,
+                    "pruned expired sessions"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to prune expired sessions");
+            }
+        }
+    });
+}
+
 /// Path to this workspace's prompt history file (`<sessions>/<project-key>/history.jsonl`).
 pub fn history_path(config: &Loaded) -> PathBuf {
     project_sessions(config).history_path()

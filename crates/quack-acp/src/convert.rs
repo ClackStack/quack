@@ -1,12 +1,116 @@
 //! Conversions between ACP messages and the engine's protocol.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use quack_config::McpServerFile;
-use quack_protocol::{InputItem, ReplayItem};
+use quack_protocol::{CommandInfo, InputItem, ReplayItem};
 use serde_json::{Value, json};
 
 use crate::wire::{ContentBlock, McpServer};
+
+static IMAGE_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// Session-scoped temp folder holding decoded ACP image attachments; removed on drop.
+#[derive(Debug)]
+pub(crate) struct ImageTempDir {
+    dir: Option<PathBuf>,
+}
+
+impl ImageTempDir {
+    pub fn new(session_id: &str) -> Self {
+        let safe: String = session_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(32)
+            .collect();
+        let seq = IMAGE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("quack-acp-{}-{safe}-{seq}", std::process::id()));
+        Self { dir: Some(dir) }
+    }
+
+    pub fn save(&mut self, bytes: &[u8], mime_type: &str) -> Option<PathBuf> {
+        let dir = self.dir.as_ref()?;
+        std::fs::create_dir_all(dir).ok()?;
+        let ext = match mime_type.to_ascii_lowercase().as_str() {
+            "image/png" => "png",
+            "image/jpeg" | "image/jpg" => "jpg",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            _ => "bin",
+        };
+        let seq = IMAGE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("img-{seq}.{ext}"));
+        std::fs::write(&path, bytes).ok()?;
+        Some(path)
+    }
+}
+
+impl Drop for ImageTempDir {
+    fn drop(&mut self) {
+        if let Some(dir) = self.dir.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// Standard and URL-safe Base64 decoder (ignores ASCII whitespace).
+pub(crate) fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits: u8 = 0;
+    for b in input.bytes() {
+        if b.is_ascii_whitespace() || b == b'=' {
+            continue;
+        }
+        let val: u8 = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(val);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Custom commands and MCP prompts as an ACP `available_commands_update`.
+pub(crate) fn available_commands(custom: &[CommandInfo], mcp: &[CommandInfo]) -> Value {
+    let mut seen = HashSet::new();
+    let mut cmds = Vec::new();
+    for c in custom.iter().chain(mcp.iter()) {
+        if !seen.insert(c.name.clone()) {
+            continue;
+        }
+        let mut entry = json!({
+            "name": c.name,
+            "description": c.description,
+        });
+        if !c.args.trim().is_empty() {
+            entry["input"] = json!({ "hint": c.args });
+        }
+        cmds.push(entry);
+    }
+    json!({
+        "sessionUpdate": "available_commands_update",
+        "availableCommands": cmds,
+    })
+}
 
 /// The ACP kind of a tool, from its name. Profiles name tools differently (`shell`,
 /// `Bash`, `run_shell_command`), so this matches on parts of the name.
@@ -50,12 +154,31 @@ pub(crate) fn plan(checklist: &str) -> Value {
 }
 
 /// A prompt's content blocks as turn input. Files the user mentioned become their path
-/// (the model reads them itself); embedded file contents are quoted with their path.
-pub(crate) fn prompt_items(blocks: Vec<ContentBlock>) -> Vec<InputItem> {
+/// (the model reads them itself); embedded file contents are quoted with their path;
+/// inline base64 images are saved to `images` as temp files and passed as `InputItem::Image`.
+pub(crate) fn prompt_items(blocks: Vec<ContentBlock>, images: &mut ImageTempDir) -> Vec<InputItem> {
     blocks
         .into_iter()
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(InputItem::text(text)),
+            ContentBlock::Image {
+                data,
+                mime_type,
+                uri,
+            } => {
+                if !data.trim().is_empty() {
+                    let bytes = base64_decode(&data)?;
+                    let path = images.save(&bytes, &mime_type)?;
+                    Some(InputItem::Image {
+                        path: path.display().to_string(),
+                    })
+                } else {
+                    let path = uri.as_deref().and_then(file_path)?;
+                    Some(InputItem::Image {
+                        path: path.display().to_string(),
+                    })
+                }
+            }
             ContentBlock::ResourceLink { uri } => Some(InputItem::text(display_uri(&uri))),
             ContentBlock::Resource { resource } => resource.text.map(|text| {
                 InputItem::text(format!(
@@ -339,20 +462,17 @@ mod tests {
             {"type": "image", "data": "AAAA", "mimeType": "image/png"},
         ]))
         .expect("blocks");
-        let texts: Vec<_> = prompt_items(blocks)
-            .into_iter()
-            .map(|i| match i {
-                InputItem::Text { text } => text,
-                other => format!("{other:?}"),
-            })
-            .collect();
-        assert_eq!(texts.len(), 3, "the image is left out: {texts:?}");
-        assert_eq!(texts[0], "explain");
-        assert!(texts[1].ends_with("a.rs"), "{}", texts[1]);
+        let mut imgs = ImageTempDir::new("test");
+        let items = prompt_items(blocks, &mut imgs);
+        assert_eq!(items.len(), 4, "image becomes InputItem::Image: {items:?}");
+        assert_eq!(items[0], InputItem::text("explain"));
+        assert!(matches!(&items[1], InputItem::Text { text } if text.ends_with("a.rs")));
         assert!(
-            texts[2].contains("b.rs:\n```\nfn b() {}\n```"),
-            "{}",
-            texts[2]
+            matches!(&items[2], InputItem::Text { text } if text.contains("b.rs:\n```\nfn b() {}\n```"))
         );
+        assert!(matches!(items[3], InputItem::Image { ref path } if path.ends_with(".png")));
+        if let InputItem::Image { path } = &items[3] {
+            assert_eq!(std::fs::read(path).expect("saved bytes"), vec![0, 0, 0]);
+        }
     }
 }

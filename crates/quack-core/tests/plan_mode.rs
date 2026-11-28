@@ -77,6 +77,57 @@ async fn next_mode(engine: &mut EngineHandle) -> (WorkMode, ApprovalPolicy) {
 }
 
 #[tokio::test]
+async fn new_sessions_use_plan_and_allow_until_defaults_are_changed() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let loaded = common::workspace_in(tmp.path(), &server.uri(), r#"["tiny"]"#, "", None);
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    let defaults = (WorkMode::Plan, ApprovalPolicy::Allow);
+    assert_eq!(next_mode(&mut engine).await, defaults);
+
+    engine
+        .submit(Op::SetWorkMode {
+            mode: WorkMode::Edit,
+        })
+        .await;
+    assert_eq!(
+        next_mode(&mut engine).await,
+        (WorkMode::Edit, ApprovalPolicy::Allow)
+    );
+    engine
+        .submit(Op::SetApprovalPolicy {
+            policy: ApprovalPolicy::Ask,
+        })
+        .await;
+    assert_eq!(
+        next_mode(&mut engine).await,
+        (WorkMode::Edit, ApprovalPolicy::Ask)
+    );
+
+    engine.submit(Op::NewSession).await;
+    assert_eq!(next_mode(&mut engine).await, defaults);
+
+    for (key, value) in [
+        ("permissions.work_mode", "\"edit\""),
+        ("permissions.mode", "\"ask\""),
+    ] {
+        engine
+            .submit(Op::SaveSetting {
+                key: key.into(),
+                value: value.into(),
+                scope: quack_core::protocol::WriteScope::User,
+            })
+            .await;
+    }
+    engine.submit(Op::NewSession).await;
+    assert_eq!(
+        next_mode(&mut engine).await,
+        (WorkMode::Edit, ApprovalPolicy::Ask)
+    );
+    engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn all_four_combinations_enforce_work_mode_before_approvals() {
     for work_mode in [WorkMode::Plan, WorkMode::Edit] {
         for approvals in [ApprovalPolicy::Ask, ApprovalPolicy::Allow] {
@@ -433,12 +484,11 @@ async fn plan_mode_shell_denial_lists_only_profiles_read_only_tools() {
     let second = &bodies(&server).await[1];
     assert!(second.contains("permission denied: plan mode:"), "{second}");
     let expected = if quack_tools::outline::supported(std::path::Path::new("a.rs")) {
-        "the dedicated read-only tools (read, index)"
+        "the dedicated read-only tools (read, grep, glob, index)"
     } else {
-        "the dedicated read-only tools (read)"
+        "the dedicated read-only tools (read, grep, glob)"
     };
     assert!(second.contains(expected), "{second}");
     assert!(!second.contains("list_dir"), "{second}");
-    assert!(!second.contains(", glob"), "{second}");
     engine.shutdown().await;
 }

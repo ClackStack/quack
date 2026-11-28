@@ -28,7 +28,8 @@ quack/
 │   ├── quack-core/          # Agent loop: owns a session, wires everything together
 │   ├── quack-tui/           # ratatui client
 │   ├── quack-exec/          # Headless client (text / json / stream-json)
-│   ├── quack-acp/           # Zed Agent Client Protocol server (feature-gated, later)
+│   ├── quack-acp/           # Agent Client Protocol server (feature-gated)
+│   ├── quack-gui/           # Tauri + SvelteKit desktop client (see 15-desktop-client)
 │   └── quack-cli/           # The `quack` binary: arg parsing, picks a client
 ├── defaults/                  # Default TOML files. NOT compiled in (see 14-packaging)
 │   ├── providers.d/
@@ -176,7 +177,7 @@ Path handling rules, enforced by a lint/test helper:
 | TLS | `rustls`, `rustls-platform-verifier` (via reqwest) | OS trust store |
 | MCP | `rmcp` | Official Rust SDK |
 | ACP | none: wire types and JSON-RPC in `quack-acp` (the official crates change serde_json features) | Feature-gated |
-| LSP | `lsp-types`, `async-lsp` (evaluate) or hand-rolled JSON-RPC | |
+| LSP | Hand-rolled JSON-RPC over stdio (`serde_json` + `url`) | No `lsp-types`/`async-lsp` overhead |
 | Tree-sitter | `tree-sitter`, `tree-sitter-<lang>` behind features | |
 | Tokenizers | `tokenizers` (HF), `tiktoken-rs` | Feature-gated; heavy |
 | Search | `ignore`, `grep-searcher`, `grep-regex`, `globset` | ripgrep internals |
@@ -233,4 +234,4 @@ If a provider TOML names a protocol that was compiled out, the provider fails to
 ## Open questions
 
 - Should `quack-core` also expose a local socket (daemon mode) so several frontends can attach to one session? This is deferred, but the protocol is designed to allow it.
-- `async-lsp` vs. a hand-rolled LSP client. Decide during the M4 spike.
+- `async-lsp` vs. a hand-rolled LSP client: resolved (hand-rolled JSON-RPC over stdio in `quack-lsp`).

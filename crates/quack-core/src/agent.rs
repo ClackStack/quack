@@ -139,18 +139,26 @@ impl Pool {
     /// caching the setup for the session. Returns `None` when unset, identical to the
     /// session model, or unavailable.
     pub(crate) async fn small_setup(&self, parent: &TurnCtx) -> Option<Arc<Setup>> {
+        self.small_setup_for(&parent.setup, &parent.ledger).await
+    }
+
+    /// Resolve `[model] small` relative to a base setup and egress ledger.
+    pub(crate) async fn small_setup_for(
+        &self,
+        base: &Setup,
+        ledger: &Arc<quack_providers::EgressLedger>,
+    ) -> Option<Arc<Setup>> {
         let wanted = self.config.settings.model.small.trim();
-        let p = &parent.setup;
         if wanted.is_empty()
-            || wanted == p.model_ref
-            || wanted == format!("{}/{}", p.provider.id, p.model.id)
+            || wanted == base.model_ref
+            || wanted == format!("{}/{}", base.provider.id, base.model.id)
         {
             return None;
         }
         let key = (
             "__small__".to_owned(),
             wanted.to_owned(),
-            p.profile.id.clone(),
+            base.profile.id.clone(),
         );
         if let Some(s) = self.setups.lock().await.get(&key) {
             return Some(s.clone());
@@ -167,7 +175,7 @@ impl Pool {
         )
         .await
         .ok()?;
-        s.provider.set_ledger(parent.ledger.clone());
+        s.provider.set_ledger(ledger.clone());
         let s = Arc::new(s);
         let mut setups = self.setups.lock().await;
         Some(setups.entry(key).or_insert(s).clone())
@@ -361,6 +369,8 @@ async fn start(parent: &TurnCtx, call_key: &str, req: TaskRequest) -> TaskReport
         responses_session: Arc::default(),
         last_reminders: Arc::default(),
         egress_guard: Arc::default(),
+        audit: parent.audit.clone(),
+        client_bridge: parent.client_bridge.clone(),
     };
     let cancel = ctx.cancel.clone();
     let prompt = turn::Prompt {

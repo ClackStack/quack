@@ -235,22 +235,35 @@ fn load_in(found: Dirs, env: Env<'_>, opts: &LoadOptions) -> Result<Loaded, Conf
     let mut warnings = Vec::new();
     let mut diagnostics = Vec::new();
     if let Some(dir) = &dirs.ignored_system_dir {
+        let source = if dirs.registry_policy.is_active() {
+            crate::win_policy::REGISTRY_ORIGIN.to_owned()
+        } else {
+            dirs.system.display().to_string()
+        };
         warnings.push(format!(
-            "QUACK_SYSTEM_DIR={} ignored: {} holds a system policy",
+            "QUACK_SYSTEM_DIR={} ignored: {source} holds a system policy",
             dir.display(),
-            dirs.system.display()
         ));
     }
 
     // The system layer can relocate or disable the defaults bundle, so read it first.
     let system = read_layer(LayerKind::System, Some(&dirs.system), &mut diagnostics);
-    if let Some(dir) = system
-        .table
+    let registry_layer = dirs.registry_policy.policy_toml.as_deref().map(|text| {
+        parse_inline_layer(
+            LayerKind::System,
+            PathBuf::from(crate::win_policy::REGISTRY_ORIGIN),
+            text,
+            &mut diagnostics,
+        )
+    });
+    let defaults_dir_override = registry_layer
         .as_ref()
+        .and_then(|l| l.table.as_ref())
+        .or(system.table.as_ref())
         .and_then(|(_, t)| merge::get_path(t, "defaults.dir"))
         .and_then(Value::as_str)
-        .filter(|d| !d.is_empty())
-    {
+        .filter(|d| !d.is_empty());
+    if let Some(dir) = defaults_dir_override {
         dirs.defaults = (dir != "none").then(|| PathBuf::from(dir));
     }
     let defaults = read_layer(
@@ -266,6 +279,9 @@ fn load_in(found: Dirs, env: Env<'_>, opts: &LoadOptions) -> Result<Loaded, Conf
     for mut layer in [defaults, system] {
         apply_layer(&mut layer, &mut merged, &mut origins, &mut warnings);
         reports.push(report(layer));
+    }
+    if let Some(mut reg) = registry_layer {
+        apply_layer(&mut reg, &mut merged, &mut origins, &mut warnings);
     }
 
     // Everything at or below the system layer: the reference for locked keys.
@@ -422,15 +438,32 @@ fn read_layer(kind: LayerKind, dir: Option<&Path>, diags: &mut Vec<FileDiagnosti
             return layer;
         }
     };
+    let mut layer = parse_inline_layer(kind, path, &text, diags);
+    layer.dir = Some(dir.to_path_buf());
+    layer
+}
+
+fn parse_inline_layer(
+    kind: LayerKind,
+    path: PathBuf,
+    text: &str,
+    diags: &mut Vec<FileDiagnostic>,
+) -> LayerFile {
+    let mut layer = LayerFile {
+        kind,
+        dir: path.parent().map(Path::to_path_buf),
+        table: None,
+        status: LayerStatus::Missing,
+    };
     // One parse: the table drives the merge, and validating it against the typed schema
     // is a walk over the parsed values. Only a file that fails validation is parsed
     // again, and only then, for a diagnostic that carries a span; startup never pays
     // for the second parse.
-    let table = match toml::from_str::<Table>(&text) {
+    let table = match toml::from_str::<Table>(text) {
         Ok(table) => table,
         Err(e) => {
             diags.push(
-                FileDiagnostic::from_toml(&path, &text, &e)
+                FileDiagnostic::from_toml(&path, text, &e)
                     .with_help("this file is ignored until fixed; other layers still load"),
             );
             layer.status = LayerStatus::Failed;
@@ -438,9 +471,9 @@ fn read_layer(kind: LayerKind, dir: Option<&Path>, diags: &mut Vec<FileDiagnosti
         }
     };
     if let Err(e) = Settings::deserialize(table.clone()) {
-        let err = toml::from_str::<Settings>(&text).err().unwrap_or(e);
+        let err = toml::from_str::<Settings>(text).err().unwrap_or(e);
         diags.push(
-            FileDiagnostic::from_toml(&path, &text, &err)
+            FileDiagnostic::from_toml(&path, text, &err)
                 .with_help("this file is ignored until fixed; other layers still load"),
         );
         layer.status = LayerStatus::Failed;
@@ -569,7 +602,7 @@ fn overridden_by(origins: &Origins, base_origins: &Origins, lock: &str) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::PermissionMode;
+    use crate::settings::{PermissionMode, WorkMode};
     use crate::testing::Fixture;
 
     #[test]
@@ -629,6 +662,26 @@ mod tests {
         assert_eq!(l.settings, Settings::default());
         assert_eq!(l.project, ProjectStatus::None);
         assert!(l.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn session_defaults_can_be_overridden_independently() {
+        let f = Fixture::new();
+        let fresh = f.load();
+        assert_eq!(fresh.settings.permissions.work_mode, WorkMode::Plan);
+        assert_eq!(fresh.settings.permissions.mode, PermissionMode::Allow);
+
+        f.write("user/config.toml", "[permissions]\nwork_mode = \"edit\"");
+        let edit = f.load();
+        assert_eq!(edit.settings.permissions.work_mode, WorkMode::Edit);
+        assert_eq!(edit.settings.permissions.mode, PermissionMode::Allow);
+
+        // Use the same writer as the settings UI to change just the approval default.
+        edit.save_setting(LayerKind::User, "permissions.mode", "\"ask\"")
+            .expect("save approval policy");
+        let updated = f.load();
+        assert_eq!(updated.settings.permissions.work_mode, WorkMode::Edit);
+        assert_eq!(updated.settings.permissions.mode, PermissionMode::Ask);
     }
 
     #[test]
@@ -805,5 +858,51 @@ mod tests {
         let f = Fixture::new();
         f.write("user/config.toml", "\u{feff}[ui]\nascii = true");
         assert!(f.load().settings.ui.ascii);
+    }
+
+    #[test]
+    fn windows_registry_policy_pins_system_dir_and_locks_settings() {
+        let f = Fixture::new();
+        let pinned_sys = f.root.join("pinned-sys");
+        std::fs::create_dir_all(&pinned_sys).expect("mkdir");
+        std::fs::write(
+            pinned_sys.join("config.toml"),
+            "[audit]\npath = \"/var/log/quack/audit.jsonl\"\n",
+        )
+        .expect("write");
+        f.write(
+            "user/config.toml",
+            "[network]\noffline = false\n[audit]\npath = \"\"\n",
+        );
+
+        let policy = crate::win_policy::RegistryPolicy {
+            system_dir: Some(pinned_sys.clone()),
+            policy_toml: Some(
+                "[network]\noffline = true\n[policy]\nlocked = [\"network.offline\", \"audit.path\"]\n"
+                    .into(),
+            ),
+        };
+        let repo = f.root.join("repo");
+        let dirs =
+            Dirs::discover_in_with_policy(&|k| f.vars.get(k).cloned(), &repo, repo.clone(), policy);
+        assert_eq!(dirs.system, pinned_sys);
+        assert!(dirs.ignored_system_dir.is_some());
+
+        let l = load_in(dirs, &|k| f.vars.get(k).cloned(), &LoadOptions::new(&repo)).expect("load");
+        assert!(l.settings.network.offline);
+        assert_eq!(l.settings.audit.path, "/var/log/quack/audit.jsonl");
+        assert!(l.settings.policy.locks("audit.path"));
+        assert!(
+            l.warnings
+                .iter()
+                .any(|w| w.contains("HKLM\\SOFTWARE\\Policies\\quack"))
+        );
+        assert!(matches!(
+            l.origin_of("network.offline"),
+            Origin::File {
+                layer: LayerKind::System,
+                path
+            } if path == Path::new(crate::win_policy::REGISTRY_ORIGIN)
+        ));
     }
 }

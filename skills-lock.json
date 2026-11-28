@@ -1,13 +1,6 @@
 {
   "version": 2,
   "skills": {
-    "frontierharness-eval": {
-      "source": "frontier-harness-eval/eval",
-      "sourceType": "github",
-      "skillPath": "skills/frontierharness-eval/SKILL.md",
-      "computedHash": "67fb2066d6c08e9144139ffd536c81d8ca33bb63a029c86d275dcbb0626ddd86",
-      "commit": "e837a70bd6beb4e72eeeda62dd06e3bd34f6cb63"
-    },
     "runta-cli": {
       "source": "runta.com",
       "sourceUrl": "https://runta.com/docs",

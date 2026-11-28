@@ -30,13 +30,25 @@ pub fn sse_raw(chunks: &[String]) -> ResponseTemplate {
         .set_body_string(body + "data: [DONE]\n\n")
 }
 
-/// Isolated directories under `root`, one provider file `mock.toml`, no defaults bundle.
+/// Isolated directories under `root` and one mock provider. Tests of the editing
+/// loop start in Edit + Ask unless a scenario configures another mode.
 /// The workspace is `root/ws`; the harness starts in `root/ws/<cwd>`.
 pub fn workspace(root: &Path, base_url: &str, models: &str, cwd: &str) -> Loaded {
-    workspace_in(root, base_url, models, cwd, None)
+    workspace_in(root, base_url, models, cwd, Some(&editing_defaults(root)))
 }
 
-/// [`workspace`] with a defaults bundle at `defaults`, loaded as the lowest layer.
+pub fn editing_defaults(root: &Path) -> PathBuf {
+    let defaults = root.join("test-defaults");
+    std::fs::create_dir_all(&defaults).expect("test defaults dir");
+    std::fs::write(
+        defaults.join("config.toml"),
+        "[permissions]\nwork_mode = \"edit\"\nmode = \"ask\"\n",
+    )
+    .expect("test defaults");
+    defaults
+}
+
+/// Load with the given defaults bundle, or just the compiled defaults if `None`.
 pub fn workspace_in(
     root: &Path,
     base_url: &str,

@@ -40,12 +40,77 @@ pub(crate) fn run_with_io(loaded: &Loaded, cmd: McpCmd, io: &mut McpIo<'_>) -> i
         McpCmd::Enable { id } => cmd_enable(loaded, &id, io),
         McpCmd::Disable { id } => cmd_disable(loaded, &id, io),
         McpCmd::Remove { id, project } => cmd_remove(loaded, &id, project, io),
+        McpCmd::Login { .. } | McpCmd::Logout { .. } => {
+            Err("login/logout run asynchronously via `quack mcp login|logout`".into())
+        }
     };
     match result {
         Ok(()) => 0,
         Err(msg) => {
             let _ = writeln!(io.err, "error: {msg}");
             1
+        }
+    }
+}
+
+pub(crate) async fn login(loaded: &Loaded, id: String, no_browser: bool) -> i32 {
+    let client = match quack_core::mcp_oauth_client(loaded, &id, None) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return quack_exec::exit::CONFIG_ERROR;
+        }
+    };
+    let open = |url: &str| {
+        eprintln!(
+            "Sign in to MCP server `{id}` in your browser. If it does not open, visit:\n\n  {url}\n"
+        );
+        if !no_browser {
+            quack_core::setup::open_sign_in_browser(url);
+        }
+    };
+    match client.sign_in(open).await {
+        Ok(done) => {
+            if done.scopes.is_empty() {
+                eprintln!("signed in to MCP server `{}`.", done.server);
+            } else {
+                eprintln!(
+                    "signed in to MCP server `{}` (scopes: {}).",
+                    done.server,
+                    done.scopes.join(" ")
+                );
+            }
+            quack_exec::exit::OK
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            quack_exec::exit::CONFIG_ERROR
+        }
+    }
+}
+
+pub(crate) async fn logout(loaded: &Loaded, id: String) -> i32 {
+    let client = match quack_core::mcp_oauth_client(loaded, &id, None) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return quack_exec::exit::CONFIG_ERROR;
+        }
+    };
+    match client.sign_out().await {
+        Ok(true) => {
+            eprintln!("signed out of MCP server `{id}`.");
+            quack_exec::exit::OK
+        }
+        Ok(false) => {
+            eprintln!(
+                "removed local OAuth credentials for `{id}`, but the server did not confirm revocation."
+            );
+            quack_exec::exit::OK
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            quack_exec::exit::CONFIG_ERROR
         }
     }
 }

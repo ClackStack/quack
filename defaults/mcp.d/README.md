@@ -17,6 +17,12 @@ network calls and spawns no processes until you opt in.
 3. **By hand:** run `quack config paths` to see your `mcp.d/` folder, copy one of these
    files into it, and delete `enabled = false` (or change it to `enabled = true`).
 
+## OAuth 2.1 + PKCE & per-server options
+
+Remote streamable HTTP servers that require OAuth 2.1 can declare an `[oauth]` table (using RFC 9728 Protected Resource Metadata, RFC 8414 Authorization Server Metadata, and RFC 7591 Dynamic Client Registration automatically, with optional `client_id`, `client_secret`, `scopes`, `authorization_server`, and `redirect_port`), then authenticate via `quack mcp login <id>` or `/mcp login <id>` (and revoke via `quack mcp logout <id>` / `/mcp logout <id>`).
+
+Every server file also supports `defer = "auto" | "always" | "never"` (controlling `tool_search` deferral), `sampling_model = "current" | "small"`, and `max_output_tokens` (default `8000`, spilling trimmed outputs to a local file).
+
 ## Shipped examples
 
 | File | Transport | Description |

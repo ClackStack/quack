@@ -84,7 +84,28 @@ impl Tool for Read {
 
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolCtx) -> BoxFuture<'a, ToolOutput> {
         let ctx = ctx.clone();
-        Box::pin(crate::registry::blocking(move || read(&args, &ctx)))
+        Box::pin(async move {
+            if let Some(bridge) = ctx.client_bridge.clone()
+                && let Ok(raw_path) = arg_str(&args, PATH)
+            {
+                let path = paths::resolve(&ctx.root, raw_path);
+                if !path.is_dir()
+                    && let Some(res) = bridge.read_text_file(&path).await
+                {
+                    return match res {
+                        Ok(content) => {
+                            let bytes = content.into_bytes();
+                            crate::registry::blocking(move || {
+                                render_bytes(&args, &ctx, path, bytes)
+                            })
+                            .await
+                        }
+                        Err(e) => ToolOutput::error(e),
+                    };
+                }
+            }
+            crate::registry::blocking(move || read(&args, &ctx)).await
+        })
     }
 }
 
@@ -102,6 +123,16 @@ fn read(args: &Value, ctx: &ToolCtx) -> Result<ToolOutput, String> {
         ));
     }
     let bytes = std::fs::read(&path).map_err(|e| io_msg(&path, &e))?;
+    render_bytes(args, ctx, path, bytes)
+}
+
+fn render_bytes(
+    args: &Value,
+    ctx: &ToolCtx,
+    path: std::path::PathBuf,
+    bytes: Vec<u8>,
+) -> Result<ToolOutput, String> {
+    let shown = paths::display(&ctx.root, &path);
     if looks_binary(&bytes) {
         return Err(format!("{shown} is a binary file ({} bytes)", bytes.len()));
     }

@@ -280,6 +280,10 @@ pub struct Engine {
     secret_allowlist: Arc<Mutex<Vec<String>>>,
     /// One user question at a time: every turn and sampling request shares this.
     prompt_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Enterprise tool-execution audit log, when `[audit] path` is set.
+    audit: Option<Arc<crate::audit::AuditLog>>,
+    /// Optional host-client bridge (e.g. ACP editor `fs/*` and `terminal/*` delegation).
+    client_bridge: Option<Arc<dyn quack_tools::ClientBridge>>,
 }
 
 impl Engine {
@@ -291,6 +295,16 @@ impl Engine {
 
     /// Like [`spawn`](Self::spawn), resuming a saved session.
     pub fn spawn_with(config: Arc<Loaded>, resume: Resume) -> EngineHandle {
+        Self::spawn_with_bridge(config, resume, None)
+    }
+
+    /// Like [`spawn_with`](Self::spawn_with), attaching an optional host-client bridge
+    /// (used by ACP to delegate `read`/`write`/`shell` to the editor when enabled).
+    pub fn spawn_with_bridge(
+        config: Arc<Loaded>,
+        resume: Resume,
+        client_bridge: Option<Arc<dyn quack_tools::ClientBridge>>,
+    ) -> EngineHandle {
         let (tx, events) = broadcast::channel(EVENT_CAPACITY);
         let (ops, ops_rx) = mpsc::channel(OP_CAPACITY);
         let (config_tx, config_rx) = watch::channel(config.clone());
@@ -308,6 +322,7 @@ impl Engine {
         let secret_allowlist =
             Arc::new(Mutex::new(config.settings.network.secret_allowlist.clone()));
         let prompt_lock = Arc::default();
+        let audit = crate::audit::AuditLog::from_config(&config);
         wire_ledger(&ledger, &tx, &ledger_log);
         let engine = Self {
             extension_config: config.clone(),
@@ -365,6 +380,8 @@ impl Engine {
             ledger,
             ledger_log,
             secret_allowlist,
+            audit,
+            client_bridge,
         };
         let task = tokio::spawn(engine.run(ops_rx, asks_rx));
         EngineHandle {
@@ -399,6 +416,15 @@ impl Engine {
         self.start_mcp().await;
         self.start_lsp().await;
         self.load_hooks().await;
+        let keep_id = match &self.resume {
+            Resume::Id(id) => Some(id.clone()),
+            Resume::Latest => session::find(&self.config, &Resume::Latest)
+                .ok()
+                .flatten()
+                .map(|e| e.id),
+            Resume::New => None,
+        };
+        session::spawn_retention_prune(self.config.clone(), keep_id);
         let (watch_tx, mut watch_rx) = mpsc::channel::<crate::watch::WatchEvent>(8);
         crate::watch::spawn(self.config_tx.subscribe(), watch_tx);
         let mut startup = tokio::spawn(startup::run(
@@ -610,6 +636,9 @@ impl Engine {
             self.config.settings.network.clone(),
             crate::sandbox::server_policy(&self.config),
         );
+        manager.set_data_dir(self.config.dirs.user_data.clone());
+        manager.set_policy(self.config.settings.policy.mcp.clone());
+        manager.set_output_dir(self.config.dirs.user_cache.join("mcp-output"));
         manager.set_asker(self.asks.clone());
         manager.set_ledger(self.ledger.clone());
         manager.start();
@@ -661,18 +690,36 @@ impl Engine {
                     let _ = reply.send(Err("no model is ready yet".into()));
                     return;
                 };
-                let sampler = crate::mcp_ask::Sampler {
-                    tx: self.tx.clone(),
-                    approvals: self.approvals.clone(),
-                    perms: c.perms.clone(),
-                    setup: c.setup.clone(),
-                    stats: self.stats.clone(),
-                    log: self.log.clone(),
-                    prompt_lock: self.prompt_lock.clone(),
-                    cancel,
-                    call_id,
-                };
+                let prefer_small = self.mcp.manager.sampling_model(&server)
+                    == quack_config::McpSamplingModel::Small;
+                let base_setup = c.setup.clone();
+                let perms = c.perms.clone();
+                let pool = prefer_small.then(|| self.pool());
+                let ledger = self.ledger.clone();
+                let tx = self.tx.clone();
+                let approvals = self.approvals.clone();
+                let stats = self.stats.clone();
+                let log = self.log.clone();
+                let prompt_lock = self.prompt_lock.clone();
                 tokio::spawn(async move {
+                    let setup = if let Some(pool) = pool {
+                        pool.small_setup_for(&base_setup, &ledger)
+                            .await
+                            .unwrap_or(base_setup)
+                    } else {
+                        base_setup
+                    };
+                    let sampler = crate::mcp_ask::Sampler {
+                        tx,
+                        approvals,
+                        perms,
+                        setup,
+                        stats,
+                        log,
+                        prompt_lock,
+                        cancel,
+                        call_id,
+                    };
                     let result = tokio::select! {
                         r = sampler.run(&server, request) => r,
                         () = reply.closed() => return,
@@ -951,6 +998,8 @@ impl Engine {
                     .info(self.convo.as_ref().and_then(|c| c.setup.budget)),
             }),
             Op::RestartMcp { id } => self.restart_mcp(id),
+            Op::McpLogin { id } => self.start_mcp_login(id).await,
+            Op::McpLogout { id } => self.mcp_logout(id),
             Op::EnableMcp { id } => self.enable_mcp(id, done, reload).await,
             Op::DisableMcp { id } => self.disable_mcp(id, done, reload).await,
             Op::AddMcp {
@@ -1162,6 +1211,8 @@ fn op_name(op: &Op) -> &'static str {
         Op::ListLsp => "list_lsp",
         Op::InitInstructions => "init_instructions",
         Op::RestartMcp { .. } => "restart_mcp",
+        Op::McpLogin { .. } => "mcp_login",
+        Op::McpLogout { .. } => "mcp_logout",
         Op::EnableMcp { .. } => "enable_mcp",
         Op::SaveMcpServer { .. } => "save_mcp_server",
         Op::DisableMcp { .. } => "disable_mcp",

@@ -41,7 +41,12 @@ pub struct ProviderFile {
     /// Wire protocol: `openai-chat` (default), `openai-responses`, `anthropic-messages`, `ollama`.
     #[serde(default = "openai_chat")]
     pub api: String,
+    #[serde(default)]
     pub base_url: String,
+    /// Additional endpoint URLs for round-robin load balancing and automatic failover across
+    /// nodes. May be set alongside or instead of `base_url`.
+    #[serde(default)]
+    pub base_urls: Vec<String>,
     #[serde(default = "yes")]
     pub enabled: bool,
     #[serde(default)]
@@ -256,13 +261,35 @@ pub fn save_connection(
 }
 
 impl ProviderFile {
+    /// Every configured endpoint URL in order (`base_url` first if non-empty, then each
+    /// non-empty deduplicated entry from `base_urls`).
+    pub fn endpoints(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        let primary = self.base_url.trim();
+        if !primary.is_empty() {
+            out.push(primary);
+        }
+        for url in &self.base_urls {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() && !out.contains(&trimmed) {
+                out.push(trimmed);
+            }
+        }
+        out
+    }
+
+    /// Primary endpoint URL (`base_url`, or the first entry in `base_urls`).
+    pub fn primary_base_url(&self) -> &str {
+        self.endpoints().into_iter().next().unwrap_or("")
+    }
+
     /// The id to look this provider up by in the model catalog. A server on this machine
     /// serves its own window at its own cost, so it needs asking for by name.
     pub fn catalog_id<'a>(&'a self, id: &'a str) -> Option<&'a str> {
         match self.catalog.as_deref() {
             Some("") => None,
             Some(named) => Some(named),
-            None => (!crate::is_loopback(&self.base_url)).then_some(id),
+            None => (!crate::is_loopback(self.primary_base_url())).then_some(id),
         }
     }
 

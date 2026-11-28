@@ -122,6 +122,48 @@ async fn diagnostics_after_edits_and_queries() {
 }
 
 #[tokio::test]
+async fn code_actions_list_and_apply_direct_and_resolved() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().canonicalize().expect("canonical");
+    let a = root.join("a.fx");
+    std::fs::write(&a, "let x = ERROR;\n").expect("write");
+    let mgr = manager(&root);
+
+    let q = Query {
+        path: Some(a.clone()),
+        line: Some(1),
+        column: None,
+        symbol: Some("ERROR".into()),
+    };
+    let listed = ops::code_actions(&mgr, &q, None, Some("quickfix"))
+        .await
+        .expect("list code actions");
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert_eq!(listed[0].title, "Fix ERROR (resolved)");
+    assert!(listed[0].is_preferred && listed[0].applicable);
+    assert_eq!(listed[1].title, "Replace ERROR inline");
+
+    // Apply via `codeAction/resolve` using 1-based index.
+    let resolved = ops::code_action_apply(&mgr, &q, None, Some("quickfix"), "1")
+        .await
+        .expect("apply resolved");
+    assert_eq!(resolved.files.len(), 1);
+    let after = ops::apply_edits("let x = ERROR;\n", &resolved.files[0].1, resolved.encoding)
+        .expect("apply_edits");
+    assert_eq!(after, "let x = OK_RESOLVED;\n");
+
+    // Apply inline edit by title substring.
+    let inline = ops::code_action_apply(&mgr, &q, None, None, "inline")
+        .await
+        .expect("apply inline");
+    let after = ops::apply_edits("let x = ERROR;\n", &inline.files[0].1, inline.encoding)
+        .expect("apply_edits");
+    assert_eq!(after, "let x = OK_INLINE;\n");
+
+    mgr.shutdown().await;
+}
+
+#[tokio::test]
 async fn missing_program_is_reported_not_started() {
     let dir = tempfile::tempdir().expect("tempdir");
     let file: LspServerFile =
@@ -207,6 +249,24 @@ async fn real_rust_analyzer() {
     .expect("hover");
     eprintln!("{hover}");
     assert!(hover.contains("fn add(a: u32) -> u32"), "{hover}");
+    let actions = ops::code_actions(
+        &mgr,
+        &Query {
+            path: Some(main.clone()),
+            line: Some(1),
+            column: None,
+            symbol: Some("add".into()),
+        },
+        None,
+        None,
+    )
+    .await
+    .expect("code_actions");
+    eprintln!("code actions: {actions:?}");
+    assert!(
+        !actions.is_empty(),
+        "rust-analyzer should offer code actions on fn add"
+    );
     mgr.shutdown().await;
 }
 

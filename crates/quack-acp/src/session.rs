@@ -1,13 +1,15 @@
 //! One ACP session: an engine, and the task that turns its events into `session/update`
 //! notifications and answers the session's `session/prompt` requests.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
+use quack_config::Loaded;
 use quack_core::EngineHandle;
 use quack_protocol::{
-    ApprovalDecision, ApprovalPolicy, ApprovalRequest, CallId, Event, InputItem, ModelId, Op,
-    PermissionMode, ProviderId, ProviderModels, Subsystem, TurnOverrides, WriteScope,
+    ApprovalDecision, ApprovalPolicy, ApprovalRequest, CallId, CommandInfo, Event, InputItem,
+    ModelId, Op, PermissionMode, ProviderId, ProviderModels, Subsystem, TurnOverrides, WriteScope,
 };
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
@@ -15,9 +17,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::SessionError;
-use crate::convert::{self, chunk, text_content, tool_content};
+use crate::convert::{self, ImageTempDir, chunk, text_content, tool_content};
 use crate::rpc::{Peer, RpcError};
-use crate::wire::{PermissionOutcome, PermissionResponse};
+use crate::wire::{ContentBlock, PermissionOutcome, PermissionResponse};
 
 /// How long opening a session may take: config, the model, and replaying a saved log.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -44,7 +46,7 @@ pub(crate) const MODEL_OPTION: &str = "model";
 pub(crate) enum Cmd {
     Prompt {
         id: Value,
-        items: Vec<InputItem>,
+        blocks: Vec<ContentBlock>,
     },
     Cancel,
     Mode(String),
@@ -63,6 +65,7 @@ pub(crate) enum Cmd {
 #[derive(Debug)]
 pub(crate) struct Handle {
     pub cmds: mpsc::UnboundedSender<Cmd>,
+    pub config: Arc<Loaded>,
     task: JoinHandle<()>,
 }
 
@@ -79,6 +82,9 @@ impl Handle {
 pub(crate) struct Startup {
     /// MCP servers finished starting, so their tools are there for the first turn.
     pub mcp_ready: bool,
+    pub commands: Vec<CommandInfo>,
+    pub mcp_prompts: Vec<CommandInfo>,
+    pub title: Option<String>,
 }
 
 /// Read events until `want` returns something.
@@ -92,6 +98,12 @@ pub(crate) async fn wait_for<T>(
             match engine.events.recv().await {
                 Ok(e) => {
                     startup.mcp_ready |= mcp_settled(&e);
+                    match &e {
+                        Event::Commands { commands } => startup.commands = commands.clone(),
+                        Event::McpPrompts { prompts } => startup.mcp_prompts = prompts.clone(),
+                        Event::SessionTitle { title } => startup.title = title.clone(),
+                        _ => {}
+                    }
                     if let Some(t) = want(&e) {
                         return Ok(t);
                     }
@@ -122,7 +134,9 @@ pub(crate) fn modes(current: &str) -> Value {
 /// Start the task that runs session `id` on `engine`.
 pub(crate) fn start(id: String, engine: EngineHandle, peer: Peer, startup: Startup) -> Handle {
     let (cmds, rx) = mpsc::unbounded_channel();
-    let approvals = engine.config().settings.permissions.mode;
+    let config = engine.config().clone();
+    let approvals = config.settings.permissions.mode;
+    let images = ImageTempDir::new(&id);
     let run = Run {
         id,
         approvals,
@@ -135,12 +149,17 @@ pub(crate) fn start(id: String, engine: EngineHandle, peer: Peer, startup: Start
         cancelled: false,
         error: None,
         announced: HashSet::new(),
-        output: Default::default(),
+        output: HashMap::new(),
         catalog: Vec::new(),
         current_model: None,
+        images,
+        custom_commands: startup.commands,
+        mcp_prompts: startup.mcp_prompts,
+        initial_title: startup.title,
+        agents: HashMap::new(),
     };
     let task = tokio::spawn(run.run(engine, rx));
-    Handle { cmds, task }
+    Handle { cmds, config, task }
 }
 
 struct Run {
@@ -161,15 +180,31 @@ struct Run {
     /// Tool calls the editor has been told about.
     announced: HashSet<String>,
     /// Streamed output of the running tool calls.
-    output: std::collections::HashMap<String, String>,
+    output: HashMap<String, String>,
     /// `<provider>/<model>` choices.
     catalog: Vec<(String, String)>,
     current_model: Option<String>,
+    /// Temp directory storing decoded inline prompt images for this session.
+    images: ImageTempDir,
+    custom_commands: Vec<CommandInfo>,
+    mcp_prompts: Vec<CommandInfo>,
+    initial_title: Option<String>,
+    /// Active sub-agent run id -> agent type name (e.g. `explore`).
+    agents: HashMap<String, String>,
 }
 
 impl Run {
     async fn run(mut self, mut engine: EngineHandle, mut cmds: mpsc::UnboundedReceiver<Cmd>) {
         let _ = self.ops.send(Op::ListModels).await;
+        if !self.custom_commands.is_empty() || !self.mcp_prompts.is_empty() {
+            self.emit_commands();
+        }
+        if let Some(title) = self.initial_title.take() {
+            self.update(json!({
+                "sessionUpdate": "session_info_update",
+                "title": title,
+            }));
+        }
         loop {
             tokio::select! {
                 cmd = cmds.recv() => match cmd {
@@ -190,6 +225,13 @@ impl Run {
         engine.shutdown().await;
     }
 
+    fn emit_commands(&self) {
+        self.update(convert::available_commands(
+            &self.custom_commands,
+            &self.mcp_prompts,
+        ));
+    }
+
     fn update(&self, update: Value) {
         self.peer.notify(
             "session/update",
@@ -199,7 +241,7 @@ impl Run {
 
     async fn on_cmd(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Prompt { id, items } => {
+            Cmd::Prompt { id, blocks } => {
                 if self.prompt.is_some() || self.queued.is_some() {
                     self.peer.respond(
                         id,
@@ -207,10 +249,13 @@ impl Run {
                             "a prompt is already running in this session · cancel it first",
                         )),
                     );
-                } else if self.ready {
-                    self.submit(id, items).await;
                 } else {
-                    self.queued = Some((id, items));
+                    let items = convert::prompt_items(blocks, &mut self.images);
+                    if self.ready {
+                        self.submit(id, items).await;
+                    } else {
+                        self.queued = Some((id, items));
+                    }
                 }
             }
             Cmd::Cancel => {
@@ -346,6 +391,69 @@ impl Run {
                     })
                     .await;
             }
+            Event::SessionTitle { title } => {
+                self.update(json!({
+                    "sessionUpdate": "session_info_update",
+                    "title": title,
+                }));
+            }
+            Event::Commands { commands } => {
+                self.custom_commands = commands;
+                self.emit_commands();
+            }
+            Event::McpPrompts { prompts } => {
+                self.mcp_prompts = prompts;
+                self.emit_commands();
+            }
+            Event::AgentStarted {
+                id,
+                agent,
+                description,
+                model,
+                ..
+            } => {
+                self.agents.insert(id, agent.clone());
+                self.update(chunk(
+                    "agent_thought_chunk",
+                    &format!("\n[{agent}] {description} ({model})\n"),
+                ));
+            }
+            Event::Agent { id, inner } => {
+                let label = self.agents.get(&id).cloned().unwrap_or(id);
+                match *inner {
+                    Event::ToolCallBegin { call } => {
+                        let title = format!("[{label}] {}", call.summary);
+                        self.announce(&call.call_id, &call.name, &title, "in_progress");
+                    }
+                    Event::ToolCallOutputDelta { call_id, chunk } => {
+                        self.output.entry(call_id.0).or_default().push_str(&chunk);
+                    }
+                    Event::ToolCallEnd { call_id, result } => {
+                        let streamed = self.output.remove(&call_id.0).unwrap_or_default();
+                        let detail = result.detail.as_deref().unwrap_or(&streamed);
+                        let content = if detail.trim().is_empty() {
+                            text_content(&result.summary)
+                        } else {
+                            tool_content(detail)
+                        };
+                        self.update(json!({
+                            "sessionUpdate": "tool_call_update",
+                            "toolCallId": call_id.0,
+                            "status": if result.ok { "completed" } else { "failed" },
+                            "content": [content],
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+            Event::AgentFinished { id, ok, summary } => {
+                let label = self.agents.remove(&id).unwrap_or(id);
+                let state = if ok { "done" } else { "failed" };
+                self.update(chunk(
+                    "agent_thought_chunk",
+                    &format!("[{label}] {state}: {summary}\n"),
+                ));
+            }
             Event::Plan { checklist } => self.update(convert::plan(&checklist)),
             Event::ContextUpdate {
                 used,
@@ -465,17 +573,28 @@ impl Run {
                 let body = findings
                     .iter()
                     .map(|f| {
+                        let (label, source, impact) = f.context.as_ref().map_or(
+                            (
+                                f.kind.as_str(),
+                                f.location.as_str(),
+                                "If this is a real credential, it could grant access to the service or data it protects.",
+                            ),
+                            |c| (c.label.as_str(), c.source.as_str(), c.impact.as_str()),
+                        );
+                        let line = f.line.map_or_else(String::new, |n| format!(", scanned line {n}"));
+                        let masked = convert::fenced(&format!("{}  {}", f.preview, f.fingerprint), "");
                         format!(
-                            "- `{}` in `{}` (`{}`): `{}`",
-                            f.kind, f.location, f.fingerprint, f.preview
+                            "{label} · {source}{line}\n\n{impact}\n\n{masked}"
                         )
                     })
                     .collect::<Vec<_>>()
-                    .join("\n");
+                    .join("\n\n");
                 (
                     "secret_guard",
-                    format!("Possible secret bound for {provider} ({host})"),
-                    body,
+                    format!("Secret Shield paused before sending to {provider} ({host})"),
+                    format!(
+                        "{body}\n\nRedacting replaces detected matches before sending. Later requests may include unredacted text again as part of the conversation. Allowing for the session skips future warnings for these matches."
+                    ),
                 )
             }
         };
@@ -581,11 +700,20 @@ fn choices(providers: &[ProviderModels]) -> Vec<(String, String)> {
 fn options(always: &[String], is_secrets: bool) -> Value {
     let mut out = Vec::new();
     if is_secrets {
-        out.push(json!({"optionId": "redact", "name": "Redact & Send", "kind": "allow_once"}));
+        out.push(json!({"optionId": "redact", "name": "Redact & send", "kind": "allow_once"}));
     }
+    let (allow, allow_session, deny) = if is_secrets {
+        (
+            "Send unredacted",
+            "Send unredacted and allow for this session",
+            "Withhold flagged text",
+        )
+    } else {
+        ("Allow", "Allow for this session", "Deny")
+    };
     out.extend([
-        json!({"optionId": "allow", "name": "Allow", "kind": "allow_once"}),
-        json!({"optionId": "allow-session", "name": "Allow for this session", "kind": "allow_always"}),
+        json!({"optionId": "allow", "name": allow, "kind": "allow_once"}),
+        json!({"optionId": "allow-session", "name": allow_session, "kind": "allow_always"}),
     ]);
     if !always.is_empty() {
         let rules = always
@@ -599,6 +727,6 @@ fn options(always: &[String], is_secrets: bool) -> Value {
             "kind": "allow_always",
         }));
     }
-    out.push(json!({"optionId": "deny", "name": "Deny", "kind": "reject_once"}));
+    out.push(json!({"optionId": "deny", "name": deny, "kind": "reject_once"}));
     Value::Array(out)
 }

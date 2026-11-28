@@ -150,6 +150,10 @@ pub(crate) struct TurnCtx {
     pub last_reminders: Arc<Mutex<ReminderState>>,
     /// Remote Secret Shield vetting state across turns and model switches.
     pub egress_guard: Arc<Mutex<EgressGuardState>>,
+    /// Enterprise audit log writer, when `[audit] path` is configured.
+    pub audit: Option<Arc<crate::audit::AuditLog>>,
+    /// Optional host-client bridge (e.g. ACP editor `fs/*` and `terminal/*`).
+    pub client_bridge: Option<Arc<dyn quack_tools::ClientBridge>>,
 }
 
 /// What the user sent, ready for the model, and what they typed (which hooks see).
@@ -1872,6 +1876,7 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall, history_index: usize) -> ToolO
 
     let mut tctx = s.tool_ctx.clone();
     tctx.cancel = ctx.cancel.child_token();
+    tctx.client_bridge = ctx.client_bridge.clone();
     // Yolo and `/sandbox off` run commands outside the sandbox; in Plan mode, any active
     // sandbox is tightened to a strict read-only policy (no writable paths, no network).
     if let Ok(p) = ctx.perms.lock() {
@@ -1896,30 +1901,78 @@ async fn run_call(ctx: &TurnCtx, call: &ToolCall, history_index: usize) -> ToolO
         Ok(sub) => sub,
         Err(e) => return done(ToolOutput::error(e)),
     };
-    let (args, subject) = match permit(ctx, &tool, call, &call_id, &tctx, args, subject).await {
-        Ok(passed) => passed,
-        Err(e) => return done(ToolOutput::error(e)),
-    };
-    done(
-        execute(
-            ctx,
-            &tool,
-            &call_id,
-            tctx,
-            args,
-            subject,
-            plan_version,
-            history_index,
-        )
-        .await,
+    let (args, subject, decided_by) =
+        match permit(ctx, &tool, call, &call_id, &tctx, args, subject).await {
+            Ok(passed) => passed,
+            Err(denied) => {
+                if let Some(audit) = &ctx.audit {
+                    let subj = crate::audit::subject_label(&denied.subject, &tctx.root);
+                    audit.record(crate::audit::AuditEntry {
+                        session_id: &ctx.session,
+                        agent: ctx.agent.as_deref(),
+                        call_id: &call_id.0,
+                        tool: tool.name(),
+                        subject: &subj,
+                        decision: denied.decision,
+                        decided_by: &denied.decided_by,
+                        ok: None,
+                        args: audit.include_content().then_some(&denied.args),
+                        summary: Some(&denied.message),
+                    });
+                }
+                return done(ToolOutput::error(denied.message));
+            }
+        };
+    let audit_subj = ctx
+        .audit
+        .as_ref()
+        .map(|_| crate::audit::subject_label(&subject, &tctx.root));
+    let audit_args = ctx
+        .audit
+        .as_ref()
+        .filter(|a| a.include_content())
+        .map(|_| args.clone());
+    let out = execute(
+        ctx,
+        &tool,
+        &call_id,
+        tctx,
+        args,
+        subject,
+        plan_version,
+        history_index,
     )
+    .await;
+    if let (Some(audit), Some(subj)) = (&ctx.audit, &audit_subj) {
+        audit.record(crate::audit::AuditEntry {
+            session_id: &ctx.session,
+            agent: ctx.agent.as_deref(),
+            call_id: &call_id.0,
+            tool: tool.name(),
+            subject: subj,
+            decision: crate::audit::AuditDecision::Allow,
+            decided_by: &decided_by,
+            ok: Some(out.ok),
+            args: audit_args.as_ref(),
+            summary: Some(&out.summary),
+        });
+    }
+    done(out)
+}
+
+struct PermitDenied {
+    message: String,
+    decision: crate::audit::AuditDecision,
+    decided_by: String,
+    args: Value,
+    subject: Subject,
 }
 
 /// The permission side of a call: the pre-tool hook (which can deny the call or
 /// rewrite its arguments), the permission decision, the approval ask when the rules
 /// say `Ask`, and the recheck for plan mode entered while the ask was on screen.
-/// `Ok` carries the arguments and subject to run with; `Err` is the message the call
-/// ends with.
+/// `Ok` carries the arguments, subject, and who decided (`rule`, `user`, `hook:...`);
+/// `Err` carries the denial message and audit metadata.
 async fn permit(
     ctx: &TurnCtx,
     tool: &Arc<dyn Tool>,
@@ -1928,9 +1981,19 @@ async fn permit(
     tctx: &ToolCtx,
     mut args: Value,
     mut subject: Subject,
-) -> Result<(Value, Subject), String> {
+) -> Result<(Value, Subject, String), Box<PermitDenied>> {
+    use crate::audit::AuditDecision;
+    let deny = |message: String, decision, decided_by: String, args, subject| {
+        Box::new(PermitDenied {
+            message,
+            decision,
+            decided_by,
+            args,
+            subject,
+        })
+    };
     let root = &ctx.setup.tool_ctx.root;
-    let mut hooked = None;
+    let mut hooked: Option<(Verdict, String)> = None;
     if ctx.hooks.any(HookEvent::PreTool) {
         let target = hooks::call_target(&subject, &args, root);
         let h = ctx
@@ -1949,40 +2012,69 @@ async fn permit(
             } else {
                 reason
             };
-            return Err(format!("blocked by hook `{id}`: {reason}"));
+            return Err(deny(
+                format!("blocked by hook `{id}`: {reason}"),
+                AuditDecision::Deny,
+                format!("hook:{id}"),
+                args,
+                subject,
+            ));
         }
         if let Some(updated) = h.updated_args.clone() {
-            args = prepare(tool.as_ref(), updated, tctx).await?;
-            subject = tool.subject(&args, tctx)?;
+            args = match prepare(tool.as_ref(), updated, tctx).await {
+                Ok(a) => a,
+                Err(e) => {
+                    return Err(deny(e, AuditDecision::Deny, "hook".into(), args, subject));
+                }
+            };
+            subject = match tool.subject(&args, tctx) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Err(deny(e, AuditDecision::Deny, "hook".into(), args, subject));
+                }
+            };
         }
-        hooked = h.verdict.map(|(v, _)| v);
+        hooked = h.verdict;
     }
     let read_tools: Vec<&str> = ["read", "grep", "glob", "list_dir", "index", "lsp"]
         .into_iter()
         .filter_map(|t| ctx.setup.surface.name_of(t))
         .collect();
-    let decision = ctx
+    let rule_decision = ctx
         .perms
         .lock()
         .map(|p| p.check_with_tools(&subject, Some(&read_tools)))
         .unwrap_or(Decision::Ask);
     // A deny rule beats a hook's allow, and a command outside the sandbox always asks.
-    let decision = match (hooked, decision) {
-        (_, deny @ Decision::Deny(_)) => deny,
-        (Some(Verdict::Ask), _) => Decision::Ask,
-        (Some(Verdict::Allow), Decision::Ask)
+    let (decision, mut decided_by) = match (&hooked, rule_decision) {
+        (_, deny @ Decision::Deny(_)) => (deny, "rule".to_owned()),
+        (Some((Verdict::Ask, id)), _) => (Decision::Ask, format!("hook:{id}")),
+        (Some((Verdict::Allow, id)), Decision::Ask)
             if !matches!(subject, Subject::ShellOutsideSandbox(_)) =>
         {
-            Decision::Allow
+            (Decision::Allow, format!("hook:{id}"))
         }
-        (_, d) => d,
+        (_, d) => (d, "rule".to_owned()),
     };
     match decision {
         Decision::Allow => {}
-        Decision::Deny(reason) => return Err(format!("permission denied: {reason}")),
+        Decision::Deny(reason) => {
+            return Err(deny(
+                format!("permission denied: {reason}"),
+                AuditDecision::Deny,
+                decided_by,
+                args,
+                subject,
+            ));
+        }
         Decision::Ask => {
             // If the call would fail anyway (e.g. old_string not found), skip asking.
-            let request = tool.preview(&args, tctx)?;
+            let request = match tool.preview(&args, tctx) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(deny(e, AuditDecision::Deny, decided_by, args, subject));
+                }
+            };
             let always = ctx
                 .perms
                 .lock()
@@ -2004,8 +2096,17 @@ async fn permit(
                 "approval",
                 serde_json::json!({ "call_id": call.id, "decision": answer }),
             );
+            decided_by = "user".to_owned();
             match answer {
-                None => return Err("interrupted by the user".into()),
+                None => {
+                    return Err(deny(
+                        "interrupted by the user".into(),
+                        AuditDecision::Interrupted,
+                        decided_by,
+                        args,
+                        subject,
+                    ));
+                }
                 Some(ApprovalDecision::AllowOnce | ApprovalDecision::RedactAndSend) => {}
                 Some(ApprovalDecision::AllowSession) => {
                     if let Ok(mut p) = ctx.perms.lock() {
@@ -2019,13 +2120,21 @@ async fn permit(
                     save_always(ctx, &scope, &always);
                 }
                 Some(ApprovalDecision::Deny) => {
-                    return Err(
+                    return Err(deny(
                         "the user declined this action. Ask them how to proceed if unsure.".into(),
-                    );
+                        AuditDecision::Deny,
+                        decided_by,
+                        args,
+                        subject,
+                    ));
                 }
                 Some(ApprovalDecision::DenyWithFeedback { feedback }) => {
-                    return Err(format!(
-                        "the user declined this action and said: {feedback}"
+                    return Err(deny(
+                        format!("the user declined this action and said: {feedback}"),
+                        AuditDecision::Deny,
+                        decided_by,
+                        args,
+                        subject,
                     ));
                 }
             }
@@ -2037,9 +2146,15 @@ async fn permit(
     if let Ok(p) = ctx.perms.lock()
         && let Decision::Deny(reason) = p.check_with_tools(&subject, Some(&read_tools))
     {
-        return Err(format!("permission denied: {reason}"));
+        return Err(deny(
+            format!("permission denied: {reason}"),
+            AuditDecision::Deny,
+            "rule".into(),
+            args,
+            subject,
+        ));
     }
-    Ok((args, subject))
+    Ok((args, subject, decided_by))
 }
 
 /// The execution side of a call: undo points and diagnostics before the run, the run

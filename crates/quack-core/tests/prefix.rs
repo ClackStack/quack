@@ -294,7 +294,11 @@ async fn session(profile: &str, config: &str) {
 #[tokio::test]
 async fn every_profile_keeps_its_prefix_across_turns() {
     for p in profiles() {
-        session(&p, "[permissions]\nmode = \"full-auto\"\n").await;
+        session(
+            &p,
+            "[permissions]\nwork_mode = \"edit\"\nmode = \"full-auto\"\n",
+        )
+        .await;
     }
 }
 
@@ -318,7 +322,7 @@ async fn hashline_edits_keep_the_prefix_too() {
         }
         session(
             &p,
-            "[permissions]\nmode = \"full-auto\"\n[tools]\nedit_format = \"hashline\"\n",
+            "[permissions]\nwork_mode = \"edit\"\nmode = \"full-auto\"\n[tools]\nedit_format = \"hashline\"\n",
         )
         .await;
     }
@@ -366,7 +370,7 @@ async fn system_prompt_and_tools_are_the_same_in_every_workspace() {
         for (project, body) in &bodies {
             let first = body["messages"][1]["content"].as_str().expect("user");
             assert!(first.starts_with("<context>"), "{profile}: {first}");
-            assert!(first.ends_with("</context>\n\nhello"), "{profile}: {first}");
+            assert!(first.contains("</context>\n\nhello"), "{profile}: {first}");
             assert!(
                 first.contains(&format!("Use tabs in {project}.")),
                 "{profile}"
@@ -473,7 +477,7 @@ async fn responses_session_is_strictly_append_only_with_delta_reminders() {
         tmp.path(),
         &server.uri(),
         "generic",
-        "[permissions]\nmode = \"full-auto\"\n",
+        "[permissions]\nwork_mode = \"edit\"\nmode = \"full-auto\"\n",
     );
     let provider_path = loaded
         .dirs

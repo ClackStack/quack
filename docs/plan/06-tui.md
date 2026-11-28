@@ -49,20 +49,22 @@ Choice bars (2026-10-19) sit between the transcript and the input, taking rows f
 
 ### Wide-terminal sidebar (2026-11-11)
 
-At 140 columns × 24 rows and above, a right sidebar shows the session
-title, working folder, Git branch (or short detached commit), model, profile,
-context tokens and percentage, a context meter, the summarization threshold and
-generation speed. It is 36 columns wide at 140, takes one of every four columns
-past that, and stops at 48; the conversation always keeps at least 104.
+At 140 columns × 24 rows and above, the right sidebar shows **Session**,
+**Working folder** (with Git branch or short detached commit), **Model** (with
+profile), **Context**, **Plan**, **Sub-agents**, **LSP**, and **Skills**, in that
+order. Context shows token usage, the summarization threshold, generation speed,
+and cache hits. The sidebar is 36 columns wide at 140, takes one of every four
+columns past that, and stops at 48; the conversation always keeps at least 104.
 Long values wrap within the sidebar with bounded height; long paths keep the
 project folder visible. Missing Git metadata is omitted and unreported context
 usage is labeled. Themes, `NO_COLOR` and ASCII mode apply to the sidebar too.
 
-Sub-agents (`task` runs) get their own section between the folder and the model:
-one row per run with its description and state, a spinner and step count while
-it runs, then its result summary (`/tasks` keeps the full detail). Only the last
-few finished runs stay listed; older ones collapse into a `+N earlier` line so
-the rest of the panel keeps its room.
+Sub-agents lists every `task` run started in the session, showing a spinner and
+step count while it runs and a summary when it finishes (`/tasks` has the full
+detail). LSP shows active servers. Skills lists all available skills and marks
+the ones loaded into the session (`/skills` has descriptions). When the sidebar
+overflows, use the mouse wheel over it or Alt-PageUp / Alt-PageDown to scroll
+independently of the transcript.
 
 When the model creates a plan (`Event::Plan` / `todo`), a **Plan** section
 appears below Context with the completion count and percentage (`Plan · 1/3 (33%)`),
@@ -70,10 +72,10 @@ a progress meter, and the steps (done, active, pending). Steps wrap onto up to
 two indented lines when the whole plan fits, or switch to one line per step and
 window around the active/next step (with `+N earlier` / `+N more`) when vertical
 space is tight. Completed plans remain visible at 100% until cleared or a new
-session starts. While the sidebar shows the plan, the one-line plan strip above
-the input steps aside (`/todo` still expands the full list there); if the
-sidebar has too few rows left (for example alongside sub-agents on a 24-row
-terminal) or narrows below 140×24, the main-pane strip stays visible.
+session starts. The plan can shrink to its heading and current step to leave
+room for the sections below it. When the plan fits in the sidebar, the one-line
+plan strip above the input steps aside (`/todo` still expands the full list
+there); on small terminals without a sidebar, the main-pane strip stays visible.
 
 The folder and branch move out of the header, context/speed move out of
 the status bar, and the one-line plan strip moves out of the main pane while the
@@ -170,7 +172,7 @@ All configuration UIs share one modal widget, so they look and behave the same:
 | `/resume` | `/sessions`, `/session` | Session browser for this project (Tab switches to all projects): title, age, turns, model, preview pane with the transcript head. Actions: resume, fork, rename, export, delete (with confirmation) |
 | `/new` | `/clear` | Start a fresh session (the current one stays saved) |
 | `/rewind` | (Esc Esc) | Pick an earlier user message. Choose conversation / files / both |
-| `/undo` | | Revert the last mutating tool call's file changes |
+| `/undo` | | Revert the last mutating tool call's file changes (including mutating shell commands via private shadow git snapshots) |
 | `/fork` | | Branch the session from here. `--worktree` runs the branch in its own git worktree ([07](07-sessions-memory-checkpoints.md#parallel-sessions-in-worktrees)) |
 | `/edit` | | Enter Edit without changing approvals; optionally send a task |
 | `/plan` | | Read/search only; propose changes and exact tests, then review to implement or keep planning ([04](04-agent-loop-and-tools.md#plan-mode)) |
@@ -182,7 +184,7 @@ All configuration UIs share one modal widget, so they look and behave the same:
 | `/config` | `/settings` | **Settings editor**: tabs mirror `config.toml` tables (Model, UI, Context, Tools, Permissions, Memory, Sessions, Network). Each row shows the effective value, its source layer and a description from the JSON Schema. Edit inline with type-aware widgets (toggle, enum picker, number, string, list); `Ctrl-L` toggles user config vs `.quack/config.toml` |
 | `/scope` | `[user\|project]` | Show or switch the TUI write scope between user config and project `.quack/` (built 2026-11-14) |
 | `/permissions [ask\|allow]` | | Ask/Allow approval picker, keeping Plan/Edit, plus allow/ask/deny rule lists per layer; add/remove rules; shows the compiled-in deny floor (read-only). Yolo stays under `/yolo`; an active legacy policy is named in the tab title |
-| `/mcp` | | MCP servers: state, tool count, token cost, deferred flag, logs. Actions: restart, enable/disable (session or persistent), view tools, add server (template or blank) |
+| `/mcp` | | MCP servers: state, tool count, token cost, deferred flag, logs. Actions: restart, enable/disable, add server, OAuth sign-in/out (`/mcp login <id>`, `/mcp logout <id>`) |
 | `/lsp` | | LSP servers: state, indexing progress, diagnostics count; restart, enable/disable |
 | `/skills` | | Skill list by layer; view SKILL.md; enable/disable; invoke |
 | `/commands` | | Custom commands from each layer's `commands/` folder: name, arguments, description, file (built 2026-10-18). Typing `/<name> args` runs one |
@@ -199,6 +201,8 @@ All configuration UIs share one modal widget, so they look and behave the same:
 | `/reload` | | Read config, providers, MCP servers, instructions and skills again, keeping the conversation ([01](01-configuration.md#hot-reload)) |
 | `/trust` | `[trusted\|settings-only\|ignored]` | Decide whether this repo's `.quack/` loads; opens on its own when a decision is needed ([01](01-configuration.md#as-implemented-2026-10-18)) |
 | `/copy` | | Copy the last response (or pick a code block) to the clipboard. Implemented as `/copy [code]` through both OSC 52 (works over SSH) and the local OS clipboard helper (`wl-copy`, `xclip`/`xsel`, `pbcopy`, PowerShell `Set-Clipboard`, plus `tmux load-buffer -w` fallback inside tmux) so terminals without OSC 52 such as GNOME Terminal work out of the box |
+| `/probe` | | Run a live synthetic tool-calling probe against the active model to verify structured tool calling vs text fallback |
+| `/gui` | | Hand off this workspace and session to `quack-gui` |
 | `/help` | `?` | Commands and keys |
 | `/quit` | `/exit` | Quit |
 

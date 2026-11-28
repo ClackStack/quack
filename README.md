@@ -37,7 +37,7 @@ curl -fsSL https://quack.clackstack.dev/install.sh | sh
 irm https://quack.clackstack.dev/install.ps1 | iex
 ```
 
-*Prebuilt `.deb`, `.rpm`, `.AppImage`, `.dmg`, `-setup.exe`, Homebrew `quack.rb` formula, and platform archives are available on the [releases page](https://github.com/ClackStack/quack/releases).*
+*Prebuilt `.deb`, `.rpm`, `.msi`, `.AppImage`, `.dmg`, `-setup.exe`, Homebrew `quack.rb` formula, keyless GitHub build provenance attestations, and platform archives are available on the [releases page](https://github.com/ClackStack/quack/releases).*
 
 ### 2. Run
 
@@ -57,6 +57,8 @@ The `codex` profile is selected automatically for the current Sol, Astra, Luna a
 model ids (6.2 and 6.1 generations) on ChatGPT
 and OpenAI providers; use `--profile generic` to override it. It includes tracked
 reads before patches, sub-agents and image viewing on vision-capable models.
+It prefers Quack's built-in `grep` and `glob` for routine search, so neither
+`rg` nor shell `grep` needs to be installed.
 All shipped profiles have mock-tested tracked-read/edit workflows; incompatible
 exclusive-profile edit-format overrides report an actionable startup error.
 [An upstream Codex review](evals/results/2026-11-11/codex-comparison.md) informed
@@ -93,19 +95,23 @@ parallel `quack exec` or CI runs on the same repository.
 
 | Command | Description |
 |---|---|
-| `quack` | Launch interactive terminal UI |
-| `quack setup` | Terminal wizard to add providers and models |
-| `quack doctor` | Diagnose environment, sandbox, tools, and provider connections |
-| `quack mcp ...` | List, add, enable, disable, or remove MCP servers (`list`, `add`, `enable`, `disable`, `remove`) |
-| `quack exec "..."` | Run a single turn headlessly for scripts or CI pipelines |
+| `quack` | Launch interactive terminal UI (supports `--worktree <name>`, `--continue`, `-s <id>`) |
+| `quack setup` | Terminal wizard to add providers, keys, subscriptions, and models |
+| `quack doctor` | Diagnose environment, policy locks, audit log, sandbox, tools, and provider connections |
+| `quack config check\|show\|paths\|schema` | Validate config layers, inspect effective values with `--origin`, print paths, or export JSON schemas |
+| `quack trust [trusted\|settings-only\|ignored]` | Inspect or decide whether the current repo's `.quack/` loads |
+| `quack login [provider]` / `quack logout` | Sign in to or revoke a browser-authenticated provider (`[auth]`, e.g. ChatGPT plan) |
+| `quack mcp ...` | List, add, enable, disable, remove, or OAuth sign in/out of MCP servers (`list`, `add`, `enable`, `disable`, `remove`, `login`, `logout`) |
+| `quack sessions [prune]` | List saved sessions, or prune older ones (`--older-than 30d`, `--all`, `--dry-run`) |
+| `quack exec "..."` | Run a single turn headlessly for scripts or CI pipelines (`-p` shorthand) |
 | `quack acp` | Start an Agent Client Protocol server for Zed, JetBrains, Neovim, or VS Code |
 | `quack gui [PATH...]` | Launch `quack-gui` on one or more folders (merging with restored tabs unless `--no-restore`; also `/gui` inside the TUI) |
 | `quack-gui [PATH...]` | Open the desktop app directly: the same engine in a window, one tab per folder |
-| `quack keyring set <id>` | Store an API key securely in the OS credential store |
-
-Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` in the provider file reads a shell variable, `{ file = "path" }` a file (mode 0600 recommended), and `{ cmd = [..] }` a command. On Linux without a running Secret Service (WSL, servers, containers), `quack setup` and the TUI save keys to a file under your config folder automatically and say so.
+| `quack keyring set\|delete <id>` | Store or remove an API key securely in the OS credential store |
 | `quack update` | Say whether a new version is out and how to get it; changes nothing |
 | `quack catalog refresh` | Download current model prices and context windows |
+
+Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` in the provider file reads a shell variable, `{ file = "path" }` a file (mode 0600 recommended), and `{ cmd = [..] }` a command. On Linux without a running Secret Service (WSL, servers, containers), `quack setup` and the TUI save keys to a file under your config folder automatically and say so.
 
 ---
 
@@ -131,17 +137,18 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 
 ### Models & Reasoning
 
-- **Local and hosted engines**: Works with local servers (Ollama, llama.cpp, vLLM, SGLang, LM Studio, Docker Model Runner) and 30+ hosted providers (Anthropic, OpenAI, Google Gemini, xAI, Cohere, OpenRouter, Groq, Cerebras, Fireworks, Together, DeepInfra, Novita, Nebius, Baseten, Hugging Face, NVIDIA NIM, SambaNova, SiliconFlow, Alibaba Cloud, DeepSeek, Moonshot, Kimi, Z.ai, MiniMax, Xiaomi MiMo, Mistral, Vercel AI Gateway, OpenCode Zen, GitHub Models, Venice, Hyperbolic, Scaleway, Synthetic, Charm Hyper).
+- **Local and hosted engines**: Works with 6 local servers (Ollama, llama.cpp, vLLM, SGLang, LM Studio, Docker Model Runner) and 36 hosted provider presets (42 bundled provider files total: Anthropic, OpenAI, ChatGPT plan, Google Gemini, xAI, Cohere, OpenRouter, Groq, Cerebras, Fireworks, Together, DeepInfra, Novita, Nebius, Baseten, Chutes, Hugging Face, NVIDIA NIM, SambaNova, SiliconFlow, Alibaba Cloud, DeepSeek, Moonshot, Kimi, Z.ai, MiniMax, Xiaomi MiMo, Mistral, Vercel AI Gateway, OpenCode Zen, GitHub Models, Venice, Hyperbolic, Scaleway, Synthetic, Charm Hyper).
+- **Multi-endpoint failover (`base_urls`)**: Configure `base_urls = [...]` in a provider file to round-robin across internal GPU nodes with automatic exponential health cooldown (15 s → 120 s) on retryable failures across streams, `/models`, Ollama `/api/show`, and Responses WebSockets. `[policy.providers] hosts` validates every endpoint in `base_urls`.
 - **Thinking and reasoning models**: `/thinking` picks the active model's supported effort level; `/thinking high` sets it directly and `/thinking default` restores its configured default. The toolbar and sidebar show the level beside the model, and each model's selection survives reload, session resume and restarts. `Ctrl-T` or `/thinking show|hide` controls the reasoning display. Reasoning tokens are preserved across tool steps as required by DeepSeek, Kimi, MiniMax, GLM, Claude, and OpenAI.
 - **Tool-call repair**: Automatically parses and heals calls returned as text or markup (Hermes, Qwen-XML, GLM, DeepSeek, Kimi formats), recovers loose arguments, and deduplicates call IDs.
 - **Guided decoding**: Enforces schema-guided grammar decoding (`ToolCallMode::Grammar`) on supported local engines to eliminate JSON malformations.
-- **Family profiles**: Automatically tunes prompt templates, tool definitions, edit formats, and sampling parameters for specific model families (`qwen-code`, `cc-style`, `kimi-code`, `codex`, `dsh`, `vibe`).
+- **Family profiles**: Automatically tunes prompt templates, tool definitions, edit formats, and sampling parameters for specific model families (8 shipped profiles: `generic`, `qwen-code`, `cc-style`, `zcode`, `kimi-code`, `codex`, `dsh`, `vibe`).
 - **Live switching**: Change active models mid-conversation with `/models` or inspect provider health with `/providers` without losing conversation history. Models that declare `reasoning.efforts` show their levels in `/models`, and quack asks for a thinking level right after you switch to one, since the level changes both behaviour and cost.
 - **Token telemetry**: Real-time tokens per second and time-to-first-token tracking in the status bar.
 
 ### Tools & Editing
 
-- **Core tool suite**: `read` (500-line default cap with automatic outlining for large files and `symbol` reads), `write`, `glob`, `grep` (`content`/`files`/`count` modes, context lines, and match limits), `list_dir`, `shell` (including managed background jobs via `background: true`, `job_action: "wait" | "output" | "stop" | "list"`, blocking `wait_secs`, and delta output on polls), `lsp`, and `index`. Allowed read-only tools execute in parallel while preserving result order.
+- **Core tool suite**: `read` (500-line default cap with automatic outlining for large files and `symbol` reads), `write`, `glob`, `grep` (regex or `literal: true`, match-centered excerpts, and `content`/`files`/`count` modes), `list_dir`, `shell` (including managed background jobs via `background: true`, `job_action: "wait" | "output" | "stop" | "list"`, blocking `wait_secs`, and delta output on polls), `lsp` (definition, references, hover, symbols, diagnostics, rename, and `code_action` listing/applying), `index`, and opt-in SSRF-protected `web_fetch` (`[tools.web_fetch] enabled = true`, off by default and disabled when offline). Allowed read-only tools execute in parallel while preserving result order.
 - **Intelligent code indexing**: `index` generates Tree-sitter symbol outlines (functions, types, methods, and line ranges, cached per file snapshot) for Rust, Python, Go, TypeScript, JavaScript, C, C++, and Bash. Large file reads automatically return outlines so the model reads only relevant definition spans.
 - **Flexible edit formats**: Configurable via `[tools] edit_format`:
   - `str_replace`: Forgiving single-snippet replacement (with optional `symbol` scoping), or batch independent exact replacements in one file with `edits`.
@@ -158,7 +165,7 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 
 - **Zero-config language servers**: Automatic background integration for Rust (`rust-analyzer`), Go (`gopls`), Python (`pyright`/`basedpyright`), TypeScript/JavaScript, C/C++ (`clangd`), C#, Java, Lua, Bash, TOML, and YAML. Uses existing servers installed on your `PATH`.
 - **Immediate edit diagnostics**: As soon as a file is edited, newly introduced compile or type errors are fed back into the tool result so the model fixes them before continuing.
-- **Model LSP navigation**: Enables the model to find definitions, locate references, view documentation hovers, inspect diagnostics, and perform project-wide symbol renames.
+- **Model LSP navigation & edits**: Enables the model to find definitions, locate references, view documentation hovers, inspect diagnostics, list/apply LSP `code_action` quickfixes and refactors, and perform project-wide symbol renames — all with diff previews, approvals, and undo checkpoints.
 - **Status bar counters**: Displays live error and warning counts (`✗1 ⚠3`) directly in the UI. Inspect indexing progress and server logs with `/lsp`.
 
 ### Safety & Sandboxing
@@ -170,10 +177,14 @@ Keys can also be kept out of the keyring entirely: `api_key = { env = "VAR" }` i
 - **Project trust**: Untrusted cloned repositories execute no `.quack/` configurations until explicitly trusted via `/trust`.
 - **Quick sandbox toggle**: Toggle the sandbox on or off during a session with `/sandbox` while preserving work mode and approvals.
 - **Pre-egress Secret Shield & Session Egress Ledger**: Locally scans outbound prompts, `@` file mentions/slices, `AGENTS.md` / session instructions, tool results, and previously local history on mid-session switches to remote providers with `redact-secret` plus active resolved credentials (`[network] secret_guard = "ask"`) before HTTP egress, while logging every outbound/blocked hop into a live session ledger.
+- **Enterprise JSONL audit log (`[audit]`)**: Optional append-only mode-`0600` JSONL log (`ts`, `session_id`, `agent`, `call_id`, `tool`, `subject`, `decision`, `decided_by`, `ok`, `duration_ms`) recording every allowed, denied, hook-blocked, or interrupted tool execution, lockable via `[policy]`. Tool arguments and result summaries are omitted by default (`include_content = false`).
+- **Windows machine-level registry policy**: Reads `HKLM\SOFTWARE\Policies\quack` (`SystemDir` and `PolicyToml`) natively on Windows so GPO/MDM/Intune policies cannot be redirected via `%ProgramData%` or `QUACK_SYSTEM_DIR`, and reports active locks and audit health in `quack doctor`.
 
 ### Planning & Sub-Agents
 
-Choose what the agent can do and when it asks independently. New sessions default to **Edit + Ask**.
+Choose what the agent can do and when it asks independently. New sessions default to **Plan + Allow**.
+Change either default in the desktop app’s **Settings → Permissions**, in the TUI’s `/config`,
+or in `config.toml` under `[permissions]`.
 
 | Work mode | Ask | Allow |
 |---|---|---|
@@ -208,25 +219,26 @@ configuration and migration from older modes.
 - **Smart token management**: Prunes superseded file reads, obsolete tool outputs, and failed attempts before performing compaction.
 - **Lossless compaction**: Compaction preserves the original user prompt and files changed to date.
 - **Context analytics**: `/context` visualizes token distribution across prompts, tools, and history; `/stats` graphs cumulative token usage, latency, and session cost.
-- **Session persistence**: Every session is written incrementally and survives crashes. Continue seamlessly with `quack --continue` or `/resume`.
+- **Session persistence & retention**: Every session is written incrementally and survives crashes. Continue seamlessly with `quack --continue` or `/resume`, prune older transcripts with `quack sessions prune --older-than 30d [--all] [--dry-run]`, or enable automatic startup retention cleanup with `[sessions] retention_days`.
 - **Time travel and branches**: `/undo` rolls back file changes (including mutating shell commands via private shadow git snapshots); `/rewind` reverts files and conversation turns to any previous point; `/fork` branches a session into a new thread, and `/fork --worktree [name]` (or `quack --worktree <name>`) isolates the branch in a git worktree under `.quack/worktrees/<name>`.
 - **Persistent memory**: Maintains project and global memory notes (`/memory`), auto-detecting corrections and preferences across sessions.
 - **Instruction hierarchy**: Automatically loads instructions from `AGENTS.md` (and imports existing `CLAUDE.md`, `.cursorrules`, or Copilot files).
 
 ### MCP & Extensibility
 
-- **Model Context Protocol (MCP)**: Supports stdio and streamable HTTP MCP servers with bundled disabled examples (`context7`, `roost`, `github`, `fetch`, `playwright`, `filesystem`, `time`, `everything`), guided setup (`quack mcp add`, `/mcp`), one-command enabling (`quack mcp enable <id>`), deferred tools (`tool_search`), prompts as `/<server>:<prompt>`, resources, and elicitation/sampling.
+- **Model Context Protocol (MCP)**: Supports stdio and streamable HTTP MCP servers — including **OAuth 2.1 + PKCE** sign-in with RFC 9728/8414 discovery and RFC 7591 Dynamic Client Registration (`quack mcp login <id>`, `/mcp login <id>`), bundled disabled examples (`context7`, `roost`, `github`, `fetch`, `playwright`, `filesystem`, `time`, `everything`), guided setup (`quack mcp add`, `/mcp`), per-server `defer = "auto" | "always" | "never"` (`tool_search`), full-output spill files on truncation, live progress streaming, prompts as `/<server>:<prompt>`, resources, and elicitation/sampling (with optional `sampling_model = "small"`).
 - **Deferred discovery**: Large tool surfaces are indexed and searched dynamically (`tool_search`), avoiding context bloat.
 - **Event hooks**: Run custom scripts on session events (`session_start`, `user_prompt`, `pre_tool`, `post_tool`, `turn_end`) configured in `hooks.d/`. `/hooks` configures linked Jira issues and GitHub, GitLab, Gitea/Forgejo or Bitbucket reviews, including private repositories and multiple self-hosted instances. Enter credentials in a masked field, then **Save and enable**; the next prompt uses them. [Setup and examples](defaults/hooks.d/README.md).
 - **Standard Agent Skills (`SKILL.md`)**: Reads generic, standard Agent Skills (`SKILL.md` with YAML frontmatter) automatically from `.agents/skills/` (project) and `~/.agents/skills/` (user), alongside `skills/` in your config layers and bundles—plus extra folders such as `.claude/skills` via `[skills] compat_paths`. Only names and descriptions sit in the prompt index; the model loads full instructions on demand with the `skill` tool, or you can browse and invoke them via `/skills` and `/<name>`.
 - **Custom slash commands**: Place markdown prompt templates in `commands/` (e.g. `commands/git/pr.md` becomes `/git:pr`).
 - **Import from other coding agents**: If Quack finds folders such as `.claude/skills` or `.claude/commands`, the terminal startup panel points to `/compat`. Review a folder, then press **Enter** to load it for this run or **Ctrl-S** to load it and save its path for future runs. Workspace paths are saved in `.quack/config.toml` when project settings are allowed; home paths are saved in your user config. Nothing is imported automatically or copied. Only load prompt files you trust.
 - **Bundles**: Group skills, commands, MCP servers, and hooks into shareable directory bundles.
+- **Scoped live hot-reload**: Edits to `skills/`, `commands/`, `hooks.d/`, `profiles.d/`, `agents.d/`, `themes/`, and `grammars/` hot-reload automatically without dropping session approvals; edits to individual `mcp.d/` or `lsp.d/` files restart or stop only the affected server(s).
 
 ### Interface
 
 - **Full-screen Ratatui TUI**: Markdown formatting, syntax-highlighted code blocks, tables, and optional ASCII mode (`--ascii`).
-- **Wide-terminal sidebar**: At 140 columns × 24 rows and above, a right sidebar shows the session title, working folder, Git branch, running sub-agents, model, profile, context usage, generation speed and, when a plan is active, its progress and steps. It grows from 36 up to 48 columns on wider terminals and adapts as you resize; set `ui.sidebar = false` to disable it, or toggle it in `/config`.
+- **Wide-terminal sidebar**: At 140 columns × 24 rows and above, the right sidebar shows Session, Working folder (with Git branch), Model (with profile), Context, Plan, Sub-agents, LSP, and Skills, in that order. It lists all available skills, marks the ones loaded in the session, and lists all running and finished sub-agent runs. Scroll over the sidebar or use **Alt-PageUp / Alt-PageDown** when it overflows. It grows from 36 up to 48 columns on wider terminals; set `ui.sidebar = false` to disable it, or toggle it in `/config`.
 - **Window title**: The terminal's title shows the duck and what the session is about (`_(•)> fix the login bug`), and marks when a turn runs or quack needs you. If `[model] small` is configured, quack makes one background request to title the session (3–6 words, at most 50 characters) from the first message; thinking overhead is minimized while still leaving reasoning models room to think, broken `model.small` setups warn, and generation hiccups quietly keep the first-line fallback. The title also appears in the sidebar, `/resume` and `quack-gui` (its window title, header and job list). The first line of the message serves as the fallback, and `/title` sets it manually. `ui.terminal_title = false` turns it off.
 - **Smooth scrolling and selection**: Mouse wheel scrolling, click-to-position cursor, drag-to-select copying (`Ctrl-Shift-C` or `Ctrl-C` with a selection copies without interrupting a running turn; `Shift`-drag uses the terminal's own selection), and native system clipboard (`wl-copy`, `xclip`/`xsel`, `pbcopy`, Windows clipboard) alongside OSC 52.
 - **Interactive pickers**: Fast, fuzzy-filtered modals for `/models`, `/providers`, `/config`, `/context`, `/stats`, `/doctor`, `/probe` (synthetic tool-calling probe), `/gui` (hand off session to `quack-gui`), and `/help`. In `/models` (and `quack-gui`'s model selector), set any model as the **Large** default (`[model] default`), **Small** helper (`[model] small`, used for session titles and `explore` sub-agents), or **Both** (`Ctrl-S` in `/models`, or `/models default [large|small|both] <provider>/<model>`). In `/config` → Layers, inspect each layer’s status and file path, then press Enter to copy the selected path. In `/config`, `/models`, `/profiles`, `/theme`, `/bundles`, `/hooks`, `/mcp` (including MCP add prompts), and approval prompts (`always`), press `Ctrl-L` (or `/scope [user|project]` / `--project` / `--user`) to choose whether writes go to user config or the project's `.quack/` folder.
@@ -245,7 +257,7 @@ Example configuration for Zed (`settings.json`):
 }
 ```
 
-The editor panel receives streaming replies, reasoning steps, tool diffs, permission approval prompts, and checklist updates directly from quack.
+The editor panel receives streaming replies, reasoning steps, tool diffs, sub-agent tool calls, slash command lists, session titles, image attachments, `session/list`, permission approval prompts, and checklist updates directly from quack — plus optional editor-routed `fs/*` and `terminal/*` delegation (`[tools] acp_client_fs` / `acp_client_terminal`).
 
 ---
 
@@ -256,8 +268,9 @@ The editor panel receives streaming replies, reasoning steps, tool diffs, permis
 Prebuilt archives for all supported targets are published on the [Releases](https://github.com/ClackStack/quack/releases) page:
 - **Linux**: Static binaries (musl) for x64 and ARM64, `.deb` and `.rpm` packages.
 - **macOS**: Universal archives (x64 and Apple Silicon) and Homebrew tap formulas.
-- **Windows**: x64 and ARM64 zip archives and PowerShell installer.
+- **Windows**: x64 and ARM64 WiX v5 `.msi` installers (per-machine `ALLUSERS=2` for GPO/MDM/Intune or per-user `MSIINSTALLPERUSER=1`, MST-ready `DefaultsFeature`), zip archives, and PowerShell installer.
 - **Desktop GUI (`quack-gui`)**: Unsigned desktop installers and packages sharing the same on-disk `defaults/` directory as `quack`: `.dmg` for macOS (x64 and Apple Silicon), `-setup.exe` NSIS installers for Windows (x64 and ARM64), and `.deb`, `.rpm`, and `.AppImage` for glibc Linux (x64 and ARM64; static musl targets ship the CLI only). Installing the GUI alone does not install `quack` (and vice versa), though they share one `defaults/`, config, sessions, memory, and history; `install.sh` asks what to install (both by default, or whatever is already installed when updating) unless `--tui`/`-Tui` or `--gui`/`-Gui` is passed. On Linux it prefers the `.deb`/`.rpm` packages — which register the desktop entry and the shared `defaults/` system-wide — when the machine can install one (root or sudo), falling back to the self-contained `~/.local` archive; `--pkg deb|rpm|archive` forces a format.
+- **Supply chain & verification**: Every release publishes `SHA256SUMS`, CycloneDX 1.5 SBOMs (`quack.cdx.json`, `quack-gui.cdx.json`), and keyless GitHub SLSA build provenance attestations (`gh attestation verify <file> --repo ClackStack/quack`).
 
 ### Minimal / Air-Gapped Installs (`--plucked`)
 
@@ -284,11 +297,11 @@ Settings merge in the following order of precedence (higher layers override lowe
 | Layer | Location | Purpose |
 |---|---|---|
 | **Defaults** | `<prefix>/share/quack/defaults/` or `QUACK_DEFAULTS_DIR` | Bundled base configurations and profiles |
-| **System** | `/etc/quack/` (Linux), `/Library/Application Support/quack/` (macOS), `%ProgramData%\quack\` (Windows) | Administrative policies and enforced locks |
+| **System** | `/etc/quack/` (Linux), `/Library/Application Support/quack/` (macOS), `%ProgramData%\quack\` + `HKLM\SOFTWARE\Policies\quack` (Windows) | Administrative policies and enforced locks |
 | **User** | `~/.config/quack/` (`$XDG_CONFIG_HOME`) or `%APPDATA%\quack\` | User preferences and private configurations |
 | **Project** | `.quack/` at the repository root | Project-specific tools, commands, and rules (active once trusted) |
-| **Environment** | `QUACK_MODEL`, `QUACK_CONFIG_DIR`, etc. | Runtime environment variables |
-| **CLI Flags** | `-m`, `--profile`, `--mode`, `--approvals`, `-c key=value` | Command-line overrides for the active run |
+| **Environment** | `QUACK_MODEL`, `QUACK_PROMPT_CACHE_KEY`, `QUACK_CONFIG_DIR`, etc. | Runtime environment variables |
+| **CLI Flags** | `-m`, `--profile`, `--mode`, `--approvals`, `--worktree`, `--cache-key`, `-c key=value` | Command-line overrides for the active run |
 
 Run `quack config show --origin` to view your effective configuration and see which layer defined each setting.
 
@@ -343,8 +356,11 @@ mode = "workspace-write"       # Sandboxed execution; no network egress
 [permissions]
 deny = ["shell:curl *", "shell:wget *"]
 
+[audit]
+path = "/var/log/quack/audit.jsonl"  # append-only metadata log (no args/content by default)
+
 [policy]
-locked = ["model.default", "network", "sandbox.mode", "permissions.deny"]
+locked = ["model.default", "network", "sandbox.mode", "permissions.deny", "audit"]
 max_permission_mode = "allow"  # allow automatic actions, but prevent yolo
 project_config = "trusted-only"
 
@@ -364,6 +380,8 @@ ok      corp        2 declared models
 ok    model         corp/coder
 ok    agents        2 agents: explore (read-only, on corp/fast), general
 ok    sandbox       workspace-write · Landlock + seccomp
+ok    policy        5 locked · max approvals: allow · provider allowlist · mcp allowlist · offline
+ok    audit         /var/log/quack/audit.jsonl (metadata only)
 info  network       llm.internal.example · policy allows only llm.internal.example, *.internal.example
 ```
 
@@ -385,8 +403,8 @@ info  network       llm.internal.example · policy allows only llm.internal.exam
 **`[permissions]`**
 | Key | Default | Description |
 |---|---|---|
-| `work_mode` | `"edit"` | `plan` (read/search and propose tests) or `edit` (implementation) |
-| `mode` | `"ask"` | Approval policy: `ask` or `allow` |
+| `work_mode` | `"plan"` | `plan` (read/search and propose tests) or `edit` (implementation) |
+| `mode` | `"allow"` | Approval policy: `ask` or `allow` |
 | `allow` | `[]` | Rule patterns executed without prompting (`shell:cargo test*`, `edit:src/**`) |
 | `ask` | `[]` | Rule patterns that always prompt, even in `allow` (yolo bypasses asks) |
 | `deny` | `[]` | Rule patterns strictly forbidden across all modes |
@@ -410,9 +428,15 @@ alias for Allow; existing flags and saved sessions still load without increasing
 | `proxy` | `""` | Proxy URL. When empty, each scheme uses `HTTP_PROXY` or `HTTPS_PROXY`, with `ALL_PROXY` as a fallback. System settings apply when no environment proxy is set. Hosts in `NO_PROXY` go direct |
 | `ca_bundle` | `""` | Path to custom PEM certificate bundle |
 | `http1_only` | `false` | Force HTTP/1.1. Try it if HTTP/2 requests stall behind a VPN or proxy |
-| `secret_guard` | `"ask"` | Pre-egress Secret Shield policy (`ask`, `redact`, `block`, or `off`) scanning prompts and tool outputs locally with `redact-secret` + resolved credentials before HTTP send |
+| `secret_guard` | `"ask"` | Pre-egress Secret Shield policy (`ask`, `redact`, or `off`) scanning prompts and tool outputs locally with `redact-secret` + resolved credentials before HTTP send (non-interactive clients fall back from `ask` to `redact`) |
 | `secret_guard_local` | `false` | When `true`, also applies Secret Shield to loopback destinations (`localhost`, `127.0.0.1`) |
 | `secret_allowlist` | `[]` | SHA-256 secret fingerprints explicitly allowlisted across sessions |
+
+In `ask` mode, Secret Shield shows the destination provider and host, where it found
+each possible secret, and what the match could expose if valid. The preview is masked,
+and line numbers refer to the scanned text, not necessarily a file. Choose **Redact &
+send** to replace detected matches, or withhold the flagged text. If you send it
+unredacted, later requests may include it again as part of the conversation.
 
 For a single provider, select it in TUI `/providers` and press `Ctrl-S` (or `Enter`
 when it has no API key), or open **Advanced connection settings** on the desktop
@@ -458,6 +482,7 @@ WSL, try the full hostname and check [Microsoft's WSL VPN and DNS tunneling guid
 | `budget_ratio` | `0.85` | Fraction of window reserved for context vs response buffer |
 | `compaction_threshold` | `0.80` | Threshold of budget at which automatic pruning and compaction trigger |
 | `cache_strategy` | `"auto"` | KV cache optimization: `auto`, `preserve`, or `aggressive` |
+| `cache_key` | unset | Shared prompt-cache routing key (overrides per-session UUID for parallel `quack exec` / CI runs; also `--cache-key` or `QUACK_PROMPT_CACHE_KEY`) |
 
 **`[tools]`**
 | Key | Default | Description |
@@ -466,6 +491,18 @@ WSL, try the full hostname and check [Microsoft's WSL VPN and DNS tunneling guid
 | `shell` | `"auto"` | Shell interpreter: `auto`, `bash`, `zsh`, `pwsh`, `powershell`, `cmd`, or path |
 | `default_timeout_secs` | `120` | Maximum execution time before process tree termination |
 | `read_outline_tokens` | `2000` | Token threshold above which large file reads return Tree-sitter outlines |
+| `web_fetch.enabled` | `false` | Opt-in SSRF-protected `web_fetch` tool; always unregistered when `[network] offline = true` |
+| `web_fetch.allow_private` | `false` | Allow fetching loopback, RFC1918 private, link-local, and cloud-metadata IPs |
+| `web_fetch.max_bytes` | `2097152` | Maximum response body size in bytes (2 MiB) |
+| `web_fetch.timeout_secs` | `20` | Per-request timeout in seconds |
+| `acp_client_fs` | `false` | Under `quack acp`, route `read`/`write` through the editor (`fs/*`) when advertised |
+| `acp_client_terminal` | `false` | Under `quack acp`, run foreground `shell` commands in the editor's terminal (`terminal/*`) when advertised |
+
+**`[audit]`**
+| Key | Default | Description |
+|---|---|---|
+| `path` | `""` | Mode-`0600` JSONL file appending one structured record per tool execution (empty disables auditing) |
+| `include_content` | `false` | Include tool arguments and result summaries in audit entries (omitted by default) |
 
 **`[agent]`**
 | Key | Default | Description |
@@ -498,7 +535,10 @@ WSL, try the full hostname and check [Microsoft's WSL VPN and DNS tunneling guid
 | `memory.path` | `""` | Directory for persistent memory files (defaults to user data directory) |
 | `memory.project_scope` | `"data-dir"` | Memory storage scope: `data-dir` or `repo` (`.quack/memory`) |
 | `memory.writes` | `"auto"` | Approval policy for new memory notes: `auto` or `ask` |
+| `memory.index_max_tokens` | `1500` | Maximum token budget for the memory index in the prompt |
+| `memory.nudge` | `true` | Remind the model to save corrections and lasting preferences |
 | `sessions.path` | `""` | Directory for session transcripts |
+| `sessions.retention_days` | `0` | Automatically prune sessions older than N days on startup (`0` keeps forever) |
 
 ---
 
@@ -506,19 +546,27 @@ WSL, try the full hostname and check [Microsoft's WSL VPN and DNS tunneling guid
 
 | Key | Default | Description |
 |---|---|---|
-| `base_url` | required | Server API endpoint URL |
+| `base_url` | required (or `base_urls`) | Primary server API endpoint URL |
+| `base_urls` | `[]` | Additional endpoint URLs for round-robin balancing and exponential health-cooldown failover across nodes |
 | `api` | `"openai-chat"` | Protocol: `openai-chat`, `openai-responses`, `anthropic-messages`, or `ollama` |
-| `api_key` | none | Secret definition (`"sk-..."`, `{ env = "VAR" }`, `{ keyring = "id" }`, `{ file = "path" }`) |
+| `api_key` | none | Secret definition (`"sk-..."`, `{ env = "VAR" }`, `{ keyring = "id" }`, `{ file = "path" }`, `{ cmd = [...] }`) |
+| `auth` | none | Browser sign-in instead of a key (e.g. `{ type = "chatgpt", issuer = "https://auth.openai.com" }`) |
 | `models` | `[]` | Declared models or server discovery options |
 | `name`, `group` | ID, `""` | Display labels in setup and picker modals |
 | `enabled` | `true` | Toggle provider availability |
 | `auth_header`, `auth_scheme` | `Authorization`, `Bearer` | HTTP authorization header configuration |
 | `headers` | `{}` | Custom HTTP headers sent with requests |
+| `extra_body` | `{}` | JSON fields merged into every request body under each model's `extra_body` |
+| `native_compaction` | `false` | Use native OpenAI Responses compaction (`true` on bundled `openai` and `chatgpt`) |
+| `responses_websocket` | `false` | Use persistent Responses WebSocket continuation with Ping/Pong keepalive (`true` on bundled `openai` and `chatgpt`) |
+| `prompt_cache` | `{}` | Prompt-cache wire options: `developer_instructions`, `explicit_breakpoints`, `ttl` (or Ollama `keep_alive`), `diagnostics`, `cache_key`, `affinity_header`, `cache_control` (`auto`\|`breakpoints`), `cache_control_models` |
+| `tls.ca_file`, `client_cert`, `client_key` | none | Custom root CA and mutual TLS client certificate |
 | `http.timeout_connect_secs` | `30` | Connection timeout, covering TCP, any proxy and TLS |
 | `http.timeout_idle_secs` | `300` | Stream idle timeout |
 | `http.timeout_first_byte_secs` | `0` (the idle timeout) | Wait for response headers before retrying; doubles on each retry |
 | `http.max_retries` | `3` | Maximum automatic retries on transient errors |
-| `discovery.enabled` | `false` | Query server `/models` endpoint dynamically at startup |
+| `http.proxy`, `http.no_proxy`, `http.http1_only` | `""`, `false`, unset | Per-provider proxy URL, direct-connection bypass, and HTTP/1.1 override |
+| `discovery.enabled`, `discovery.include` | `false`, `[]` | Query `/models` at startup and filter by model ID globs |
 | `catalog` | provider ID | ID in the model catalog, for prices and windows nothing else reports. Servers on this machine aren't looked up unless named; `""` turns it off |
 
 **Per-model options in `models`:**
@@ -527,14 +575,20 @@ WSL, try the full hostname and check [Microsoft's WSL VPN and DNS tunneling guid
 | `id` | required | Model identifier recognized by provider |
 | `alias` | none | Short name for CLI and picker selection (`<provider>/<alias>`) |
 | `context_window`, `max_output` | from server, then catalog (window only) | Token boundary definitions |
+| `compact_at` | unset | Soft prompt-token ceiling for automatic compaction (e.g. `250000` below a 272k cliff) |
 | `profile` | `"auto"` | Model profile ID or `auto` matching |
 | `vision` | `false` | Enable image input and `view_image` tool |
 | `tool_calling.mode` | `"native"` | `native`, `text` (markup in reply), or `grammar` (guided decoding) |
 | `tool_calling.text_format` | `"auto"` | Format for text tool calls: `hermes`, `qwen3-xml`, `glm`, `json-block`, `deepseek`, or `kimi` |
+| `tool_calling.parallel` | `true` | Allow parallel tool calls on the wire (`false` sends `parallel_tool_calls: false`) |
 | `reasoning.format` | `"auto"` | Format of thinking tokens: `reasoning_content`, `reasoning`, `think-tags`, or `none` |
+| `reasoning.preserve_in_history` | `"all_turns"` | Replay earlier reasoning: `"never"` (`false`), `"current_turn"`, or `"all_turns"` (`true`) |
+| `reasoning.wire` | `"effort"` | How effort serializes on `openai-chat`: `effort`, `enable-thinking`, or `none` |
 | `reasoning.effort` | unset (server default) | Default thinking effort; explicit values take precedence over effort in `extra_body` |
 | `reasoning.efforts` | `[]` | Supported effort values in picker order; enables `/thinking` choices without assuming model capabilities |
-| `sampling` | from profile | Model parameters (`temperature`, `top_p`, `top_k`, `min_p`) |
+| `prompt_cache` | from provider | Per-model prompt-cache override (replaces provider `[prompt_cache]` when set) |
+| `sampling` | from profile | Model parameters (`temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`) |
+| `serving.prefix_cache`, `prefill_tps` | `true`, unset | KV prefix-cache reuse and prefill throughput hints for `cache_strategy = "auto"` |
 | `cost` | from server, then catalog | Cost per million tokens: `input`, `output`, `cached_input`, `cache_write` |
 
 For example, add `reasoning = { effort = "medium", efforts = ["low", "medium", "high"] }`
@@ -560,6 +614,8 @@ MCP servers live as individual `<id>.toml` files in your user config folder (`mc
    quack mcp add roost --url https://roost.internal:8484/mcp \
      --header "Authorization=Bearer {env:ROOST_TOKEN}" --auto-approve "list_*,search_*,get_*,read_*"
    quack mcp add playwright -- npx -y @playwright/mcp@latest
+   quack mcp login linear                               # OAuth 2.1 + PKCE sign-in for [oauth] server
+   quack mcp logout linear                              # revoke and delete saved OAuth tokens
    ```
 3. **By editing TOML directly**:
 
@@ -572,6 +628,16 @@ MCP servers live as individual `<id>.toml` files in your user config folder (`mc
 
    [tools]
    auto_approve = ["*"]
+   ```
+
+   OAuth 2.1 + PKCE HTTP example (`~/.config/quack/mcp.d/linear.toml`, then run `quack mcp login linear` or `/mcp login linear`):
+   ```toml
+   description = "Linear issues and projects"
+   url = "https://mcp.linear.app/mcp"
+
+   [oauth]
+   # Uses RFC 9728/8414 discovery + RFC 7591 Dynamic Client Registration automatically;
+   # optionally set client_id, client_secret, scopes, authorization_server, redirect_port.
    ```
 
    Self-hosted HTTP example (`~/.config/quack/mcp.d/roost.toml`, or run `quack mcp enable roost`):
@@ -594,15 +660,18 @@ MCP servers live as individual `<id>.toml` files in your user config folder (`mc
 | `command`, `args` | | Executable path and arguments for stdio MCP servers |
 | `url` | | Endpoint URL for remote streamable HTTP MCP servers |
 | `headers` | `{}` | HTTP headers for remote servers (`Secret` values supported) |
+| `oauth` | none | OAuth 2.1 + PKCE table (`enabled`, `client_id`, `client_secret`, `scopes`, `authorization_server`, `redirect_port`) for remote HTTP servers |
 | `env` | `{}` | Environment variables passed to stdio server process (`Secret` values supported) |
 | `cwd` | workspace root | Process working directory (`~/` expanded) |
 | `inherit_env` | OS safe defaults | Explicit list of host env var names to pass through |
 | `sandbox` | `false` | Run local stdio server inside the OS sandbox |
+| `defer` | `"auto"` | Defer tools behind `tool_search`: `auto` (above 10% budget), `always`, or `never` |
+| `sampling_model` | `"current"` | Model serving `sampling/createMessage`: `current` or `small` (`[model] small`) |
 | `tools.allow`, `tools.deny` | `[]` | Globs filtering exposed tool definitions |
 | `tools.auto_approve` | `[]` | Globs of tool names that execute without asking approval |
 | `startup_timeout_secs` | `20` | Server initialization timeout |
 | `call_timeout_secs` | `120` | Per-tool-call timeout (`0` disables) |
-| `max_output_tokens` | `25000` | Token cap applied to MCP tool and resource outputs |
+| `max_output_tokens` | `8000` | Token cap applied to MCP tool and resource outputs (full output spills to a temp file when trimmed) |
 
 ---
 
@@ -613,9 +682,15 @@ MCP servers live as individual `<id>.toml` files in your user config folder (`mc
 | `command`, `args` | required | Language server binary and startup arguments |
 | `extensions` | required | Covered file extensions without leading dot (`["rs"]`, `["py"]`) |
 | `root_markers` | `[]` | Project root boundary files (`Cargo.toml`, `go.mod`, `pyproject.toml`) |
+| `language_ids` | `{}` | Explicit LSP `languageId` overrides per extension |
+| `env` | `{}` | Extra environment variables (`Secret` values supported) |
 | `initialization_options` | `{}` | LSP initialization parameters |
+| `settings` | `{}` | Answers to `workspace/configuration` requests |
+| `sandbox` | `false` | Run language server inside the OS sandbox |
 | `diagnostics.settle_ms` | `800` | Settle delay before querying diagnostics after edits |
+| `diagnostics.max_wait_ms` | `5000` | Maximum wait for diagnostics after edits |
 | `diagnostics.min_severity` | `"warning"` | Minimum diagnostic level to report: `error`, `warning`, `info`, or `hint` |
+| `diagnostics.max_items` | `20` | Maximum diagnostics per file appended to edit results |
 
 ---
 
@@ -663,6 +738,7 @@ and confirms the hook is active. Turning a hook off lists its id in `[hooks] dis
 | `read_only` | `false` | Restrict agent to read-only tools; permits parallel runs |
 | `model` | caller model | Model override (`small` or `<provider>/<model>`) |
 | `max_steps` | `250` | Maximum model calls before stopping (runaway guard; shipped `explore` = 250, `general` = 500) |
+| `reasoning_effort` | inherit | Optional reasoning effort override (e.g. `"low"` on shipped `explore`) |
 
 ---
 

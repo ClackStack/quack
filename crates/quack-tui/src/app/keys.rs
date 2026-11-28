@@ -36,8 +36,17 @@ impl App {
             }
             TermEvent::Mouse(m) if self.modal.is_none() && self.hook_form.is_none() => match m.kind
             {
-                MouseEventKind::ScrollUp => self.scroll_up(WHEEL_ROWS),
-                MouseEventKind::ScrollDown => self.scroll_down(WHEEL_ROWS),
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    let up = m.kind == MouseEventKind::ScrollUp;
+                    let area = self.sidebar_view.get().area;
+                    if area.contains((m.column, m.row).into()) {
+                        self.scroll_sidebar(up, WHEEL_ROWS);
+                    } else if up {
+                        self.scroll_up(WHEEL_ROWS);
+                    } else {
+                        self.scroll_down(WHEEL_ROWS);
+                    }
+                }
                 MouseEventKind::Down(MouseButton::Left) => self.press(m.column, m.row),
                 MouseEventKind::Drag(MouseButton::Left) => self.drag(m.column, m.row),
                 MouseEventKind::Up(MouseButton::Left) => self.release(),
@@ -353,10 +362,14 @@ impl App {
                     ));
                 } else if was_connection && let Some(id) = self.connection_picker_provider.take() {
                     self.open_providers_selected(&id);
-                } else if self.signing_in.take().is_some() {
+                } else if let Some(id) = self.signing_in.take() {
                     self.browser = None;
-                    self.ops.push(Op::SignIn { id: None });
-                    self.open_hosted_setup();
+                    if id.starts_with("mcp:") {
+                        self.ops.push(Op::McpLogin { id: None });
+                    } else {
+                        self.ops.push(Op::SignIn { id: None });
+                        self.open_hosted_setup();
+                    }
                 }
             }
             ModalOutcome::Copy(text) => {
@@ -477,9 +490,17 @@ impl App {
         }
     }
 
-    /// Transcript scrolling keys, shared by the prompt and the approval bar. Returns
+    /// Transcript and sidebar scrolling keys, shared by the prompt and the approval bar. Returns
     /// whether `key` was one.
     pub(super) fn scroll_key(&mut self, key: KeyEvent) -> bool {
+        let sidebar = self.sidebar_view.get();
+        if key.modifiers == KeyModifiers::ALT
+            && sidebar.height > 0
+            && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
+        {
+            self.scroll_sidebar(key.code == KeyCode::PageUp, sidebar.height - 1);
+            return true;
+        }
         let page = self.view.get().1.saturating_sub(2).max(1);
         let jump = key
             .modifiers
@@ -507,6 +528,16 @@ impl App {
 
     pub(super) fn scroll_down(&mut self, rows: usize) {
         self.scroll.set(self.scroll.get().saturating_sub(rows));
+        self.dirty = true;
+    }
+
+    fn scroll_sidebar(&mut self, up: bool, rows: usize) {
+        let offset = self.sidebar_scroll.get();
+        self.sidebar_scroll.set(if up {
+            offset.saturating_sub(rows)
+        } else {
+            (offset + rows).min(self.sidebar_view.get().max_scroll)
+        });
         self.dirty = true;
     }
 

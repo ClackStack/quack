@@ -65,6 +65,8 @@ pub enum Subject {
         /// The server file auto-approves it.
         auto_approve: bool,
     },
+    /// Fetching a URL via the opt-in `web_fetch` tool.
+    WebFetch(String),
 }
 
 /// Result of a tool call: what the model sees and what the UI shows.
@@ -284,6 +286,10 @@ pub struct ToolCtx {
     pub grammars: Arc<crate::grammar::Grammars>,
     /// Managed background shell jobs for this session; killed automatically on drop.
     pub bg: Arc<quack_shell::BackgroundManager>,
+    /// Opt-in SSRF-protected web fetcher; `None` hides `web_fetch` (disabled or offline).
+    pub web_fetch: Option<Arc<dyn crate::web_fetch::WebFetcher>>,
+    /// Optional host-client bridge (e.g. ACP editor `fs/*` and `terminal/*` delegation).
+    pub client_bridge: Option<Arc<dyn crate::client_bridge::ClientBridge>>,
 }
 
 impl ToolCtx {
@@ -365,6 +371,7 @@ impl Registry {
             Arc::new(crate::todo::Todo),
             Arc::new(crate::ask::AskUser),
             Arc::new(crate::task::Task),
+            Arc::new(crate::web_fetch::WebFetch),
         ];
         Self { tools }
     }
@@ -402,6 +409,8 @@ pub(crate) fn test_ctx() -> ToolCtx {
         outline_above: 0,
         grammars: crate::grammar::Grammars::builtin(),
         bg: Arc::default(),
+        web_fetch: None,
+        client_bridge: None,
     }
 }
 

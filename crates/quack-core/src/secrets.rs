@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use quack_config::is_loopback;
 use quack_config::settings::{NetworkSettings, SecretGuardMode};
 use quack_config::sha256::Sha256;
-use quack_protocol::SecretFinding;
+use quack_protocol::{SecretFinding, SecretFindingContext};
 use redact_secret::{
     Action, BuiltInRegistry, ByteRange, Confidence, DefaultPolicy, Finding, WholeInputLimits,
     redact_with_limits, typed_placeholder_formatter,
@@ -164,6 +164,7 @@ pub fn scan_text(
             preview: mask_preview(matched),
             fingerprint,
             line: Some(line),
+            context: Some(finding_context(f.type_name(), location)),
         });
         surviving.push(redacted_finding);
     }
@@ -184,6 +185,68 @@ pub fn scan_text(
         findings: ui_findings,
         redacted,
         redaction_count,
+    }
+}
+
+fn finding_context(kind: &str, location: &str) -> SecretFindingContext {
+    let (label, impact) = match kind {
+        "active_credential" => (
+            "Configured credential",
+            "This exactly matches a provider or MCP credential loaded by quack. If still valid, it could be used with that credential's permissions.",
+        ),
+        "github_token"
+        | "github_fine_grained_personal_access_token"
+        | "github_oauth_token"
+        | "github_app_installation_token"
+        | "github_app_user_to_server_token"
+        | "github_app_refresh_token" => (
+            "Possible GitHub token",
+            "If valid, it could grant access to GitHub resources within the token's permissions.",
+        ),
+        "aws_access_key_id" => (
+            "Possible AWS access key ID",
+            "If valid, the key ID and its corresponding secret key could be used to make AWS requests with that identity's permissions.",
+        ),
+        "aws_secret_access_key" => (
+            "Possible AWS secret access key",
+            "If valid, this secret and its corresponding key ID could be used to make AWS requests with that identity's permissions.",
+        ),
+        "private_key" => (
+            "Possible private key",
+            "If usable, it could let someone authenticate or sign as the key's owner.",
+        ),
+        "openai_api_key" | "openai_admin_api_key" => (
+            "Possible OpenAI API key",
+            "If valid, it could be used to make API requests within the key's permissions, potentially incurring charges.",
+        ),
+        "anthropic_api_key" | "anthropic_admin_api_key" | "anthropic_enterprise_api_key" => (
+            "Possible Anthropic API key",
+            "If valid, it could be used to make API requests within the key's permissions, potentially incurring charges.",
+        ),
+        _ => (
+            "Possible secret",
+            "This matches a secret pattern. If it's a real credential, it could grant access to the service or data it protects.",
+        ),
+    };
+    let source = match location {
+        "user_prompt" => "Prompt text".into(),
+        "system_prompt" => "System prompt".into(),
+        "session_context" => "Session context".into(),
+        "history:user" => "Earlier user message".into(),
+        "history:assistant" => "Earlier model reply".into(),
+        "history:tool" => "Earlier tool output".into(),
+        "history:compaction" => "Conversation summary".into(),
+        "history:session_context" => "Earlier session context".into(),
+        "history:system" => "Earlier system message".into(),
+        _ => match location.strip_prefix("tool:") {
+            Some(name) => format!("Tool output: {name}"),
+            None => "Scanned text".into(),
+        },
+    };
+    SecretFindingContext {
+        label: label.into(),
+        source,
+        impact: impact.into(),
     }
 }
 
@@ -261,8 +324,32 @@ mod tests {
         assert!(!report.findings[0].preview.contains("SYNTHETIC"));
         assert!(report.findings[0].fingerprint.starts_with("sha256:"));
         assert_eq!(report.findings[0].line, Some(2));
+        let pattern = report.findings[0]
+            .context
+            .as_ref()
+            .expect("pattern context");
+        assert_eq!(pattern.label, "Possible GitHub token");
+        assert_eq!(pattern.source, "Prompt text");
+        assert!(pattern.impact.starts_with("If valid"));
         assert_eq!(report.findings[1].kind, "active_credential");
         assert_eq!(report.findings[1].line, Some(3));
+        let exact = report.findings[1].context.as_ref().expect("exact context");
+        assert!(exact.impact.contains("exactly matches"));
+        let serialized = serde_json::to_string(&report.findings).expect("serialize findings");
+        assert!(!serialized.contains(&gh_token));
+        assert!(!serialized.contains(&session_secret));
+    }
+
+    #[test]
+    fn unknown_detector_gets_conditional_context_and_readable_tool_source() {
+        let context = finding_context("new_detector", "tool:read");
+        assert_eq!(context.label, "Possible secret");
+        assert_eq!(context.source, "Tool output: read");
+        assert!(context.impact.contains("If it's a real credential"));
+        assert_eq!(
+            finding_context("new_detector", "history:assistant").source,
+            "Earlier model reply"
+        );
     }
 
     #[test]

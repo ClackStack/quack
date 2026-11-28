@@ -732,7 +732,12 @@ async fn resume_reproduces_the_request_exactly() {
     let root = tmp.path();
     let spawn = |resume| {
         // The defaults bundle supplies the shipped `generic` profile and its system prompt.
-        let loaded = configure(root, &server.uri(), Some(&defaults_bundle()), "");
+        let loaded = configure(
+            root,
+            &server.uri(),
+            Some(&defaults_bundle()),
+            "[permissions]\nwork_mode = \"edit\"\nmode = \"ask\"\n",
+        );
         Engine::spawn_with(Arc::new(loaded), resume)
     };
 

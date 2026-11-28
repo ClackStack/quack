@@ -20,7 +20,7 @@ use quack_config::LoadOptions;
 use quack_core::{Engine, Resume};
 use quack_exec::exit;
 
-use cli::{CatalogCmd, Cli, Cmd, ConfigCmd, KeyringCmd};
+use cli::{CatalogCmd, Cli, Cmd, ConfigCmd, KeyringCmd, SessionsCmd};
 
 fn main() -> ExitCode {
     let started = Instant::now();
@@ -107,7 +107,11 @@ fn main() -> ExitCode {
             ConfigCmd::Schema { dir } => commands::config_schema(&loaded, dir),
             ConfigCmd::Paths => commands::config_paths(&loaded),
         }),
-        Cmd::Mcp { cmd } => code(mcp::run(&loaded, cmd)),
+        Cmd::Mcp { cmd } => match cmd {
+            cli::McpCmd::Login { id, no_browser } => block_on(mcp::login(&loaded, id, no_browser)),
+            cli::McpCmd::Logout { id } => block_on(mcp::logout(&loaded, id)),
+            other => code(mcp::run(&loaded, other)),
+        },
         Cmd::Doctor => block_on(async move {
             let checks = quack_core::doctor::run(Arc::new(loaded)).await;
             commands::doctor(&checks)
@@ -126,7 +130,14 @@ fn main() -> ExitCode {
             cmd: CatalogCmd::Refresh { out },
         } => block_on(commands::catalog_refresh(&loaded, out)),
         Cmd::Update => block_on(update::run(&loaded)),
-        Cmd::Sessions => code(commands::sessions(&loaded)),
+        Cmd::Sessions { cmd } => code(match cmd {
+            None => commands::sessions(&loaded),
+            Some(SessionsCmd::Prune {
+                older_than,
+                all,
+                dry_run,
+            }) => commands::sessions_prune(&loaded, older_than.as_deref(), all, dry_run),
+        }),
         Cmd::Trust { decision } => code(commands::trust(&loaded, decision.map(Into::into))),
         Cmd::Keyring { cmd } => code(match cmd {
             KeyringCmd::Set { name } => commands::keyring_set(&name),
@@ -158,7 +169,8 @@ fn main() -> ExitCode {
                 o.mcp = start.mcp;
                 let loaded = quack_config::load(&o)
                     .map_err(|e| quack_acp::SessionError::Other(e.to_string()))?;
-                let engine = Engine::spawn_with(Arc::new(loaded), start.resume);
+                let engine =
+                    Engine::spawn_with_bridge(Arc::new(loaded), start.resume, start.client_bridge);
                 if plan {
                     let _ = engine.ops.try_send(plan_op());
                 }

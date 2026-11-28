@@ -138,6 +138,17 @@ pub enum Op {
     RestartMcp {
         id: String,
     },
+    /// Start an OAuth 2.1 browser sign-in for a remote HTTP MCP server, or cancel a
+    /// pending sign-in with `id = None`.
+    McpLogin {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        id: Option<String>,
+    },
+    /// Revoke and delete saved OAuth credentials for a remote HTTP MCP server.
+    McpLogout {
+        id: String,
+    },
     /// Enable a disabled MCP server (copying a defaults file or setting `enabled = true`
     /// and removing `[mcp] disabled` entries) and reload MCP connections.
     EnableMcp {
@@ -979,17 +990,30 @@ pub enum ApprovalRequest {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SecretFinding {
     pub id: String,
-    /// Detector family / rule id (e.g. `aws_access_key`, `resolved_secret`).
+    /// Detector family / rule id (e.g. `aws_access_key_id`, `active_credential`).
     pub kind: String,
-    /// Source location label (`prompt`, `@src/config.rs`, or `tool:shell`).
+    /// Scanner source label (`user_prompt`, `history:user`, or `tool:shell`).
     pub location: String,
     /// Masked preview (`sk-live-••••9f2a`), never the plaintext secret.
     pub preview: String,
-    /// Short SHA-256 fingerprint (`sha256:a1b2c3d4e5f6`) for allowlisting.
+    /// SHA-256 fingerprint for allowlisting.
     pub fingerprint: String,
+    /// One-based line in the scanned text, not necessarily a source-file line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub context: Option<SecretFindingContext>,
+}
+
+/// Human-readable context derived from detector and source metadata, not the matched text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct SecretFindingContext {
+    pub label: String,
+    pub source: String,
+    pub impact: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1799,6 +1823,33 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap_or_default();
         assert_eq!(serde_json::from_str::<Event>(&json).ok(), Some(ev));
+    }
+
+    #[test]
+    fn secret_finding_context_is_optional_on_the_wire() {
+        let legacy = serde_json::json!({
+            "id": "sec-1",
+            "kind": "active_credential",
+            "location": "user_prompt",
+            "preview": "••••••••",
+            "fingerprint": "sha256:test",
+        });
+        let mut finding: SecretFinding =
+            serde_json::from_value(legacy.clone()).expect("old finding");
+        assert!(finding.context.is_none());
+        assert_eq!(serde_json::to_value(&finding).expect("finding"), legacy);
+
+        finding.context = Some(SecretFindingContext {
+            label: "Configured credential".into(),
+            source: "Prompt text".into(),
+            impact: "This exactly matches a configured credential.".into(),
+        });
+        let enriched = serde_json::to_value(&finding).expect("enriched finding");
+        assert_eq!(enriched["context"]["source"], "Prompt text");
+        assert_eq!(
+            serde_json::from_value::<SecretFinding>(enriched).expect("new finding"),
+            finding
+        );
     }
 
     /// The wire shapes the exported TypeScript (crates/quack-gui/ui/src/lib/protocol.ts)

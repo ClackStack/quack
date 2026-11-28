@@ -38,7 +38,7 @@
 	const steps = [
 		{
 			title: 'Install with --plucked',
-			text: 'The complete agent (prompts, sub-agents, MCP, ACP, language servers) without preinstalled hosted-service providers, so nothing points outside your network. For offline installs, pass `--archive`, or use the `.deb` and `.rpm` packages.',
+			text: 'The complete agent (prompts, sub-agents, MCP, ACP, language servers) without preinstalled hosted-service providers, so nothing points outside your network. For offline installs, pass `--archive`, or use the `.deb`, `.rpm`, and Windows `.msi` packages.',
 			file: 'shell',
 			code: installCmd,
 			lang: 'sh'

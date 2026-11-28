@@ -9,11 +9,12 @@
 use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
-use quack_config::{ItemState, Loaded, load_mcp};
-use quack_mcp::{McpManager, ServerSpec, ServerState, ToolInfo, model_tool_name};
+use quack_config::{ItemState, Loaded, McpDefer, load_mcp};
+use quack_mcp::{McpManager, McpOAuthClient, ServerSpec, ServerState, ToolInfo, model_tool_name};
 use quack_protocol::{
     ApprovalRequest, CommandInfo, Event, LoadState, McpServerInfo, McpServerState, Subsystem,
 };
+use quack_providers::EgressLedger;
 use quack_tools::{Subject, Tool, ToolCtx, ToolKind, ToolOutput};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -110,16 +111,27 @@ impl Mcp {
             .collect()
     }
 
-    /// Whether tools are behind `tool_search` for this budget.
-    fn deferred(tools: &[McpTool], budget: Option<u32>) -> bool {
-        let tokens: u32 = tools.iter().map(McpTool::tokens).sum();
-        tokens > budget.unwrap_or(FALLBACK_BUDGET) / 10
+    /// Whether `auto`-defer tools should be placed behind `tool_search` for this budget.
+    fn auto_deferred(tools: &[McpTool], budget: Option<u32>) -> bool {
+        let non_always_tokens: u32 = tools
+            .iter()
+            .filter(|t| t.info.defer != McpDefer::Always)
+            .map(McpTool::tokens)
+            .sum();
+        non_always_tokens > budget.unwrap_or(FALLBACK_BUDGET) / 10
     }
 
-    /// The MCP tools to offer with the next request: the servers' tools (or
-    /// `tool_search` and what it turned on), then the resource tools when any ready
-    /// server lists resources. Cached until the servers, the turned-on tools or the
-    /// budget change.
+    fn is_tool_deferred(tool: &McpTool, auto_deferred: bool) -> bool {
+        match tool.info.defer {
+            McpDefer::Always => true,
+            McpDefer::Never => false,
+            McpDefer::Auto => auto_deferred,
+        }
+    }
+
+    /// The MCP tools to offer with the next request: always-direct tools, auto tools (or
+    /// `tool_search` and what it turned on), then the resource tools when any ready server
+    /// lists resources. Cached until the servers, the turned-on tools or the budget change.
     pub fn offered(self: &Arc<Self>, budget: Option<u32>) -> Vec<Arc<dyn Tool>> {
         let revision = self.manager.revision();
         let activated = self.activated.lock().map(|a| a.clone()).unwrap_or_default();
@@ -148,34 +160,39 @@ impl Mcp {
         activated: &[String],
     ) -> Vec<Arc<dyn Tool>> {
         let tools = self.adapters();
+        let auto_def = Self::auto_deferred(&tools, budget);
         let mut out: Vec<Arc<dyn Tool>> = Vec::new();
-        let has_resources = !self.manager.resources().is_empty();
-        if !Self::deferred(&tools, budget) {
-            out.extend(tools.into_iter().map(|t| Arc::new(t) as Arc<dyn Tool>));
-            if has_resources {
-                out.push(Arc::new(ListResources {
-                    manager: self.manager.clone(),
-                }));
-                out.push(Arc::new(ReadResource {
-                    manager: self.manager.clone(),
-                }));
+        let mut direct_names: Vec<String> = Vec::new();
+        let mut any_deferred = false;
+        for t in &tools {
+            if Self::is_tool_deferred(t, auto_def) {
+                any_deferred = true;
+            } else {
+                direct_names.push(t.name.clone());
+                out.push(Arc::new(t.clone()));
             }
-        } else {
-            // Keep static MCP tools (`tool_search` and resource tools) ahead of dynamically
-            // activated tools so activating a match only appends at the tail of `tools[]`.
+        }
+        let has_resources = !self.manager.resources().is_empty();
+        // Keep static MCP tools (`tool_search` and resource tools) ahead of dynamically
+        // activated tools so activating a match only appends at the tail of `tools[]`.
+        if any_deferred {
             out.push(Arc::new(ToolSearch {
                 mcp: Arc::clone(self),
             }));
-            if has_resources {
-                out.push(Arc::new(ListResources {
-                    manager: self.manager.clone(),
-                }));
-                out.push(Arc::new(ReadResource {
-                    manager: self.manager.clone(),
-                }));
-            }
+        }
+        if has_resources {
+            out.push(Arc::new(ListResources {
+                manager: self.manager.clone(),
+            }));
+            out.push(Arc::new(ReadResource {
+                manager: self.manager.clone(),
+            }));
+        }
+        if any_deferred {
             for name in activated {
-                if let Some(t) = tools.iter().find(|t| t.name == *name) {
+                if !direct_names.iter().any(|d| d == name)
+                    && let Some(t) = tools.iter().find(|t| t.name == *name)
+                {
                     out.push(Arc::new(t.clone()));
                 }
             }
@@ -191,7 +208,7 @@ impl Mcp {
     /// `/mcp`: each server with its state and the cost of its tools.
     pub fn info(&self, budget: Option<u32>) -> Vec<McpServerInfo> {
         let tools = self.adapters();
-        let deferred = Self::deferred(&tools, budget);
+        let auto_def = Self::auto_deferred(&tools, budget);
         self.manager
             .status()
             .into_iter()
@@ -201,6 +218,11 @@ impl Mcp {
                     ServerState::Ready => (McpServerState::Ready, String::new()),
                     ServerState::Failed(e) => (McpServerState::Failed, e),
                     ServerState::Stopped => (McpServerState::Stopped, String::new()),
+                };
+                let deferred = match s.defer {
+                    McpDefer::Always => true,
+                    McpDefer::Never => false,
+                    McpDefer::Auto => auto_def,
                 };
                 McpServerInfo {
                     tool_tokens: tools
@@ -420,7 +442,13 @@ impl Tool for McpTool {
         Box::pin(async move {
             let out = self
                 .manager
-                .call(&self.info.server, &self.info.name, args, &ctx.cancel)
+                .call_with_progress(
+                    &self.info.server,
+                    &self.info.name,
+                    args,
+                    &ctx.cancel,
+                    ctx.on_output.clone(),
+                )
                 .await;
             // One line, so JSON results read as `{ "a": 1, … }` rather than `{`.
             let first: String = out
@@ -971,6 +999,41 @@ fn store_mcp_bearer(
             })
         }
     }
+}
+
+/// Build an [`McpOAuthClient`] for a configured remote HTTP MCP server.
+pub fn oauth_client(
+    config: &Loaded,
+    id: &str,
+    ledger: Option<Arc<EgressLedger>>,
+) -> Result<McpOAuthClient, String> {
+    let items = load_mcp(config);
+    let item = items
+        .iter()
+        .find(|i| i.id == id)
+        .ok_or_else(|| format!("no MCP server `{id}` · see `quack mcp list`"))?;
+    let file = match &item.state {
+        ItemState::Loaded(f) => f,
+        ItemState::Disabled(why) => {
+            return Err(format!(
+                "MCP server `{id}` is disabled ({why}) · enable it with `quack mcp enable {id}`"
+            ));
+        }
+        ItemState::Failed(d) => {
+            return Err(format!(
+                "MCP server `{id}` failed to parse: {}",
+                d.one_line()
+            ));
+        }
+    };
+    McpOAuthClient::from_server(
+        id,
+        file,
+        &config.dirs.user_data,
+        config.settings.network.clone(),
+        config.settings.policy.mcp.clone(),
+        ledger,
+    )
 }
 
 #[cfg(test)]

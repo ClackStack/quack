@@ -18,6 +18,33 @@ pub(crate) const PROTOCOL_VERSION: u16 = 1;
 pub(crate) struct Initialize {
     #[serde(default)]
     pub protocol_version: u16,
+    #[serde(default)]
+    pub client_capabilities: ClientCapabilities,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClientCapabilities {
+    #[serde(default)]
+    pub fs: FsCapabilities,
+    #[serde(default)]
+    pub terminal: bool,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FsCapabilities {
+    #[serde(default)]
+    pub read_text_file: bool,
+    #[serde(default)]
+    pub write_text_file: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ListSessions {
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,13 +100,21 @@ pub(crate) enum ContentBlock {
     Text {
         text: String,
     },
+    Image {
+        #[serde(default)]
+        data: String,
+        #[serde(default, rename = "mimeType")]
+        mime_type: String,
+        #[serde(default)]
+        uri: Option<String>,
+    },
     ResourceLink {
         uri: String,
     },
     Resource {
         resource: EmbeddedResource,
     },
-    /// Images and audio, which quack does not take yet.
+    /// Audio or future content kinds quack does not handle yet.
     #[serde(other)]
     Other,
 }

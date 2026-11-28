@@ -36,6 +36,7 @@ mod state;
 #[cfg(test)]
 mod testing;
 mod trust;
+pub mod win_policy;
 
 pub use agent::AgentFile;
 pub use bundle::{Bundle, BundleFile};
@@ -53,7 +54,7 @@ pub use load::{
     load_with, load_workspace_with,
 };
 pub use lsp::LspServerFile;
-pub use mcp::{McpServerFile, McpTools};
+pub use mcp::{McpDefer, McpOAuth, McpSamplingModel, McpServerFile, McpTools};
 pub use mcp_manage::{
     McpDisabled, McpEnabled, McpSummary, NewMcpServer, NewMcpTransport, check_mcp_id,
     collect_mcp_env_vars, collect_secret_env_vars, derive_mcp_id_from_command,
@@ -94,6 +95,21 @@ pub fn load_mcp(loaded: &Loaded) -> Vec<Item<McpServerFile>> {
         &loaded.settings.policy.mcp,
         |f| (!f.url.is_empty()).then_some(f.url.as_str()),
     );
+    // An explicit OAuth authorization server is contacted too, so policy must allow its host.
+    let policy = &loaded.settings.policy.mcp;
+    for item in &mut items {
+        if let ItemState::Loaded(f) = &item.state
+            && let Some(auth_url) = f
+                .oauth
+                .as_ref()
+                .filter(|o| o.enabled)
+                .and_then(|o| o.authorization_server.as_deref())
+                .filter(|u| !u.is_empty())
+            && !policy.allows(&item.id, Some(auth_url))
+        {
+            item.state = ItemState::Disabled("not allowed by policy".into());
+        }
+    }
     items
 }
 
@@ -159,16 +175,25 @@ pub fn load_providers(loaded: &Loaded) -> Vec<Item<ProviderFile>> {
         &mut items,
         &loaded.settings.providers.disabled,
         &loaded.settings.policy.providers,
-        |f| Some(f.base_url.as_str()),
+        |f| Some(f.primary_base_url()),
     );
-    // A sign-in server is contacted too, so policy must allow its host as well.
+    // Every endpoint in `base_urls` and any sign-in server are contacted too, so policy
+    // must allow every one of their hosts.
     let policy = &loaded.settings.policy.providers;
     for item in &mut items {
-        if let ItemState::Loaded(f) = &item.state
-            && let Some(auth) = &f.auth
-            && !policy.allows(&item.id, Some(&auth.issuer))
-        {
-            item.state = ItemState::Disabled("not allowed by policy".into());
+        if let ItemState::Loaded(f) = &item.state {
+            let endpoints = f.endpoints();
+            let endpoint_blocked = !endpoints.is_empty()
+                && endpoints
+                    .iter()
+                    .any(|url| !policy.allows(&item.id, Some(url)));
+            let auth_blocked = f
+                .auth
+                .as_ref()
+                .is_some_and(|auth| !policy.allows(&item.id, Some(&auth.issuer)));
+            if endpoint_blocked || auth_blocked {
+                item.state = ItemState::Disabled("not allowed by policy".into());
+            }
         }
     }
     items
@@ -373,5 +398,59 @@ mod tests {
         let o = LoadOptions::new(f.root.join("repo"));
         let without_bundle = load_with(&move |k| vars.get(k).cloned(), &o).expect("load");
         assert!(provider_drift(&without_bundle).is_empty());
+    }
+
+    #[test]
+    fn base_urls_secondary_endpoint_checked_against_policy() {
+        let f = Fixture::new();
+        f.write(
+            "system/config.toml",
+            "[policy.providers]\nhosts = [\"*.internal.example\"]\n",
+        );
+        f.write(
+            "user/providers.d/cluster.toml",
+            "base_urls = [\"https://gpu-1.internal.example/v1\", \"https://leak.external.example/v1\"]\n",
+        );
+        f.write(
+            "user/providers.d/ok.toml",
+            "base_urls = [\"https://gpu-1.internal.example/v1\", \"https://gpu-2.internal.example/v1\"]\n",
+        );
+        let loaded = f.load();
+        let items = load_providers(&loaded);
+        let cluster = items.iter().find(|i| i.id == "cluster").expect("cluster");
+        assert!(
+            matches!(cluster.state, ItemState::Disabled(ref why) if why.contains("policy")),
+            "{cluster:?}"
+        );
+        let ok = items.iter().find(|i| i.id == "ok").expect("ok");
+        assert!(matches!(ok.state, ItemState::Loaded(_)), "{ok:?}");
+    }
+
+    #[test]
+    fn mcp_oauth_authorization_server_checked_against_policy() {
+        let f = Fixture::new();
+        f.write(
+            "system/config.toml",
+            "[policy.mcp]\nhosts = [\"*.internal.example\"]\n",
+        );
+        f.write(
+            "user/mcp.d/bad.toml",
+            "url = \"https://mcp.internal.example/mcp\"\n\
+             [oauth]\nauthorization_server = \"https://auth.external.example\"\n",
+        );
+        f.write(
+            "user/mcp.d/good.toml",
+            "url = \"https://mcp.internal.example/mcp\"\n\
+             [oauth]\nauthorization_server = \"https://auth.internal.example\"\n",
+        );
+        let loaded = f.load();
+        let items = load_mcp(&loaded);
+        let bad = items.iter().find(|i| i.id == "bad").expect("bad");
+        assert!(
+            matches!(bad.state, ItemState::Disabled(ref why) if why.contains("policy")),
+            "{bad:?}"
+        );
+        let good = items.iter().find(|i| i.id == "good").expect("good");
+        assert!(matches!(good.state, ItemState::Loaded(_)), "{good:?}");
     }
 }

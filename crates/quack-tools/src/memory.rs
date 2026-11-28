@@ -306,6 +306,8 @@ mod tests {
             outline_above: 0,
             grammars: crate::grammar::Grammars::builtin(),
             bg: Arc::default(),
+            web_fetch: None,
+            client_bridge: None,
         }
     }
 

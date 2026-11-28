@@ -324,7 +324,8 @@ impl Provider {
             return false;
         }
 
-        let url = self.url(responses::RESPONSES_PATH);
+        let (_, base) = self.endpoints.pick();
+        let url = format!("{base}/{}", responses::RESPONSES_PATH);
         let keepalive = state.keepalive_interval();
         // Take ownership until completion so cancellation drops any partial exchange.
         let existing = state.connection.take();

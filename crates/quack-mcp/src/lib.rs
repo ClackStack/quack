@@ -3,6 +3,7 @@
 
 mod ask;
 mod manager;
+pub mod oauth;
 mod output;
 mod spawn;
 
@@ -11,3 +12,4 @@ pub use manager::{
     CallOutput, MAX_RESTARTS, McpManager, PromptArg, PromptInfo, ResourceInfo, ServerSpec,
     ServerState, ServerStatus, ToolInfo, model_tool_name,
 };
+pub use oauth::{McpCredentials, McpOAuthClient, McpSignedIn, has_saved_token};

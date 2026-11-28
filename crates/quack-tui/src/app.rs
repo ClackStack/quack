@@ -28,7 +28,7 @@ const DOUBLE_ESC: Duration = Duration::from_millis(600);
 const SPIN_EVERY: u64 = 5;
 /// Welcome duck advances animation every N frames (16 ms each).
 const DUCK_ANIM_EVERY: u64 = 8;
-/// Transcript rows one mouse-wheel notch scrolls.
+/// Rows one mouse-wheel notch scrolls.
 const WHEEL_ROWS: usize = 3;
 /// Frames (16 ms each) the status bar says a selection was copied.
 const COPIED_FRAMES: u64 = 125;
@@ -72,6 +72,9 @@ pub struct App {
     pub(crate) scroll: Cell<usize>,
     /// `(rows, height)` of the transcript as last drawn.
     pub(crate) view: Cell<(usize, usize)>,
+    /// Sidebar rows scrolled down from the top, and its last drawn viewport.
+    pub(crate) sidebar_scroll: Cell<usize>,
+    pub(crate) sidebar_view: Cell<crate::sidebar::View>,
     /// The input box's text area and its first visible row, as last drawn.
     pub(crate) input_view: Cell<(Rect, usize)>,
     /// The transcript's area as last drawn, scrollbar column included.
@@ -162,7 +165,7 @@ pub struct App {
     /// A `/new` session switch is in flight; clear `session_saved` when `SessionConfigured` lands.
     starting_new: bool,
     /// Installed skills, runnable as `/<name>`.
-    skills: Vec<quack_protocol::SkillInfo>,
+    pub(crate) skills: Vec<quack_protocol::SkillInfo>,
     /// Custom slash commands, minus any that a built-in command's name hides.
     custom: Vec<quack_protocol::CommandInfo>,
     compat_folders: Option<Vec<quack_protocol::CompatFolder>>,
@@ -267,6 +270,8 @@ impl App {
             modal: None,
             scroll: Cell::new(0),
             view: Cell::new((0, 0)),
+            sidebar_scroll: Cell::new(0),
+            sidebar_view: Cell::default(),
             input_view: Cell::new((Rect::default(), 0)),
             transcript_area: Cell::new(Rect::default()),
             work_mode_area: Cell::new(Rect::default()),

@@ -203,6 +203,7 @@ pub(crate) fn call_target(subject: &quack_tools::Subject, args: &Value, root: &P
             .map(|p| quack_tools::paths::display(root, p))
             .collect::<Vec<_>>()
             .join(" "),
+        Subject::WebFetch(url) => url.clone(),
         _ => args.to_string(),
     }
 }

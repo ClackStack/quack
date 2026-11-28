@@ -1,5 +1,99 @@
 {
   "$defs": {
+    "McpDefer": {
+      "description": "Per-server override for deferring MCP tool schemas behind `tool_search`.",
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Defer behind `tool_search` when MCP schemas exceed 10% of the context budget.",
+          "type": "string"
+        },
+        {
+          "const": "always",
+          "description": "Always keep this server's tools behind `tool_search`.",
+          "type": "string"
+        },
+        {
+          "const": "never",
+          "description": "Always offer this server's tools directly in the model's tool list.",
+          "type": "string"
+        }
+      ]
+    },
+    "McpOAuth": {
+      "additionalProperties": false,
+      "description": "OAuth 2.1 + PKCE configuration for a remote streamable-HTTP MCP server.",
+      "properties": {
+        "authorization_server": {
+          "default": null,
+          "description": "Override the authorization server issuer URL instead of discovering it via\nRFC 9728 Protected Resource Metadata (`/.well-known/oauth-protected-resource`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client_id": {
+          "default": null,
+          "description": "Pre-registered OAuth client ID. Omit to use RFC 7591 Dynamic Client Registration\nwhen the authorization server advertises `registration_endpoint`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client_secret": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional client secret for confidential clients."
+        },
+        "enabled": {
+          "default": true,
+          "description": "Enable OAuth sign-in for this server (default true when `[oauth]` is present).",
+          "type": "boolean"
+        },
+        "redirect_port": {
+          "default": null,
+          "description": "Preferred loopback port on `127.0.0.1` for the OAuth redirect callback.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scopes": {
+          "default": [],
+          "description": "Scopes to request; defaults to scopes advertised by the resource/auth server.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "McpSamplingModel": {
+      "description": "Model used to serve a server's `sampling/createMessage` requests.",
+      "oneOf": [
+        {
+          "const": "current",
+          "description": "Use the session's active model.",
+          "type": "string"
+        },
+        {
+          "const": "small",
+          "description": "Use `[model] small` when configured, falling back to the session model.",
+          "type": "string"
+        }
+      ]
+    },
     "McpTools": {
       "additionalProperties": false,
       "properties": {
@@ -122,6 +216,11 @@
       "description": "Working directory; default: the workspace root.",
       "type": "string"
     },
+    "defer": {
+      "$ref": "#/$defs/McpDefer",
+      "default": "auto",
+      "description": "Controls whether this server's tools are deferred behind `tool_search`."
+    },
     "description": {
       "default": "",
       "description": "Shown in `/mcp`.",
@@ -167,10 +266,27 @@
     },
     "max_output_tokens": {
       "default": 8000,
-      "description": "Longer results are cut, keeping the start and the end.",
+      "description": "Longer results are cut, keeping the start and the end (and saving the full output\nto a file when a spill directory is configured).",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
+    },
+    "oauth": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/McpOAuth"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "OAuth 2.1 + PKCE sign-in for a remote HTTP server (`quack mcp login <id>`)."
+    },
+    "sampling_model": {
+      "$ref": "#/$defs/McpSamplingModel",
+      "default": "current",
+      "description": "Which model answers this server's `sampling/createMessage` requests."
     },
     "sandbox": {
       "default": null,

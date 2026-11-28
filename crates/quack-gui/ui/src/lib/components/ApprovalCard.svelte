@@ -39,7 +39,7 @@
 			: approval.request.kind === 'edit'
 				? 'quack asks to change a file'
 				: approval.request.kind === 'egress_secrets'
-					? 'Secret Shield paused outbound request'
+					? 'Secret Shield paused the send'
 					: `quack asks to use ${approval.request.name}`
 	);
 
@@ -131,23 +131,33 @@
 			Field marks · {adds} addition{adds === 1 ? '' : 's'} · {dels} deletion{dels === 1 ? '' : 's'}
 		</p>
 	{:else if approval.request.kind === 'egress_secrets'}
-		<p class="lead">
-			Pre-egress Secret Shield detected {approval.request.findings.length} possible secret{approval.request.findings.length === 1 ? '' : 's'}
-			before sending to <code>{approval.request.provider}</code> (<code>{approval.request.host}</code>).
-			Redacting replaces each matched span with a stable masked token so model context stays coherent without transmitting the secret.
+		<p class="lead shield-note">
+			Found {approval.request.findings.length} possible secret{approval.request.findings.length === 1 ? '' : 's'}
+			in text headed to <code>{approval.request.provider}</code> (<code>{approval.request.host}</code>).
 		</p>
-		<div class="shield-findings">
+		<ul class="shield-findings" aria-label="Detected matches">
 			{#each approval.request.findings as finding (finding.id)}
-				<div class="shield-row">
+				<li class="shield-row">
 					<div class="shield-meta">
-						<span class="shield-kind">{finding.kind}</span>
-						<span class="shield-loc">{finding.location}</span>
-						<span class="shield-fp">{finding.fingerprint.slice(0, 12)}</span>
+						<strong class="shield-kind">{finding.context?.label ?? finding.kind}</strong>
+						<span class="shield-loc">
+							{finding.context?.source ?? finding.location}{finding.line === undefined ? '' : `, scanned line ${finding.line}`}
+						</span>
 					</div>
-					<code class="shield-preview">{finding.preview}</code>
-				</div>
+					<p class="shield-impact">
+						{finding.context?.impact ?? 'If this is a real credential, it could grant access to the service or data it protects.'}
+					</p>
+					<div class="shield-meta">
+						<code class="shield-preview">{finding.preview}</code>
+						<code class="shield-fp">{finding.fingerprint.slice(0, 12)}</code>
+					</div>
+				</li>
 			{/each}
-		</div>
+		</ul>
+		<p class="lead">
+			Redacting replaces detected matches with placeholders before sending.
+			If you send unredacted text, later requests may include it again as part of the conversation.
+		</p>
 	{:else}
 		<pre class="command">{approval.request.arguments}</pre>
 	{/if}
@@ -166,7 +176,7 @@
 				disabled={busy}
 				onclick={() => onAnswer('allow_once')}
 			>
-				Send unredacted once
+				Send unredacted
 			</button>
 		{:else}
 			<button class="btn btn-primary" disabled={busy} onclick={() => onAnswer('allow_once')}>
@@ -199,10 +209,11 @@
 			aria-expanded={feedbackOpen}
 			onclick={() => (feedbackOpen = !feedbackOpen)}
 		>
-			Not this — tell quack why…
+			{approval.request.kind === 'egress_secrets' ? 'Add a note…' : 'Not this — tell quack why…'}
 		</button>
 		<button class="btn btn-danger" disabled={busy} onclick={() => onAnswer('deny')}>
-			Not this <span class="kbd">esc</span>
+			{approval.request.kind === 'egress_secrets' ? 'Withhold flagged text' : 'Not this'}
+			<span class="kbd">esc</span>
 		</button>
 	</div>
 
@@ -241,13 +252,19 @@
 				if (feedbackText.trim()) onAnswer('deny', feedbackText.trim());
 			}}
 		>
-			<label class="sub-label" for="approval-feedback">What should quack do instead?</label>
+			<label class="sub-label" for="approval-feedback">
+				{approval.request.kind === 'egress_secrets'
+					? 'Why withhold this text? Do not include the secret.'
+					: 'What should quack do instead?'}
+			</label>
 			<div class="feedback-row">
 				<input
 					id="approval-feedback"
 					type="text"
 					class="feedback-input"
-					placeholder="e.g. Use cargo check instead of modifying that file…"
+					placeholder={approval.request.kind === 'egress_secrets'
+						? 'e.g. This is a live credential'
+						: 'e.g. Use cargo check instead of modifying that file…'}
 					bind:value={feedbackText}
 					bind:this={feedbackEl}
 					onkeydown={(e) => {
@@ -258,7 +275,7 @@
 					}}
 				/>
 				<button type="submit" class="btn btn-primary" disabled={busy || !feedbackText.trim()}>
-					Send guidance
+					{approval.request.kind === 'egress_secrets' ? 'Withhold with note' : 'Send guidance'}
 				</button>
 			</div>
 		</form>
@@ -617,6 +634,12 @@
 		flex-direction: column;
 		gap: 6px;
 		margin: 10px 0 12px;
+		padding: 0;
+	}
+
+	.shield-note,
+	.shield-row {
+		overflow-wrap: anywhere;
 	}
 
 	.shield-row {
@@ -638,14 +661,19 @@
 	}
 
 	.shield-kind {
-		font-family: var(--font-mono);
-		font-weight: 700;
+		font-size: 0.8125rem;
 		color: var(--fail);
 	}
 
-	.shield-loc {
-		font-family: var(--font-mono);
+	.shield-loc,
+	.shield-impact {
 		color: var(--ink-2);
+	}
+
+	.shield-impact {
+		margin: 0;
+		font-family: var(--font-serif);
+		font-size: 0.875rem;
 	}
 
 	.shield-fp {

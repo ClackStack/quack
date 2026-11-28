@@ -4,6 +4,7 @@
 //! directly (docs/plan/00-architecture.md#engine-protocol).
 
 mod agent;
+mod audit;
 pub mod checks;
 mod compat;
 mod context;
@@ -32,8 +33,10 @@ mod watch;
 
 pub use engine::{Engine, EngineHandle};
 pub use env::memory_dirs;
+pub use mcp::oauth_client as mcp_oauth_client;
 pub use session::{
-    Resume, append_history, history_path, list_sessions, load_history, sessions_dirs,
+    Resume, append_history, history_path, list_sessions, load_history, prune_sessions,
+    sessions_dirs,
 };
 
 pub use quack_protocol as protocol;
@@ -41,3 +44,5 @@ pub use quack_protocol as protocol;
 pub use quack_tools::grammar;
 /// Workspace file listing for `@file` completion.
 pub use quack_tools::workspace_files;
+/// Optional host-client delegation hooks (e.g. ACP editor `fs/*` and `terminal/*`).
+pub use quack_tools::{ClientBridge, TerminalOutput};

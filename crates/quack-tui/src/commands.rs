@@ -349,6 +349,7 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ),
     ("Up / Down", "Move between input rows, then through history"),
     ("PageUp / PageDown", "Scroll the transcript a page"),
+    ("Alt-PageUp / Alt-PageDown", "Scroll the sidebar a page"),
     ("Shift-Up / Shift-Down", "Scroll the transcript a line"),
     (
         "Ctrl-Home / Ctrl-End",

@@ -3,10 +3,27 @@
 //!
 //! Works on the result's JSON so it reads every content shape the spec revisions use.
 
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde_json::Value;
 
+static SPILL_SEQ: AtomicU64 = AtomicU64::new(1);
+
 /// Text for the model and whether the server reported an error.
+#[cfg(test)]
 pub(crate) fn render(result: &Value, max_chars: usize) -> (bool, String) {
+    render_spilled(result, max_chars, None, "")
+}
+
+/// Like [`render`], writing the full untruncated output under `spill_dir` when it exceeds
+/// `max_chars` and citing the saved path in the truncation marker.
+pub(crate) fn render_spilled(
+    result: &Value,
+    max_chars: usize,
+    spill_dir: Option<&Path>,
+    label: &str,
+) -> (bool, String) {
     let is_error = result
         .get("isError")
         .and_then(Value::as_bool)
@@ -28,7 +45,7 @@ pub(crate) fn render(result: &Value, max_chars: usize) -> (bool, String) {
     } else {
         parts.join("\n")
     };
-    (is_error, cut(&text, max_chars))
+    (is_error, cut_spilled(&text, max_chars, spill_dir, label))
 }
 
 /// One content block as text.
@@ -58,7 +75,18 @@ fn resource(r: &Value) -> String {
 }
 
 /// A `resources/read` result: each part under its URI.
+#[cfg(test)]
 pub(crate) fn contents(result: &Value, max_chars: usize) -> String {
+    contents_spilled(result, max_chars, None, "")
+}
+
+/// Like [`contents`], saving untruncated text under `spill_dir` when it exceeds `max_chars`.
+pub(crate) fn contents_spilled(
+    result: &Value,
+    max_chars: usize,
+    spill_dir: Option<&Path>,
+    label: &str,
+) -> String {
     let parts: Vec<String> = result
         .get("contents")
         .and_then(Value::as_array)
@@ -69,7 +97,7 @@ pub(crate) fn contents(result: &Value, max_chars: usize) -> String {
     if parts.is_empty() {
         return "(empty resource)".to_owned();
     }
-    cut(&parts.join("\n"), max_chars)
+    cut_spilled(&parts.join("\n"), max_chars, spill_dir, label)
 }
 
 /// A `prompts/get` result as one message. A prompt that is a single user message reads
@@ -100,7 +128,19 @@ pub(crate) fn prompt(result: &Value) -> String {
 }
 
 /// Keep the start and the end of long output.
+#[cfg(test)]
 pub(crate) fn cut(text: &str, max_chars: usize) -> String {
+    cut_spilled(text, max_chars, None, "")
+}
+
+/// Keep the start and the end of long output, spilling the complete text to `spill_dir`
+/// when provided so the model can inspect it with `read` or `grep`.
+pub(crate) fn cut_spilled(
+    text: &str,
+    max_chars: usize,
+    spill_dir: Option<&Path>,
+    label: &str,
+) -> String {
     let total = text.chars().count();
     if total <= max_chars {
         return text.to_owned();
@@ -109,10 +149,35 @@ pub(crate) fn cut(text: &str, max_chars: usize) -> String {
     let tail = max_chars - head;
     let start: String = text.chars().take(head).collect();
     let end: String = text.chars().skip(total - tail).collect();
-    format!(
-        "{start}\n[… {} characters cut …]\n{end}",
-        total - head - tail
-    )
+    let dropped = total - head - tail;
+    if let Some(saved) = spill_dir.and_then(|dir| write_spill(dir, label, text)) {
+        format!(
+            "{start}\n[… {dropped} characters cut; full output saved to {} …]\n{end}",
+            saved.display()
+        )
+    } else {
+        format!("{start}\n[… {dropped} characters cut …]\n{end}")
+    }
+}
+
+fn write_spill(dir: &Path, label: &str, text: &str) -> Option<std::path::PathBuf> {
+    std::fs::create_dir_all(dir).ok()?;
+    let safe: String = label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(40)
+        .collect();
+    let stem = if safe.is_empty() { "mcp" } else { &safe };
+    let seq = SPILL_SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!("{stem}-{}-{seq}.txt", std::process::id()));
+    std::fs::write(&path, text).ok()?;
+    Some(path)
 }
 
 #[cfg(test)]
@@ -176,5 +241,20 @@ mod tests {
         assert!(short.starts_with("000001"));
         assert!(short.ends_with("099"));
         assert!(short.contains("250 characters cut"));
+    }
+
+    #[test]
+    fn long_output_spills_full_text_to_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let text: String = (0..100).map(|i| format!("{i:03}")).collect();
+        let short = cut_spilled(&text, 50, Some(dir.path()), "fx/echo");
+        assert!(short.contains("full output saved to"), "{short}");
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(files.len(), 1);
+        let saved = std::fs::read_to_string(files[0].path()).expect("read");
+        assert_eq!(saved, text);
     }
 }

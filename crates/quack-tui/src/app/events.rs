@@ -377,7 +377,15 @@ impl App {
             Event::SignInResult { id, error } if self.signing_in.as_deref() == Some(&id) => {
                 self.signing_in = None;
                 self.browser = None;
-                if let Some(error) = error {
+                if let Some(server) = id.strip_prefix("mcp:") {
+                    self.modal = None;
+                    if let Some(error) = error {
+                        self.note(format!("MCP sign-in failed for {server}: {error}"));
+                    } else {
+                        self.note(format!("Signed in to MCP server {server}; reconnecting…"));
+                        self.ops.push(Op::ListMcp);
+                    }
+                } else if let Some(error) = error {
                     self.setup.sign_in_error = Some((id.clone(), error.clone()));
                     self.open_hosted_setup();
                     if let Some(service) = self.setup.services.iter().flatten().find(|s| s.id == id)
@@ -541,6 +549,7 @@ impl App {
                 self.note(text);
             }
             Event::SessionResumed { session, items } => {
+                self.sidebar_scroll.set(0);
                 if std::mem::take(&mut self.resuming) {
                     self.transcript.clear();
                     self.selection = None;

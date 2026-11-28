@@ -5,7 +5,8 @@ One file per language server. A server is used only when its program is already 
 
 Servers start the first time the agent reads or edits a file they cover. After an edit,
 new errors and warnings are added to the edit's result, and the `lsp` tool gives the
-model definitions, references, hover text, symbols and diagnostics.
+model definitions, references, hover text, symbols, diagnostics, project-wide renames,
+and `code_action` quickfixes/refactors (with diff approval and undo checkpoints).
 
 The smallest file:
 

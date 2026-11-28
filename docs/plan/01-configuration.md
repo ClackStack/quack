@@ -10,7 +10,7 @@
 
 ## Directory layout
 
-The directory is resolved per OS. Environment overrides, useful for testing and portable installs: `QUACK_CONFIG_DIR` (user layer), `QUACK_SYSTEM_DIR` (system layer), `QUACK_DATA_DIR`, `QUACK_CACHE_DIR`, and `QUACK_DEFAULTS_DIR` (`none` disables the defaults bundle). `QUACK_SYSTEM_DIR` is ignored, with a warning, when the platform's system `config.toml` has a `[policy]`, so a variable can't step around an administrator's locks. On Windows the platform directory itself comes from `%ProgramData%`, which a user can also set, so a Windows policy that must hold against the user needs a fixed location (a registry key; not built yet). `quack config paths` prints the resolved directories.
+The directory is resolved per OS. Environment overrides, useful for testing and portable installs: `QUACK_CONFIG_DIR` (user layer), `QUACK_SYSTEM_DIR` (system layer), `QUACK_DATA_DIR`, `QUACK_CACHE_DIR`, and `QUACK_DEFAULTS_DIR` (`none` disables the defaults bundle). `QUACK_SYSTEM_DIR` is ignored, with a warning, when the platform's system `config.toml` has a `[policy]`, so a variable can't step around an administrator's locks. On Windows, quack also reads `HKLM\SOFTWARE\Policies\quack` directly via `RegGetValueW` (`RRF_NOEXPAND`, implemented 2026-11-26 in `win_policy.rs`): `SystemDir` (`REG_SZ`, absolute path) pins the system directory so neither `%ProgramData%` nor `QUACK_SYSTEM_DIR` can redirect policy, and `PolicyToml` (`REG_SZ` or `REG_MULTI_SZ`) merges TOML policy directly into the system layer ahead of user/project config and locks. `quack config paths` prints the resolved directories.
 
 | Layer | Linux | macOS | Windows |
 |---|---|---|---|
@@ -80,11 +80,21 @@ budget_ratio = 0.85            # fraction of model context window we plan to use
 cache_strategy = "auto"        # preserve | aggressive | auto   → 05-context
 compaction_threshold = 0.80
 # window = 16384               # use at most this much of the model's window (unset: all of it)
+# cache_key = "repo-ci"        # shared prompt-cache routing key (or --cache-key / QUACK_PROMPT_CACHE_KEY)
 
 [tools]
-edit_format = "auto"           # auto (from profile/model) | str_replace | apply_patch | whole_file | hashline
+edit_format = "auto"           # auto (from profile/model) | str_replace | apply_patch | whole_file | hashline | search_replace_blocks
 shell = "auto"                 # auto | bash | zsh | pwsh | powershell | cmd | <path>
 default_timeout_secs = 120
+read_outline_tokens = 2000     # 0: disable automatic outlining on large reads
+acp_client_fs = false          # route read/write through ACP editor when advertised
+acp_client_terminal = false    # run foreground shell in ACP editor terminal when advertised
+
+[tools.web_fetch]
+enabled = false                # opt-in SSRF-protected fetch; always unregistered when offline = true
+allow_private = false          # block loopback/private/link-local/metadata IPs by default
+max_bytes = 2097152            # 2 MiB
+timeout_secs = 20
 
 [permissions]
 work_mode = "edit"              # plan | edit, independent of approvals
@@ -104,12 +114,15 @@ compat_paths = []                 # more skill folders, e.g. ".claude/skills" on
 disabled = []                     # skill names to skip
 index_max_tokens = 1500           # cap on the skill list in the system prompt
 
+[commands]
+compat_paths = []                 # more command folders, e.g. ".claude/commands" once accepted
+
 [hooks]
 disabled = []                     # hook ids to skip; the system layer's hooks cannot be skipped
 
 [sessions]
 path = ""                         # default: <user data>/sessions
-retention_days = 0                # 0 = keep forever
+retention_days = 0                # 0 = keep forever; >0 prunes older sessions on startup
 
 [network]
 offline = false                   # true: block all egress except provider base_urls → 11-security
@@ -117,6 +130,9 @@ egress_allow = []                 # extra hosts allowed when offline
 proxy = ""                        # default: scheme-specific environment proxy, ALL_PROXY, or system
 ca_bundle = ""                    # extra PEM roots in addition to OS store
 http1_only = false                # true: force HTTP/1.1; providers can override → 02-providers
+secret_guard = "ask"              # ask | redact | off (pre-egress secret shield)
+secret_guard_local = false        # true: scan loopback requests too
+secret_allowlist = []             # sha256:... fingerprints allowed without prompts
 
 [catalog]                         # model prices and windows → 02-providers
 refresh = false                   # true: refresh in the background, at most daily
@@ -132,6 +148,10 @@ max_bytes = 32768
 
 [telemetry]
 otel_endpoint = ""                # empty = disabled (default). Never enabled implicitly.
+
+[audit]                           # enterprise tool-execution audit log → 11-security
+path = ""                         # JSONL path; empty = disabled
+include_content = false           # omit args and summaries by default
 
 [policy]                          # only honoured in the SYSTEM layer
 locked = ["network.offline", "permissions.deny", "providers.allowed"]

@@ -55,6 +55,9 @@ pub struct McpServerFile {
     pub url: String,
     #[serde(default)]
     pub headers: BTreeMap<String, Secret>,
+    /// OAuth 2.1 + PKCE sign-in for a remote HTTP server (`quack mcp login <id>`).
+    #[serde(default)]
+    pub oauth: Option<McpOAuth>,
 
     /// Run a local server inside the OS sandbox (see `[sandbox]` in config.toml).
     #[serde(default)]
@@ -64,11 +67,81 @@ pub struct McpServerFile {
     pub startup_timeout_secs: u64,
     #[serde(default = "call_timeout")]
     pub call_timeout_secs: u64,
-    /// Longer results are cut, keeping the start and the end.
+    /// Longer results are cut, keeping the start and the end (and saving the full output
+    /// to a file when a spill directory is configured).
     #[serde(default = "max_output")]
     pub max_output_tokens: u32,
+    /// Controls whether this server's tools are deferred behind `tool_search`.
+    #[serde(default)]
+    pub defer: McpDefer,
+    /// Which model answers this server's `sampling/createMessage` requests.
+    #[serde(default)]
+    pub sampling_model: McpSamplingModel,
     #[serde(default)]
     pub tools: McpTools,
+}
+
+/// OAuth 2.1 + PKCE configuration for a remote streamable-HTTP MCP server.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct McpOAuth {
+    /// Enable OAuth sign-in for this server (default true when `[oauth]` is present).
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Pre-registered OAuth client ID. Omit to use RFC 7591 Dynamic Client Registration
+    /// when the authorization server advertises `registration_endpoint`.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Optional client secret for confidential clients.
+    #[serde(default)]
+    pub client_secret: Option<Secret>,
+    /// Scopes to request; defaults to scopes advertised by the resource/auth server.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Override the authorization server issuer URL instead of discovering it via
+    /// RFC 9728 Protected Resource Metadata (`/.well-known/oauth-protected-resource`).
+    #[serde(default)]
+    pub authorization_server: Option<String>,
+    /// Preferred loopback port on `127.0.0.1` for the OAuth redirect callback.
+    #[serde(default)]
+    pub redirect_port: Option<u16>,
+}
+
+impl Default for McpOAuth {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            client_id: None,
+            client_secret: None,
+            scopes: Vec::new(),
+            authorization_server: None,
+            redirect_port: None,
+        }
+    }
+}
+
+/// Per-server override for deferring MCP tool schemas behind `tool_search`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpDefer {
+    /// Defer behind `tool_search` when MCP schemas exceed 10% of the context budget.
+    #[default]
+    Auto,
+    /// Always keep this server's tools behind `tool_search`.
+    Always,
+    /// Always offer this server's tools directly in the model's tool list.
+    Never,
+}
+
+/// Model used to serve a server's `sampling/createMessage` requests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpSamplingModel {
+    /// Use the session's active model.
+    #[default]
+    Current,
+    /// Use `[model] small` when configured, falling back to the session model.
+    Small,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -95,6 +168,11 @@ impl McpServerFile {
             (true, true) => Err("set `command` (a local server) or `url` (a remote one)".into()),
             (false, false) => Err("set either `command` or `url`, not both".into()),
         }
+    }
+
+    /// True when this server uses OAuth 2.1 sign-in (`[oauth]` enabled on an HTTP server).
+    pub fn uses_oauth(&self) -> bool {
+        self.oauth.as_ref().is_some_and(|o| o.enabled)
     }
 }
 

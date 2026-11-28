@@ -84,6 +84,19 @@ impl Engine {
         }
     }
 
+    fn effective_client_bridge(&self) -> Option<Arc<dyn quack_tools::ClientBridge>> {
+        let inner = self.client_bridge.as_ref()?.clone();
+        let tools = &self.config.settings.tools;
+        if !tools.acp_client_fs && !tools.acp_client_terminal {
+            return None;
+        }
+        Some(Arc::new(GatedClientBridge {
+            inner,
+            allow_fs: tools.acp_client_fs,
+            allow_terminal: tools.acp_client_terminal,
+        }))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn turn_ctx(
         &self,
@@ -126,6 +139,8 @@ impl Engine {
             responses_session,
             last_reminders,
             egress_guard,
+            audit: self.audit.clone(),
+            client_bridge: self.effective_client_bridge(),
         }
     }
 
@@ -630,5 +645,48 @@ pub(super) fn expand_skill(setup: &Setup, prompt: &str) -> PromptExpansion {
             error: Some(format!("skill /{name}: {e}")),
             ..Default::default()
         },
+    }
+}
+
+#[derive(Debug)]
+struct GatedClientBridge {
+    inner: Arc<dyn quack_tools::ClientBridge>,
+    allow_fs: bool,
+    allow_terminal: bool,
+}
+
+impl quack_tools::ClientBridge for GatedClientBridge {
+    fn read_text_file<'a>(
+        &'a self,
+        path: &'a std::path::Path,
+    ) -> futures::future::BoxFuture<'a, Option<Result<String, String>>> {
+        if !self.allow_fs {
+            return Box::pin(async { None });
+        }
+        self.inner.read_text_file(path)
+    }
+
+    fn write_text_file<'a>(
+        &'a self,
+        path: &'a std::path::Path,
+        content: &'a str,
+    ) -> futures::future::BoxFuture<'a, Option<Result<(), String>>> {
+        if !self.allow_fs {
+            return Box::pin(async { None });
+        }
+        self.inner.write_text_file(path, content)
+    }
+
+    fn run_terminal<'a>(
+        &'a self,
+        command: &'a str,
+        cwd: &'a std::path::Path,
+        timeout: Duration,
+        cancel: CancellationToken,
+    ) -> futures::future::BoxFuture<'a, Option<Result<quack_tools::TerminalOutput, String>>> {
+        if !self.allow_terminal {
+            return Box::pin(async { None });
+        }
+        self.inner.run_terminal(command, cwd, timeout, cancel)
     }
 }

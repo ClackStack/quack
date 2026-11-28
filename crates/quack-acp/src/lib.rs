@@ -5,6 +5,7 @@
 //! added to `mcp.d`. The editor draws the conversation and answers approvals; questions
 //! from `ask_user` are skipped, as in `quack exec`. Nothing but protocol goes to stdout.
 
+mod bridge;
 mod convert;
 mod rpc;
 mod session;
@@ -14,14 +15,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use quack_config::McpServerFile;
-use quack_core::{EngineHandle, Resume};
+use quack_config::{LoadOptions, McpServerFile};
+use quack_core::{ClientBridge, EngineHandle, Resume};
 use quack_protocol::Event;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
+use bridge::AcpBridge;
 use rpc::{Peer, RpcError};
 use session::{Cmd, Startup};
 use wire::McpServer;
@@ -34,6 +36,10 @@ pub struct SessionStart {
     pub resume: Resume,
     /// The editor's MCP servers, by id, for `LoadOptions::mcp`.
     pub mcp: Vec<(String, McpServerFile)>,
+    /// Optional editor capability bridge (`fs/*`, `terminal/*`), active when the editor
+    /// advertises those capabilities and `[tools] acp_client_fs` / `acp_client_terminal`
+    /// enable them.
+    pub client_bridge: Option<Arc<dyn ClientBridge>>,
 }
 
 /// Why an ACP session could not be opened or continued.
@@ -84,6 +90,7 @@ where
         peer: Peer::new(out_tx),
         spawn,
         sessions: HashMap::new(),
+        client_caps: wire::ClientCapabilities::default(),
     };
     let mut lines = BufReader::new(input).lines();
     let read = loop {
@@ -113,6 +120,7 @@ struct Server {
     peer: Peer,
     spawn: Spawn,
     sessions: HashMap<String, session::Handle>,
+    client_caps: wire::ClientCapabilities,
 }
 
 /// The answer to a request: now, or later from the session (`session/prompt`).
@@ -147,7 +155,10 @@ impl Server {
     async fn dispatch(&mut self, method: &str, p: Value, id: Option<Value>) -> Reply {
         let now = |r: Result<Value, RpcError>| Reply::Now(r);
         match method {
-            "initialize" => now(params::<wire::Initialize>(p).map(|r| initialize(&r))),
+            "initialize" => now(params::<wire::Initialize>(p).map(|r| {
+                self.client_caps = r.client_capabilities.clone();
+                initialize(&r)
+            })),
             "authenticate" => now(empty()),
             "session/new" => now(match params::<wire::NewSession>(p) {
                 Ok(r) => self.new_session(r).await,
@@ -155,6 +166,10 @@ impl Server {
             }),
             "session/load" => now(match params::<wire::LoadSession>(p) {
                 Ok(r) => self.load_session(r).await,
+                Err(e) => Err(e),
+            }),
+            "session/list" => now(match params::<wire::ListSessions>(p) {
+                Ok(r) => self.list_sessions(r).await,
                 Err(e) => Err(e),
             }),
             "session/prompt" => {
@@ -167,7 +182,7 @@ impl Server {
                 };
                 let cmd = Cmd::Prompt {
                     id,
-                    items: convert::prompt_items(r.prompt),
+                    blocks: r.prompt,
                 };
                 match self.send(&r.session_id, cmd) {
                     Ok(()) => Reply::Later,
@@ -252,6 +267,7 @@ impl Server {
         cwd: PathBuf,
         resume: Resume,
         servers: Vec<McpServer>,
+        bridge: Arc<AcpBridge>,
     ) -> Result<EngineHandle, RpcError> {
         if !cwd.is_absolute() {
             return Err(RpcError::invalid(format!(
@@ -266,12 +282,18 @@ impl Server {
                 Err(e) => tracing::warn!(%e, "skipping an editor MCP server"),
             }
         }
-        (self.spawn)(SessionStart { cwd, resume, mcp })
-            .map_err(|e| RpcError::internal(e.to_string()))
+        (self.spawn)(SessionStart {
+            cwd,
+            resume,
+            mcp,
+            client_bridge: Some(bridge),
+        })
+        .map_err(|e| RpcError::internal(e.to_string()))
     }
 
     async fn new_session(&mut self, r: wire::NewSession) -> Result<Value, RpcError> {
-        let mut engine = self.spawn(r.cwd, Resume::New, r.mcp_servers)?;
+        let bridge = AcpBridge::new(self.peer.clone(), self.client_caps.clone());
+        let mut engine = self.spawn(r.cwd, Resume::New, r.mcp_servers, bridge.clone())?;
         let mode = engine
             .config()
             .settings
@@ -286,6 +308,7 @@ impl Server {
         })
         .await
         .map_err(|e| RpcError::internal(e.to_string()))?;
+        bridge.set_session_id(id.clone());
         let handle = session::start(id.clone(), engine, self.peer.clone(), startup);
         self.sessions.insert(id.clone(), handle);
         Ok(json!({"sessionId": id, "modes": session::modes(&mode)}))
@@ -296,7 +319,9 @@ impl Server {
         if let Some(old) = self.sessions.remove(&id) {
             old.close().await;
         }
-        let mut engine = self.spawn(r.cwd, Resume::Id(id.clone()), r.mcp_servers)?;
+        let bridge = AcpBridge::new(self.peer.clone(), self.client_caps.clone());
+        bridge.set_session_id(id.clone());
+        let mut engine = self.spawn(r.cwd, Resume::Id(id.clone()), r.mcp_servers, bridge)?;
         let mode = engine
             .config()
             .settings
@@ -326,6 +351,81 @@ impl Server {
         self.sessions.insert(id, handle);
         Ok(json!({"modes": session::modes(&mode)}))
     }
+
+    async fn list_sessions(&self, r: wire::ListSessions) -> Result<Value, RpcError> {
+        if let Some(ref cwd) = r.cwd
+            && !cwd.is_absolute()
+        {
+            return Err(RpcError::invalid(format!(
+                "cwd must be an absolute path, got {}",
+                cwd.display()
+            )));
+        }
+        let existing = match &r.cwd {
+            Some(cwd) => self
+                .sessions
+                .values()
+                .find(|h| h.config.dirs.cwd == *cwd || h.config.dirs.workspace_root == *cwd)
+                .map(|h| h.config.clone()),
+            None => self.sessions.values().next().map(|h| h.config.clone()),
+        };
+        let config = match existing {
+            Some(cfg) => cfg,
+            None => {
+                let cwd = match r.cwd {
+                    Some(c) => c,
+                    None => std::env::current_dir()
+                        .map_err(|e| RpcError::internal(format!("current directory: {e}")))?,
+                };
+                Arc::new(
+                    quack_config::load(&LoadOptions::new(cwd))
+                        .map_err(|e| RpcError::internal(e.to_string()))?,
+                )
+            }
+        };
+        let cwd_str = config.dirs.workspace_root.display().to_string();
+        let (_, listed) = tokio::task::spawn_blocking(move || quack_core::list_sessions(&config))
+            .await
+            .map_err(|e| RpcError::internal(e.to_string()))?;
+        let sessions: Vec<Value> = listed
+            .into_iter()
+            .map(|s| {
+                let mut obj = json!({
+                    "sessionId": s.id,
+                    "cwd": cwd_str,
+                });
+                if !s.title.is_empty() {
+                    obj["title"] = json!(s.title);
+                }
+                if s.updated > 0 {
+                    obj["updatedAt"] = json!(rfc3339_utc(s.updated));
+                }
+                obj
+            })
+            .collect();
+        Ok(json!({ "sessions": sessions }))
+    }
+}
+
+/// Format Unix epoch seconds as RFC 3339 UTC (`YYYY-MM-DDTHH:MM:SSZ`) without extra deps.
+fn rfc3339_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let hour = rem / 3600;
+    let min = (rem % 3600) / 60;
+    let sec = rem % 60;
+    // Howard Hinnant's civil-from-days algorithm.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}Z")
 }
 
 fn unknown_session(id: &str) -> RpcError {
@@ -345,9 +445,9 @@ fn initialize(r: &wire::Initialize) -> Value {
         "protocolVersion": wire::PROTOCOL_VERSION,
         "agentCapabilities": {
             "loadSession": true,
-            "promptCapabilities": {"image": false, "audio": false, "embeddedContext": true},
+            "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true},
             "mcpCapabilities": {"http": true, "sse": false},
-            "sessionCapabilities": {"close": {}},
+            "sessionCapabilities": {"close": {}, "list": {}},
         },
         "authMethods": [],
         "agentInfo": {"name": "quack", "title": "quack", "version": env!("CARGO_PKG_VERSION")},

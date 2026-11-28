@@ -29,6 +29,8 @@ pub struct Settings {
     pub skills: SkillSettings,
     pub commands: CommandSettings,
     pub telemetry: TelemetrySettings,
+    /// Enterprise tool-execution audit log (docs/plan/11-security.md#audit-log-enterprise).
+    pub audit: AuditSettings,
     /// Disable provider files from lower layers without deleting them.
     pub providers: ItemToggles,
     pub mcp: ItemToggles,
@@ -220,6 +222,15 @@ pub struct ToolSettings {
     /// `read` without a line range shows the outline of source files larger than this
     /// (in tokens), so the model reads only the part it needs. 0: always the whole file.
     pub read_outline_tokens: u32,
+    /// Opt-in SSRF-protected HTTP fetch tool (disabled by default and when offline).
+    pub web_fetch: WebFetchSettings,
+    /// When running under ACP (`quack acp`) and the editor advertises `fs` capabilities,
+    /// route `read` and `write` through the editor (`fs/read_text_file`, `fs/write_text_file`)
+    /// so unsaved editor buffers are visible.
+    pub acp_client_fs: bool,
+    /// When running under ACP (`quack acp`) and the editor advertises `terminal` support,
+    /// run foreground `shell` commands inside the editor's terminal (`terminal/*`).
+    pub acp_client_terminal: bool,
 }
 
 impl Default for ToolSettings {
@@ -229,6 +240,35 @@ impl Default for ToolSettings {
             shell: "auto".into(),
             default_timeout_secs: 120,
             read_outline_tokens: 2000,
+            web_fetch: WebFetchSettings::default(),
+            acp_client_fs: false,
+            acp_client_terminal: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebFetchSettings {
+    /// Register the `web_fetch` tool. Off by default; always disabled when
+    /// `network.offline = true`.
+    pub enabled: bool,
+    /// Allow fetching loopback, RFC1918 private, link-local, and cloud-metadata IPs.
+    /// Off by default for SSRF protection; enable only for internal documentation hosts.
+    pub allow_private: bool,
+    /// Maximum response body size in bytes (default 2 MiB).
+    pub max_bytes: usize,
+    /// Per-request timeout in seconds (default 20 s).
+    pub timeout_secs: u64,
+}
+
+impl Default for WebFetchSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_private: false,
+            max_bytes: 2 * 1024 * 1024,
+            timeout_secs: 20,
         }
     }
 }
@@ -250,11 +290,12 @@ pub enum EditFormat {
     SearchReplaceBlocks,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct PermissionSettings {
-    /// Approval defaults, independent of whether the agent is planning or editing.
+    /// Approval policy for a new session: `allow` or `ask`, independent of work mode.
     pub mode: PermissionMode,
+    /// Work mode for a new session: `plan` or `edit`.
     pub work_mode: WorkMode,
     #[serde(deserialize_with = "list::de")]
     #[schemars(with = "ListOrAppend")]
@@ -265,6 +306,18 @@ pub struct PermissionSettings {
     #[serde(deserialize_with = "list::de")]
     #[schemars(with = "ListOrAppend")]
     pub deny: Vec<String>,
+}
+
+impl Default for PermissionSettings {
+    fn default() -> Self {
+        Self {
+            mode: PermissionMode::Allow,
+            work_mode: WorkMode::Plan,
+            allow: Vec::new(),
+            ask: Vec::new(),
+            deny: Vec::new(),
+        }
+    }
 }
 
 /// The OS sandbox for shell commands (docs/plan/11-security.md#os-sandboxing).
@@ -505,6 +558,16 @@ pub struct CommandSettings {
 pub struct TelemetrySettings {
     /// Empty disables telemetry. Never enabled implicitly.
     pub otel_endpoint: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuditSettings {
+    /// JSONL file to append one record per tool execution. Empty disables auditing.
+    pub path: String,
+    /// Include tool arguments and result summaries in audit records. Off by default so
+    /// file contents and model text stay out of audit logs.
+    pub include_content: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

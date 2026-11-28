@@ -3676,6 +3676,7 @@ dependencies = [
 name = "quack-acp"
 version = "0.0.0"
 dependencies = [
+ "futures",
  "quack-config",
  "quack-core",
  "quack-protocol",
@@ -3683,6 +3684,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "wiremock",
 ]
@@ -3729,6 +3731,7 @@ dependencies = [
  "toml 1.2.0+spec-1.1.0",
  "toml_edit 0.25.18+spec-1.1.0",
  "windows-native-keyring-store",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3848,7 +3851,9 @@ dependencies = [
  "quack-providers",
  "quack-sandbox",
  "quack-shell",
+ "ring",
  "rmcp",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

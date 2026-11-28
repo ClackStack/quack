@@ -1,5 +1,7 @@
 //! `list_dir`, `glob` and `grep`. All respect .gitignore and skip `.git`.
 
+use std::borrow::Cow;
+use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 
 use futures::future::BoxFuture;
@@ -16,7 +18,8 @@ const MAX_LIST: usize = 400;
 const MAX_GLOB: usize = 200;
 const MAX_GREP: usize = 200;
 const MAX_GREP_LINE: usize = 300;
-const MAX_GREP_FILE: u64 = 5 * 1024 * 1024;
+const MAX_GREP_FILE_MIB: u64 = 5;
+const MAX_GREP_FILE: u64 = MAX_GREP_FILE_MIB * 1024 * 1024;
 const PATH: &[&str] = &["path", "dir", "directory"];
 
 pub(crate) fn walker(root: &Path, max_depth: Option<usize>) -> ignore::Walk {
@@ -55,6 +58,47 @@ pub fn workspace_files(root: &Path, limit: usize) -> Vec<String> {
 
 fn base(args: &Value, ctx: &ToolCtx) -> PathBuf {
     opt_str(args, PATH).map_or_else(|| ctx.root.clone(), |p| paths::resolve(&ctx.root, p))
+}
+
+fn search_metadata(root: &Path, path: &Path) -> Result<Metadata, String> {
+    std::fs::metadata(path).map_err(|e| {
+        let shown = paths::display(root, path);
+        format!("Cannot search `{shown}`: {e} · check that `path` exists and is accessible")
+    })
+}
+
+fn search_files(dir: &Path) -> impl Iterator<Item = Result<PathBuf, ignore::Error>> {
+    walker(dir, None).filter_map(|entry| match entry {
+        Ok(e) if e.file_type().is_some_and(|t| t.is_file()) => Some(Ok(e.into_path())),
+        Ok(_) => None,
+        Err(e) => Some(Err(e)),
+    })
+}
+
+#[derive(Default)]
+struct SearchSkips {
+    traversal_errors: usize,
+    unreadable: usize,
+    oversized: usize,
+}
+
+impl SearchSkips {
+    fn warning(&self) -> Option<String> {
+        let mut reasons = Vec::new();
+        if self.traversal_errors > 0 {
+            reasons.push(format!("traversal errors: {}", self.traversal_errors));
+        }
+        if self.unreadable > 0 {
+            reasons.push(format!("unreadable files: {}", self.unreadable));
+        }
+        if self.oversized > 0 {
+            reasons.push(format!(
+                "files over {MAX_GREP_FILE_MIB} MiB: {}",
+                self.oversized
+            ));
+        }
+        (!reasons.is_empty()).then(|| format!("Search incomplete ({})", reasons.join(", ")))
+    }
 }
 
 fn read_preview(name: String, args: &Value) -> Result<ApprovalRequest, String> {
@@ -181,6 +225,12 @@ impl Tool for Glob {
         let dir = base(&args, ctx);
         let root = ctx.root.clone();
         Box::pin(blocking(move || {
+            if !search_metadata(&root, &dir)?.is_dir() {
+                let shown = paths::display(&root, &dir);
+                return Err(format!(
+                    "`{shown}` is not a directory · choose a directory to search"
+                ));
+            }
             let pattern = arg_str(&args, &["pattern", "glob"])?;
             // A bare `*.rs` means "anywhere", as models usually intend.
             let pattern = if pattern.contains('/') {
@@ -195,20 +245,29 @@ impl Tool for Glob {
                 .compile_matcher();
             let mut hits = Vec::new();
             let mut total = 0;
-            for entry in walker(&dir, None).flatten() {
-                if !entry.file_type().is_some_and(|t| t.is_file()) {
+            let mut skipped = SearchSkips::default();
+            for path in search_files(&dir) {
+                let Ok(path) = path else {
+                    skipped.traversal_errors += 1;
                     continue;
-                }
-                let rel = entry.path().strip_prefix(&dir).unwrap_or(entry.path());
+                };
+                let rel = path.strip_prefix(&dir).unwrap_or(&path);
                 if matcher.is_match(rel) {
                     total += 1;
                     if hits.len() < MAX_GLOB {
-                        hits.push(paths::display(&root, entry.path()));
+                        hits.push(paths::display(&root, &path));
                     }
                 }
             }
+            let warning = skipped.warning();
             if hits.is_empty() {
-                return Ok(ToolOutput::ok("No files matched.", "no matches"));
+                return Ok(match warning {
+                    Some(warning) => ToolOutput::ok(
+                        format!("No files matched in searched paths.\n{warning}"),
+                        "search incomplete",
+                    ),
+                    None => ToolOutput::ok("No files matched.", "no matches"),
+                });
             }
             let mut out = hits.join("\n");
             if total > hits.len() {
@@ -217,12 +276,40 @@ impl Tool for Glob {
                     total - hits.len()
                 ));
             }
+            if let Some(warning) = warning {
+                out.push('\n');
+                out.push_str(&warning);
+            }
             Ok(ToolOutput::ok(out, format!("{total} files")))
         }))
     }
 }
 
 // ---------------------------------------------------------------- grep
+
+fn line_excerpt<'a>(line: &'a str, matcher: Option<&regex::Regex>) -> Cow<'a, str> {
+    if line.len() <= MAX_GREP_LINE {
+        return Cow::Borrowed(line);
+    }
+    let len = line.chars().count();
+    if len <= MAX_GREP_LINE {
+        return Cow::Borrowed(line);
+    }
+    let start = matcher.and_then(|re| re.find(line)).map_or(0, |hit| {
+        let offset = line[..hit.start()].chars().count();
+        let padding = MAX_GREP_LINE.saturating_sub(hit.as_str().chars().count()) / 2;
+        offset.saturating_sub(padding).min(len - MAX_GREP_LINE)
+    });
+    let mut excerpt = String::new();
+    if start > 0 {
+        excerpt.push('…');
+    }
+    excerpt.extend(line.chars().skip(start).take(MAX_GREP_LINE));
+    if start + MAX_GREP_LINE < len {
+        excerpt.push('…');
+    }
+    Cow::Owned(excerpt)
+}
 
 #[derive(Debug)]
 pub struct Grep;
@@ -237,7 +324,7 @@ impl Tool for Grep {
     fn description(&self, ctx: &ToolCtx) -> String {
         let shape = if ctx.hashline() {
             "`path:line: text` for each match, under a `[path#tag]` header per file whose tag \
-             edit_hashline takes"
+             edit_hashline takes (read clipped lines before editing them)"
         } else {
             "`path:line: text` for each match"
         };
@@ -246,14 +333,16 @@ impl Tool for Grep {
              {shape} (`output_mode: \"content\"`, default), matching file paths only \
              (`\"files\"`), or match counts per file (`\"count\"`). Use `glob` to limit the \
              files searched (e.g. `*.rs`), `context` for surrounding lines, and `limit` to cap \
-             results."
+             results. For exact text instead of regex, pass `{{\"pattern\":\"foo.bar()\",\"literal\":true}}`. \
+             Skips binary files and files over {MAX_GREP_FILE_MIB} MiB."
         )
     }
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "Regular expression" },
+                "pattern": { "type": "string", "description": "Regular expression, or exact text if literal is true" },
+                "literal": { "type": "boolean", "description": "Treat pattern as exact text instead of a regex (default false)" },
                 "path": { "type": "string", "description": "File or directory; default is the workspace root" },
                 "glob": { "type": "string", "description": "Only search files matching this glob" },
                 "case_insensitive": { "type": "boolean" },
@@ -288,7 +377,12 @@ impl Tool for Grep {
         let reads = ctx.hashline().then(|| ctx.reads.clone());
         Box::pin(blocking(move || {
             let pattern = arg_str(&args, &["pattern", "regex", "query"])?;
-            let re = regex::RegexBuilder::new(pattern)
+            let pattern = if opt_bool(&args, &["literal"]) {
+                Cow::Owned(regex::escape(pattern))
+            } else {
+                Cow::Borrowed(pattern)
+            };
+            let re = regex::RegexBuilder::new(&pattern)
                 .case_insensitive(opt_bool(&args, &["case_insensitive", "ignore_case", "-i"]))
                 .build()
                 .map_err(|e| format!("invalid regex: {e}"))?;
@@ -334,39 +428,43 @@ impl Tool for Grep {
             )
             .unwrap_or(MAX_GREP)
             .clamp(1, MAX_GREP);
-            let clip = |line: &str| {
-                let line = line.trim_end();
-                if line.chars().count() > MAX_GREP_LINE {
-                    format!("{}…", line.chars().take(MAX_GREP_LINE).collect::<String>())
-                } else {
-                    line.to_owned()
-                }
-            };
-
             let mut out = String::new();
             let mut matches = 0;
             let mut files = 0;
-            let entries: Box<dyn Iterator<Item = PathBuf>> = if dir.is_file() {
-                Box::new(std::iter::once(dir.clone()))
-            } else {
-                Box::new(
-                    walker(&dir, None)
-                        .flatten()
-                        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-                        .map(ignore::DirEntry::into_path),
-                )
-            };
+            let mut skipped = SearchSkips::default();
+            let meta = search_metadata(&root, &dir)?;
+            let entries: Box<dyn Iterator<Item = Result<PathBuf, ignore::Error>>> =
+                if meta.is_file() {
+                    Box::new(std::iter::once(Ok(dir.clone())))
+                } else if meta.is_dir() {
+                    Box::new(search_files(&dir))
+                } else {
+                    let shown = paths::display(&root, &dir);
+                    return Err(format!(
+                        "`{shown}` is not a file or directory · choose a path to search"
+                    ));
+                };
             for path in entries {
+                let Ok(path) = path else {
+                    skipped.traversal_errors += 1;
+                    continue;
+                };
                 if filter
                     .as_ref()
                     .is_some_and(|f| !f.is_match(path.strip_prefix(&dir).unwrap_or(&path)))
                 {
                     continue;
                 }
-                if std::fs::metadata(&path).map_or(true, |m| m.len() > MAX_GREP_FILE) {
+                let Ok(meta) = std::fs::metadata(&path) else {
+                    skipped.unreadable += 1;
+                    continue;
+                };
+                if meta.len() > MAX_GREP_FILE {
+                    skipped.oversized += 1;
                     continue;
                 }
                 let Ok(bytes) = std::fs::read(&path) else {
+                    skipped.unreadable += 1;
                     continue;
                 };
                 if looks_binary(&bytes) {
@@ -422,9 +520,10 @@ impl Tool for Grep {
                             }
                             if !printed_header {
                                 printed_header = true;
-                                if let Some((_, tag)) = &tagged {
+                                if let Some((reads, tag)) = &tagged {
                                     out.push_str(&crate::hashline::header(&shown_path, tag));
                                     out.push('\n');
+                                    reads.saw_outline(&path, tag, &text);
                                 }
                             }
                             let start = hit.saturating_sub(context);
@@ -445,14 +544,17 @@ impl Tool for Grep {
                                 if line_idx > hit && next_hit.is_some_and(|nh| line_idx >= nh) {
                                     break;
                                 }
-                                if let Some((reads, tag)) = &tagged {
+                                let excerpt =
+                                    line_excerpt(line_text, (line_idx == hit).then_some(&re));
+                                if matches!(excerpt, Cow::Borrowed(_))
+                                    && let Some((reads, tag)) = &tagged
+                                {
                                     reads.saw(&path, tag, &text, (line_idx + 1, line_idx + 1));
                                 }
                                 let sep = if line_idx == hit { ':' } else { '-' };
                                 out.push_str(&format!(
-                                    "{shown_path}{sep}{}{sep} {}\n",
+                                    "{shown_path}{sep}{}{sep} {excerpt}\n",
                                     line_idx + 1,
-                                    clip(line_text)
                                 ));
                                 last_printed = Some(line_idx);
                             }
@@ -460,8 +562,15 @@ impl Tool for Grep {
                     }
                 }
             }
+            let warning = skipped.warning();
             if matches == 0 {
-                return Ok(ToolOutput::ok("No matches.", "no matches"));
+                return Ok(match warning {
+                    Some(warning) => ToolOutput::ok(
+                        format!("No matches in searched files.\n{warning}"),
+                        "search incomplete",
+                    ),
+                    None => ToolOutput::ok("No matches.", "no matches"),
+                });
             }
             match mode {
                 Mode::Files | Mode::Count => {
@@ -480,6 +589,10 @@ impl Tool for Grep {
                         ));
                     }
                 }
+            }
+            if let Some(warning) = warning {
+                out.push_str(&warning);
+                out.push('\n');
             }
             Ok(ToolOutput::ok(
                 out,

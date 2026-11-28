@@ -54,6 +54,7 @@
 				[['dim', '   No changes made; tests proposed for review.']],
 				[],
 				[['accent', '   › Implement plan · allow approvals']],
+				[['dim', '     Implement plan (fresh context) · allow approvals']],
 				[['dim', '     Keep planning']]
 			]
 		},
@@ -119,7 +120,7 @@
 			<figure class="-mx-2 sm:mx-0">
 				<div class="term rounded-xl overflow-hidden border-2 border-ink shadow-[0_18px_40px_-18px_rgba(29,42,58,0.55)]">
 					<div class="flex justify-between px-3 py-1.5 text-term-dim text-[11px] sm:text-[13px]">
-						<span><span class="text-term-text">quack 0.3.3</span> · ~/src/calendar</span>
+						<span><span class="text-term-text">quack 0.4.2</span> · ~/src/calendar</span>
 						<span>⎇ main</span>
 					</div>
 					<div class="screen px-1 pt-2 pb-4 min-h-[24.5em] overflow-x-auto" role="tabpanel">

@@ -534,6 +534,82 @@ impl Engine {
         });
     }
 
+    pub(super) async fn start_mcp_login(&mut self, id: Option<String>) {
+        if let Some(task) = self.sign_in.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(id) = id {
+            let config = self.config.clone();
+            let tx = self.tx.clone();
+            let mcp = self.mcp.clone();
+            let ledger = self.ledger.clone();
+            let budget = self.convo.as_ref().and_then(|c| c.setup.budget);
+            let sign_id = format!("mcp:{id}");
+            self.sign_in = Some(tokio::spawn(async move {
+                let result = match crate::mcp::oauth_client(&config, &id, Some(ledger)) {
+                    Ok(client) => {
+                        let url_id = sign_id.clone();
+                        client
+                            .sign_in(|url| {
+                                let _ = tx.send(Event::SignInUrl {
+                                    id: url_id,
+                                    url: url.to_owned(),
+                                });
+                            })
+                            .await
+                            .map(|_| ())
+                    }
+                    Err(error) => Err(error),
+                };
+                if result.is_ok() {
+                    let _ = mcp.manager.restart(&id).await;
+                    let _ = tx.send(Event::McpServers {
+                        servers: mcp.info(budget),
+                    });
+                }
+                let _ = tx.send(Event::SignInResult {
+                    id: sign_id,
+                    error: result.err(),
+                });
+            }));
+        }
+    }
+
+    pub(super) fn mcp_logout(&self, id: String) {
+        let config = self.config.clone();
+        let tx = self.tx.clone();
+        let mcp = self.mcp.clone();
+        let ledger = self.ledger.clone();
+        let budget = self.convo.as_ref().and_then(|c| c.setup.budget);
+        tokio::spawn(async move {
+            match crate::mcp::oauth_client(&config, &id, Some(ledger)) {
+                Ok(client) => match client.sign_out().await {
+                    Ok(revoked) => {
+                        let _ = mcp.manager.restart(&id).await;
+                        let _ = tx.send(Event::McpServers {
+                            servers: mcp.info(budget),
+                        });
+                        let msg = if revoked {
+                            format!("signed out of MCP server `{id}`")
+                        } else {
+                            format!(
+                                "removed local OAuth credentials for MCP server `{id}` (server did not confirm revocation)"
+                            )
+                        };
+                        let _ = tx.send(Event::Notice { message: msg });
+                    }
+                    Err(message) => {
+                        let _ = tx.send(Event::Warning { message });
+                    }
+                },
+                Err(message) => {
+                    let _ = tx.send(Event::Warning { message });
+                }
+            }
+        });
+    }
+
     pub(super) async fn enable_mcp(
         &mut self,
         id: String,

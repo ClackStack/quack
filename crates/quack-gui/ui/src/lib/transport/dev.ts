@@ -35,6 +35,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const DEV_INITIAL_OVERRIDES: Record<string, string> = {
 	'model.default': '"dev-local/tiny"',
 	'model.planner': '"dev-local/thinker"',
+	// The scripted demo shows an edit that needs approval.
+	'permissions.work_mode': '"edit"',
+	'permissions.mode': '"ask"',
 	'network.offline': 'true',
 	'catalog.url': '"https://models.dev/api.json"',
 	'updates.url': '"https://api.github.com/repos/charmbracelet/quack/releases/latest"'

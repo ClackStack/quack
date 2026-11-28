@@ -9,6 +9,7 @@ For CI, scripts, git hooks, and wrapping by other tools.
 ```
 quack exec "fix the failing test in crates/core" \
   --model corp-vllm/qwen3-coder \
+  --mode edit \
   --approvals allow \
   --output-format stream-json \
   --max-steps 50 \
@@ -30,7 +31,7 @@ We'll evaluate making `stream-json` compatible with Claude Code's stream-json fo
 
 ### Behaviour
 
-- Approvals: anything that still needs approval is **denied** in headless mode, with feedback to the model. Use `--approvals allow` or `[permissions] allow` rules for eligible actions. Explicit ask rules and approval for leaving the sandbox still apply. `--mode plan` reads/searches and proposes tests without running them; approvals cannot override Plan restrictions. See the [user guide](../modes.md).
+- New sessions use the same Plan + Allow defaults as interactive sessions. Pass `--mode edit` to permit changes and test execution. Anything that still needs approval is **denied** in headless mode, with feedback to the model. Explicit ask rules and approval for leaving the sandbox still apply; approvals cannot override Plan restrictions. See the [user guide](../modes.md).
 - `ask_user` and MCP elicitation are unavailable unless `--allow-elicitation` is given, in which case they read from the TTY if one is present.
 - Exit codes: `0` success, `1` agent error / max steps, `2` config error, `3` provider unreachable, `4` denied by policy, `130` interrupted.
 - Sessions are saved like interactive ones (`--no-session` to skip).
@@ -75,8 +76,13 @@ maki (`maki-acp`) and goose both implement ACP and are the main references.
   - Work modes: `plan` and `edit`; the independent `approvals` config option offers Ask/Allow. An active legacy policy (or yolo from the command line) appears only while selected, because the current value must be among the options. `ModeChanged` updates both controls. Legacy `session/set_mode` approval names still work without leaving Plan. Leaving Plan does not run it; the user says so in the next prompt.
   - The model is a `session/set_config_option` select (category `model`), filled from `Op::ListModels` when the session starts: the available providers' models.
   - `ask_user` questions are answered as skipped, as in `quack exec`. ACP's elicitation is newer than most clients; it is the way to add them.
-- **Not yet:** images (`promptCapabilities.image` is false; the engine takes image paths, so this needs a temp file per image), `fs/*` and `terminal/*` through the editor, slash commands (`available_commands_update`), session titles, `session/list`, and showing sub-agents' own tool calls.
-- **Tests:** `quack-acp/tests/acp.rs` drives `serve` over an in-memory pipe against the real engine and a wiremock model: initialize, a streamed turn, an approval answered by the editor that writes the file, `session/load` replay in a new connection, cancel, and unknown methods and sessions. `convert.rs` unit-tests tool kinds, plans, `file://` paths (Windows drive letters), fences and editor MCP servers. Checked by hand over real stdio; not yet run inside Zed.
+- **Completed (2026-11-26):**
+  - **Images:** `promptCapabilities.image = true`; inline base64 `image` blocks decode into a session-scoped temp folder (removed on session drop) and flow as `InputItem::Image` (plus `file://` image URIs).
+  - **Slash commands & session titles:** `Event::Commands` and `Event::McpPrompts` emit `available_commands_update`; `Event::SessionTitle` emits `session_info_update`.
+  - **`session/list`:** advertised under `sessionCapabilities.list` and served from `quack_core::list_sessions` with RFC 3339 `updatedAt`.
+  - **Sub-agent tool calls:** `Event::AgentStarted` / `Event::Agent` / `Event::AgentFinished` stream sub-agent tool calls (`[explore] read ...`) and progress to the editor.
+  - **Editor `fs/*` and `terminal/*` delegation:** opt-in via `[tools] acp_client_fs` and `[tools] acp_client_terminal` when the editor advertises `clientCapabilities.fs` / `clientCapabilities.terminal`, wired through `ClientBridge` so `read`/`write` see unsaved editor buffers and foreground `shell` commands run inside the editor terminal.
+- **Tests:** `quack-acp/tests/acp.rs` drives `serve` over an in-memory pipe against the real engine and a wiremock model: initialize, a streamed turn, an approval answered by the editor that writes the file, `session/load` replay in a new connection, cancel, unknown methods/sessions, inline images + commands + titles + `session/list`, editor `fs/*` + `terminal/*` delegation, and sub-agent tool-call streaming. `convert.rs` unit-tests tool kinds, plans, `file://` paths (Windows drive letters), fences, base64 images and editor MCP servers. Checked by hand over real stdio; not yet run inside Zed.
 
 ## Open questions
 

@@ -196,6 +196,7 @@ id = "corp-vllm"                       # default: file stem
 name = "Corp GPU cluster"
 api = "openai-chat"                    # default
 base_url = "https://llm.corp.internal/v1"
+# base_urls = ["https://gpu-1.corp.internal/v1", "https://gpu-2.corp.internal/v1"]  # round-robin + failover
 enabled = true
 # responses_websocket = true           # openai-responses endpoints with WebSocket support
 
@@ -477,14 +478,18 @@ The `vibe` profile (2026-10-20) follows Vibe's tool names and keeps the exact-st
 ### Not done yet
 
 - Not run against Mistral's own API: there is no Mistral key in the test environment. The request shape is covered by unit tests against what Vibe sends and the API reference. The model itself ran live through OpenRouter on 2026-10-21, but that path is plain `openai-chat` and does not exercise this dialect.
-- Images: Large 4 accepts them, but we send no images yet.
+- Images: Mistral's dialect sends `image_url` chunks inline in user and tool messages when `vision = true` (landed 2026-10-24; see [Vision](#vision-2026-10-24)), not yet tested live against Mistral's own API.
 - Self-hosting the open weights, when they ship: vLLM with `--tokenizer-mode mistral --config-format mistral --load-format mistral --enable-auto-tool-choice --tool-call-parser mistral`. At about 1T parameters this needs several GPUs. Check these flags against the release and add them to setup's vLLM note.
 - A budget-capped eval subset through the API ([13](13-testing-and-evals.md)) before calling it verified.
+
+## Multi-endpoint failover (`base_urls`, 2026-11-26)
+
+A provider file may list `base_urls = [...]` alongside or instead of `base_url`. `ProviderFile::endpoints()` deduplicates `base_url` followed by `base_urls`, and `[policy.providers] hosts` plus `quack doctor` validate every configured endpoint. `EndpointPool` (`quack-providers/src/provider.rs`) distributes requests round-robin across healthy endpoints and puts any endpoint that suffers a retryable failure (`Network`, `Timeout`, `ServerOverloaded`, `RateLimited`) into exponential health cooldown (15 s → 30 s → 60 s → 120 s cap) across HTTP streams, `/models`, Ollama `/api/show`, and Responses WebSockets, falling back to the least-unhealthy node if every node is cooling down.
 
 ## Open questions
 
 - Should we support `api = "openai-completions"` (raw prompt with our own chat template) for servers with broken templates? It would give full control but means maintaining Jinja templates. Proposed: later, behind a feature, using `minijinja` with each model's own template.
-- Should multiple base URLs per provider (load balancing/failover across GPU nodes) be supported? Proposed: `base_urls = [...]` with round-robin plus health checks, in M5.
+- Multiple base URLs per provider (`base_urls = [...]`): resolved (implemented 2026-11-26 above).
 
 ### Selectable reasoning effort (2026-11-11)
 

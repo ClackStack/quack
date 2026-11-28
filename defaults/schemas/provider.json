@@ -719,7 +719,16 @@
       ]
     },
     "base_url": {
+      "default": "",
       "type": "string"
+    },
+    "base_urls": {
+      "default": [],
+      "description": "Additional endpoint URLs for round-robin load balancing and automatic failover across\nnodes. May be set alongside or instead of `base_url`.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     },
     "catalog": {
       "default": null,
@@ -831,9 +840,6 @@
       }
     }
   },
-  "required": [
-    "base_url"
-  ],
   "title": "ProviderFile",
   "type": "object"
 }

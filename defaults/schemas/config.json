@@ -40,6 +40,22 @@
       ],
       "type": "string"
     },
+    "AuditSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "include_content": {
+          "default": false,
+          "description": "Include tool arguments and result summaries in audit records. Off by default so\nfile contents and model text stay out of audit logs.",
+          "type": "boolean"
+        },
+        "path": {
+          "default": "",
+          "description": "JSONL file to append one record per tool execution. Empty disables auditing.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "CacheStrategy": {
       "enum": [
         "preserve",
@@ -375,12 +391,13 @@
         },
         "mode": {
           "$ref": "#/$defs/ApprovalPolicy",
-          "default": "ask",
-          "description": "Approval defaults, independent of whether the agent is planning or editing."
+          "default": "allow",
+          "description": "Approval policy for a new session: `allow` or `ask`, independent of work mode."
         },
         "work_mode": {
           "$ref": "#/$defs/WorkMode",
-          "default": "edit"
+          "default": "plan",
+          "description": "Work mode for a new session: `plan` or `edit`."
         }
       },
       "type": "object"
@@ -566,6 +583,16 @@
     "ToolSettings": {
       "additionalProperties": false,
       "properties": {
+        "acp_client_fs": {
+          "default": false,
+          "description": "When running under ACP (`quack acp`) and the editor advertises `fs` capabilities,\nroute `read` and `write` through the editor (`fs/read_text_file`, `fs/write_text_file`)\nso unsaved editor buffers are visible.",
+          "type": "boolean"
+        },
+        "acp_client_terminal": {
+          "default": false,
+          "description": "When running under ACP (`quack acp`) and the editor advertises `terminal` support,\nrun foreground `shell` commands inside the editor's terminal (`terminal/*`).",
+          "type": "boolean"
+        },
         "default_timeout_secs": {
           "default": 120,
           "format": "uint64",
@@ -587,6 +614,16 @@
           "default": "auto",
           "description": "`auto`, `bash`, `zsh`, `pwsh`, `powershell`, `cmd`, or a path.",
           "type": "string"
+        },
+        "web_fetch": {
+          "$ref": "#/$defs/WebFetchSettings",
+          "default": {
+            "allow_private": false,
+            "enabled": false,
+            "max_bytes": 2097152,
+            "timeout_secs": 20
+          },
+          "description": "Opt-in SSRF-protected HTTP fetch tool (disabled by default and when offline)."
         }
       },
       "type": "object"
@@ -657,6 +694,36 @@
       },
       "type": "object"
     },
+    "WebFetchSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_private": {
+          "default": false,
+          "description": "Allow fetching loopback, RFC1918 private, link-local, and cloud-metadata IPs.\nOff by default for SSRF protection; enable only for internal documentation hosts.",
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": false,
+          "description": "Register the `web_fetch` tool. Off by default; always disabled when\n`network.offline = true`.",
+          "type": "boolean"
+        },
+        "max_bytes": {
+          "default": 2097152,
+          "description": "Maximum response body size in bytes (default 2 MiB).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timeout_secs": {
+          "default": 20,
+          "description": "Per-request timeout in seconds (default 20 s).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "WorkMode": {
       "description": "What the agent may do. Planning never authorizes changes or test execution.",
       "enum": [
@@ -674,6 +741,14 @@
       "default": {
         "max_steps": 100
       }
+    },
+    "audit": {
+      "$ref": "#/$defs/AuditSettings",
+      "default": {
+        "include_content": false,
+        "path": ""
+      },
+      "description": "Enterprise tool-execution audit log (docs/plan/11-security.md#audit-log-enterprise)."
     },
     "bundles": {
       "$ref": "#/$defs/ItemToggles",
@@ -787,8 +862,8 @@
         "allow": [],
         "ask": [],
         "deny": [],
-        "mode": "ask",
-        "work_mode": "edit"
+        "mode": "allow",
+        "work_mode": "plan"
       }
     },
     "policy": {
@@ -846,10 +921,18 @@
     "tools": {
       "$ref": "#/$defs/ToolSettings",
       "default": {
+        "acp_client_fs": false,
+        "acp_client_terminal": false,
         "default_timeout_secs": 120,
         "edit_format": "auto",
         "read_outline_tokens": 2000,
-        "shell": "auto"
+        "shell": "auto",
+        "web_fetch": {
+          "allow_private": false,
+          "enabled": false,
+          "max_bytes": 2097152,
+          "timeout_secs": 20
+        }
       }
     },
     "ui": {

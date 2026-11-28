@@ -4,13 +4,14 @@
 //! turn: tools appear once their server is ready. Stdio servers that exit are restarted
 //! with backoff, up to [`MAX_RESTARTS`] times.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use quack_config::settings::NetworkSettings;
-use quack_config::{McpServerFile, glob_match};
+use quack_config::settings::{AllowList, NetworkSettings};
+use quack_config::{McpDefer, McpSamplingModel, McpServerFile, glob_match};
 use quack_protocol::EgressKind;
 use quack_providers::{EgressDraft, EgressLedger};
 use quack_shell::Tree;
@@ -19,7 +20,8 @@ use rmcp::ErrorData;
 use rmcp::model::{
     CallToolRequestParams, ClientCapabilities, ClientConfig, ElicitRequestParams, ElicitResult,
     ElicitationAction, ElicitationCapability, FormElicitationCapability, GetPromptRequestParams,
-    Implementation, ProtocolVersion, ReadResourceRequestParams, SamplingCapability,
+    Implementation, ProgressNotificationParam, ProtocolVersion, ReadResourceRequestParams,
+    SamplingCapability,
 };
 use rmcp::service::{
     ClientLifecycleMode, NotificationContext, Peer, RequestContext, RoleClient, RunningService,
@@ -64,6 +66,8 @@ pub struct ToolInfo {
     pub read_only: bool,
     /// Matches the server file's `tools.auto_approve`.
     pub auto_approve: bool,
+    /// Per-server deferral policy (`auto`, `always`, or `never`).
+    pub defer: McpDefer,
 }
 
 /// One prompt a ready server offers; the user runs it as `/<server>:<prompt>`.
@@ -196,6 +200,12 @@ pub struct ServerStatus {
     pub prompts: Vec<String>,
     /// Resource URIs and URI templates.
     pub resources: Vec<String>,
+    /// Per-server deferral policy (`auto`, `always`, `never`).
+    pub defer: McpDefer,
+    /// True when this remote HTTP server uses OAuth 2.1 sign-in.
+    pub oauth: bool,
+    /// True when OAuth is enabled and local credentials exist on disk.
+    pub signed_in: bool,
     /// The server's last stderr lines and log messages.
     pub log: Vec<String>,
 }
@@ -247,6 +257,9 @@ struct Server {
     /// time spent on them doesn't count toward `call_timeout_secs`.
     asking: AtomicUsize,
     asked: AtomicU64,
+    /// Active progress subscribers for in-flight `tools/call` requests.
+    progress_sinks: Mutex<HashMap<u64, mpsc::UnboundedSender<String>>>,
+    next_progress: AtomicU64,
 }
 
 pub struct McpManager {
@@ -263,6 +276,12 @@ pub struct McpManager {
     asker: Mutex<Option<mpsc::Sender<ServerAsk>>>,
     ledger: Mutex<Option<Arc<EgressLedger>>>,
     secret_values: Mutex<Vec<String>>,
+    /// User data directory for OAuth credentials (`mcp-auth/`).
+    data_dir: Mutex<Option<PathBuf>>,
+    /// Enterprise `[policy.mcp]` host allowlist for OAuth discovery/token endpoints.
+    policy: Mutex<AllowList>,
+    /// Directory where truncated MCP tool/resource outputs are spilled in full.
+    output_dir: Mutex<Option<PathBuf>>,
 }
 
 impl std::fmt::Debug for McpManager {
@@ -307,6 +326,8 @@ impl McpManager {
                     log: Log::default(),
                     asking: AtomicUsize::new(0),
                     asked: AtomicU64::new(0),
+                    progress_sinks: Mutex::new(HashMap::new()),
+                    next_progress: AtomicU64::new(1),
                 })
             })
             .collect();
@@ -321,7 +342,62 @@ impl McpManager {
             asker: Mutex::new(None),
             ledger: Mutex::new(None),
             secret_values: Mutex::new(Vec::new()),
+            data_dir: Mutex::new(None),
+            policy: Mutex::new(AllowList::default()),
+            output_dir: Mutex::new(None),
         })
+    }
+
+    /// Set the user data directory used to store MCP OAuth credentials (`mcp-auth/`).
+    pub fn set_data_dir(&self, dir: PathBuf) {
+        if let Ok(mut slot) = self.data_dir.lock() {
+            *slot = Some(dir);
+        }
+    }
+
+    fn data_dir(&self) -> PathBuf {
+        if let Some(dir) = self.data_dir.lock().ok().and_then(|g| g.clone()) {
+            return dir;
+        }
+        quack_config::user_data_dir(&|k| std::env::var_os(k))
+    }
+
+    /// Set the enterprise `[policy.mcp]` allowlist for OAuth endpoint host validation.
+    pub fn set_policy(&self, policy: AllowList) {
+        if let Ok(mut slot) = self.policy.lock() {
+            *slot = policy;
+        }
+    }
+
+    fn policy(&self) -> AllowList {
+        self.policy.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    /// Set the directory where full truncated MCP outputs are spilled for `read`/`grep`.
+    pub fn set_output_dir(&self, dir: PathBuf) {
+        if let Ok(mut slot) = self.output_dir.lock() {
+            *slot = Some(dir);
+        }
+    }
+
+    fn output_dir(&self) -> Option<PathBuf> {
+        self.output_dir.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Configured sampling model preference (`current` or `small`) for `server`.
+    pub fn sampling_model(&self, server: &str) -> McpSamplingModel {
+        self.servers
+            .iter()
+            .find(|s| s.spec.id == server)
+            .map_or(McpSamplingModel::Current, |s| s.spec.file.sampling_model)
+    }
+
+    /// Look up a configured server spec by id.
+    pub fn server_spec(&self, id: &str) -> Option<ServerSpec> {
+        self.servers
+            .iter()
+            .find(|s| s.spec.id == id)
+            .map(|s| s.spec.clone())
     }
 
     /// Attach a session egress ledger so remote MCP connections and calls are recorded.
@@ -447,6 +523,9 @@ impl McpManager {
                     }),
                     Err(_) => ("?", String::new()),
                 };
+                let oauth = f.uses_oauth();
+                let signed_in =
+                    oauth && crate::oauth::has_saved_token(&self.data_dir(), &s.spec.id);
                 ServerStatus {
                     id: s.spec.id.clone(),
                     transport: transport.into(),
@@ -456,6 +535,9 @@ impl McpManager {
                     tools,
                     prompts,
                     resources,
+                    defer: f.defer,
+                    oauth,
+                    signed_in,
                     log: s
                         .log
                         .lock()
@@ -608,8 +690,28 @@ impl McpManager {
                     );
                     return Err(why);
                 }
-                let (client, headers, secrets) =
+                let (client, mut headers, mut secrets) =
                     http_parts(&file, &self.network, self.ledger()).await?;
+                if file.uses_oauth() {
+                    let oauth = crate::oauth::McpOAuthClient::from_server(
+                        &server.spec.id,
+                        &file,
+                        &self.data_dir(),
+                        self.network.clone(),
+                        self.policy(),
+                        self.ledger(),
+                    )?;
+                    let token = oauth.bearer().await?;
+                    if token.len() >= 8 {
+                        secrets.push(token.clone());
+                    }
+                    let mut val = quack_providers::reqwest::header::HeaderValue::from_str(
+                        &format!("Bearer {token}"),
+                    )
+                    .map_err(|_| "invalid characters in OAuth access token".to_owned())?;
+                    val.set_sensitive(true);
+                    headers.insert(quack_providers::reqwest::header::AUTHORIZATION, val);
+                }
                 if !secrets.is_empty()
                     && let Ok(mut guard) = self.secret_values.lock()
                 {
@@ -634,7 +736,16 @@ impl McpManager {
                             s
                         }
                         Err(e) => {
-                            let msg = e.to_string();
+                            let mut msg = e.to_string();
+                            if file.uses_oauth()
+                                && (msg.contains("401")
+                                    || msg.to_ascii_lowercase().contains("unauthorized"))
+                            {
+                                msg = format!(
+                                    "{msg} · run `quack mcp login {}` or `/mcp login {}`",
+                                    server.spec.id, server.spec.id
+                                );
+                            }
                             self.record_ledger(
                                 EgressDraft::new(EgressKind::McpHttp, &file.url, "mcp-http")
                                     .blocked(msg.clone()),
@@ -764,6 +875,20 @@ impl McpManager {
         args: Value,
         cancel: &CancellationToken,
     ) -> CallOutput {
+        self.call_with_progress(server, tool, args, cancel, None)
+            .await
+    }
+
+    /// Like [`Self::call`], attaching a progress token when `on_progress` is supplied so
+    /// server `notifications/progress` messages stream to the caller.
+    pub async fn call_with_progress(
+        &self,
+        server: &str,
+        tool: &str,
+        args: Value,
+        cancel: &CancellationToken,
+        on_progress: Option<mpsc::UnboundedSender<String>>,
+    ) -> CallOutput {
         let fail = |text: String| CallOutput { ok: false, text };
         let (s, service) = match self.service(server) {
             Ok(found) => found,
@@ -783,15 +908,34 @@ impl McpManager {
             }
         };
         let params = CallToolRequestParams::new(tool.to_owned()).with_arguments(arguments);
+        let _progress_guard = on_progress.map(|tx| {
+            let key = s.next_progress.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut sinks) = s.progress_sinks.lock() {
+                sinks.insert(key, tx);
+            }
+            ProgressGuard { server: s, key }
+        });
         let result = tokio::select! {
             r = timed(s, service.call_tool(params)) => r,
             () = cancel.cancelled() => return fail("interrupted by the user".into()),
         };
+        // Give any progress notification that arrived immediately ahead of the response a
+        // chance to deliver before the guard unregisters the sink.
+        if _progress_guard.is_some() {
+            tokio::task::yield_now().await;
+        }
         let max_chars = s.spec.file.max_output_tokens as usize * 4;
+        let spill_dir = self.output_dir();
+        let spill_label = format!("{server}_{tool}");
         match result {
             Ok(Ok(r)) => {
                 let value = serde_json::to_value(&r).unwrap_or_default();
-                let (is_error, text) = crate::output::render(&value, max_chars);
+                let (is_error, text) = crate::output::render_spilled(
+                    &value,
+                    max_chars,
+                    spill_dir.as_deref(),
+                    &spill_label,
+                );
                 if is_http {
                     let mut draft =
                         EgressDraft::new(EgressKind::McpHttp, &s.spec.file.url, "mcp-http")
@@ -873,12 +1017,16 @@ impl McpManager {
             Err(e) => return fail(e),
         };
         let read = service.read_resource(ReadResourceRequestParams::new(uri));
+        let spill_dir = self.output_dir();
+        let spill_label = format!("{server}_resource");
         match timed(s, read).await {
             Ok(Ok(r)) => CallOutput {
                 ok: true,
-                text: crate::output::contents(
+                text: crate::output::contents_spilled(
                     &serde_json::to_value(&r).unwrap_or_default(),
                     s.spec.file.max_output_tokens as usize * 4,
+                    spill_dir.as_deref(),
+                    &spill_label,
                 ),
             },
             Ok(Err(e)) => fail(format!("MCP error: {e}")),
@@ -966,6 +1114,7 @@ async fn list_tools(peer: &Peer<RoleClient>, spec: &ServerSpec) -> Result<Vec<To
                 .as_ref()
                 .and_then(|a| a.read_only_hint)
                 .unwrap_or(false),
+            defer: spec.file.defer,
             description: t.description.as_deref().unwrap_or_default().to_owned(),
             schema: Value::Object((*t.input_schema).clone()),
             name: t.name.into_owned(),
@@ -1061,7 +1210,7 @@ async fn list_resources(
     Ok(listed)
 }
 
-type Headers = std::collections::HashMap<
+type Headers = HashMap<
     quack_providers::reqwest::header::HeaderName,
     quack_providers::reqwest::header::HeaderValue,
 >;
@@ -1254,6 +1403,82 @@ impl ClientHandler for Handler {
             m.relist(self.idx, context.peer.clone(), List::Resources)
                 .await;
         }
+    }
+
+    async fn on_progress(
+        &self,
+        params: ProgressNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) {
+        let Some(m) = self.manager.upgrade() else {
+            return;
+        };
+        let server = &m.servers[self.idx];
+        // Active progress counts as liveness so long-running tools don't prematurely time out.
+        server.asked.fetch_add(1, Ordering::SeqCst);
+        let line = format_progress(&params);
+        spawn::push_log(&server.log, line.clone());
+        if let Ok(sinks) = server.progress_sinks.lock() {
+            for tx in sinks.values() {
+                let _ = tx.send(format!("{line}\n"));
+            }
+        }
+    }
+
+    #[allow(
+        deprecated,
+        reason = "logging notifications are deprecated in 2026-07-28 but older servers still emit them"
+    )]
+    async fn on_logging_message(
+        &self,
+        params: rmcp::model::LoggingMessageNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) {
+        let Some(m) = self.manager.upgrade() else {
+            return;
+        };
+        let server = &m.servers[self.idx];
+        let body = match &params.data {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let prefix = params
+            .logger
+            .as_deref()
+            .filter(|l| !l.is_empty())
+            .map_or_else(String::new, |l| format!("{l}: "));
+        let line = format!("[{:?}] {prefix}{body}", params.level);
+        tracing::debug!(target: "mcp", server = %server.spec.id, "{line}");
+        spawn::push_log(&server.log, line);
+    }
+}
+
+struct ProgressGuard<'a> {
+    server: &'a Server,
+    key: u64,
+}
+
+impl Drop for ProgressGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut sinks) = self.server.progress_sinks.lock() {
+            sinks.remove(&self.key);
+        }
+    }
+}
+
+fn format_progress(p: &ProgressNotificationParam) -> String {
+    let counts = match p.total {
+        Some(total) if total > 0.0 => format!("{:.0}/{:.0}", p.progress, total),
+        _ => format!("{:.0}", p.progress),
+    };
+    match p
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        Some(msg) => format!("[progress {counts}] {msg}"),
+        None => format!("[progress {counts}]"),
     }
 }
 

@@ -2,6 +2,32 @@
 
 Milestones are ordered by dependency and value. Each has **exit criteria** that must pass on **Linux, macOS and Windows** in CI before moving on. Dates are left out on purpose; scope is what's fixed.
 
+## Secret Shield warning context — 2026-11-28
+
+- Terminal, desktop, and ACP approvals show a readable source, scanned-text line, destination, and conditional impact for possible secrets. Matches stay masked; scan policy and approval behavior are unchanged.
+
+## Built-in search — 2026-11-27
+
+- The exclusive `codex` profile now offers and prefers Quack's built-in `grep` and `glob` for routine search. This removes the need to try shell `rg` or fall back to another executable. The shell tool and its argument-list interface are unchanged.
+- `grep` now supports literal text and keeps matches visible in long-line excerpts. `grep` and `glob` distinguish invalid paths and incomplete searches from clean no-match results.
+
+## Enterprise core, MCP OAuth, LSP code actions, ACP completeness, and Windows MSI / attestations — 2026-11-26
+
+Closed the remaining core/enterprise, MCP, LSP, ACP, and no-account packaging gaps without adding any new external crates:
+
+- **Enterprise audit log & Windows machine registry policy (`quack-config`, `quack-core`):**
+  - Added `[audit]` (`path`, `include_content`, default off) writing mode-`0600` append-only JSONL records (`ts`, `session_id`, `agent`, `call_id`, `tool`, `subject`, `decision`, `decided_by`, `ok`, `duration_ms`; args/summaries omitted unless `include_content = true`) for every allowed, denied, hook-blocked, or interrupted tool execution, plus `quack doctor` checks for active system policy and audit configuration.
+  - Added `quack-config/src/win_policy.rs` reading `HKLM\SOFTWARE\Policies\quack` (`SystemDir` via `RegGetValueW`/`RRF_NOEXPAND` pinning `Dirs.system` against `%ProgramData%` and `QUACK_SYSTEM_DIR`; `PolicyToml` merged at `LayerKind::System` before user/project config and locks).
+- **Session pruning & retention (`quack-store`, `quack-core`, `quack-cli`):** added `ProjectSessions::prune_older_than` / `prune_all_projects` / `parse_duration_secs`, CLI `quack sessions prune [--older-than <dur>] [--all] [--dry-run]`, and automatic background startup retention cleanup when `[sessions] retention_days > 0`.
+- **Opt-in SSRF-protected `web_fetch` (`quack-config`, `quack-providers`, `quack-tools`, `quack-core`):** added `[tools.web_fetch]` (off by default, unregistered under `[network] offline = true`), blocking loopback/private/link-local/CGNAT/metadata IPs with DNS-pinning (`resolve_to_addrs`) against DNS rebinding, per-hop redirect re-validation, `EgressLedger` recording, HTML cleanup, and `web_fetch:<host>` permission rules.
+- **Multi-`base_urls` provider failover (`quack-config`, `quack-providers`, `quack-core`):** added `base_urls = [...]` with round-robin balancing and exponential health cooldown (15 s → 120 s) across retryable failures in HTTP streams, `/models`, Ollama `/api/show`, and Responses WebSockets; enforced `[policy.providers] hosts` across every endpoint in `base_urls`.
+- **MCP OAuth 2.1 + PKCE & MCP polish (`quack-config`, `quack-mcp`, `quack-protocol`, `quack-core`, `quack-cli`, `quack-tui`):**
+  - Added `[oauth]` on `mcp.d/<id>.toml` implementing RFC 9728 Protected Resource Metadata discovery (`/.well-known/oauth-protected-resource` + 401 `WWW-Authenticate` probe), RFC 8414 Authorization Server Metadata, RFC 7591 Dynamic Client Registration, PKCE S256 loopback callback, RFC 8707 `resource` indicator, process-locked token refresh, revocation, and egress + `[policy.mcp]` host enforcement on every discovered endpoint. Wired `quack mcp login|logout`, `/mcp login|logout`, and `Op::McpLogin`/`Op::McpLogout`.
+  - Added per-server `defer = "auto" | "always" | "never"`, full-output spill files on MCP tool/resource truncation, live `notifications/progress` streaming into `ToolCallOutputDelta` (and `notifications/message` logging into `/mcp`), and `sampling_model = "current" | "small"`.
+- **LSP `code_action` & live `rust-analyzer` verification (`quack-lsp`, `quack-tools`):** added `textDocument/codeAction` + `codeAction/resolve` (`lsp` `operation = "code_action"`, read-only listing or `apply` through `Tool::prepare` → `Subject::Edits` → diff approval + undo checkpoints + post-edit diagnostics). Verified live against `rust-analyzer` 1.98.0 (`real_rust_analyzer`), which also uncovered and fixed an early-return race in `Client::changed` when servers advertise pull diagnostics while still reporting `$/progress`.
+- **ACP completeness (`quack-acp`, `quack-tools`, `quack-core`, `quack-config`, `quack-cli`):** added `promptCapabilities.image = true` (base64 inline images decoded to session-scoped temp files), `available_commands_update`, `session_info_update` titles, `session/list`, sub-agent tool-call streaming (`Event::Agent*`), and opt-in editor-routed `fs/*` and `terminal/*` (`[tools] acp_client_fs`, `acp_client_terminal`) via `ClientBridge`.
+- **No-account packaging upgrades (`packaging/windows/quack.wxs`, `scripts/package-msi.ps1`, `.github/workflows/release.yml`):** added WiX v5 Windows MSI packaging (`quack-<target>.msi`, per-machine/per-user `ALLUSERS=2`, MST-ready `DefaultsFeature`, optional Authenticode hook) and keyless GitHub SLSA build provenance attestations (`actions/attest@v4`) on `dist/*`. Apple notarization and Windows Authenticode signing remain deferred until developer certificates are set up.
+
 ## Session efficiency, profile outlines, shell waits, and WebSocket keepalive — 2026-11-26
 
 Reduced redundant context growth and reconnect churn across long coding sessions while preserving prefix-cache stability:
@@ -134,6 +160,7 @@ carries the same note in the provider row. No live calls; merging and drift test
 - Updated the README and website with the four combinations, separate status indicators and a planning example that proposes tests without running them. The [work modes guide](../modes.md) covers controls, configuration, sandbox behavior and migration; team rollout, MCP, memory, headless and security references use the same model.
 - Plan only reads/searches and presents proposed tests (exact commands and purpose) for review. Changes, tests/builds, scripts, memory writes and mutating MCP/agent calls are refused before rules, grants and yolo. The shell classifier also refuses writing/executing variants of reading commands.
 - Both settings and the planner handoff boundary are session records, restored on reload/resume under current policy. Typed Ops and `ModeChanged` expose authoritative state; `permissions.work_mode` can be locked separately. Covered by the permission matrix, mock-engine mode/accept/reload/resume/policy regressions and TUI review/status snapshots; no live model calls.
+- 2026-11-27: New sessions default to Plan + Allow. Both defaults can still be changed independently in desktop settings, TUI `/config`, or layered TOML. Saved session modes and system policy still take precedence.
 
 ## Scaffold (M1 kickoff) — done 2026-10-17
 
@@ -488,6 +515,7 @@ Milestones: G1 desktop MVP (Welcome/recent folders, login-shell `PATH` & `.app` 
 - Docs updated with each feature (user docs live in `docs/`, separate from `docs/plan/`)
 
 - 2026-11-10: Refreshed `/config` Layers with status hints, spaced panes and more room for wrapped paths. Enter copies the full selected path through OSC 52 while keeping the modal open.
+- 2026-11-27: Reordered the TUI sidebar and added independent scrolling so all available skills and all session sub-agent runs stay accessible ([06](06-tui.md#wide-terminal-sidebar-2026-11-11)).
 - 2026-11-26: Replaced the `compat` startup placeholder with opt-in discovery of other agents' skill and command folders. TUI `/compat` reviews each folder and loads it for the run or saves the path to user or project settings ([08](08-instructions-skills-commands.md#other-harnesses-files)).
 - 2026-11-25: Desktop GUI sidebar (`Sidebar.svelte` and `JobsOverview.svelte`) pins the active `Plan` section directly below `Projects` with `done/total`, completion percentage, an accessible progress bar, completed-step checkmarks, and bounded scrolling for long plans, while `Jobs` overview cards show completion percentage and the active step ([15](15-desktop-client.md#the-ui)).
 - 2026-11-24: Wide-terminal TUI sidebar shows the active plan below Context (`Plan · done/total (%)`, progress meter, and steps with adaptive two-line wrapping or windowed overflow), moving the one-line plan strip out of the main pane while the sidebar displays it and falling back automatically on narrow or crowded screens ([06](06-tui.md#wide-terminal-sidebar-2026-11-11)).

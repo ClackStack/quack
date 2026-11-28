@@ -17,9 +17,10 @@ use quack_protocol::{
     LspServerInfo, LspServerState, McpSecretValue, McpServerInfo, McpServerState, MemoryNote,
     ModelId, ModelInfo, Op, PermissionMode, ProfileInfo, ProviderConnection, ProviderHttpVersion,
     ProviderId, ProviderModels, PruneReport, Question, QuestionOption, ReplayItem, RequestStat,
-    RewindPoint, SecretFinding, SecretText, ServiceInfo, SessionId, SessionInfo, SessionSummary,
-    SkillInfo, StatsReport, Subsystem, ToolCallInfo, ToolProbeCase, ToolProbeReport,
-    ToolResultSummary, ToolStat, TurnId, TurnOverrides, Usage, WorkMode, WriteScope,
+    RewindPoint, SecretFinding, SecretFindingContext, SecretText, ServiceInfo, SessionId,
+    SessionInfo, SessionSummary, SkillInfo, StatsReport, Subsystem, ToolCallInfo, ToolProbeCase,
+    ToolProbeReport, ToolResultSummary, ToolStat, TurnId, TurnOverrides, Usage, WorkMode,
+    WriteScope,
 };
 use ts_rs::TS;
 
@@ -393,6 +394,11 @@ fn export_protocol_ts() {
             "EgressStats",
             EgressStats::docs().unwrap_or_default(),
             EgressStats::decl(&cfg),
+        ),
+        (
+            "SecretFindingContext",
+            SecretFindingContext::docs().unwrap_or_default(),
+            SecretFindingContext::decl(&cfg),
         ),
         (
             "SecretFinding",

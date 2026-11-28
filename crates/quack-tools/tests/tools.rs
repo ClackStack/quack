@@ -30,6 +30,8 @@ fn ctx(root: &std::path::Path) -> ToolCtx {
         outline_above: 0,
         grammars: quack_tools::grammar::Grammars::builtin(),
         bg: Arc::default(),
+        web_fetch: None,
+        client_bridge: None,
     }
 }
 
@@ -397,6 +399,156 @@ async fn grep_supports_files_count_context_and_limit() {
         "{}",
         limited.model
     );
+}
+
+#[tokio::test]
+async fn grep_can_match_literal_metacharacters_case_insensitively() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = Registry::builtin();
+    let c = ctx(dir.path());
+    std::fs::write(dir.path().join("a.txt"), "foo.bar()\nfooXbar\nFOO.BAR()\n").expect("fixture");
+
+    let literal = call(
+        &reg,
+        &c,
+        "grep",
+        json!({"pattern": "foo.bar()", "literal": true, "case_insensitive": true}),
+    )
+    .await;
+    assert_eq!(literal.model, "a.txt:1: foo.bar()\na.txt:3: FOO.BAR()\n");
+
+    let regex = call(&reg, &c, "grep", json!({"pattern": "foo.bar()"})).await;
+    assert_eq!(regex.model, "a.txt:1: foo.bar()\na.txt:2: fooXbar\n");
+}
+
+#[tokio::test]
+async fn grep_keeps_matches_visible_when_clipping_long_unicode_lines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = Registry::builtin();
+    let c = ctx(dir.path());
+    let left = "é".repeat(330);
+    let right = "界".repeat(330);
+    std::fs::write(
+        dir.path().join("a.txt"),
+        format!("needle{right}\n{left}needle{right}\n{left}needle\n"),
+    )
+    .expect("fixture");
+
+    let out = call(&reg, &c, "grep", json!({"pattern": "needle"})).await;
+    let lines: Vec<_> = out.model.lines().collect();
+    assert_eq!(lines.len(), 3, "{out:?}");
+    for (i, (left_clipped, right_clipped)) in [(false, true), (true, true), (true, false)]
+        .into_iter()
+        .enumerate()
+    {
+        let snippet = lines[i]
+            .strip_prefix(&format!("a.txt:{}: ", i + 1))
+            .expect("file and line prefix");
+        assert!(snippet.contains("needle"), "{snippet}");
+        assert_eq!(snippet.starts_with('…'), left_clipped, "{snippet}");
+        assert_eq!(snippet.ends_with('…'), right_clipped, "{snippet}");
+        assert!(
+            snippet.trim_matches('…').chars().count() <= 300,
+            "{snippet}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn search_reports_bad_paths_instead_of_no_matches() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = Registry::builtin();
+    let c = ctx(dir.path());
+    for tool in ["grep", "glob"] {
+        let out = call(
+            &reg,
+            &c,
+            tool,
+            json!({"pattern": "needle", "path": "missing"}),
+        )
+        .await;
+        assert!(
+            !out.ok && out.model.contains("Cannot search `missing`"),
+            "{out:?}"
+        );
+    }
+
+    std::fs::write(dir.path().join("a.txt"), "needle\n").expect("fixture");
+    let out = call(
+        &reg,
+        &c,
+        "glob",
+        json!({"pattern": "*.txt", "path": "a.txt"}),
+    )
+    .await;
+    assert!(!out.ok && out.model.contains("not a directory"), "{out:?}");
+}
+
+#[tokio::test]
+async fn grep_reports_size_skips_with_or_without_hits() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = Registry::builtin();
+    let c = ctx(dir.path());
+    std::fs::write(dir.path().join("a.txt"), "needle\n").expect("fixture");
+    std::fs::File::create(dir.path().join("oversized.log"))
+        .expect("large file")
+        .set_len(5 * 1024 * 1024 + 1)
+        .expect("set file length");
+
+    for (pattern, expected) in [
+        ("needle", "a.txt:1: needle"),
+        ("missing", "No matches in searched files."),
+    ] {
+        let out = call(&reg, &c, "grep", json!({"pattern": pattern})).await;
+        assert!(out.ok && out.model.starts_with(expected), "{out:?}");
+        assert!(
+            out.model
+                .contains("Search incomplete (files over 5 MiB: 1)"),
+            "{out:?}"
+        );
+    }
+    let out = call(
+        &reg,
+        &c,
+        "grep",
+        json!({"pattern": "missing", "glob": "*.txt"}),
+    )
+    .await;
+    assert!(out.ok && out.model == "No matches.", "{out:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn search_reports_unreadable_files_and_directories() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = Registry::builtin();
+    let c = ctx(dir.path());
+    let blocked_dir = dir.path().join("blocked");
+    let blocked_file = dir.path().join("blocked.txt");
+    std::fs::create_dir(&blocked_dir).expect("create directory");
+    std::fs::write(&blocked_file, "needle").expect("fixture");
+    let permissions = |path, mode| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("permissions");
+    };
+    permissions(&blocked_dir, 0o000);
+    permissions(&blocked_file, 0o000);
+    let no_dir_access = std::fs::read_dir(&blocked_dir).is_err();
+    let no_file_access = std::fs::read(&blocked_file).is_err();
+    let grep = call(&reg, &c, "grep", json!({"pattern": "needle"})).await;
+    let glob = call(&reg, &c, "glob", json!({"pattern": "*.rs"})).await;
+    permissions(&blocked_dir, 0o700);
+    permissions(&blocked_file, 0o600);
+
+    // A privileged test runner may be able to read mode-000 files and directories.
+    if no_dir_access {
+        assert!(grep.model.contains("traversal errors: 1"), "{grep:?}");
+        assert!(glob.model.contains("traversal errors: 1"), "{glob:?}");
+    }
+    if no_file_access {
+        assert!(grep.model.contains("unreadable files: 1"), "{grep:?}");
+    }
 }
 
 #[cfg(feature = "lang-common")]

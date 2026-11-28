@@ -322,3 +322,53 @@ async fn sandboxed_server() {
     assert!(failed.contains("sandbox"), "{failed}");
     m.shutdown().await;
 }
+
+#[tokio::test]
+async fn progress_notifications_stream_and_long_output_spills_to_disk() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spill = tmp.path().join("spill");
+    let m = McpManager::new(
+        vec![ServerSpec {
+            id: "fx".into(),
+            // 16 tokens * 4 = 64 chars max before spilling
+            file: fixture("max_output_tokens = 16\n"),
+        }],
+        tmp.path().to_path_buf(),
+        Default::default(),
+    );
+    m.set_output_dir(spill.clone());
+    m.start();
+    ready(&m, "fx").await;
+
+    let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel();
+    let long = "a".repeat(200);
+    let out = m
+        .call_with_progress(
+            "fx",
+            "echo",
+            serde_json::json!({ "text": long }),
+            &CancellationToken::new(),
+            Some(ptx),
+        )
+        .await;
+    assert!(out.ok, "{out:?}");
+    assert!(out.text.contains("full output saved to"), "{out:?}");
+    let mut progress_lines = Vec::new();
+    while let Ok(line) = prx.try_recv() {
+        progress_lines.push(line);
+    }
+    assert!(
+        progress_lines
+            .iter()
+            .any(|l| l.contains("[progress 1/2] echoing")),
+        "{progress_lines:?}"
+    );
+    let saved_files: Vec<_> = std::fs::read_dir(&spill)
+        .expect("spill dir")
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(saved_files.len(), 1);
+    let full = std::fs::read_to_string(saved_files[0].path()).expect("read spill");
+    assert_eq!(full, format!("echo: {}", "a".repeat(200)));
+    m.shutdown().await;
+}

@@ -21,7 +21,7 @@ async fn reports_each_provider_and_the_local_checks() {
         .mount(&server)
         .await;
     let tmp = tempfile::tempdir().expect("tempdir");
-    let loaded = common::workspace(tmp.path(), &server.uri(), "[]", "");
+    let loaded = common::workspace_in(tmp.path(), &server.uri(), "[]", "", None);
     let checks = doctor::run(Arc::new(loaded)).await;
     let get = |name: &str| {
         checks

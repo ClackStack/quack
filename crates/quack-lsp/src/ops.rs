@@ -131,6 +131,262 @@ pub struct Rename {
     pub files: Vec<(PathBuf, Vec<TextEdit>)>,
 }
 
+/// Summary of one available LSP code action (`textDocument/codeAction`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeActionSummary {
+    /// 1-based index in the returned list.
+    pub index: usize,
+    pub title: String,
+    pub kind: String,
+    pub is_preferred: bool,
+    /// True when the action already includes edits or can be resolved via `codeAction/resolve`.
+    pub applicable: bool,
+    pub disabled: Option<String>,
+}
+
+/// Resolved file edits for a single chosen code action.
+#[derive(Debug, Clone)]
+pub struct CodeActionEdit {
+    pub title: String,
+    pub encoding: pos::Encoding,
+    pub files: Vec<(PathBuf, Vec<TextEdit>)>,
+}
+
+/// Query available code actions at `q` (optionally extending through 1-based `end_line`
+/// and filtered by LSP `kind`, e.g. `quickfix`, `refactor`, `source.organizeImports`).
+pub async fn code_actions(
+    mgr: &Arc<LspManager>,
+    q: &Query,
+    end_line: Option<u32>,
+    kind: Option<&str>,
+) -> Result<Vec<CodeActionSummary>, String> {
+    let (client, actions) = raw_code_actions(mgr, q, end_line, kind).await?;
+    let can_resolve = client.supports_code_action_resolve();
+    Ok(actions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| {
+            let title = a["title"].as_str()?.trim().to_owned();
+            let kind = a["kind"].as_str().unwrap_or_default().to_owned();
+            let is_preferred = a["isPreferred"].as_bool().unwrap_or(false);
+            let disabled = a["disabled"]["reason"].as_str().map(str::to_owned);
+            let has_edit = !a["edit"].is_null();
+            let resolvable = can_resolve && a.get("command").is_none() || !a["data"].is_null();
+            Some(CodeActionSummary {
+                index: i + 1,
+                title,
+                kind,
+                is_preferred,
+                applicable: disabled.is_none() && (has_edit || (can_resolve && resolvable)),
+                disabled,
+            })
+        })
+        .collect())
+}
+
+/// Format code actions as concise text for the model.
+pub fn format_code_actions(actions: &[CodeActionSummary]) -> String {
+    if actions.is_empty() {
+        return "No code actions available at that location.".into();
+    }
+    let mut lines = Vec::with_capacity(actions.len() + 2);
+    lines.push(format!(
+        "{} code action{}:",
+        actions.len(),
+        if actions.len() == 1 { "" } else { "s" }
+    ));
+    for a in actions {
+        let mut tags = Vec::new();
+        if !a.kind.is_empty() {
+            tags.push(a.kind.as_str());
+        }
+        if a.is_preferred {
+            tags.push("preferred");
+        }
+        if !a.applicable && a.disabled.is_none() {
+            tags.push("command-only");
+        }
+        let tag_str = if tags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", tags.join(", "))
+        };
+        let disabled_str = a
+            .disabled
+            .as_deref()
+            .map(|r| format!(" (disabled: {r})"))
+            .unwrap_or_default();
+        lines.push(format!("  {}. {}{tag_str}{disabled_str}", a.index, a.title));
+    }
+    lines.push("Pass `apply` with the number or title to apply one.".into());
+    lines.join("\n")
+}
+
+/// Resolve and extract the workspace edits for the chosen code action (`selection` is a
+/// 1-based index, exact title, or unique case-insensitive substring of the title).
+pub async fn code_action_apply(
+    mgr: &Arc<LspManager>,
+    q: &Query,
+    end_line: Option<u32>,
+    kind: Option<&str>,
+    selection: &str,
+) -> Result<CodeActionEdit, String> {
+    let selection = selection.trim();
+    if selection.is_empty() {
+        return Err("`apply` cannot be empty; pass an action number or title".into());
+    }
+    let (client, actions) = raw_code_actions(mgr, q, end_line, kind).await?;
+    if actions.is_empty() {
+        return Err("no code actions are available at that location".into());
+    }
+    let chosen = pick_code_action(&actions, selection)?;
+    if let Some(reason) = chosen["disabled"]["reason"].as_str() {
+        return Err(format!("code action is disabled: {reason}"));
+    }
+    let title = chosen["title"]
+        .as_str()
+        .unwrap_or("code action")
+        .trim()
+        .to_owned();
+    let mut resolved = chosen.clone();
+    if resolved["edit"].is_null() && client.supports_code_action_resolve() {
+        resolved = client
+            .request("codeAction/resolve", resolved, REQUEST_TIMEOUT)
+            .await?;
+    }
+    if resolved["edit"].is_null() {
+        return Err(format!(
+            "code action `{title}` has no text edits (server-side commands are not executed)"
+        ));
+    }
+    let files = workspace_edit(&resolved["edit"])?;
+    if files.is_empty() {
+        return Err(format!("code action `{title}` produced no file edits"));
+    }
+    Ok(CodeActionEdit {
+        title,
+        encoding: client.encoding(),
+        files,
+    })
+}
+
+fn pick_code_action<'a>(actions: &'a [Value], selection: &str) -> Result<&'a Value, String> {
+    if let Ok(idx) = selection.parse::<usize>()
+        && idx >= 1
+    {
+        return actions
+            .get(idx - 1)
+            .ok_or_else(|| format!("code action #{idx} is out of range (1..={})", actions.len()));
+    }
+    let needle = selection.to_ascii_lowercase();
+    if let Some(exact) = actions.iter().find(|a| {
+        a["title"]
+            .as_str()
+            .is_some_and(|t| t.trim().eq_ignore_ascii_case(selection))
+    }) {
+        return Ok(exact);
+    }
+    let matches: Vec<&Value> = actions
+        .iter()
+        .filter(|a| {
+            a["title"]
+                .as_str()
+                .is_some_and(|t| t.to_ascii_lowercase().contains(&needle))
+        })
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(*one),
+        [] => {
+            let titles: Vec<&str> = actions.iter().filter_map(|a| a["title"].as_str()).collect();
+            Err(format!(
+                "no code action matches `{selection}`; available: {}",
+                titles.join("; ")
+            ))
+        }
+        many => {
+            let titles: Vec<&str> = many.iter().filter_map(|a| a["title"].as_str()).collect();
+            Err(format!(
+                "`{selection}` matches multiple code actions: {} · pass the number or full title",
+                titles.join("; ")
+            ))
+        }
+    }
+}
+
+async fn raw_code_actions(
+    mgr: &Arc<LspManager>,
+    q: &Query,
+    end_line: Option<u32>,
+    kind: Option<&str>,
+) -> Result<(Arc<Client>, Vec<Value>), String> {
+    let path = q.path.clone().ok_or("`path` is required")?;
+    let client = client(mgr, &path).await?;
+    need(&client, "codeActionProvider", "code actions")?;
+    let text = client.sync(&path).await?;
+    let lines: Vec<&str> = text.lines().collect();
+    let (start_line, start_char, end_l, end_char) =
+        if q.line.is_none() && q.symbol.as_deref().map(str::trim).is_none_or(str::is_empty) {
+            // Whole-file code actions (e.g. `source.organizeImports`).
+            let last_idx = lines.len().saturating_sub(1);
+            let last_len = lines.get(last_idx).map_or(0, |l| l.chars().count());
+            (0usize, 0usize, last_idx, last_len)
+        } else {
+            let (line, col) = position(&text, q)?;
+            let line_text = lines.get(line).copied().unwrap_or_default();
+            if let Some(el) = end_line {
+                let el = (el.max(1) as usize - 1).min(lines.len().saturating_sub(1));
+                let el = el.max(line);
+                let el_len = lines.get(el).map_or(0, |l| l.chars().count());
+                (line, 0, el, el_len)
+            } else if let Some(sym) = q.symbol.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                (line, col, line, col + sym.chars().count())
+            } else {
+                (line, 0, line, line_text.chars().count())
+            }
+        };
+    let start_line_text = lines.get(start_line).copied().unwrap_or_default();
+    let end_line_text = lines.get(end_l).copied().unwrap_or_default();
+    let enc = client.encoding();
+    let overlapping_diags: Vec<Value> = client
+        .raw_diagnostics(&path)
+        .into_iter()
+        .filter(|d| {
+            let ds = d["range"]["start"]["line"].as_u64().unwrap_or(0) as usize;
+            let de = d["range"]["end"]["line"].as_u64().unwrap_or(ds as u64) as usize;
+            ds <= end_l && de >= start_line
+        })
+        .collect();
+    let mut context = json!({ "diagnostics": overlapping_diags });
+    if let Some(only) = kind.map(str::trim).filter(|s| !s.is_empty()) {
+        context["only"] = json!([only]);
+    }
+    let params = json!({
+        "textDocument": { "uri": pos::path_to_uri(&path) },
+        "range": {
+            "start": {
+                "line": start_line,
+                "character": enc.to_lsp(start_line_text, start_char),
+            },
+            "end": {
+                "line": end_l,
+                "character": enc.to_lsp(end_line_text, end_char),
+            },
+        },
+        "context": context,
+    });
+    let r = client
+        .request("textDocument/codeAction", params, REQUEST_TIMEOUT)
+        .await?;
+    let actions: Vec<Value> = r
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|item| item.is_object() && item["title"].is_string())
+        .collect();
+    Ok((client, actions))
+}
+
 /// Ask the server to rename the symbol at `q` to `new_name`. Nothing is written: the
 /// caller applies the edits ([`apply_edits`]) after approval.
 pub async fn rename(mgr: &Arc<LspManager>, q: &Query, new_name: &str) -> Result<Rename, String> {
@@ -188,7 +444,7 @@ fn workspace_edit(r: &Value) -> Result<Vec<(PathBuf, Vec<TextEdit>)>, String> {
         for c in changes {
             if c.get("kind").is_some() {
                 return Err(
-                    "this rename also creates, renames or deletes files, which quack does not do yet"
+                    "this edit also creates, renames or deletes files, which quack does not do yet"
                         .into(),
                 );
             }

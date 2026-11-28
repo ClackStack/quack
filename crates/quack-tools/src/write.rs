@@ -141,33 +141,50 @@ impl Tool for Write {
 
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolCtx) -> BoxFuture<'a, ToolOutput> {
         let ctx = ctx.clone();
-        Box::pin(crate::registry::blocking(move || {
-            let p = plan(&args, &ctx)?;
-            if let Some(parent) = p.path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| io_msg(parent, &e))?;
-            }
-            std::fs::write(&p.path, &p.encoded).map_err(|e| io_msg(&p.path, &e))?;
-            let c = crate::text::commit(
-                &ctx,
-                &p.path,
-                &p.shown,
-                p.before.as_deref(),
-                &p.after,
-                "change",
-                crate::text::NamedFile::No,
-            );
-            crate::hashline::saw_whole(&ctx, &p.path, &p.after);
-            let verb = if p.before.is_some() {
-                "Updated"
-            } else {
-                "Created"
+        Box::pin(async move {
+            let p = match plan(&args, &ctx) {
+                Ok(p) => p,
+                Err(e) => return ToolOutput::error(e),
             };
-            let mut msg = format!("{verb} {} ({} lines).", p.shown, p.after.lines().count());
-            if let Some(warning) = &c.warning {
-                msg.push_str("\n\n");
-                msg.push_str(warning);
+            let mut written_via_bridge = false;
+            if let Some(bridge) = ctx.client_bridge.clone()
+                && let Some(res) = bridge.write_text_file(&p.path, &p.encoded).await
+            {
+                if let Err(e) = res {
+                    return ToolOutput::error(e);
+                }
+                written_via_bridge = true;
             }
-            Ok(ToolOutput::ok(msg, format!("+{} -{}", c.add, c.del)).with_detail(c.detail))
-        }))
+            crate::registry::blocking(move || {
+                if !written_via_bridge {
+                    if let Some(parent) = p.path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| io_msg(parent, &e))?;
+                    }
+                    std::fs::write(&p.path, &p.encoded).map_err(|e| io_msg(&p.path, &e))?;
+                }
+                let c = crate::text::commit(
+                    &ctx,
+                    &p.path,
+                    &p.shown,
+                    p.before.as_deref(),
+                    &p.after,
+                    "change",
+                    crate::text::NamedFile::No,
+                );
+                crate::hashline::saw_whole(&ctx, &p.path, &p.after);
+                let verb = if p.before.is_some() {
+                    "Updated"
+                } else {
+                    "Created"
+                };
+                let mut msg = format!("{verb} {} ({} lines).", p.shown, p.after.lines().count());
+                if let Some(warning) = &c.warning {
+                    msg.push_str("\n\n");
+                    msg.push_str(warning);
+                }
+                Ok(ToolOutput::ok(msg, format!("+{} -{}", c.add, c.del)).with_detail(c.detail))
+            })
+            .await
+        })
     }
 }

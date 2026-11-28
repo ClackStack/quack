@@ -1,5 +1,7 @@
 //! A full turn against a mock OpenAI-compatible server: tool call → approval → result → answer.
 
+mod common;
+
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::Path;
@@ -55,7 +57,10 @@ fn workspace_with_provider(root: &Path, provider_toml: Option<&str>) -> Loaded {
     ] {
         vars.insert(k.into(), root.join(sub).into_os_string());
     }
-    vars.insert("QUACK_DEFAULTS_DIR".into(), "none".into());
+    vars.insert(
+        "QUACK_DEFAULTS_DIR".into(),
+        common::editing_defaults(root).into_os_string(),
+    );
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).expect("mkdir");
     load_with(&move |k| vars.get(k).cloned(), &LoadOptions::new(ws)).expect("load")

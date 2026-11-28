@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::win_policy::RegistryPolicy;
 use crate::{APP_NAME, ENV_PREFIX, PROJECT_DIR_NAME};
 
 /// Source of environment variables. Injected so tests never mutate the process
@@ -44,6 +45,8 @@ pub struct Dirs {
     /// `QUACK_SYSTEM_DIR`, when set but not used because the platform's system layer holds
     /// a `[policy]`: a variable must not be able to step around an administrator's locks.
     pub ignored_system_dir: Option<PathBuf>,
+    /// Machine-level policy read from `HKLM\SOFTWARE\Policies\quack` on Windows.
+    pub registry_policy: RegistryPolicy,
     pub user_config: PathBuf,
     pub user_data: PathBuf,
     pub user_cache: PathBuf,
@@ -68,6 +71,15 @@ impl Dirs {
     }
 
     pub(crate) fn discover_in(env: Env<'_>, cwd: &Path, workspace_root: PathBuf) -> Self {
+        Self::discover_in_with_policy(env, cwd, workspace_root, crate::win_policy::read())
+    }
+
+    pub(crate) fn discover_in_with_policy(
+        env: Env<'_>,
+        cwd: &Path,
+        workspace_root: PathBuf,
+        registry_policy: RegistryPolicy,
+    ) -> Self {
         let var = |name: &str| env(&format!("{ENV_PREFIX}{name}")).filter(|v| !v.is_empty());
         let home = env(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
             .map(PathBuf::from)
@@ -82,12 +94,16 @@ impl Dirs {
                 .into_iter()
                 .find(|p| p.is_dir()),
         };
-        let (system, ignored_system_dir) =
-            system_dir(var("SYSTEM_DIR").map(PathBuf::from), platform.system);
+        let (system, ignored_system_dir) = system_dir_with_policy(
+            var("SYSTEM_DIR").map(PathBuf::from),
+            platform.system,
+            &registry_policy,
+        );
         Self {
             defaults,
             system,
             ignored_system_dir,
+            registry_policy,
             user_config: var("CONFIG_DIR").map_or(platform.config, PathBuf::from),
             user_cache: var("CACHE_DIR").map_or(platform.cache, PathBuf::from),
             user_data,
@@ -112,15 +128,30 @@ impl Dirs {
     }
 }
 
-/// The system layer's directory: `requested` (from `QUACK_SYSTEM_DIR`) unless `platform`
-/// holds a policy, which then stays in force. Returns the directory and, when the request
-/// was refused, the refused one.
-fn system_dir(requested: Option<PathBuf>, platform: PathBuf) -> (PathBuf, Option<PathBuf>) {
+/// The system layer's directory: a Windows HKLM `SystemDir` always pins it (immune to
+/// both `%ProgramData%` and `QUACK_SYSTEM_DIR`); otherwise `requested` (from
+/// `QUACK_SYSTEM_DIR`) wins unless `platform` holds a `[policy]` or `PolicyToml` is set.
+fn system_dir_with_policy(
+    requested: Option<PathBuf>,
+    platform: PathBuf,
+    registry: &RegistryPolicy,
+) -> (PathBuf, Option<PathBuf>) {
+    if let Some(pinned) = &registry.system_dir {
+        let ignored = requested.filter(|r| r != pinned);
+        return (pinned.clone(), ignored);
+    }
     match requested {
-        Some(r) if r != platform && has_policy(&platform) => (platform, Some(r)),
+        Some(r) if r != platform && (registry.policy_toml.is_some() || has_policy(&platform)) => {
+            (platform, Some(r))
+        }
         Some(r) => (r, None),
         None => (platform, None),
     }
+}
+
+#[cfg(test)]
+fn system_dir(requested: Option<PathBuf>, platform: PathBuf) -> (PathBuf, Option<PathBuf>) {
+    system_dir_with_policy(requested, platform, &RegistryPolicy::default())
 }
 
 /// Whether a layer directory's `config.toml` has a `[policy]` table.

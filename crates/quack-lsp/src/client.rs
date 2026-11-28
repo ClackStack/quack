@@ -30,6 +30,8 @@ type Pending = Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>;
 #[derive(Debug, Default)]
 struct State {
     diagnostics: Snapshot,
+    /// Raw LSP Diagnostic objects per file, passed back in `textDocument/codeAction` context.
+    raw_diagnostics: HashMap<PathBuf, Vec<Value>>,
     /// Sequence number of the last `publishDiagnostics` per file.
     published: HashMap<PathBuf, u64>,
     seq: u64,
@@ -232,6 +234,22 @@ impl Client {
         self.caps
             .get()
             .is_some_and(|c| !matches!(c[capability], Value::Null | Value::Bool(false)))
+    }
+
+    /// Whether the server supports `codeAction/resolve`.
+    pub fn supports_code_action_resolve(&self) -> bool {
+        self.caps
+            .get()
+            .and_then(|c| c["codeActionProvider"]["resolveProvider"].as_bool())
+            .unwrap_or(false)
+    }
+
+    pub fn raw_diagnostics(&self, path: &Path) -> Vec<Value> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|s| s.raw_diagnostics.get(&pos::key(path)).cloned())
+            .unwrap_or_default()
     }
 
     pub fn log(&self) -> Vec<String> {
@@ -495,10 +513,11 @@ impl Client {
                 json!({ "textDocument": { "uri": uri } }),
             )
             .await;
-        if self.supports("diagnosticProvider") {
+        let supports_pull = self.supports("diagnosticProvider");
+        if supports_pull {
             self.pull_after_change(path, max_wait).await;
-            // A server that only answers pulls has nothing more to send.
-            if !self.pushes() {
+            // A server that only answers pulls and is already idle has nothing more to send.
+            if !self.pushes() && self.progress().is_empty() {
                 return Ok(());
             }
         }
@@ -519,6 +538,12 @@ impl Client {
                 || now - started >= max_wait
                 || !self.alive()
             {
+                if supports_pull && !seen && self.alive() {
+                    let remaining = max_wait.saturating_sub(now - started);
+                    if !remaining.is_zero() {
+                        self.pull_after_change(path, remaining).await;
+                    }
+                }
                 return Ok(());
             }
             let wake = (quiet_since + settle).max(now + Duration::from_millis(20));
@@ -573,15 +598,15 @@ impl Client {
             if r["kind"] == "unchanged" {
                 continue;
             }
-            let list: Vec<Diagnostic> = r["items"]
-                .as_array()
-                .map(|a| a.iter().filter_map(Diagnostic::from_lsp).collect())
-                .unwrap_or_default();
+            let raw_list: Vec<Value> = r["items"].as_array().cloned().unwrap_or_default();
+            let list: Vec<Diagnostic> = raw_list.iter().filter_map(Diagnostic::from_lsp).collect();
             if let Ok(mut s) = self.state.lock() {
                 if list.is_empty() {
                     s.diagnostics.remove(&file);
+                    s.raw_diagnostics.remove(&file);
                 } else {
-                    s.diagnostics.insert(file, list);
+                    s.diagnostics.insert(file.clone(), list);
+                    s.raw_diagnostics.insert(file, raw_list);
                 }
             }
         }
@@ -725,10 +750,12 @@ impl Reader {
                 let Some(path) = params["uri"].as_str().and_then(pos::uri_to_path) else {
                     return;
                 };
-                let list: Vec<Diagnostic> = params["diagnostics"]
+                let raw_list: Vec<Value> = params["diagnostics"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(Diagnostic::from_lsp).collect())
+                    .cloned()
                     .unwrap_or_default();
+                let list: Vec<Diagnostic> =
+                    raw_list.iter().filter_map(Diagnostic::from_lsp).collect();
                 if let Ok(mut s) = self.state.lock() {
                     let key = pos::key(&path);
                     s.seq += 1;
@@ -736,8 +763,10 @@ impl Reader {
                     s.published.insert(key.clone(), seq);
                     if list.is_empty() {
                         s.diagnostics.remove(&key);
+                        s.raw_diagnostics.remove(&key);
                     } else {
-                        s.diagnostics.insert(key, list);
+                        s.diagnostics.insert(key.clone(), list);
+                        s.raw_diagnostics.insert(key, raw_list);
                     }
                 }
             }
@@ -792,6 +821,7 @@ fn capabilities() -> Value {
         "workspace": {
             "configuration": true,
             "workspaceFolders": true,
+            "workspaceEdit": { "documentChanges": true },
             "symbol": { "dynamicRegistration": false },
         },
         "window": { "workDoneProgress": true },
@@ -802,6 +832,25 @@ fn capabilities() -> Value {
             "references": {},
             "hover": { "contentFormat": ["markdown", "plaintext"] },
             "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
+            "codeAction": {
+                "codeActionLiteralSupport": {
+                    "codeActionKind": {
+                        "valueSet": [
+                            "",
+                            "quickfix",
+                            "refactor",
+                            "refactor.extract",
+                            "refactor.inline",
+                            "refactor.rewrite",
+                            "source",
+                            "source.organizeImports",
+                            "source.fixAll"
+                        ]
+                    }
+                },
+                "dataSupport": true,
+                "resolveSupport": { "properties": ["edit"] }
+            },
         },
     })
 }

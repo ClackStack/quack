@@ -1,8 +1,8 @@
 //! A provider ready to use: resolved secrets, one HTTP client, retries and streaming.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use quack_config::provider::ReasoningFormat;
@@ -34,7 +34,7 @@ mod websocket;
 /// has its own instance and can always start again from its local history.
 #[derive(Debug, Default)]
 pub struct ResponsesSession {
-    response_id: std::sync::Mutex<Option<String>>,
+    response_id: Mutex<Option<String>>,
     #[cfg(feature = "proto-openai-responses")]
     socket: tokio::sync::Mutex<websocket::SessionSocket>,
 }
@@ -74,6 +74,119 @@ enum Api {
     Responses,
 }
 
+#[derive(Debug, Default)]
+struct EndpointHealth {
+    unhealthy_until: Option<Instant>,
+    consecutive_failures: u32,
+}
+
+/// Round-robin endpoint pool with per-endpoint cooldown for multi-`base_urls` failover.
+#[derive(Debug)]
+struct EndpointPool {
+    urls: Vec<String>,
+    cursor: AtomicUsize,
+    health: Mutex<Vec<EndpointHealth>>,
+}
+
+impl EndpointPool {
+    fn new(urls: Vec<String>) -> Self {
+        let len = urls.len();
+        Self {
+            urls,
+            cursor: AtomicUsize::new(0),
+            health: Mutex::new((0..len).map(|_| EndpointHealth::default()).collect()),
+        }
+    }
+
+    fn urls(&self) -> &[String] {
+        &self.urls
+    }
+
+    /// Pick the next healthy endpoint in round-robin order. If every endpoint is currently
+    /// in cooldown, returns the one whose cooldown expires soonest.
+    fn pick(&self) -> (usize, &str) {
+        let len = self.urls.len();
+        if len <= 1 {
+            return (0, &self.urls[0]);
+        }
+        let start = self.cursor.fetch_add(1, Ordering::Relaxed) % len;
+        let now = Instant::now();
+        let Ok(health) = self.health.lock() else {
+            return (start, &self.urls[start]);
+        };
+        for offset in 0..len {
+            let idx = (start + offset) % len;
+            if health[idx].unhealthy_until.is_none_or(|until| now >= until) {
+                return (idx, &self.urls[idx]);
+            }
+        }
+        // All endpoints are in cooldown; try the one closest to recovering.
+        let idx = (0..len)
+            .min_by_key(|&i| health[i].unhealthy_until.unwrap_or(now))
+            .unwrap_or(start);
+        (idx, &self.urls[idx])
+    }
+
+    /// Pick another endpoint not yet attempted in `tried`, preferring healthy ones first.
+    fn pick_other(&self, tried: &[usize]) -> Option<(usize, &str)> {
+        let len = self.urls.len();
+        if tried.len() >= len {
+            return None;
+        }
+        let start = tried.last().map_or(0, |&last| (last + 1) % len);
+        let now = Instant::now();
+        let health = self.health.lock().ok();
+        // First pass: untried and healthy.
+        for offset in 0..len {
+            let idx = (start + offset) % len;
+            if tried.contains(&idx) {
+                continue;
+            }
+            let healthy = health
+                .as_ref()
+                .is_none_or(|h| h[idx].unhealthy_until.is_none_or(|until| now >= until));
+            if healthy {
+                return Some((idx, &self.urls[idx]));
+            }
+        }
+        // Second pass: any untried endpoint, even if still cooling down.
+        for offset in 0..len {
+            let idx = (start + offset) % len;
+            if !tried.contains(&idx) {
+                return Some((idx, &self.urls[idx]));
+            }
+        }
+        None
+    }
+
+    fn mark_ok(&self, idx: usize) {
+        if self.urls.len() <= 1 {
+            return;
+        }
+        if let Ok(mut health) = self.health.lock()
+            && let Some(slot) = health.get_mut(idx)
+        {
+            slot.consecutive_failures = 0;
+            slot.unhealthy_until = None;
+        }
+    }
+
+    fn mark_failed(&self, idx: usize, err: &ProviderError) {
+        if self.urls.len() <= 1 || !err.retryable() {
+            return;
+        }
+        if let Ok(mut health) = self.health.lock()
+            && let Some(slot) = health.get_mut(idx)
+        {
+            slot.consecutive_failures = slot.consecutive_failures.saturating_add(1);
+            let secs = 15u64
+                .saturating_mul(1 << (slot.consecutive_failures.saturating_sub(1)).min(3))
+                .min(120);
+            slot.unhealthy_until = Some(Instant::now() + Duration::from_secs(secs));
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Provider {
     pub id: String,
@@ -86,6 +199,8 @@ pub struct Provider {
     /// serves them all.
     client: Arc<RwLock<Pooled>>,
     base_url: String,
+    /// All normalized endpoints (`base_url` + `base_urls`) for round-robin & failover.
+    endpoints: Arc<EndpointPool>,
     /// Shared by every clone, so a new key ([`Provider::take_key`]) reaches them all.
     /// The map under the lock is itself shared, so a request copies one `Arc`.
     headers: Arc<RwLock<Arc<HeaderMap>>>,
@@ -215,18 +330,32 @@ impl Provider {
             .ok()
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default();
-        let base_url = match api {
-            #[cfg(feature = "proto-ollama")]
-            Api::Ollama => ollama::native_base(&file.base_url),
-            _ => file.base_url.trim_end_matches('/'),
+        let raw_endpoints = file.endpoints();
+        if raw_endpoints.is_empty() {
+            return Err(config(
+                "provider must set `base_url` or a non-empty `base_urls` list".into(),
+            ));
         }
-        .to_owned();
+        let normalized_urls: Vec<String> = raw_endpoints
+            .into_iter()
+            .map(|u| {
+                match api {
+                    #[cfg(feature = "proto-ollama")]
+                    Api::Ollama => ollama::native_base(u),
+                    _ => u.trim_end_matches('/'),
+                }
+                .to_owned()
+            })
+            .collect();
+        let base_url = normalized_urls[0].clone();
+        let endpoints = Arc::new(EndpointPool::new(normalized_urls));
         let ledger = spec.ledger.clone();
         Ok(Self {
             id: id.to_owned(),
             api,
             dialect: openai_chat::Dialect::of(&base_url),
             base_url,
+            endpoints,
             file: Arc::new(file),
             spec: Arc::new(spec),
             client: Arc::new(RwLock::new(Pooled {
@@ -253,9 +382,22 @@ impl Provider {
         }
     }
 
-    /// Configured endpoint base URL (without trailing slash).
+    /// Current session egress ledger, if one has been attached.
+    pub fn ledger(&self) -> Option<Arc<EgressLedger>> {
+        match self.ledger.read() {
+            Ok(slot) => slot.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Configured primary endpoint base URL (without trailing slash).
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// All normalized endpoint base URLs (`base_url` + `base_urls`).
+    pub fn base_urls(&self) -> &[String] {
+        self.endpoints.urls()
     }
 
     /// Add `count` redactions to attribute to the next inference stream entry.
@@ -595,10 +737,6 @@ impl Provider {
         ))
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}/{path}", self.base_url)
-    }
-
     /// Headers are a request's first byte; a dropped request never sends them. Servers send
     /// them after prefill, so each retry waits twice as long: a stall is retried quickly and a
     /// long prompt still gets time, up to the idle timeout.
@@ -618,7 +756,35 @@ impl Provider {
     }
 
     async fn get_json(&self, path: &str) -> Result<serde_json::Value, ProviderError> {
-        self.get_json_at(self.url(path)).await
+        let (mut idx, mut base) = self.endpoints.pick();
+        let mut tried = vec![idx];
+        loop {
+            let url = format!("{base}/{path}");
+            match self.get_json_at(url).await {
+                Ok(val) => {
+                    self.endpoints.mark_ok(idx);
+                    return Ok(val);
+                }
+                Err(e) if e.retryable() => {
+                    self.endpoints.mark_failed(idx, &e);
+                    if let Some((next_idx, next_base)) = self.endpoints.pick_other(&tried) {
+                        tracing::warn!(
+                            provider = %self.id,
+                            failed = %base,
+                            next = %next_base,
+                            error = %e,
+                            "failing over models request to next endpoint"
+                        );
+                        idx = next_idx;
+                        base = next_base;
+                        tried.push(idx);
+                        continue;
+                    }
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     async fn get_json_at(&self, url: String) -> Result<serde_json::Value, ProviderError> {
@@ -724,7 +890,8 @@ impl Provider {
     /// listing goes out without a window, but each failure is logged so it can be seen.
     #[cfg(feature = "proto-ollama")]
     async fn ollama_show(&self, model: &str) -> Option<u32> {
-        let req_url = self.url(ollama::SHOW_PATH);
+        let (_, base) = self.endpoints.pick();
+        let req_url = format!("{base}/{}", ollama::SHOW_PATH);
         let payload = serde_json::json!({ "model": model });
         let bytes_sent = serde_json::to_vec(&payload)
             .map(|v| v.len() as u64)
@@ -927,7 +1094,6 @@ impl Provider {
         };
         let bytes_sent = body_bytes.len() as u64;
         let redactions = self.pending_redactions.swap(0, Ordering::Relaxed);
-        let req_url = self.url(&path);
         let affinity = match req
             .prompt_cache
             .affinity_header
@@ -955,10 +1121,21 @@ impl Provider {
         };
 
         let mut attempt = 0;
+        let (mut ep_idx, mut ep_base) = self.endpoints.pick();
+        let mut tried_endpoints = vec![ep_idx];
         // A plain header set never changes mid-turn, so every retry reuses the first clone;
         // a signed-in provider refreshes its token per attempt.
         let mut shared: Option<RequestHeaders> = None;
-        let (generation, resp) = loop {
+        let (generation, req_url, resp) = loop {
+            #[cfg(feature = "proto-anthropic")]
+            let ep_path = if self.api == Api::Anthropic {
+                anthropic::path(ep_base, "messages")
+            } else {
+                path.clone()
+            };
+            #[cfg(not(feature = "proto-anthropic"))]
+            let ep_path = path.clone();
+            let req_url = format!("{ep_base}/{ep_path}");
             let headers = match &mut shared {
                 Some(h) => h.clone(),
                 None => {
@@ -1012,12 +1189,47 @@ impl Provider {
                 self.renew_client(generation, e);
             }
             match result {
-                Ok(r) => break (generation, r),
-                Err(e) if e.retryable() && attempt < self.file.http.max_retries => {
-                    let wait = backoff(attempt, &e);
-                    tracing::warn!(provider = %self.id, attempt, ?wait, error = %e, "retrying");
-                    attempt += 1;
-                    tokio::time::sleep(wait).await;
+                Ok(r) => {
+                    self.endpoints.mark_ok(ep_idx);
+                    break (generation, req_url, r);
+                }
+                Err(e) if e.retryable() => {
+                    self.endpoints.mark_failed(ep_idx, &e);
+                    if let Some((next_idx, next_base)) = self.endpoints.pick_other(&tried_endpoints)
+                    {
+                        tracing::warn!(
+                            provider = %self.id,
+                            failed = %ep_base,
+                            next = %next_base,
+                            error = %e,
+                            "failing over to next endpoint"
+                        );
+                        ep_idx = next_idx;
+                        ep_base = next_base;
+                        tried_endpoints.push(ep_idx);
+                        continue;
+                    }
+                    if attempt < self.file.http.max_retries {
+                        let wait = backoff(attempt, &e);
+                        tracing::warn!(provider = %self.id, attempt, ?wait, error = %e, "retrying");
+                        attempt += 1;
+                        tokio::time::sleep(wait).await;
+                        let (next_idx, next_base) = self.endpoints.pick();
+                        ep_idx = next_idx;
+                        ep_base = next_base;
+                        tried_endpoints.clear();
+                        tried_endpoints.push(ep_idx);
+                        continue;
+                    }
+                    self.record_ledger(
+                        EgressDraft::new(EgressKind::Inference, req_url, self.file.api.clone())
+                            .sent(bytes_sent)
+                            .status(status)
+                            .redactions(redactions)
+                            .blocked(e.message.clone()),
+                    );
+                    let _ = tx.send(Err(e)).await;
+                    return;
                 }
                 Err(e) => {
                     self.record_ledger(
@@ -1371,14 +1583,24 @@ pub(crate) fn unredirected_client(
     network: &NetworkSettings,
     env: Env<'_>,
 ) -> Result<reqwest::Client, String> {
-    let file: ProviderFile =
-        serde_json::from_value(serde_json::json!({ "base_url": "" })).map_err(|e| e.to_string())?;
-    ClientSpec::resolve(&file, network, env)
-        .map_err(|e| e.message)?
-        .builder()
-        .redirect(reqwest::redirect::Policy::none())
+    unredirected_builder(network, env)?
+        .0
         .build()
         .map_err(|e| format!("HTTP client: {e}"))
+}
+
+/// Like [`unredirected_client`], returning the builder (so callers like `web_fetch` can
+/// pin verified DNS resolutions via `resolve_to_addrs`) and whether a proxy is configured.
+pub(crate) fn unredirected_builder(
+    network: &NetworkSettings,
+    env: Env<'_>,
+) -> Result<(reqwest::ClientBuilder, bool), String> {
+    let file: ProviderFile =
+        serde_json::from_value(serde_json::json!({ "base_url": "" })).map_err(|e| e.to_string())?;
+    let spec = ClientSpec::resolve(&file, network, env).map_err(|e| e.message)?;
+    let has_proxy = !spec.proxies.is_empty();
+    let builder = spec.builder().redirect(reqwest::redirect::Policy::none());
+    Ok((builder, has_proxy))
 }
 
 #[cfg(test)]
@@ -1753,7 +1975,7 @@ mod tests {
     ) -> (
         std::net::SocketAddr,
         Arc<std::sync::atomic::AtomicBool>,
-        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<AtomicUsize>,
     ) {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1824,7 +2046,7 @@ mod tests {
         assert_eq!(reply(&p).await.expect("first reply"), "Hello");
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
         dead.store(true, Ordering::SeqCst);
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         assert_eq!(reply(&p).await.expect("the retry answers"), "Hello");
         assert_eq!(
             accepted.load(Ordering::SeqCst),
@@ -1937,5 +2159,40 @@ mod tests {
         );
         let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).expect("json");
         assert_eq!(body["prompt_cache_key"], "sess-abc123");
+    }
+
+    #[tokio::test]
+    async fn base_urls_failover_and_round_robin() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let failing = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("overloaded"))
+            .mount(&failing)
+            .await;
+
+        let healthy = sse_server().await;
+        let file: ProviderFile = toml::from_str(&format!(
+            "base_urls = [\"{}/v1\", \"{}/v1\"]\nmodels = [\"m\"]\n",
+            failing.uri(),
+            healthy.uri()
+        ))
+        .expect("provider toml");
+        assert_eq!(file.endpoints().len(), 2);
+
+        let p = Provider::new("cluster", file, &NetworkSettings::default(), &|_| None)
+            .expect("provider");
+        assert_eq!(p.base_urls().len(), 2);
+
+        // Request 1 hits node 0 (503), marks it unhealthy, and fails over to node 1 cleanly.
+        assert_eq!(reply(&p).await.expect("failover reply"), "Hello");
+        assert_eq!(failing.received_requests().await.expect("reqs").len(), 1);
+        assert_eq!(healthy.received_requests().await.expect("reqs").len(), 1);
+
+        // Request 2 skips the cooling-down node 0 and routes straight to healthy node 1.
+        assert_eq!(reply(&p).await.expect("steady reply"), "Hello");
+        assert_eq!(failing.received_requests().await.expect("reqs").len(), 1);
+        assert_eq!(healthy.received_requests().await.expect("reqs").len(), 2);
     }
 }

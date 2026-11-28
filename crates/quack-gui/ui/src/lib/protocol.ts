@@ -567,15 +567,19 @@ export type EgressKind = "inference" | "models" | "mcp_http" | "auth" | "fetch" 
 export type EgressEntry = { seq: number, timestamp_ms: number, kind: EgressKind, host: string, path: string, protocol: string, local: boolean, bytes_sent: number, bytes_received: number, status?: number, redactions: number, blocked_reason?: string, };
 export type EgressStats = { total_requests: number, total_bytes_sent: number, total_bytes_received: number, local_requests: number, remote_requests: number, blocked_count: number, redacted_count: number, };
 /**
+ * Human-readable context derived from detector and source metadata, not the matched text.
+ */
+export type SecretFindingContext = { label: string, source: string, impact: string, };
+/**
  * Masked credential or high-entropy match flagged before outbound transmission.
  */
 export type SecretFinding = { id: string,
 /**
- * Detector family / rule id (e.g. `aws_access_key`, `resolved_secret`).
+ * Detector family / rule id (e.g. `aws_access_key_id`, `active_credential`).
  */
 kind: string,
 /**
- * Source location label (`prompt`, `@src/config.rs`, or `tool:shell`).
+ * Scanner source label (`user_prompt`, `history:user`, or `tool:shell`).
  */
 location: string,
 /**
@@ -583,9 +587,13 @@ location: string,
  */
 preview: string,
 /**
- * Short SHA-256 fingerprint (`sha256:a1b2c3d4e5f6`) for allowlisting.
+ * SHA-256 fingerprint for allowlisting.
  */
-fingerprint: string, line?: number, };
+fingerprint: string,
+/**
+ * One-based line in the scanned text, not necessarily a source-file line.
+ */
+line?: number, context?: SecretFindingContext, };
 export type ToolProbeCase = { name: string, passed: boolean, latency_ms: number, detail: string, };
 export type ToolProbeReport = { model: string, configured_mode: string, recommended_mode: string, recommended_text_format?: string, cases: Array<ToolProbeCase>, summary: string, };
 export type LspDiagnosticItem = { server: string, path: string,
@@ -696,7 +704,7 @@ mode: string,
  * Replace the planning messages with a concise handoff brief even when no
  * separate `[model] planner` is configured.
  */
-clear_context?: boolean, } | { "op": "run_doctor" } | { "op": "list_mcp" } | { "op": "restart_mcp", id: string, } | { "op": "enable_mcp", id: string, } | { "op": "disable_mcp", id: string, } | { "op": "add_mcp", id: string, url: string, command: string, args: Array<string>, bearer_env?: string, bearer_token?: SecretText, scope?: WriteScope, } | { "op": "save_mcp_server", id: string, scope: WriteScope, description: string, command: string, args: Array<string>, cwd: string, url: string, sandbox?: boolean, env: { [key in string]: McpSecretValue }, headers: { [key in string]: McpSecretValue }, } | { "op": "list_lsp" } | { "op": "init_instructions" } | { "op": "detect_servers" } | { "op": "add_provider", id: string, base_url: string, api?: string, model: string, } | { "op": "list_services" } | { "op": "sign_in", id?: string, } | { "op": "set_provider_key", id: string, key: SecretText, } | { "op": "add_server", base_url: string, key?: SecretText, } | { "op": "list_provider_connections" } | { "op": "save_provider_connection", id: string, http_version?: ProviderHttpVersion, no_proxy?: boolean, } | { "op": "list_memory" } | { "op": "save_memory", scope: string, name: string, description: string, kind: string, body: string, previous_scope?: string, previous_name?: string, } | { "op": "delete_memory", scope: string, name: string, } | { "op": "set_title", title: string, } | { "op": "save_setting", key: string, value: string, scope: WriteScope, } | { "op": "fork_session" } | { "op": "fork_worktree", name?: string, } | { "op": "export", format: ExportFormat, path?: string, } | { "op": "list_rewind_points" } | { "op": "rewind", back: number, conversation: boolean, files: boolean, force: boolean, } | { "op": "reload_config" } | { "op": "trust_project", decision: string, } | { "op": "import_compat", kind: CompatKind, path: string, save: boolean, } | { "op": "enable_hook", id: string, replace_payload?: boolean | null, } | { "op": "inspect_hook_setup", id: string, request: number, } | { "op": "save_hook_setup", id: string, request: number, revision: string, connections: Array<HookConnectionDraft>,
+clear_context?: boolean, } | { "op": "run_doctor" } | { "op": "list_mcp" } | { "op": "restart_mcp", id: string, } | { "op": "mcp_login", id?: string, } | { "op": "mcp_logout", id: string, } | { "op": "enable_mcp", id: string, } | { "op": "disable_mcp", id: string, } | { "op": "add_mcp", id: string, url: string, command: string, args: Array<string>, bearer_env?: string, bearer_token?: SecretText, scope?: WriteScope, } | { "op": "save_mcp_server", id: string, scope: WriteScope, description: string, command: string, args: Array<string>, cwd: string, url: string, sandbox?: boolean, env: { [key in string]: McpSecretValue }, headers: { [key in string]: McpSecretValue }, } | { "op": "list_lsp" } | { "op": "init_instructions" } | { "op": "detect_servers" } | { "op": "add_provider", id: string, base_url: string, api?: string, model: string, } | { "op": "list_services" } | { "op": "sign_in", id?: string, } | { "op": "set_provider_key", id: string, key: SecretText, } | { "op": "add_server", base_url: string, key?: SecretText, } | { "op": "list_provider_connections" } | { "op": "save_provider_connection", id: string, http_version?: ProviderHttpVersion, no_proxy?: boolean, } | { "op": "list_memory" } | { "op": "save_memory", scope: string, name: string, description: string, kind: string, body: string, previous_scope?: string, previous_name?: string, } | { "op": "delete_memory", scope: string, name: string, } | { "op": "set_title", title: string, } | { "op": "save_setting", key: string, value: string, scope: WriteScope, } | { "op": "fork_session" } | { "op": "fork_worktree", name?: string, } | { "op": "export", format: ExportFormat, path?: string, } | { "op": "list_rewind_points" } | { "op": "rewind", back: number, conversation: boolean, files: boolean, force: boolean, } | { "op": "reload_config" } | { "op": "trust_project", decision: string, } | { "op": "import_compat", kind: CompatKind, path: string, save: boolean, } | { "op": "enable_hook", id: string, replace_payload?: boolean | null, } | { "op": "inspect_hook_setup", id: string, request: number, } | { "op": "save_hook_setup", id: string, request: number, revision: string, connections: Array<HookConnectionDraft>,
 /**
  * None keeps the current enabled state.
  */

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use quack_config::{LoadOptions, Loaded, load_with};
-use quack_core::protocol::{Event, InputItem, Op, TurnOverrides};
+use quack_core::protocol::{Event, InputItem, Op, TurnOverrides, WorkMode};
 use quack_core::{Engine, EngineHandle};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_string_contains, method};
@@ -42,7 +42,7 @@ fn configure_models(root: &Path, base_url: &str, models: &str) -> Loaded {
     .expect("provider");
     std::fs::write(
         user.join("config.toml"),
-        "[permissions]\nmode = \"full-auto\"\n",
+        "[permissions]\nwork_mode = \"edit\"\nmode = \"full-auto\"\n",
     )
     .expect("config");
     let mut vars: HashMap<String, OsString> = HashMap::new();
@@ -482,6 +482,64 @@ async fn codex_exposes_task_and_gates_view_image_on_vision() {
 }
 
 #[tokio::test]
+async fn codex_can_search_without_shell_tools() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"role\":\"tool\""))
+        .respond_with(sse(
+            json!({"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}),
+        ))
+        .mount(&server)
+        .await;
+    let calls = json!([
+        {"index":0,"id":"g1","function":{"name":"grep","arguments":json!({"pattern":"foo.bar()","literal":true}).to_string()}},
+        {"index":1,"id":"g2","function":{"name":"glob","arguments":json!({"pattern":"*.txt"}).to_string()}}
+    ]);
+    Mock::given(method("POST"))
+        .respond_with(sse(
+            json!({"choices":[{"delta":{"tool_calls":calls},"finish_reason":"tool_calls"}]}),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut loaded = configure(tmp.path(), &server.uri(), "codex");
+    loaded.settings.permissions.work_mode = WorkMode::Plan;
+    let path = loaded.dirs.workspace_root.join("target.txt");
+    std::fs::write(path, "fooXbar\nfoo.bar()\n").expect("search fixture");
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    turn(&mut engine, "find foo.bar() and list text files").await;
+    engine.shutdown().await;
+
+    let bodies: Vec<Value> = server
+        .received_requests()
+        .await
+        .expect("requests")
+        .iter()
+        .filter(|r| r.method == "POST")
+        .map(|r| serde_json::from_slice(&r.body).expect("request JSON"))
+        .collect();
+    let [first, second] = bodies.as_slice() else {
+        panic!("expected two model requests, got {}", bodies.len());
+    };
+    let offered = tools(first);
+    assert!(
+        offered["grep"].iter().any(|param| param == "literal") && offered.contains_key("glob"),
+        "{offered:?}"
+    );
+    let messages = second["messages"].as_array().expect("messages");
+    for (id, expected) in [("g1", "target.txt:2: foo.bar()"), ("g2", "target.txt")] {
+        let result = messages
+            .iter()
+            .find(|m| m["role"] == "tool" && m["tool_call_id"] == id)
+            .and_then(|m| m["content"].as_str())
+            .expect("search result");
+        assert_eq!(result.trim_end(), expected, "search call {id}");
+    }
+}
+
+#[tokio::test]
 async fn codex_shell_takes_an_argument_list() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -516,6 +574,8 @@ async fn codex_shell_takes_an_argument_list() {
         names.iter().all(|n| [
             "apply_patch",
             "ask_user",
+            "glob",
+            "grep",
             "index",
             "memory",
             "read",

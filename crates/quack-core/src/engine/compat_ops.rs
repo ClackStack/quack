@@ -6,6 +6,7 @@ use crate::compat;
 impl Engine {
     pub(super) fn replace_config(&mut self, config: Arc<Loaded>) {
         self.extension_config = self.imports.config(&config);
+        self.audit = crate::audit::AuditLog::from_config(&config);
         self.config = config;
         self.config_tx.send_replace(self.config.clone());
     }

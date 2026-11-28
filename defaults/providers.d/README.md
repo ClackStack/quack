@@ -27,7 +27,7 @@ base_url = "https://openrouter.ai/api/v1"
 api_key = { env = "OPENROUTER_API_KEY" }
 ```
 
-Only `base_url` is required. Models are discovered from the server's `/models`
+Only `base_url` (or `base_urls = [...]` for multi-node round-robin balancing and health-cooldown failover) is required. Models are discovered from the server's `/models`
 endpoint. Every other option has a working default; the full list is in
 `../schemas/provider.json` (editors with taplo complete it).
 

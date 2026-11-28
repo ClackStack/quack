@@ -21,12 +21,33 @@ const OP: &[&str] = &["operation", "op", "action", "command"];
 const PATH: &[&str] = &["path", "file_path", "filename", "file"];
 const SYMBOL: &[&str] = &["symbol", "name", "query"];
 const NEW_NAME: &[&str] = &["new_name", "newName", "to"];
-/// Where `prepare` keeps a rename's result. Not part of the schema; a value the model
-/// sends is replaced.
+const APPLY: &[&str] = &["apply", "code_action", "title"];
+const KIND: &[&str] = &["kind", "only"];
+/// Where `prepare` keeps a rename or code-action edit's result. Not part of the schema; a
+/// value the model sends is replaced.
 const RENAMED: &str = "__quack_renamed";
 
 fn is_rename(args: &Value) -> bool {
     opt_str(args, OP).is_some_and(|o| o.trim().eq_ignore_ascii_case("rename"))
+}
+
+fn is_code_action(args: &Value) -> bool {
+    opt_str(args, OP).is_some_and(|o| {
+        matches!(
+            o.trim().to_ascii_lowercase().as_str(),
+            "code_action" | "code_actions" | "quickfix" | "fix" | "actions"
+        )
+    })
+}
+
+fn code_action_apply_arg(args: &Value) -> Option<&str> {
+    opt_str(args, APPLY)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn is_edit_op(args: &Value) -> bool {
+    is_rename(args) || (is_code_action(args) && code_action_apply_arg(args).is_some())
 }
 
 /// A rename's planned changes: each file with the text it was worked out from, so a
@@ -85,7 +106,7 @@ fn operation(args: &Value) -> Result<Operation, String> {
     let name = opt_str(args, OP).ok_or("missing required string argument `operation`")?;
     Operation::parse(name).ok_or_else(|| {
         format!(
-            "unknown operation `{name}`; use one of: {}, rename",
+            "unknown operation `{name}`; use one of: {}, rename, code_action",
             Operation::NAMES.join(", ")
         )
     })
@@ -132,8 +153,10 @@ impl Tool for Lsp {
              file's outline), `diagnostics` (errors and warnings; for `path`, or everywhere). \
              For definition/references/hover give `path`, `line` and the `symbol` name on that \
              line. `rename` (with `new_name`) renames the symbol everywhere the server \
-             knows of, as one edit for the user to approve. Edits already report new \
-             errors, so you rarely need `diagnostics`.",
+             knows of, as one edit for the user to approve. `code_action` lists quickfixes \
+             and refactors at `path` (and optional `line`/`end_line`/`symbol`/`kind`); pass \
+             `apply` with a number or title to apply one as an approved edit. Edits already \
+             report new errors, so you rarely need `diagnostics`.",
             langs.join(" ")
         )
     }
@@ -143,13 +166,16 @@ impl Tool for Lsp {
             "type": "object",
             "properties": {
                 "operation": { "type": "string", "enum": [
-                    "definition", "references", "hover", "symbols", "diagnostics", "rename"
+                    "definition", "references", "hover", "symbols", "diagnostics", "rename", "code_action"
                 ] },
                 "path": { "type": "string", "description": "File path, relative to the workspace root or absolute" },
                 "line": { "type": "integer", "description": "1-based line number" },
+                "end_line": { "type": "integer", "description": "For code_action: optional 1-based inclusive end line" },
                 "symbol": { "type": "string", "description": "Identifier on that line, or a name to search for" },
                 "column": { "type": "integer", "description": "1-based column, instead of `symbol`" },
-                "new_name": { "type": "string", "description": "For rename: the new name" }
+                "new_name": { "type": "string", "description": "For rename: the new name" },
+                "kind": { "type": "string", "description": "For code_action: filter by kind (e.g. `quickfix`, `refactor`, `source.organizeImports`)" },
+                "apply": { "type": "string", "description": "For code_action: 1-based index or title of the action to apply" }
             },
             "required": ["operation"]
         })
@@ -164,25 +190,36 @@ impl Tool for Lsp {
             if let Some(o) = args.as_object_mut() {
                 o.remove(RENAMED);
             }
-            if !is_rename(&args) {
+            if !is_edit_op(&args) {
                 return Ok(args);
             }
             let mgr = ctx
                 .lsp
                 .as_ref()
                 .ok_or("no language servers are configured")?;
-            let new_name = opt_str(&args, NEW_NAME).unwrap_or_default();
-            let rename = ops::rename(mgr, &query(&args, ctx), new_name).await?;
+            let (label, encoding, files) = if is_rename(&args) {
+                let new_name = opt_str(&args, NEW_NAME).unwrap_or_default();
+                let rename = ops::rename(mgr, &query(&args, ctx), new_name).await?;
+                ("rename", rename.encoding, rename.files)
+            } else {
+                let selection = code_action_apply_arg(&args).unwrap_or_default();
+                let end_line = opt_u64(&args, &["end_line"]).and_then(|n| u32::try_from(n).ok());
+                let kind = opt_str(&args, KIND);
+                let applied =
+                    ops::code_action_apply(mgr, &query(&args, ctx), end_line, kind, selection)
+                        .await?;
+                ("code action", applied.encoding, applied.files)
+            };
             let mut planned = Vec::new();
-            for (path, edits) in &rename.files {
+            for (path, edits) in &files {
                 let shown = paths::display(&ctx.root, path);
                 if !paths::inside(&ctx.root, path) {
                     return Err(format!(
-                        "the rename would change {shown}, outside the workspace; quack does not do that"
+                        "the {label} would change {shown}, outside the workspace; quack does not do that"
                     ));
                 }
                 let file = TextFile::load(path)?;
-                let after = ops::apply_edits(&file.text, edits, rename.encoding)
+                let after = ops::apply_edits(&file.text, edits, encoding)
                     .map_err(|e| format!("{shown}: {e}"))?;
                 planned.push(json!({
                     "path": path.display().to_string(),
@@ -196,11 +233,13 @@ impl Tool for Lsp {
     }
 
     fn subject(&self, args: &Value, ctx: &ToolCtx) -> Result<Subject, String> {
-        if is_rename(args) {
+        if is_edit_op(args) {
             let files: Vec<PathBuf> = planned(args)?.into_iter().map(|(p, _, _)| p).collect();
             return Ok(Subject::Edits(files));
         }
-        operation(args)?;
+        if !is_code_action(args) {
+            operation(args)?;
+        }
         Ok(Subject::Read(match opt_str(args, PATH) {
             Some(p) => paths::resolve(&ctx.root, p),
             None => ctx.root.clone(),
@@ -216,6 +255,9 @@ impl Tool for Lsp {
         if let Some(to) = opt_str(args, NEW_NAME).filter(|_| is_rename(args)) {
             s.push_str(&format!(" → {to}"));
         }
+        if let Some(apply) = code_action_apply_arg(args).filter(|_| is_code_action(args)) {
+            s.push_str(&format!(" apply={apply}"));
+        }
         if let Some(p) = opt_str(args, PATH) {
             s.push_str(&format!(
                 " {}",
@@ -229,7 +271,7 @@ impl Tool for Lsp {
     }
 
     fn preview(&self, args: &Value, ctx: &ToolCtx) -> Result<ApprovalRequest, String> {
-        if is_rename(args) {
+        if is_edit_op(args) {
             return Ok(patch::preview(&changes(args, ctx)?));
         }
         Ok(ApprovalRequest::Tool {
@@ -240,7 +282,7 @@ impl Tool for Lsp {
 
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolCtx) -> BoxFuture<'a, ToolOutput> {
         Box::pin(async move {
-            if is_rename(&args) {
+            if is_edit_op(&args) {
                 return match changes(&args, ctx).and_then(|c| patch::write(&c, ctx)) {
                     Ok(out) => out,
                     Err(e) => ToolOutput::error(e),
@@ -249,6 +291,23 @@ impl Tool for Lsp {
             let Some(mgr) = &ctx.lsp else {
                 return ToolOutput::error("no language servers are configured");
             };
+            if is_code_action(&args) {
+                let q = query(&args, ctx);
+                let end_line = opt_u64(&args, &["end_line"]).and_then(|n| u32::try_from(n).ok());
+                let kind = opt_str(&args, KIND).map(str::to_owned);
+                let run = ops::code_actions(mgr, &q, end_line, kind.as_deref());
+                let result = tokio::select! {
+                    r = run => r.map(|list| ops::format_code_actions(&list)),
+                    () = ctx.cancel.cancelled() => Err("interrupted by the user".into()),
+                };
+                return match result {
+                    Ok(text) => {
+                        let first = text.lines().next().unwrap_or_default().to_owned();
+                        ToolOutput::ok(text, first)
+                    }
+                    Err(e) => ToolOutput::error(e),
+                };
+            }
             let op = match operation(&args) {
                 Ok(op) => op,
                 Err(e) => return ToolOutput::error(e),

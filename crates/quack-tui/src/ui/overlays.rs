@@ -1,5 +1,7 @@
 //! Popups, prompt modals, approval cards, and choice bars.
 
+use quack_protocol::SecretFinding;
+
 use super::*;
 
 /// `/setup`'s question box: a URL or a key, over everything else. A key is drawn as dots.
@@ -278,7 +280,7 @@ pub(crate) fn key_hints(t: &crate::theme::Theme, keys: &[(&str, &str)]) -> Line<
     Line::from(spans)
 }
 
-/// Bottom overlay asking to allow a tool call.
+/// Bottom overlay asking to allow a tool call or send flagged content.
 pub(super) fn draw_approval(f: &mut Frame<'_>, app: &App, above: Rect) {
     let Some(approval) = &app.approval else {
         return;
@@ -327,22 +329,8 @@ pub(super) fn draw_approval(f: &mut Frame<'_>, app: &App, above: Rect) {
             provider,
             host,
             findings,
-        } => (
-            format!(" Potential secret bound for {provider} ({host}) "),
-            findings
-                .iter()
-                .map(|f| {
-                    Line::from(vec![
-                        Span::styled(format!(" {} ", f.kind), t.error),
-                        Span::raw(format!(" {} · ", f.location)),
-                        Span::styled(f.preview.clone(), t.accent),
-                        Span::styled(format!(" ({})", f.fingerprint), t.dim),
-                    ])
-                })
-                .collect(),
-        ),
+        } => return draw_secret_approval(f, app, above, provider, host, findings),
     };
-    let is_secrets = matches!(approval.request, ApprovalRequest::EgressSecrets { .. });
     // Borders, a blank row under the title and one above the keys, the rules `A` saves,
     // and the keys.
     let always = !approval.always.is_empty();
@@ -380,19 +368,12 @@ pub(super) fn draw_approval(f: &mut Frame<'_>, app: &App, above: Rect) {
             t.dim,
         ));
     }
-    let mut keys = Vec::new();
-    if is_secrets {
-        keys.extend([
-            Span::styled(" r ", t.pill(t.ok)),
-            Span::raw(" redact & send  "),
-        ]);
-    }
-    keys.extend([
+    let mut keys = vec![
         Span::styled(" y ", t.pill(t.ok)),
         Span::raw(" allow  "),
         Span::styled(" a ", t.pill(t.accent)),
         Span::raw(" this session  "),
-    ]);
+    ];
     if always {
         keys.extend([
             Span::styled(" A ", t.pill(t.accent)),
@@ -411,6 +392,125 @@ pub(super) fn draw_approval(f: &mut Frame<'_>, app: &App, above: Rect) {
         .border_set(app.glyphs.border)
         .border_style(t.warn)
         .padding(ratatui::widgets::Padding::horizontal(1));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_secret_approval(
+    f: &mut Frame<'_>,
+    app: &App,
+    above: Rect,
+    provider: &str,
+    host: &str,
+    findings: &[SecretFinding],
+) {
+    let t = &app.theme;
+    let width = usize::from(above.width.saturating_sub(4)).max(1);
+    let available = usize::from(above.height.saturating_sub(2));
+    let styled = |text: &str, style| {
+        wrap(text, width)
+            .into_iter()
+            .map(move |row| Line::styled(row, style))
+    };
+    let actions = [
+        ("r", "redact & send"),
+        ("y/Enter", "send unredacted"),
+        ("a", "allow for session"),
+        ("n/Esc", "withhold"),
+    ];
+    let all_keys = key_hints(t, &actions);
+    let keys = if all_keys.width() <= width {
+        vec![all_keys]
+    } else {
+        actions
+            .chunks(2)
+            .flat_map(|pair| {
+                let line = key_hints(t, pair);
+                if line.width() <= width {
+                    vec![line]
+                } else {
+                    pair.iter()
+                        .map(|action| key_hints(t, std::slice::from_ref(action)))
+                        .collect()
+                }
+            })
+            .collect()
+    };
+    let count = findings.len();
+    let noun = if count == 1 { "secret" } else { "secrets" };
+    let summary = format!("To {provider} ({host}) · {count} possible {noun}");
+    let mut lines: Vec<_> = styled(&summary, t.warn)
+        .take(available.saturating_sub(keys.len()))
+        .collect();
+    let mut details = findings.iter().map(|finding| {
+        let (label, source, impact) = finding.context.as_ref().map_or(
+            (
+                finding.kind.as_str(),
+                finding.location.as_str(),
+                "If this is a real credential, it could grant access to the service or data it protects.",
+            ),
+            |c| (c.label.as_str(), c.source.as_str(), c.impact.as_str()),
+        );
+        let line = finding
+            .line
+            .map_or_else(String::new, |n| format!(", scanned line {n}"));
+        let heading = format!("{label} · {source}{line}");
+        let id = truncate(
+            &format!("{}  {}", finding.preview, finding.fingerprint),
+            width,
+        );
+        styled(&heading, t.warn)
+            .chain(styled(impact, Style::default()))
+            .chain(std::iter::once(Line::styled(id, t.dim)))
+            .collect::<Vec<_>>()
+    }).peekable();
+    let mut notes: Vec<_> = styled(
+        "Redact replaces matches. Later requests can include unredacted text again. Session allow skips future warnings for these matches.",
+        Style::default(),
+    )
+    .collect();
+    let mut room = available.saturating_sub(lines.len() + keys.len());
+    let first = details.peek().map_or(0, Vec::len) + usize::from(count > 1);
+    if room < notes.len() + first {
+        notes.clear();
+    }
+    room -= notes.len();
+    let mut shown = 0;
+    for rows in details {
+        // Admit only complete findings and leave a row to say when there are more.
+        if rows.len() + usize::from(shown + 1 < count) > room {
+            break;
+        }
+        room -= rows.len();
+        lines.extend(rows);
+        shown += 1;
+    }
+    if shown < count && room > 0 {
+        let hidden = match count - shown {
+            1 => "1 finding not shown".into(),
+            n => format!("{n} findings not shown"),
+        };
+        lines.push(Line::styled(truncate(&hidden, width), t.dim));
+    }
+    lines.extend(notes);
+    lines.extend(keys);
+    let height = u16::try_from(lines.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(above.height);
+    let area = Rect::new(
+        above.x,
+        above.bottom().saturating_sub(height),
+        above.width,
+        height,
+    );
+    let block = Block::bordered()
+        .title(Span::styled(
+            " Secret Shield paused the send ",
+            t.pill(t.warn),
+        ))
+        .border_set(app.glyphs.border)
+        .border_style(t.warn)
+        .padding(ratatui::widgets::Padding::horizontal(1));
+    f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 

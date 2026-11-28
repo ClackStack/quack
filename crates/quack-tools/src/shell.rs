@@ -339,43 +339,62 @@ impl Tool for Shell {
                 .map(Duration::from_secs)
                 .unwrap_or(ctx.default_timeout)
                 .min(ctx.max_timeout);
-            let opts = RunOptions {
-                cwd: ctx.root.clone(),
-                timeout,
-                drain: EXIT_DRAIN,
-                cancel: ctx.cancel.clone(),
-                on_output: ctx.on_output.clone(),
-                sandbox: policy(&args, ctx),
-            };
-            let sandboxed = opts.sandbox.is_some();
-            let r = match run(&ctx.shell, &command, opts).await {
-                Ok(r) => r,
-                Err(e) => {
-                    return ToolOutput::error(format!(
-                        "could not start {}: {e}",
-                        ctx.shell.program().display()
-                    ));
-                }
-            };
-            let status = if r.timed_out {
+            let (sandboxed, output, exit_code, timed_out, cancelled, dropped_bytes) =
+                if let Some(bridge) = ctx.client_bridge.clone()
+                    && let Some(res) = bridge
+                        .run_terminal(&command, &ctx.root, timeout, ctx.cancel.clone())
+                        .await
+                {
+                    match res {
+                        Ok(r) => (false, r.output, r.exit_code, r.timed_out, r.cancelled, 0),
+                        Err(e) => {
+                            return ToolOutput::error(format!("editor terminal failed: {e}"));
+                        }
+                    }
+                } else {
+                    let opts = RunOptions {
+                        cwd: ctx.root.clone(),
+                        timeout,
+                        drain: EXIT_DRAIN,
+                        cancel: ctx.cancel.clone(),
+                        on_output: ctx.on_output.clone(),
+                        sandbox: policy(&args, ctx),
+                    };
+                    let sandboxed = opts.sandbox.is_some();
+                    let r = match run(&ctx.shell, &command, opts).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return ToolOutput::error(format!(
+                                "could not start {}: {e}",
+                                ctx.shell.program().display()
+                            ));
+                        }
+                    };
+                    (
+                        sandboxed,
+                        r.output,
+                        r.exit_code,
+                        r.timed_out,
+                        r.cancelled,
+                        r.dropped_bytes,
+                    )
+                };
+            let status = if timed_out {
                 format!(
                     "timed out after {}s (process tree killed)",
                     timeout.as_secs()
                 )
-            } else if r.cancelled {
+            } else if cancelled {
                 "interrupted by the user".to_owned()
             } else {
-                match r.exit_code {
+                match exit_code {
                     Some(c) => format!("exit code {c}"),
                     None => "killed by a signal".to_owned(),
                 }
             };
-            let mut body = r.output.clone();
-            if r.dropped_bytes > 0 {
-                body.push_str(&format!(
-                    "\n… [{} more bytes not captured]",
-                    r.dropped_bytes
-                ));
+            let mut body = output.clone();
+            if dropped_bytes > 0 {
+                body.push_str(&format!("\n… [{} more bytes not captured]", dropped_bytes));
             }
             let distilled = distill_output(&body);
             let truncated = distilled.len() > HEAD + TAIL;
@@ -385,7 +404,7 @@ impl Tool for Shell {
             } else {
                 format!("{status}\n{trimmed}")
             };
-            let lines = r.output.lines().count();
+            let lines = output.lines().count();
             if truncated && let Some(saved) = spill_output(&body) {
                 model.push_str(&format!(
                     "\n[full output ({} bytes, {lines} lines) saved to {}]",
@@ -393,8 +412,8 @@ impl Tool for Shell {
                     saved.display()
                 ));
             }
-            let ok = r.exit_code == Some(0);
-            if sandboxed && !ok && quack_sandbox::looks_blocked(&r.output) {
+            let ok = exit_code == Some(0);
+            if sandboxed && !ok && quack_sandbox::looks_blocked(&output) {
                 model.push_str(
                     "\n\nThis command ran in the sandbox (writes only in the workspace and temp \
                      folders; network as configured). If the sandbox caused the failure and the \

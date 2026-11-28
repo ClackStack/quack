@@ -1,7 +1,7 @@
 # Work modes and approvals
 
 quack has two independent controls: **Plan / Edit** for what the agent can do, and
-**Ask / Allow** for when it needs approval. New sessions default to **Edit + Ask**.
+**Ask / Allow** for when it needs approval. New sessions default to **Plan + Allow**.
 
 | Work mode | Ask | Allow |
 |---|---|---|
@@ -42,7 +42,7 @@ The TUI shows work mode and approvals separately.
 | `/permissions ask` | Ask before unapproved actions, keeping work mode |
 | `/permissions allow` | Automatically approve eligible actions, keeping work mode |
 
-For example, enter `/permissions allow`, then `/plan make the parser faster`.
+For example, in a fresh session, ask quack to make a plan for speeding up the parser.
 The agent investigates and proposes tests for you to review before implementation.
 
 The CLI exposes the same controls:
@@ -54,18 +54,24 @@ quack exec --mode plan --approvals allow "Plan a fix for the date parser"
 ```
 
 Headless runs cannot answer approval prompts: actions that still require approval are
-denied with feedback to the model. Use scoped allow rules or `--approvals allow` as
-appropriate. Plan restrictions still apply.
+denied with feedback to the model. Pass `--mode edit` if a headless run should make
+changes or run tests. To pin approvals for a script, pass `--approvals ask` or
+`--approvals allow` explicitly.
 
-In `config.toml`:
+To change the defaults, use **Settings → Permissions** in the desktop app or edit
+`permissions.work_mode` and `permissions.mode` via `/config` in the TUI. Both settings
+can also be set in your user `config.toml` or a trusted project's `.quack/config.toml`.
+For example, to keep the previous defaults:
 
 ```toml
 [permissions]
-work_mode = "plan"  # plan or edit; default: edit
-mode = "allow"      # ask or allow; default: ask
+work_mode = "edit"
+mode = "ask"
 ```
 
-Both selections survive reload and session resume, subject to current system policy.
+You can override either default on its own. If you set `work_mode = "edit"` and leave
+`mode` unset, eligible edits and commands run without prompting. Saved session modes
+survive reload and resume, subject to current system policy and explicit CLI overrides.
 ACP editors expose separate Plan/Edit and Ask/Allow controls. Administrators can cap
 approvals with `policy.max_permission_mode` and separately lock
 `permissions.work_mode` to Plan; a Plan lock also prevents plan acceptance.

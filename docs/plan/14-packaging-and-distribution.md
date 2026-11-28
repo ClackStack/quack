@@ -277,13 +277,17 @@ deb|rpm|archive` forces a format.
   `--pkg archive` is accepted alongside `--plucked`/`--binary-only`/`--prefix`. Covered by
   offline regression tests in `scripts/test_install.py` (22 tests).
 
+### Windows MSI & Keyless Release Attestations (2026-11-26)
+
+- **Windows MSI (`packaging/windows/quack.wxs`, `scripts/package-msi.ps1`):** WiX v5 installer built on Windows release tag jobs in `.github/workflows/release.yml` (`quack-x86_64-pc-windows-msvc.msi` and `quack-aarch64-pc-windows-msvc.msi`). Installs `quack.exe`, `LICENSE`, `NOTICE`, `PATH` registration, and a separate `DefaultsFeature` (`defaults\`) into `%ProgramFiles%\quack\` (`Scope="perMachineOrUser"` / `ALLUSERS=2`, supporting both GPO/MDM per-machine installs and `MSIINSTALLPERUSER=1` per-user installs, plus MST transforms). Currently unsigned; `scripts/package-msi.ps1` runs `signtool.exe` automatically when `WINDOWS_SIGN_CERT_PFX` is configured.
+- **Keyless Build Provenance Attestations:** `.github/workflows/release.yml`'s `publish` job requests `id-token: write` and `attestations: write` and runs `actions/attest@v4` over `dist/*`, enabling verification via `gh attestation verify` with no external signing accounts.
+
 ### Still to do
 
 | Platform | Artifacts |
 |---|---|
-| macOS | notarization |
-| Windows | **MSI** (per-machine and per-user), signed (Authenticode); needs WiX on a Windows runner |
-| All | signatures |
+| macOS | notarization (deferred until Apple Developer ID / business registration) |
+| Windows | Authenticode signing (deferred until code-signing certificate / business registration) |
 
 **No self-updater** is built in. Updates come through package managers, the install scripts or the enterprise's own distribution.
 
@@ -308,7 +312,7 @@ cargo build --release --locked --offline \
 ```
 
 - A system `config.toml` with `[policy]` locks (offline, allowed providers and provider hosts, max permission mode, audit path), distributed through MDM/GPO/Ansible. `[policy.providers] hosts = ["llm.corp.example"]` guarantees no other model server is contacted, even if the bundle's files are left in place.
-- Windows: an MSI with transforms (MST) can drop the system config into `%ProgramData%\quack\`. Group Policy is not supported natively; the config file is the policy surface.
+- Windows: an MSI (`quack-<target>.msi`) with transforms (MST) can drop the system config into `%ProgramData%\quack\`, and quack natively reads `HKLM\SOFTWARE\Policies\quack` (`SystemDir` and `PolicyToml`, built 2026-11-26) for GPO/MDM/Intune enforcement.
 - Reproducible builds: `--locked`, pinned toolchain via `rust-toolchain.toml`, `SOURCE_DATE_EPOCH`.
 
 ## Licensing hygiene

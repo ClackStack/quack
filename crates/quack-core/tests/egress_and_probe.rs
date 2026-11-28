@@ -85,7 +85,7 @@ async fn live_egress_ledger_records_and_replays_across_resume() {
 #[tokio::test]
 async fn secret_shield_redacts_prompt_and_blocks_denied_tool_output() {
     let server = MockServer::start().await;
-    let secret_token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let secret_token = "ghp_SYNTHETICREVOKED00000000000000000000";
 
     Mock::given(method("POST"))
         .and(body_string_contains("Read secret.txt"))
@@ -130,7 +130,9 @@ async fn secret_shield_redacts_prompt_and_blocks_denied_tool_output() {
     // 1. Prompt containing a secret -> Ask -> RedactAndSend -> plaintext never reaches wire.
     engine
         .submit(Op::UserTurn {
-            items: vec![InputItem::text(format!("Here is my token: {secret_token}"))],
+            items: vec![InputItem::text(format!(
+                "Here is my token:\n{secret_token}"
+            ))],
             overrides: TurnOverrides::default(),
         })
         .await;
@@ -138,13 +140,27 @@ async fn secret_shield_redacts_prompt_and_blocks_denied_tool_output() {
         match next_event(&mut engine).await {
             Event::ApprovalRequest {
                 call_id,
-                request: ApprovalRequest::EgressSecrets { findings, .. },
+                request:
+                    ApprovalRequest::EgressSecrets {
+                        provider,
+                        host,
+                        findings,
+                    },
                 ..
             } => {
-                assert!(!findings.is_empty());
+                assert_eq!(provider, "mock");
+                assert_eq!(host, server.address().to_string());
+                assert_eq!(findings.len(), 1);
+                let finding = &findings[0];
+                let context = finding.context.as_ref().expect("finding context");
+                assert_eq!(context.label, "Possible GitHub token");
+                assert_eq!(context.source, "Prompt text");
+                assert_eq!(finding.line, Some(2));
+                let json = serde_json::to_string(finding).expect("serialize finding");
+                assert!(!json.contains(secret_token), "finding leaked the secret");
                 assert!(
-                    !findings[0].preview.contains("0123456789"),
-                    "finding preview leaked full secret"
+                    !json.contains("Here is my token"),
+                    "finding leaked surrounding text"
                 );
                 engine
                     .submit(Op::ApprovalResponse {
@@ -171,9 +187,15 @@ async fn secret_shield_redacts_prompt_and_blocks_denied_tool_output() {
         match next_event(&mut engine).await {
             Event::ApprovalRequest {
                 call_id,
-                request: ApprovalRequest::EgressSecrets { .. },
+                request: ApprovalRequest::EgressSecrets { findings, .. },
                 ..
             } => {
+                let finding = findings.first().expect("tool output finding");
+                assert_eq!(
+                    finding.context.as_ref().expect("context").source,
+                    "Tool output: read"
+                );
+                assert_eq!(finding.line, Some(1));
                 engine
                     .submit(Op::ApprovalResponse {
                         call_id,

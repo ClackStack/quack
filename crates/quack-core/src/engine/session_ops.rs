@@ -311,7 +311,7 @@ impl Engine {
 
     /// Replace the conversation with a saved session or an empty one, keeping the model.
     pub(super) fn switch_session(&mut self, target: Option<SessionId>) {
-        // The new session starts outside plan mode, on the session's own model.
+        // Start from the session's own model, not the previous session's planner.
         self.restore_editor();
         let Some(setup) = self.convo.as_ref().map(|c| c.setup.clone()) else {
             return self.warn("no model is ready; sessions open once one is".into());
@@ -358,9 +358,13 @@ impl Engine {
         };
         let skill_names = loaded_skills.names();
         self.skills_changed = false;
+        let (perms, warnings) = startup::configured_permissions(&self.config, &setup.tool_ctx);
+        for warning in warnings {
+            self.warn(format!("[permissions]: {warning}"));
+        }
         if let Some(c) = &mut self.convo {
             // Session approvals and the plan belong to the session they were made in.
-            c.perms = Arc::new(Mutex::new(c.setup.permissions.clone()));
+            c.perms = Arc::new(Mutex::new(perms));
             c.nested = nested(&self.config, &c.setup, &history);
             c.loaded_skills = Arc::new(Mutex::new(loaded_skills));
             c.history = Some(history);

@@ -110,7 +110,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
 		shortLabel: 'Permissions',
 		kicker: 'Guardrails & toggles',
 		summary:
-			'Default approval policy, OS sandbox scope, permission rule lists, bundles, and disabled extensions.'
+			'Default work mode and approval policy, OS sandbox scope, permission rules, and extension toggles.'
 	},
 	{
 		id: 'extensions',
@@ -636,12 +636,12 @@ export const SETTING_FIELDS: readonly SettingFieldDef[] = [
 		group: 'Default approvals & work mode',
 		label: 'Default approval policy',
 		kind: 'select',
-		defaultValue: '"ask"',
+		defaultValue: '"allow"',
 		options: [
 			{ value: 'read-only', label: 'read-only', detail: 'Deny edits and shell writes' },
 			{ value: 'ask', label: 'ask', detail: 'Prompt before edits and commands' },
 			{ value: 'auto-edit', label: 'auto-edit', detail: 'Allow file edits, ask for shell' },
-			{ value: 'allow', label: 'allow (full-auto)', detail: 'Run inside sandbox without prompts' },
+			{ value: 'allow', label: 'allow (full-auto)', detail: 'Approve eligible actions automatically' },
 			{ value: 'yolo', label: 'yolo', detail: 'Skip approval prompts' }
 		],
 		fallbackDescription: 'Startup approval policy when starting a new session.'
@@ -652,7 +652,7 @@ export const SETTING_FIELDS: readonly SettingFieldDef[] = [
 		group: 'Default approvals & work mode',
 		label: 'Default work mode',
 		kind: 'select',
-		defaultValue: '"edit"',
+		defaultValue: '"plan"',
 		options: [
 			{ value: 'edit', label: 'edit', detail: 'Start in regular editing mode' },
 			{ value: 'plan', label: 'plan', detail: 'Start in read-only planning mode' }

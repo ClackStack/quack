@@ -297,14 +297,15 @@
 				</a>
 			{/each}
 			<a href={repo} class="font-semibold text-sky-ink hover:underline underline-offset-2" rel="noreferrer">
-				.deb, .rpm &amp; all platforms
+				.deb, .rpm, .msi &amp; all platforms
 			</a>
 		</p>
 	{:else if way !== 'src'}
 		<p class="mt-2.5 text-sm text-ink-2">
 			Or download packages (<code class="text-ink">.deb</code>, <code class="text-ink">.rpm</code>,
-			<code class="text-ink">.AppImage</code>, <code class="text-ink">.dmg</code>,
-			<code class="text-ink">.exe</code>, <code class="text-ink">.tar.gz</code>) on
+			<code class="text-ink">.msi</code>, <code class="text-ink">.AppImage</code>,
+			<code class="text-ink">.dmg</code>, <code class="text-ink">.exe</code>,
+			<code class="text-ink">.tar.gz</code>) on
 			<a href={repo} class="font-semibold text-sky-ink hover:underline underline-offset-2" rel="noreferrer">GitHub Releases</a>.
 		</p>
 	{/if}

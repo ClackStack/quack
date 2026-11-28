@@ -121,8 +121,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: ConfigCmd,
     },
-    /// List saved sessions for this project.
-    Sessions,
+    /// List or prune saved sessions for this project.
+    Sessions {
+        #[command(subcommand)]
+        cmd: Option<SessionsCmd>,
+    },
     /// Check the environment: config, directories, terminal.
     Doctor,
     /// Add a provider (a server on this machine, a hosted service, or a URL) and pick the
@@ -285,6 +288,19 @@ pub(crate) enum McpCmd {
         #[arg(long)]
         project: bool,
     },
+    /// Sign in to an OAuth-protected remote HTTP MCP server in your browser.
+    Login {
+        /// Server id (see `quack mcp list`).
+        id: String,
+        /// Print the authorization URL without trying to open a browser.
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Revoke and delete saved OAuth credentials for a remote HTTP MCP server.
+    Logout {
+        /// Server id.
+        id: String,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -344,6 +360,23 @@ pub(crate) enum CatalogCmd {
         /// Write it here instead of the cache directory.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SessionsCmd {
+    /// Delete saved sessions older than a threshold.
+    Prune {
+        /// Remove sessions not updated within this duration (e.g. `30d`, `2w`, `12h`).
+        /// Defaults to `[sessions] retention_days` when set, otherwise `30d`.
+        #[arg(long = "older-than", value_name = "DURATION")]
+        older_than: Option<String>,
+        /// Prune sessions across every project, not only this workspace.
+        #[arg(long)]
+        all: bool,
+        /// Show what would be removed without deleting anything.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

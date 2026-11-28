@@ -173,6 +173,152 @@ impl ProjectSessions {
     pub fn append_history(&self, text: &str) -> std::io::Result<()> {
         append_history_file(&self.history_path(), text)
     }
+
+    /// Remove saved sessions whose last update is strictly older than `cutoff_unix`
+    /// (never removing `keep_id`), deleting their session folders and compacting
+    /// `index.jsonl`. When `dry_run` is true, nothing is deleted or rewritten.
+    pub fn prune_older_than(
+        &self,
+        cutoff_unix: u64,
+        dry_run: bool,
+        keep_id: Option<&str>,
+    ) -> std::io::Result<PruneReport> {
+        let all = self.list();
+        if all.is_empty() {
+            return Ok(PruneReport::default());
+        }
+        let mut removed = Vec::new();
+        let mut kept = Vec::new();
+        for entry in all {
+            let protected = keep_id.is_some_and(|k| k == entry.id);
+            if !protected && entry.updated < cutoff_unix {
+                removed.push(entry);
+            } else {
+                kept.push(entry);
+            }
+        }
+        if removed.is_empty() {
+            return Ok(PruneReport {
+                removed: Vec::new(),
+                kept: kept.len(),
+                bytes_freed: 0,
+            });
+        }
+        let mut bytes_freed = 0u64;
+        for entry in &removed {
+            let path = self.dir.join(&entry.dir);
+            bytes_freed = bytes_freed.saturating_add(dir_size(&path));
+            if !dry_run && path.exists() {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+        if !dry_run {
+            // Write oldest-first so the append-only order matches normal operation.
+            kept.reverse();
+            let mut buf = String::new();
+            for entry in &kept {
+                let line = serde_json::to_string(entry)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+            let index = self.index_path();
+            let seq = HISTORY_SEQ.fetch_add(1, Ordering::Relaxed);
+            let tmp = index.with_extension(format!("jsonl.{}.{seq}.tmp", std::process::id()));
+            std::fs::write(&tmp, buf)
+                .and_then(|()| rename_replacing(&tmp, &index))
+                .inspect_err(|_| {
+                    let _ = std::fs::remove_file(&tmp);
+                })?;
+        }
+        Ok(PruneReport {
+            removed,
+            kept: kept.len(),
+            bytes_freed,
+        })
+    }
+}
+
+/// Summary returned by [`ProjectSessions::prune_older_than`] and [`prune_all_projects`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    pub removed: Vec<IndexEntry>,
+    pub kept: usize,
+    pub bytes_freed: u64,
+}
+
+/// Prune expired sessions across every project directory under `sessions_root`.
+pub fn prune_all_projects(
+    sessions_root: &Path,
+    cutoff_unix: u64,
+    dry_run: bool,
+    keep_id: Option<&str>,
+) -> std::io::Result<PruneReport> {
+    let Ok(read_dir) = std::fs::read_dir(sessions_root) else {
+        return Ok(PruneReport::default());
+    };
+    let mut total = PruneReport::default();
+    for entry in read_dir.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() || !dir.join("index.jsonl").is_file() {
+            continue;
+        }
+        let ps = ProjectSessions { dir };
+        let part = ps.prune_older_than(cutoff_unix, dry_run, keep_id)?;
+        total.removed.extend(part.removed);
+        total.kept += part.kept;
+        total.bytes_freed = total.bytes_freed.saturating_add(part.bytes_freed);
+    }
+    Ok(total)
+}
+
+/// Parse a retention duration like `30d`, `2w`, `12h`, `45m`, or `60s` into seconds.
+pub fn parse_duration_secs(spec: &str) -> Result<u64, String> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return Err("duration cannot be empty; expected e.g. `30d`, `2w`, `12h`".into());
+    }
+    let (num, unit) = trimmed.split_at(trimmed.len().saturating_sub(1));
+    let multiplier: u64 = match unit {
+        "s" | "S" => 1,
+        "m" | "M" => 60,
+        "h" | "H" => 3_600,
+        "d" | "D" => 86_400,
+        "w" | "W" => 7 * 86_400,
+        _ => {
+            return Err(format!(
+                "invalid duration `{trimmed}`: end with `s`, `m`, `h`, `d`, or `w` (e.g. `30d`)"
+            ));
+        }
+    };
+    let count: u64 = num.parse().map_err(|_| {
+        format!("invalid duration `{trimmed}`: expected a positive number before `{unit}`")
+    })?;
+    if count == 0 {
+        return Err("duration must be greater than zero".into());
+    }
+    count
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("duration `{trimmed}` is too large"))
+}
+
+fn dir_size(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if meta.is_file() {
+        return meta.len();
+    }
+    if !meta.is_dir() {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| dir_size(&e.path()))
+        .fold(0u64, u64::saturating_add)
 }
 
 const MAX_HISTORY: usize = 100;
@@ -526,5 +672,68 @@ mod tests {
         assert_eq!(ps.find(&id1).expect("find 1").id, id1);
         assert_eq!(ps.find(&id2).expect("find 2").id, id2);
         assert!(ps.find("").is_err());
+    }
+
+    #[test]
+    fn prune_older_than_respects_cutoff_dry_run_and_keep_id() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ps = ProjectSessions::new(tmp.path(), Path::new("/home/u/src/proj"));
+        let mut old_log = ps.create("old000000001", "p/m").expect("old");
+        old_log
+            .append("message", serde_json::json!({"text": "ancient"}))
+            .expect("append");
+        old_log.sync(Some("old"), 1).expect("sync");
+        let old_dir = old_log.dir();
+
+        let mut keep_log = ps.create("keep00000002", "p/m").expect("keep");
+        keep_log.sync(Some("keep"), 1).expect("sync");
+        let keep_dir = keep_log.dir();
+
+        // Rewrite index with deterministic old vs new timestamps.
+        let mut entries = ps.list();
+        for e in &mut entries {
+            e.updated = if e.id == "old000000001" { 100 } else { 500 };
+        }
+        let body: String = entries
+            .iter()
+            .map(|e| format!("{}\n", serde_json::to_string(e).expect("json")))
+            .collect();
+        std::fs::write(ps.index_path(), body).expect("write index");
+
+        // Dry run reports removal without deleting anything.
+        let dry = ps.prune_older_than(200, true, None).expect("dry");
+        assert_eq!(dry.removed.len(), 1);
+        assert_eq!(dry.kept, 1);
+        assert!(dry.bytes_freed > 0);
+        assert!(old_dir.exists());
+
+        // Protected id is kept even when older than cutoff.
+        let protected = ps
+            .prune_older_than(200, false, Some("old000000001"))
+            .expect("protected");
+        assert!(protected.removed.is_empty());
+        assert!(old_dir.exists());
+
+        // Real prune removes old session directory and compacts index.
+        let pruned = ps.prune_older_than(200, false, None).expect("prune");
+        assert_eq!(pruned.removed.len(), 1);
+        assert_eq!(pruned.removed[0].id, "old000000001");
+        assert_eq!(pruned.kept, 1);
+        assert!(!old_dir.exists());
+        assert!(keep_dir.exists());
+        assert_eq!(ps.list().len(), 1);
+        assert_eq!(ps.list()[0].id, "keep00000002");
+    }
+
+    #[test]
+    fn parse_duration_handles_units_and_rejects_bad_values() {
+        assert_eq!(parse_duration_secs("30d"), Ok(30 * 86_400));
+        assert_eq!(parse_duration_secs("2w"), Ok(14 * 86_400));
+        assert_eq!(parse_duration_secs("12h"), Ok(12 * 3_600));
+        assert_eq!(parse_duration_secs("45m"), Ok(45 * 60));
+        assert_eq!(parse_duration_secs("10s"), Ok(10));
+        assert!(parse_duration_secs("0d").is_err());
+        assert!(parse_duration_secs("30").is_err());
+        assert!(parse_duration_secs("").is_err());
     }
 }

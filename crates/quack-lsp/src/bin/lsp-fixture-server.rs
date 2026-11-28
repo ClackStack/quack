@@ -29,6 +29,7 @@ fn main() {
                 "documentSymbolProvider": true,
                 "workspaceSymbolProvider": true,
                 "renameProvider": true,
+                "codeActionProvider": { "resolveProvider": true },
             }})),
             "textDocument/didOpen" => {
                 let uri = params["textDocument"]["uri"].as_str().unwrap().to_owned();
@@ -135,6 +136,72 @@ fn main() {
                 }
                 json!({ "changes": changes })
             })),
+            "textDocument/codeAction" => {
+                let uri = params["textDocument"]["uri"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let start_line = params["range"]["start"]["line"].as_u64().unwrap_or(0) as usize;
+                let end_line = params["range"]["end"]["line"]
+                    .as_u64()
+                    .unwrap_or(start_line as u64) as usize;
+                let mut actions = Vec::new();
+                if let Some(text) = docs.get(&uri) {
+                    for (i, line) in text.lines().enumerate() {
+                        if i < start_line || i > end_line {
+                            continue;
+                        }
+                        if let Some(col) = line.find("ERROR") {
+                            // Action 1: requires `codeAction/resolve`
+                            actions.push(json!({
+                                "title": "Fix ERROR (resolved)",
+                                "kind": "quickfix",
+                                "isPreferred": true,
+                                "data": { "uri": uri, "line": i, "col": col }
+                            }));
+                            // Action 2: inline workspace edit
+                            actions.push(json!({
+                                "title": "Replace ERROR inline",
+                                "kind": "quickfix",
+                                "edit": {
+                                    "changes": {
+                                        uri.clone(): [{
+                                            "range": {
+                                                "start": { "line": i, "character": col },
+                                                "end": { "line": i, "character": col + 5 }
+                                            },
+                                            "newText": "OK_INLINE"
+                                        }]
+                                    }
+                                }
+                            }));
+                            break;
+                        }
+                    }
+                }
+                Some(Value::Array(actions))
+            }
+            "codeAction/resolve" => {
+                let mut action = params.clone();
+                if let (Some(uri), Some(line), Some(col)) = (
+                    action["data"]["uri"].as_str(),
+                    action["data"]["line"].as_u64(),
+                    action["data"]["col"].as_u64(),
+                ) {
+                    action["edit"] = json!({
+                        "changes": {
+                            uri: [{
+                                "range": {
+                                    "start": { "line": line, "character": col },
+                                    "end": { "line": line, "character": col + 5 }
+                                },
+                                "newText": "OK_RESOLVED"
+                            }]
+                        }
+                    });
+                }
+                Some(action)
+            }
             "shutdown" => Some(Value::Null),
             "exit" => std::process::exit(0),
             _ => None,

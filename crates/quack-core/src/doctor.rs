@@ -212,6 +212,12 @@ fn local(config: &Loaded) -> Vec<DoctorCheck> {
         )
     });
     out.push(sandbox_check(config));
+    if let Some(policy) = policy_check(config) {
+        out.push(policy);
+    }
+    if let Some(audit) = audit_check(config) {
+        out.push(audit);
+    }
     out.push(if runs(Path::new("git"), &["--version"]) {
         check("git", CheckStatus::Ok, "found")
     } else {
@@ -371,6 +377,62 @@ fn sandbox_check(config: &Loaded) -> DoctorCheck {
     }
 }
 
+fn policy_check(config: &Loaded) -> Option<DoctorCheck> {
+    let p = &config.settings.policy;
+    let reg = &config.dirs.registry_policy;
+    let mut parts = Vec::new();
+    if reg.is_active() {
+        parts.push(quack_config::win_policy::REGISTRY_ORIGIN.to_owned());
+    }
+    if !p.locked.is_empty() {
+        parts.push(format!("{} locked", p.locked.len()));
+    }
+    if let Some(max) = p.max_permission_mode {
+        parts.push(format!("max approvals: {}", max.label()));
+    }
+    if p.project_config != quack_config::settings::ProjectConfigPolicy::TrustedOnly {
+        parts.push(format!("project config: {:?}", p.project_config));
+    }
+    if !p.providers.allowed.is_empty() || !p.providers.hosts.is_empty() {
+        parts.push("provider allowlist".into());
+    }
+    if !p.mcp.allowed.is_empty() || !p.mcp.hosts.is_empty() {
+        parts.push("mcp allowlist".into());
+    }
+    if config.settings.network.offline {
+        parts.push("offline".into());
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(check("policy", CheckStatus::Ok, parts.join(" · ")))
+}
+
+fn audit_check(config: &Loaded) -> Option<DoctorCheck> {
+    let path = crate::audit::resolve_audit_path(config)?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mode = if config.settings.audit.include_content {
+        "with content"
+    } else {
+        "metadata only"
+    };
+    match writable(parent) {
+        Ok(()) => Some(check(
+            "audit",
+            CheckStatus::Ok,
+            format!("{} ({mode})", path.display()),
+        )),
+        Err(e) => Some(check(
+            "audit",
+            CheckStatus::Fail,
+            format!("{}: {e}; audit entries cannot be written", path.display()),
+        )),
+    }
+}
+
 fn version_flag(shell: &ShellKind) -> &'static str {
     match shell {
         ShellKind::Cmd(_) => "/?",
@@ -422,7 +484,9 @@ fn egress_check(config: &Loaded, usable: &[String]) -> DoctorCheck {
         if let Some(f) = item.loaded()
             && usable.contains(&item.id)
         {
-            add(&f.base_url);
+            for url in f.endpoints() {
+                add(url);
+            }
             if let Some(auth) = &f.auth {
                 add(&auth.issuer);
             }
@@ -460,6 +524,13 @@ fn egress_check(config: &Loaded, usable: &[String]) -> DoctorCheck {
         .collect();
     if !limits.is_empty() {
         detail.push_str(&format!(" · policy allows only {}", limits.join(", ")));
+    }
+    if s.tools.web_fetch.enabled && !s.network.offline {
+        detail.push_str(if s.tools.web_fetch.allow_private {
+            " · web_fetch enabled (allow_private)"
+        } else {
+            " · web_fetch enabled"
+        });
     }
     check("network", CheckStatus::Info, detail)
 }

@@ -289,6 +289,7 @@ impl App {
                     return self.note("wait for the current turn to finish first".into());
                 }
                 self.transcript.clear();
+                self.sidebar_scroll.set(0);
                 self.agents.clear();
                 self.plan.clear();
                 self.plan_expanded = false;
@@ -444,9 +445,21 @@ impl App {
                     let id = id.trim().to_owned();
                     self.note(format!("restarting MCP server {id}…"));
                     self.ops.push(Op::RestartMcp { id });
+                } else if let Some(id) = mcp_args.strip_prefix("login ") {
+                    let id = id.trim().to_owned();
+                    let sign_id = format!("mcp:{id}");
+                    self.signing_in = Some(sign_id.clone());
+                    self.setup.sign_in_error = None;
+                    self.browser = None;
+                    self.modal = Some(modal::sign_in(&sign_id, None, &self.theme));
+                    self.ops.push(Op::McpLogin { id: Some(id) });
+                } else if let Some(id) = mcp_args.strip_prefix("logout ") {
+                    let id = id.trim().to_owned();
+                    self.note(format!("signing out of MCP server {id}…"));
+                    self.ops.push(Op::McpLogout { id });
                 } else {
                     self.note(
-                        "usage: /mcp [add [--project|--user] [http|stdio] | enable <id> | disable <id> | restart <id>]"
+                        "usage: /mcp [add [--project|--user] [http|stdio] | enable <id> | disable <id> | restart <id> | login <id> | logout <id>]"
                             .into(),
                     );
                 }

@@ -122,6 +122,9 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App) {
     );
     if let (Some(area), Some(view)) = (sidebar, sidebar_view) {
         view.draw(f, app, area);
+    } else {
+        app.sidebar_view.set(crate::sidebar::View::default());
+        app.sidebar_scroll.set(0);
     }
     draw_popup(f, app, transcript);
     if let Some(c) = choices {
@@ -734,8 +737,8 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_shows_cache_hit_loaded_skills_and_active_lsp() {
-        use quack_protocol::{LspServerInfo, LspServerState};
+    fn sidebar_shows_cache_hit_all_skills_and_active_lsp() {
+        use quack_protocol::{CallId, LspServerInfo, LspServerState, SkillInfo};
 
         let mut app = App::new(test_info());
         app.info.model = Some("charm/qwen3.8-flash".into());
@@ -756,6 +759,17 @@ mod tests {
         app.on_engine(Event::Speed {
             ttft_ms: 120,
             tokens_per_sec: Some(48.0),
+        });
+        app.on_engine(Event::Skills {
+            skills: ["rust-best-practices", "writing"]
+                .into_iter()
+                .map(|name| SkillInfo {
+                    name: name.into(),
+                    description: String::new(),
+                    source: String::new(),
+                    dir: String::new(),
+                })
+                .collect(),
         });
         app.on_engine(Event::LoadedSkills {
             skills: vec!["rust-best-practices".into(), "release".into()],
@@ -826,6 +840,7 @@ mod tests {
             "48 tokens/s · 73% cache hit",
             "Skills",
             "✓ rust-best-practices",
+            "· writing",
             "✓ release",
             "LSP",
             "✓ rust-analyzer  ready",
@@ -834,6 +849,7 @@ mod tests {
         ] {
             assert!(s.contains(text), "missing {text}: {s}");
         }
+        assert_eq!(s.matches("rust-best-practices").count(), 1);
         assert!(
             !s.contains("gopls") && !s.contains("clangd"),
             "idle and uninstalled servers must stay hidden: {s}"
@@ -859,23 +875,38 @@ mod tests {
             "{ascii}"
         );
 
-        // Overflow capping keeps more than 3 skills/LSPs bounded.
-        app.on_engine(Event::LoadedSkills {
-            skills: vec!["s1".into(), "s2".into(), "s3".into(), "s4".into()],
+        app.on_engine(Event::Plan {
+            checklist: "[~] check the parser".into(),
         });
-        let capped = render(&app, 140, 30);
-        assert!(
-            capped.contains("s3") && capped.contains("s4") && capped.contains("+2 earlier"),
-            "{capped}"
-        );
+        app.on_engine(Event::AgentStarted {
+            id: "explore-1".into(),
+            agent: "explore".into(),
+            description: "find the failing case".into(),
+            call_id: CallId("t-explore-1".into()),
+            model: "mock/small".into(),
+        });
+        let full = render(&app, 140, 40);
+        let headings = [
+            "Session",
+            "Working folder",
+            "Model",
+            "Context",
+            "Plan",
+            "Sub-agents",
+            "LSP",
+            "Skills",
+        ]
+        .map(|heading| full.find(&format!("|  {heading}")).expect(heading));
+        assert!(headings.is_sorted(), "{full}");
 
-        // Starting a new session clears cache hit, speed, and loaded skills, while keeping workspace LSPs.
+        // Starting a new session clears loaded markers but keeps available skills and LSPs.
         app.execute("/new");
         let after_new = render(&app, 140, 30);
         assert!(
             !after_new.contains("cache hit")
                 && !after_new.contains("tokens/s")
-                && !after_new.contains("Skills")
+                && !after_new.contains("release")
+                && after_new.contains(". rust-best-practices")
                 && after_new.contains("rust-analyzer"),
             "{after_new}"
         );
@@ -934,6 +965,77 @@ mod tests {
             s.contains("explore · 2 steps") && s.contains("fix the parser and add a test"),
             "{s}"
         );
+    }
+
+    #[test]
+    fn sidebar_scrolls_to_every_skill_and_sub_agent_run() {
+        use crossterm::event::{
+            Event as TermEvent, KeyCode, KeyModifiers, MouseEvent, MouseEventKind,
+        };
+        use quack_protocol::{CallId, SkillInfo};
+
+        let mut app = started_app();
+        started(&mut app);
+        app.on_engine(Event::Skills {
+            skills: (0..12)
+                .map(|i| SkillInfo {
+                    name: format!("sidebar skill {i:02}"),
+                    description: String::new(),
+                    source: String::new(),
+                    dir: String::new(),
+                })
+                .collect(),
+        });
+        for i in 0..8 {
+            let id = format!("explore-{i}");
+            app.on_engine(Event::AgentStarted {
+                call_id: CallId(format!("t-{id}")),
+                id: id.clone(),
+                agent: "explore".into(),
+                description: format!("sidebar agent {i:02}"),
+                model: "mock/small".into(),
+            });
+            if i != 2 {
+                app.on_engine(Event::AgentFinished {
+                    id,
+                    ok: i % 2 == 0,
+                    summary: "finished".into(),
+                });
+            }
+        }
+        let tall = render(&app, 140, 55);
+        for i in 0..12 {
+            assert!(tall.contains(&format!("sidebar skill {i:02}")), "{tall}");
+        }
+        for i in 0..8 {
+            assert!(tall.contains(&format!("sidebar agent {i:02}")), "{tall}");
+        }
+
+        let top = render(&app, 140, 24);
+        assert!(
+            top.contains("sidebar agent 00") && top.contains('┃'),
+            "{top}"
+        );
+        assert!(!top.contains("sidebar skill 11"), "{top}");
+        app.on_terminal(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 110,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.sidebar_scroll.get(), 3);
+        assert_eq!(app.scroll.get(), 0);
+        key(&mut app, KeyCode::PageDown, KeyModifiers::ALT);
+        let bottom = render(&app, 140, 24);
+        assert!(bottom.contains("sidebar agent 07"), "{bottom}");
+        assert!(bottom.contains("sidebar skill 11"), "{bottom}");
+        assert!(!bottom.contains("sidebar agent 00"), "{bottom}");
+
+        key(&mut app, KeyCode::PageUp, KeyModifiers::ALT);
+        assert!(render(&app, 140, 24).contains("sidebar agent 00"));
+        key(&mut app, KeyCode::PageDown, KeyModifiers::ALT);
+        assert!(render(&app, 140, 55).contains("sidebar agent 00"));
+        assert_eq!(app.sidebar_scroll.get(), 0, "clamp after a resize");
     }
 
     #[test]
@@ -1023,7 +1125,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_plan_wraps_windows_long_lists_and_falls_back_when_crowded() {
+    fn sidebar_plan_wraps_windows_long_lists_and_stays_compact_when_crowded() {
         use quack_protocol::CallId;
         let mut app = App::new(test_info());
         app.info.model = Some("charm/qwen3.8-flash".into());
@@ -1097,7 +1199,7 @@ mod tests {
         );
 
         // With one sub-agent on a 24-row screen (3 rows left), the sidebar uses its compact
-        // heading meter + active step row; with two sub-agents it yields to the main strip.
+        // heading meter + active step row. With more runs, the sidebar can scroll.
         app.info.ui.ascii = false;
         app.glyphs = crate::theme::Glyphs::new(false);
         app.theme = crate::theme::Theme::resolve("dark", false);
@@ -1124,8 +1226,8 @@ mod tests {
         });
         let crowded = render(&app, 140, 24);
         assert!(
-            !crowded.contains("Plan ") && crowded.contains("  plan  "),
-            "fallback to main-pane strip when sidebar has no room: {crowded}"
+            crowded.contains("Plan ▰▰▰▱▱▱▱▱ 3/8") && crowded.contains('┃'),
+            "a scrollable list of runs leaves the compact plan in the sidebar: {crowded}"
         );
     }
 
@@ -2738,5 +2840,64 @@ mod tests {
             "{approval_render}"
         );
         assert!(approval_render.contains("^l scope"), "{approval_render}");
+    }
+
+    #[test]
+    fn secret_approval_keeps_details_and_actions_visible_in_a_narrow_terminal() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use quack_protocol::{ApprovalDecision, CallId, Op, SecretFinding, SecretFindingContext};
+
+        let mut app = App::new(test_info());
+        started(&mut app);
+        let call_id = CallId::from("egress-1");
+        app.on_engine(Event::ApprovalRequest {
+            call_id: call_id.clone(),
+            request: ApprovalRequest::EgressSecrets {
+                provider: "work-model".into(),
+                host: "api.example.test".into(),
+                findings: (0..8)
+                    .map(|i| SecretFinding {
+                        id: format!("sec-{i}"),
+                        kind: "github_token".into(),
+                        location: "tool:shell".into(),
+                        preview: "ghp_••••9876".into(),
+                        fingerprint: "sha256:placeholder".into(),
+                        line: Some(12),
+                        context: Some(SecretFindingContext {
+                            label: "Possible GitHub token".into(),
+                            source: "Tool output: shell".into(),
+                            impact: "If valid, it could grant access to GitHub resources within the token's permissions.".into(),
+                        }),
+                    })
+                    .collect(),
+            },
+            always: vec![],
+        });
+
+        let shown = render(&app, 52, 23);
+        for text in [
+            "work-model (api.example.test)",
+            "Possible GitHub token",
+            "Tool output: shell",
+            "scanned line 12",
+            "If valid, it could grant access",
+            "ghp_••••9876",
+            "findings not shown",
+            "unredacted text again",
+            "redact & send",
+            "send unredacted",
+            "allow for session",
+            "withhold",
+        ] {
+            assert!(shown.contains(text), "missing {text:?}:\n{shown}");
+        }
+        key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!(
+            app.take_ops(),
+            vec![Op::ApprovalResponse {
+                call_id,
+                decision: ApprovalDecision::RedactAndSend,
+            }]
+        );
     }
 }

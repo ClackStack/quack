@@ -529,3 +529,51 @@ async fn servers_ask_the_user_and_the_model() {
     assert!(sent.last().expect("sent").contains("summary: Short notes."));
     engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn per_server_defer_override_controls_tool_search_independently() {
+    let always_srv = mcp_server().await;
+    let never_srv = mcp_server().await;
+    let llm = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse_text("ok"))
+        .mount(&llm)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Tiny context window forces `auto` to defer, while `never` stays direct and `always` defers.
+    let loaded = common::workspace(tmp.path(), &llm.uri(), r#"["tiny"]"#, "");
+    let mcp_dir = tmp.path().join("user/mcp.d");
+    std::fs::create_dir_all(&mcp_dir).expect("mkdir");
+    std::fs::write(
+        mcp_dir.join("always.toml"),
+        format!("url = \"{}/mcp\"\ndefer = \"always\"\n", always_srv.uri()),
+    )
+    .expect("write");
+    std::fs::write(
+        mcp_dir.join("never.toml"),
+        format!("url = \"{}/mcp\"\ndefer = \"never\"\n", never_srv.uri()),
+    )
+    .expect("write");
+
+    let mut engine = Engine::spawn(Arc::new(loaded));
+    mcp_ready(&mut engine).await;
+
+    engine.submit(Op::ListMcp).await;
+    let servers = loop {
+        if let Event::McpServers { servers } = engine.events.recv().await.expect("open") {
+            break servers;
+        }
+    };
+    let always_info = servers.iter().find(|s| s.id == "always").expect("always");
+    let never_info = servers.iter().find(|s| s.id == "never").expect("never");
+    assert!(always_info.deferred, "{always_info:?}");
+    assert!(!never_info.deferred, "{never_info:?}");
+
+    turn(&mut engine, "hello").await;
+    let sent = bodies(&llm).await;
+    assert!(sent[0].contains("\"mcp__never__echo\""), "{}", sent[0]);
+    assert!(sent[0].contains("\"tool_search\""), "{}", sent[0]);
+    assert!(!sent[0].contains("\"mcp__always__echo\""), "{}", sent[0]);
+    engine.shutdown().await;
+}

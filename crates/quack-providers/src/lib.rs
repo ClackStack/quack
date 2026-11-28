@@ -26,6 +26,7 @@ mod sse;
 pub mod tokens;
 pub mod toolparse;
 mod types;
+pub mod web_fetch;
 
 pub use error::{ErrorKind, ProviderError};
 pub use ledger::{EgressDraft, EgressLedger};

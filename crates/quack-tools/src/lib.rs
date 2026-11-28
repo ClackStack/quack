@@ -3,6 +3,7 @@
 
 mod ask;
 mod blocks;
+pub mod client_bridge;
 mod edit;
 pub mod grammar;
 mod hashline;
@@ -25,9 +26,11 @@ mod skill;
 mod task;
 mod text;
 mod todo;
+pub mod web_fetch;
 mod write;
 
 pub use ask::{Answers, AskRequest, Asker};
+pub use client_bridge::{ClientBridge, TerminalOutput};
 pub use permissions::{Decision, Permissions, is_read_only_shell};
 pub use registry::{
     ReadTracker, Registry, SandboxState, Subject, Tool, ToolCtx, ToolKind, ToolOutput,
@@ -36,3 +39,4 @@ pub use search::workspace_files;
 pub use skill::expand as expand_skill;
 pub use task::{AgentInfo, SpawnRequest, Spawner, TaskReport, TaskRequest};
 pub use todo::Plan;
+pub use web_fetch::{WebFetchResponse, WebFetcher};

@@ -183,6 +183,72 @@ pub(crate) fn sessions(loaded: &Loaded) -> i32 {
     exit::OK
 }
 
+pub(crate) fn sessions_prune(
+    loaded: &Loaded,
+    older_than: Option<&str>,
+    all_projects: bool,
+    dry_run: bool,
+) -> i32 {
+    let default_spec;
+    let spec = match older_than {
+        Some(s) => s,
+        None if loaded.settings.sessions.retention_days > 0 => {
+            default_spec = format!("{}d", loaded.settings.sessions.retention_days);
+            &default_spec
+        }
+        None => "30d",
+    };
+    let secs = match quack_store::session::parse_duration_secs(spec) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return exit::CONFIG_ERROR;
+        }
+    };
+    let report = match quack_core::prune_sessions(loaded, secs, all_projects, dry_run, None) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: cannot prune sessions: {e}");
+            return exit::AGENT_ERROR;
+        }
+    };
+    let scope = if all_projects {
+        "across all projects"
+    } else {
+        "in this project"
+    };
+    if report.removed.is_empty() {
+        println!(
+            "no sessions older than {spec} {scope} ({} kept)",
+            report.kept
+        );
+        return exit::OK;
+    }
+    let verb = if dry_run { "would remove" } else { "removed" };
+    println!(
+        "{verb} {} session(s) older than {spec} {scope} ({} freed, {} kept)",
+        report.removed.len(),
+        human_bytes(report.bytes_freed),
+        report.kept
+    );
+    exit::OK
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 pub(crate) fn trust(loaded: &Loaded, decision: Option<quack_config::TrustDecision>) -> i32 {
     use quack_config::ProjectStatus;
     let dir = &loaded.dirs.project;
