@@ -404,7 +404,7 @@ fn draw_plan(
         Span::styled(separator, t.dim),
         Span::styled(format!("{done}/{total} ({percent}%)"), count_style),
     ]));
-    let river = t.plan_river(&app.glyphs, done, total);
+    let river = t.plan_river(&app.glyphs, done, total, width);
     rows.push(Line::from(Vec::from(river)));
 
     let step_room = remaining - 3;

@@ -1,7 +1,5 @@
 //! Header, startup panel, input box, status bar, plan strip, and welcome screen.
 
-use crate::theme::PLAN_RIVER_WIDTH;
-
 use super::*;
 
 pub(super) fn draw_header(f: &mut Frame<'_>, app: &App, area: Rect, sidebar: bool) {
@@ -350,13 +348,9 @@ pub(crate) fn plan_mark(app: &App, state: PlanState) -> (&'static str, Style) {
     }
 }
 
-/// The plan strip shows while the model's plan has unfinished items.
-pub(super) fn plan_open(app: &App) -> bool {
-    app.plan.iter().any(|(s, _)| *s != PlanState::Done)
-}
-
 /// One row above the input: progress through the plan and the step in hand.
 pub(super) fn draw_plan(f: &mut Frame<'_>, app: &App, area: Rect) {
+    const MIN_RIVER_WIDTH: usize = 10;
     const MIN_STEP_ROOM: usize = 24;
 
     let t = &app.theme;
@@ -375,15 +369,18 @@ pub(super) fn draw_plan(f: &mut Frame<'_>, app: &App, area: Rect) {
         .unwrap_or((PlanState::Pending, ""));
     let (mark, mark_style) = plan_mark(app, state);
     let label = " plan ";
-    let count = format!(" {done}/{total}");
+    // Keep the river width steady when the completed count gains a digit.
+    let digits = total.checked_ilog10().unwrap_or(0) as usize + 1;
+    let count = format!(" {done:>digits$}/{total}");
     let mark = format!("  {mark} ");
-    let mut step_room = usize::from(area.width)
-        .saturating_sub(1 + label.width() + count.width() + mark.width() + 1);
+    let width = usize::from(area.width);
+    let mut step_room = width.saturating_sub(1 + label.width() + count.width() + mark.width() + 1);
+    let river_width = (width / 3).min(step_room.saturating_sub(1 + MIN_STEP_ROOM));
     let mut spans = vec![Span::raw(" "), Span::styled(label, t.pill(t.ok))];
-    if step_room >= 1 + PLAN_RIVER_WIDTH + MIN_STEP_ROOM {
+    if river_width >= MIN_RIVER_WIDTH {
         spans.push(Span::raw(" "));
-        spans.extend(t.plan_river(&app.glyphs, done, total));
-        step_room -= 1 + PLAN_RIVER_WIDTH;
+        spans.extend(t.plan_river(&app.glyphs, done, total, river_width));
+        step_room -= 1 + river_width;
     }
     spans.push(Span::styled(count, t.dim));
     if !step.is_empty() && step_room > 0 {
@@ -428,8 +425,14 @@ pub(super) fn draw_plan_list(f: &mut Frame<'_>, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), list);
 }
 
-/// The empty transcript: a duck, and the few things worth knowing first.
-pub(super) fn welcome(app: &App, area: Rect) -> Vec<Line<'static>> {
+pub(crate) const WELCOME_DUCK_ROWS: u16 = 6;
+
+pub(crate) fn welcome_duck_fits(area: Rect) -> bool {
+    area.width >= 64 && area.height > WELCOME_DUCK_ROWS
+}
+
+/// The first rows of the transcript: a duck, and the few things worth knowing first.
+pub(super) fn welcome(app: &App, area: Rect, step: u64) -> Vec<Line<'static>> {
     let t = &app.theme;
     let hint = |key: &str, what: &str| {
         vec![
@@ -471,7 +474,7 @@ pub(super) fn welcome(app: &App, area: Rect) -> Vec<Line<'static>> {
         .concat(),
     ];
     // Too narrow or short for the duck: just the tips.
-    if area.width < 64 || area.height < 7 {
+    if !welcome_duck_fits(area) {
         let mut lines = vec![Line::raw("")];
         lines.extend(right.into_iter().skip(2).map(|mut r| {
             r.insert(0, Span::raw("   "));
@@ -480,12 +483,6 @@ pub(super) fn welcome(app: &App, area: Rect) -> Vec<Line<'static>> {
         return lines;
     }
     let (body, beak) = t.duck();
-
-    let step = if app.info.ui.reduced_motion {
-        0
-    } else {
-        (app.frame() / 8) % 16
-    };
 
     let (shift, eye, beak_lower, tail, wave_idx) = match step {
         // 0: default / static pose

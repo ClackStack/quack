@@ -23,10 +23,10 @@ mod chrome;
 mod overlays;
 mod transcript;
 
-pub(crate) use chrome::plan_mark;
+pub(crate) use chrome::{WELCOME_DUCK_ROWS, plan_mark, welcome_duck_fits};
 use chrome::{
     draw_attachments, draw_header, draw_input, draw_panel, draw_plan, draw_plan_list, draw_status,
-    input_width, plan_open, welcome,
+    input_width, welcome,
 };
 pub(crate) use overlays::key_hints;
 use overlays::{choices, draw_approval, draw_choices, draw_popup, draw_prompt};
@@ -66,10 +66,8 @@ pub(crate) fn draw(f: &mut Frame<'_>, app: &App) {
         u16::try_from(app.plan.len() + 1)
             .unwrap_or(u16::MAX)
             .min(cap)
-    } else if sidebar_plan {
-        0
     } else {
-        u16::from(plan_open(app))
+        u16::from(!app.plan.is_empty() && !sidebar_plan)
     };
     let attach_rows = u16::from(!app.attachments.is_empty());
     let choice_rows = choices.as_ref().map_or(0, |c| {
@@ -724,7 +722,8 @@ mod tests {
             assert!(s.contains(text), "missing {text}: {s}");
         }
         assert_eq!(s.matches("~/src/project").count(), 1);
-        assert_eq!(s.matches("charm/qwen3.8-flash").count(), 2);
+        // The welcome also names the active model, alongside the sidebar and status bar.
+        assert_eq!(s.matches("charm/qwen3.8-flash").count(), 3);
         insta::assert_snapshot!("sidebar_140x24", s);
 
         app.set_branch(Some("fix/parser".into()));
@@ -1074,6 +1073,7 @@ mod tests {
         let s = render(&app, 140, 24);
         for text in [
             "Plan · 1/3 (33%)",
+            "~~~~~~~~~_(•)>··················",
             "✓ read the parser",
             "▶ cache the token table",
             "· run the benchmarks",
@@ -1106,8 +1106,9 @@ mod tests {
         let done = render(&app, 140, 24);
         assert!(
             done.contains("Plan · 3/3 (100%)")
-                && done.contains("~~~~~_(•)>")
-                && done.contains("✓ run the benchmarks"),
+                && done.contains("  ~~~~~~~~~~~~~~~~~~~~~~~~~~~_(•)>")
+                && done.contains("✓ run the benchmarks")
+                && !done.contains("  plan  "),
             "{done}"
         );
 
@@ -1196,7 +1197,7 @@ mod tests {
             ascii.contains("Plan - 3/8 (37%)")
                 && ascii.contains("[~] step four active")
                 && ascii.contains("+3 earlier, +2 more")
-                && ascii.contains("~_(o)>...."),
+                && ascii.contains("~~~~~~~~~~_(o)>................."),
             "{ascii}"
         );
 
@@ -1652,13 +1653,17 @@ mod tests {
     fn plan_river_tracks_completed_steps_without_animating() {
         let mut app = App::new(test_info());
         started(&mut app);
+        // Test the river after the separate welcome animation has finished.
+        for _ in 0..128 {
+            app.on_tick();
+        }
         app.transcript.push(Entry::User("fix the parser".into()));
         app.on_engine(Event::Plan {
             checklist: "[~] Inspect the parser\n[ ] Change the parser\n[ ] Run tests".into(),
         });
         let start = render(&app, 80, 24);
         assert!(
-            start.contains("_(•)>····· 0/3  ▶ Inspect the parser"),
+            start.contains("  plan  _(•)>····················· 0/3  ▶ Inspect the parser"),
             "{start}"
         );
 
@@ -1669,7 +1674,7 @@ mod tests {
         assert!(app.take_dirty(), "a checklist update must redraw");
         let progress = render(&app, 80, 24);
         assert!(
-            progress.contains("~_(•)>···· 1/3  ▶ Inspect the parser"),
+            progress.contains("  plan  ~~~~~~~_(•)>·············· 1/3  ▶ Inspect the parser"),
             "{progress}"
         );
 
@@ -1683,12 +1688,27 @@ mod tests {
         assert_eq!(render(&app, 80, 24), progress);
 
         app.on_engine(Event::Plan {
+            checklist: "[x] Inspect the parser\n[x] Change the parser\n[~] Run tests".into(),
+        });
+        let progress = render(&app, 80, 24);
+        assert!(
+            progress.contains("  plan  ~~~~~~~~~~~~~~_(•)>······· 2/3  ▶ Run tests"),
+            "{progress}"
+        );
+
+        app.on_engine(Event::Plan {
             checklist: "[x] Inspect the parser\n[x] Change the parser\n[x] Run tests".into(),
         });
-        assert!(!render(&app, 80, 24).contains("  plan  "));
-        app.execute("/todo");
         let done = render(&app, 80, 24);
-        assert!(done.contains("~~~~~_(•)> 3/3"), "{done}");
+        assert!(
+            done.contains("  plan  ~~~~~~~~~~~~~~~~~~~~~_(•)> 3/3"),
+            "{done}"
+        );
+
+        app.on_engine(Event::Plan {
+            checklist: String::new(),
+        });
+        assert!(!render(&app, 80, 24).contains("  plan  "));
     }
 
     #[test]
@@ -1704,9 +1724,14 @@ mod tests {
             "{narrow}"
         );
         assert!(!narrow.contains(app.glyphs.assistant), "{narrow}");
+        let medium = render(&app, 64, 24);
+        assert!(
+            medium.contains("~~~~~~~~_(•)>········ 1/2  · 修正 parser and run tests"),
+            "{medium}"
+        );
         let wide = render(&app, 80, 24);
         assert!(
-            wide.contains("~~_(•)>··· 1/2  · 修正 parser and run tests"),
+            wide.contains("~~~~~~~~~~~_(•)>·········· 1/2  · 修正 parser and run tests"),
             "{wide}"
         );
     }
@@ -1745,12 +1770,12 @@ mod tests {
                 .expect("draw");
             let buf = terminal.backend().buffer();
             assert_eq!((buf[(8, 0)].symbol(), buf[(8, 0)].fg), ("~", water));
-            assert_eq!((buf[(9, 0)].symbol(), buf[(9, 0)].fg), ("_", duck));
+            assert_eq!((buf[(13, 0)].symbol(), buf[(13, 0)].fg), ("_", duck));
             let row = terminal.backend().to_string();
             let expected = if ascii {
-                "~_(o)>.... 1/3  [~] Change the parser"
+                "~~~~~_(o)>........... 1/3  [~] Change the parser"
             } else {
-                "~_(•)>···· 1/3  ▶ Change the parser"
+                "~~~~~_(•)>··········· 1/3  ▶ Change the parser"
             };
             assert!(row.contains(expected), "{row}");
         }
@@ -2384,7 +2409,11 @@ mod tests {
         key(&mut app, KeyCode::Home, KeyModifiers::CONTROL);
         let s = render(&app, 80, 24);
         assert!(s.contains("message 1 ") && !s.contains("message 40"), "{s}");
-        assert!(s.contains("more lines · ctrl-end"), "{s}");
+        assert!(s.contains("<(o )___"), "{s}");
+        assert!(
+            s.contains("more lines · Ctrl-End jumps to the latest"),
+            "{s}"
+        );
 
         // New output arrives below: the top stays in view.
         app.transcript.push(Entry::Assistant("a new reply".into()));
@@ -2393,7 +2422,7 @@ mod tests {
 
         key(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
         let s = render(&app, 80, 24);
-        assert!(!s.contains("message 1 "), "{s}");
+        assert!(s.contains("message 3 ") && !s.contains("<(o )___"), "{s}");
 
         key(&mut app, KeyCode::End, KeyModifiers::CONTROL);
         let s = render(&app, 80, 24);
@@ -2407,6 +2436,62 @@ mod tests {
         assert_eq!(app.scroll.get(), 1);
         key(&mut app, KeyCode::End, KeyModifiers::NONE);
         assert_eq!(app.scroll.get(), 1);
+    }
+
+    #[test]
+    fn scrollback_hint_fits_narrow_panes_without_covering_the_scrollbar() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        for (width, ascii) in [(50, false), (30, true), (18, false), (9, false)] {
+            let mut info = test_info();
+            info.ui.ascii = ascii;
+            let mut app = App::new(info);
+            for n in 1..=40 {
+                app.transcript.push(Entry::User(format!("row {n}")));
+            }
+            let area = Rect::new(4, 1, width, 12);
+            let mut terminal =
+                Terminal::new(TestBackend::new(area.right(), area.bottom())).expect("terminal");
+            let render_pane = |terminal: &mut Terminal<TestBackend>, app: &App| {
+                terminal
+                    .draw(|f| {
+                        f.render_widget(Line::raw("left"), Rect::new(0, area.bottom() - 1, 4, 1));
+                        draw_transcript(f, app, area);
+                    })
+                    .expect("draw");
+            };
+            render_pane(&mut terminal, &app);
+            key(&mut app, KeyCode::Home, KeyModifiers::CONTROL);
+            render_pane(&mut terminal, &app);
+            let buf = terminal.backend().buffer();
+            let row: String = (0..area.right())
+                .map(|x| buf[(x, area.bottom() - 1)].symbol())
+                .collect();
+            assert!(
+                row.starts_with("left") && row.ends_with(app.glyphs.scroll[1]),
+                "{row}"
+            );
+            let scroll = app.scroll.get();
+            match width {
+                50 => assert!(
+                    row.contains(&format!("↓ {scroll} lines · Ctrl-End ")),
+                    "{row}"
+                ),
+                30 => assert!(
+                    row.contains(&format!("v {scroll} lines - Ctrl-End ")),
+                    "{row}"
+                ),
+                18 => assert!(
+                    row.contains(" Ctrl-End ") && !row.contains("lines"),
+                    "{row}"
+                ),
+                _ => assert!(!row.contains("Ctrl-"), "{row}"),
+            }
+            key(&mut app, KeyCode::End, KeyModifiers::CONTROL);
+            render_pane(&mut terminal, &app);
+            assert_eq!(app.scroll.get(), 0);
+            assert!(!terminal.backend().to_string().contains("Ctrl-End"));
+        }
     }
 
     #[test]
@@ -2510,7 +2595,7 @@ mod tests {
     }
 
     #[test]
-    fn welcome_duck_animates_and_honors_reduced_motion() {
+    fn welcome_duck_takes_one_lap_and_rests() {
         let mut app = App::new(test_info());
         started(&mut app);
 
@@ -2536,18 +2621,167 @@ mod tests {
         let s_blink = render(&app, 80, 24);
         assert!(s_blink.contains("<(- )___"));
 
-        // With reduced motion, step is locked at 0
-        let mut info_rm = test_info();
-        info_rm.ui.reduced_motion = true;
-        let mut app_rm = App::new(info_rm);
-        started(&mut app_rm);
-        for _ in 0..104 {
-            app_rm.on_tick();
+        // The last tick of the lap redraws the resting pose; no further duck redraws follow.
+        for _ in 0..23 {
+            app.on_tick();
         }
-        let s_rm = render(&app_rm, 80, 24);
-        assert!(s_rm.contains("<(o )___"));
-        assert!(s_rm.contains("._> /"));
-        assert!(s_rm.contains("~~~~~~~~~~"));
+        app.take_dirty();
+        app.on_tick();
+        assert!(app.take_dirty());
+        assert_eq!(render(&app, 80, 24), s0);
+        for _ in 0..256 {
+            app.on_tick();
+        }
+        assert!(!app.take_dirty());
+        assert_eq!(render(&app, 80, 24), s0);
+    }
+
+    #[test]
+    fn welcome_duck_never_requests_redraws_when_hidden_or_reduced_motion() {
+        for (width, height, reduced_motion) in [(80, 24, true), (60, 24, false), (80, 10, false)] {
+            let mut info = test_info();
+            info.ui.reduced_motion = reduced_motion;
+            let mut app = App::new(info);
+            started(&mut app);
+            let initial = render(&app, width, height);
+            assert_eq!(initial.contains("<(o )___"), reduced_motion, "{initial}");
+            app.take_dirty();
+            for _ in 0..104 {
+                app.on_tick();
+            }
+            assert!(!app.take_dirty());
+            assert_eq!(render(&app, width, height), initial);
+        }
+    }
+
+    #[test]
+    fn welcome_duck_stays_above_updates_and_scrolls_with_the_conversation() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut app = App::new(test_info());
+        started(&mut app);
+        let duck = "<(o )___";
+        let update = "quack 99.0.0 is out";
+        assert!(render(&app, 80, 24).contains(duck));
+
+        app.on_engine(Event::UpdateAvailable {
+            current: "0.1.0".into(),
+            latest: "99.0.0".into(),
+        });
+        let narrow = render(&app, 60, 24);
+        assert!(
+            !narrow.contains(duck) && narrow.contains(update),
+            "{narrow}"
+        );
+        let s = render(&app, 80, 24);
+        assert!(s.find(duck).expect("duck") < s.find(update).expect("update"));
+        app.take_dirty();
+        for _ in 0..56 {
+            app.on_tick();
+        }
+        assert!(app.take_dirty(), "the update does not stop the paddle");
+        assert!(render(&app, 80, 24).contains(". > /"));
+
+        app.input.set("first prompt");
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let s = render(&app, 80, 24);
+        assert!(s.contains(duck) && s.contains("first prompt"), "{s}");
+
+        app.on_engine(Event::AssistantDelta {
+            text: format!("{}\n\nlast reply line", "a reply line\n\n".repeat(24)),
+        });
+        let s = render(&app, 80, 24);
+        assert!(!s.contains(duck) && s.contains("last reply line"), "{s}");
+        app.take_dirty();
+        for _ in 0..8 {
+            app.on_tick();
+        }
+        assert!(!app.take_dirty(), "the duck is offscreen during its lap");
+
+        key(&mut app, KeyCode::Home, KeyModifiers::CONTROL);
+        let s = render(&app, 80, 24);
+        assert!(s.find(duck).expect("duck") < s.find(update).expect("update"));
+        assert!(!s.contains("last reply line"), "{s}");
+    }
+
+    #[test]
+    fn welcome_duck_copies_the_drawn_pose_across_the_notice_boundary() {
+        use crossterm::event::{
+            Event as TermEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+
+        let mut app = App::new(test_info());
+        started(&mut app);
+        app.on_engine(Event::Notice {
+            message: "startup notice".into(),
+        });
+        let s = render(&app, 80, 24);
+        assert!(s.contains("~~~~~~~~~~") && s.contains("startup notice"));
+        let top = app.transcript_area.get().y;
+        let mouse = |app: &mut App, kind, column, row| {
+            app.on_terminal(TermEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+        let left = MouseButton::Left;
+        mouse(&mut app, MouseEventKind::Down(left), 3, top + 5);
+        for _ in 0..8 {
+            app.on_tick();
+        }
+        mouse(&mut app, MouseEventKind::Drag(left), 16, top + 6);
+        mouse(&mut app, MouseEventKind::Up(left), 16, top + 6);
+        let copied = app.take_clipboard().expect("copied welcome and notice");
+        assert!(copied.starts_with("~~~~~~~~~~"), "{copied}");
+        assert!(copied.ends_with("\nstartup notice"), "{copied}");
+    }
+
+    #[test]
+    fn welcome_duck_appears_once_after_switching_sessions() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use quack_protocol::{ReplayItem, SessionId, SessionInfo};
+
+        let mut app = App::new(test_info());
+        started(&mut app);
+        app.transcript
+            .push(Entry::Assistant("old reply\n\n".repeat(24)));
+        render(&app, 80, 24);
+        key(&mut app, KeyCode::Home, KeyModifiers::CONTROL);
+        render(&app, 80, 24);
+        assert!(app.scroll.get() > 0);
+
+        app.execute("/resume previous");
+        app.on_engine(Event::SessionResumed {
+            session: Box::new(SessionInfo {
+                id: SessionId("previous".into()),
+                cwd: String::new(),
+                model: None,
+                profile: "generic".into(),
+                reasoning_effort: None,
+                reasoning_efforts: Vec::new(),
+            }),
+            items: vec![ReplayItem::User {
+                text: "resumed prompt".into(),
+            }]
+            .into(),
+        });
+        let s = render(&app, 80, 24);
+        assert_eq!(s.matches("<(o )___").count(), 1, "{s}");
+        assert!(
+            s.contains("resumed prompt") && !s.contains("old reply"),
+            "{s}"
+        );
+        assert_eq!(app.scroll.get(), 0);
+
+        app.execute("/new");
+        let s = render(&app, 80, 24);
+        assert_eq!(s.matches("<(o )___").count(), 1, "{s}");
+        assert!(
+            s.contains("new session") && !s.contains("resumed prompt"),
+            "{s}"
+        );
     }
 
     fn subscription_setup() -> App {

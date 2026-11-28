@@ -91,7 +91,7 @@ impl App {
         } else if self.input_view.get().0.contains(at) {
             self.click_input(x, y);
             self.selection = Some(Selection::new(Pane::Input, self.input_cell(x, y)));
-        } else if !self.transcript.is_empty() && self.transcript_area.get().contains(at) {
+        } else if self.transcript_area.get().contains(at) {
             self.selection = Some(Selection::new(Pane::Transcript, self.transcript_cell(x, y)));
         }
     }
@@ -135,10 +135,17 @@ impl App {
         let text = match sel.pane {
             Pane::Transcript => {
                 let width = usize::from(self.transcript_area.get().width.saturating_sub(1));
-                let (lines, gutters) = crate::ui::transcript_rows_with_gutters(self, width);
+                let (lines, gutters) = crate::ui::transcript_rows_with_gutters(self);
                 let rows: Vec<(String, usize)> = lines
                     .iter()
-                    .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                    .map(|l| {
+                        let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                        if l.width() > width {
+                            select::cut(&text, 0, width)
+                        } else {
+                            text
+                        }
+                    })
                     .zip(gutters)
                     .collect();
                 select::transcript_text(&rows, sel)
@@ -158,11 +165,8 @@ impl App {
     /// The transcript cell under `(x, y)`, held to the transcript's rows.
     pub(super) fn transcript_cell(&self, x: u16, y: u16) -> (usize, usize) {
         let area = self.transcript_area.get();
-        let (total, height) = self.view.get();
-        // The first row on screen, as drawing worked it out.
-        let first = total
-            .saturating_sub(self.scroll.get())
-            .saturating_sub(height);
+        let (total, _) = self.view.get();
+        let first = self.first_transcript_row();
         let y = y.clamp(area.y, area.bottom().saturating_sub(1));
         let row = (first + usize::from(y - area.y)).min(total.saturating_sub(1));
         (row, usize::from(x.saturating_sub(area.x)))

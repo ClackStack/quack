@@ -2,9 +2,10 @@
 
 Milestones are ordered by dependency and value. Each has **exit criteria** that must pass on **Linux, macOS and Windows** in CI before moving on. Dates are left out on purpose; scope is what's fixed.
 
-## TUI checklist polish — 2026-11-28
+## TUI polish — 2026-11-28
 
-- Plan progress is shown as a duck on a blue river in the strip, expanded checklist, and roomy sidebar. Its position follows completed steps, without a timer or replacing the exact count.
+- Plan progress is shown as a duck on a blue river in the strip, expanded checklist, and roomy sidebar. The river grows with the pane, the duck moves right in proportion to completed steps without a timer, and the plan stays visible at 100% until cleared.
+- The welcome duck takes one lap at launch, then rests at the top of scrollback. Update notices and messages appear below it, and `Ctrl-Home` brings it back after it scrolls away. The scrollback hint shortens on narrow panes to keep `Ctrl-End` visible without covering the scrollbar.
 
 ## Secret Shield warning context — 2026-11-28
 

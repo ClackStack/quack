@@ -47,6 +47,12 @@ The startup diagnostics (one row per subsystem, fed by `Event::StartupProgress`)
 
 Choice bars (2026-10-19) sit between the transcript and the input, taking rows from the transcript (the startup panel hides while one shows): the model's `ask_user` questions, and the plan review after a plan-mode turn. Both number their choices, preselect one, and keep the input live so the user can type an answer or a revision instead ([04](04-agent-loop-and-tools.md#plan-mode)).
 
+The welcome duck and tips are the first block of the transcript, above startup
+notices (including updates) and messages. They scroll away as the conversation
+grows; Ctrl-Home returns to them. The welcome is not saved in session history.
+The duck paddles once at launch when there is room, then rests; it does not
+request redraws when scrolled out of view. Small panes show just the tips.
+
 ### Wide-terminal sidebar (2026-11-11)
 
 At 140 columns × 24 rows and above, the right sidebar shows **Session**,
@@ -80,8 +86,10 @@ main-pane strip stays visible.
 
 The strip and expanded checklist also use the river when there's room. On
 narrow terminals, the strip drops the river to keep the count and step readable.
-The duck's position follows the completed fraction, not a timer. The river
-works with ASCII and `NO_COLOR`, and behaves the same with reduced motion.
+The river widens with the pane, and the duck moves to the terminal column
+nearest the completed fraction, not on a timer. It reaches the right edge
+only at 100%, and the strip stays visible until the plan clears. The river works
+with ASCII and `NO_COLOR`, and behaves the same with reduced motion.
 
 The folder and branch move out of the header, context/speed move out of
 the status bar, and the one-line plan strip moves out of the main pane while the
@@ -240,6 +248,10 @@ The **approval dialog** shows a diff view for edits (side-by-side at 160 columns
 
 Defaults are listed in `quack keys --print`. Users override them in `config.toml [keys]`. Notable defaults: Esc interrupts the turn (double Esc opens the rewind picker), Ctrl-C clears input or interrupts, and a second Ctrl-C quits. Shift-Tab toggles Plan/Edit, keeping Ask/Allow approvals; Ctrl-Y toggles Ask/Allow approvals, keeping Plan/Edit; clicking either mode pill in the status bar toggles it directly without touching the input box; and Ctrl-T shows or hides the model's thinking (`/thinking show|hide`). PageUp/PageDown and Shift-Up/Down scroll the transcript, Ctrl-Home/Ctrl-End jump to its top and bottom, and the todo pane is toggled with `/todo`.
 
+When scrolled up, the transcript shows the number of lines below and how to
+jump back. Narrow panes use `↓ 18 lines · Ctrl-End`, then `Ctrl-End` alone if
+needed. The hint never covers the scrollbar or clips the shortcut.
+
 ## Themes
 
 - `auto` detects light or dark background (OSC 11 query with timeout; `COLORFGBG` fallback).
@@ -258,7 +270,7 @@ Defaults are listed in `quack keys --print`. Users override them in `config.toml
 
 ## Accessibility
 
-- `ui.reduced_motion` replaces spinners with static indicators.
+- `ui.reduced_motion` replaces spinners with static indicators and keeps the welcome duck at rest.
 - A screen-reader-friendly mode (`--plain`) disables the alt screen and box drawing, and prints linear output, close to headless text mode with input.
 
 ## Testing

@@ -212,7 +212,7 @@ configuration and migration from older modes.
 - **Sub-agents**: Delegate work to isolated sub-agents using the `task` tool:
   - `explore`: Read-only scout that searches the codebase and returns file paths and line ranges, keeping exploratory reads out of the primary context.
   - `general`: Executes focused, self-contained implementation tasks.
-- **Live checklist tracking**: See the current step and completed count above the input or in the sidebar. When there's room, a duck on a blue river marks progress. Expand the full checklist with `/todo`.
+- **Live checklist tracking**: See the current step and completed count above the input or in the sidebar. When there's room, a duck moves right along a blue river in proportion to the completed steps and stays at the far edge at 100%. Expand the full checklist with `/todo`.
 
 ### Context & Sessions
 
@@ -237,10 +237,10 @@ configuration and migration from older modes.
 
 ### Interface
 
-- **Full-screen Ratatui TUI**: Markdown formatting, syntax-highlighted code blocks, tables, and optional ASCII mode (`--ascii`).
+- **Full-screen Ratatui TUI**: Markdown formatting, syntax-highlighted code blocks, tables, and optional ASCII mode (`--ascii`). The welcome duck takes one short paddle at launch, then rests above notices and messages. It scrolls away as the conversation grows; **Ctrl-Home** brings it back.
 - **Wide-terminal sidebar**: At 140 columns × 24 rows and above, the right sidebar shows Session, Working folder (with Git branch), Model (with profile), Context, Plan, Sub-agents, LSP, and Skills, in that order. It lists all available skills, marks the ones loaded in the session, and lists all running and finished sub-agent runs. Scroll over the sidebar or use **Alt-PageUp / Alt-PageDown** when it overflows. It grows from 36 up to 48 columns on wider terminals; set `ui.sidebar = false` to disable it, or toggle it in `/config`.
 - **Window title**: The terminal's title shows the duck and what the session is about (`_(•)> fix the login bug`), and marks when a turn runs or quack needs you. If `[model] small` is configured, quack makes one background request to title the session (3–6 words, at most 50 characters) from the first message; thinking overhead is minimized while still leaving reasoning models room to think, broken `model.small` setups warn, and generation hiccups quietly keep the first-line fallback. The title also appears in the sidebar, `/resume` and `quack-gui` (its window title, header and job list). The first line of the message serves as the fallback, and `/title` sets it manually. `ui.terminal_title = false` turns it off.
-- **Smooth scrolling and selection**: Mouse wheel scrolling, click-to-position cursor, drag-to-select copying (`Ctrl-Shift-C` or `Ctrl-C` with a selection copies without interrupting a running turn; `Shift`-drag uses the terminal's own selection), and native system clipboard (`wl-copy`, `xclip`/`xsel`, `pbcopy`, Windows clipboard) alongside OSC 52.
+- **Smooth scrolling and selection**: Mouse wheel scrolling, click-to-position cursor, drag-to-select copying (`Ctrl-Shift-C` or `Ctrl-C` with a selection copies without interrupting a running turn; `Shift`-drag uses the terminal's own selection), and native system clipboard (`wl-copy`, `xclip`/`xsel`, `pbcopy`, Windows clipboard) alongside OSC 52. When scrolled up, a width-aware hint shows that **Ctrl-End** jumps to the latest output.
 - **Interactive pickers**: Fast, fuzzy-filtered modals for `/models`, `/providers`, `/config`, `/context`, `/stats`, `/doctor`, `/probe` (synthetic tool-calling probe), `/gui` (hand off session to `quack-gui`), and `/help`. In `/models` (and `quack-gui`'s model selector), set any model as the **Large** default (`[model] default`), **Small** helper (`[model] small`, used for session titles and `explore` sub-agents), or **Both** (`Ctrl-S` in `/models`, or `/models default [large|small|both] <provider>/<model>`). In `/config` → Layers, inspect each layer’s status and file path, then press Enter to copy the selected path. In `/config`, `/models`, `/profiles`, `/theme`, `/bundles`, `/hooks`, `/mcp` (including MCP add prompts), and approval prompts (`always`), press `Ctrl-L` (or `/scope [user|project]` / `--project` / `--user`) to choose whether writes go to user config or the project's `.quack/` folder.
 - **Status bar**: Separate work mode and approval indicators, context window utilization, model generation speed, and background tasks.
 
@@ -517,7 +517,7 @@ WSL, try the full hostname and check [Microsoft's WSL VPN and DNS tunneling guid
 | `startup_panel` | `"auto"` | Startup diagnostics: in the sidebar until the first turn; on narrow terminals only on problems. `always` or `never` |
 | `ascii` | `false` | Enable pure ASCII rendering mode |
 | `mouse` | `true` | Enable mouse wheel scrolling, cursor placement, and drag selection |
-| `reduced_motion` | `false` | Replace animated spinners with static indicators |
+| `reduced_motion` | `false` | Keep the welcome duck and spinner indicators still |
 | `terminal_title` | `true` | Set the terminal window title to the duck and the session title (`_(•)> fix the login bug`); `false` leaves the title alone |
 | `sidebar` | `true` | Show session details on the right at 140 columns × 24 rows and above, growing from 36 up to 48 columns on wider terminals; `false` uses the full width for the conversation |
 | `gui_restore_tabs` | `true` | Reopen previously open workspace tabs (`session-tabs.json`) when starting `quack-gui` unless `--no-restore` is passed |

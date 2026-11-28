@@ -234,13 +234,19 @@ impl Theme {
         glyphs: &Glyphs,
         done: usize,
         total: usize,
+        width: usize,
     ) -> [ratatui::text::Span<'static>; 3] {
         use ratatui::text::Span;
 
         let duck = glyphs.assistant;
-        let travel = PLAN_RIVER_WIDTH - duck.width();
-        // Round down so the duck doesn't reach the far bank before the plan is complete.
-        let wake = done * travel / total.max(1);
+        let travel = width.saturating_sub(duck.width());
+        let nearest = (done * travel + total / 2) / total.max(1);
+        let wake = if done < total {
+            // Reserve the far bank for completion, even when rounding near 100%.
+            nearest.min(travel.saturating_sub(1))
+        } else {
+            nearest
+        };
         [
             Span::styled("~".repeat(wake), self.accent),
             Span::styled(duck, self.duck().0),
@@ -248,8 +254,6 @@ impl Theme {
         ]
     }
 }
-
-pub(crate) const PLAN_RIVER_WIDTH: usize = 10;
 
 /// A small meter, e.g. `▰▰▰▱▱`, filled `frac` of `width` cells.
 pub(crate) fn meter(frac: f32, width: usize, ascii: bool) -> String {
@@ -374,7 +378,23 @@ pub(crate) fn tokens(n: u32) -> String {
 }
 
 #[cfg(test)]
-mod token_tests {
+mod tests {
+    use super::{Glyphs, Theme, UnicodeWidthStr};
+
+    #[test]
+    fn plan_river_reserves_the_far_bank_for_completion() {
+        let theme = Theme::resolve("dark", false);
+        let glyphs = Glyphs::new(false);
+        for (done, expected_wake) in [(0, 0), (50, 11), (99, 20), (100, 21)] {
+            let [wake, duck, water] = theme.plan_river(&glyphs, done, 100, 26);
+            assert_eq!(wake.content.width(), expected_wake, "{done}% complete");
+            assert_eq!(
+                wake.content.width() + duck.content.width() + water.content.width(),
+                26
+            );
+        }
+    }
+
     #[test]
     fn token_display() {
         assert_eq!(super::tokens(850), "850");

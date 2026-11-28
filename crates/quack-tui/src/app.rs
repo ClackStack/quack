@@ -28,6 +28,7 @@ const DOUBLE_ESC: Duration = Duration::from_millis(600);
 const SPIN_EVERY: u64 = 5;
 /// Welcome duck advances animation every N frames (16 ms each).
 const DUCK_ANIM_EVERY: u64 = 8;
+const DUCK_ANIM_STEPS: u64 = 16;
 /// Rows one mouse-wheel notch scrolls.
 const WHEEL_ROWS: usize = 3;
 /// Frames (16 ms each) the status bar says a selection was copied.
@@ -79,6 +80,8 @@ pub struct App {
     pub(crate) input_view: Cell<(Rect, usize)>,
     /// The transcript's area as last drawn, scrollbar column included.
     pub(crate) transcript_area: Cell<Rect>,
+    /// Copying the welcome uses the same pose as the frame the user selected.
+    pub(crate) drawn_welcome_step: Cell<u64>,
     /// Status-bar work-mode pill (`edit` / `plan`), clickable to toggle without touching input.
     pub(crate) work_mode_area: Cell<Rect>,
     /// Status-bar approvals pill (`ask` / `allow` / `YOLO`), clickable to toggle without touching input.
@@ -274,6 +277,7 @@ impl App {
             sidebar_view: Cell::default(),
             input_view: Cell::new((Rect::default(), 0)),
             transcript_area: Cell::new(Rect::default()),
+            drawn_welcome_step: Cell::new(0),
             work_mode_area: Cell::new(Rect::default()),
             permission_area: Cell::new(Rect::default()),
             transcript_cache: RefCell::new(crate::ui::TranscriptCache::default()),
@@ -451,8 +455,13 @@ impl App {
         frames[(self.frame / SPIN_EVERY) as usize % frames.len()]
     }
 
-    pub(crate) fn frame(&self) -> u64 {
-        self.frame
+    pub(crate) fn welcome_duck_step(&self) -> u64 {
+        let step = self.frame / DUCK_ANIM_EVERY;
+        if self.info.ui.reduced_motion || step >= DUCK_ANIM_STEPS {
+            0
+        } else {
+            step
+        }
     }
 
     pub(crate) fn startup_issues(&self) -> usize {
@@ -647,10 +656,12 @@ impl App {
         {
             self.dirty = true;
         }
-        // The welcome duck animates on startup while the transcript is empty.
-        if self.transcript.is_empty()
+        // Include the last tick so the resting pose replaces the final ripple.
+        if self.frame <= DUCK_ANIM_STEPS * DUCK_ANIM_EVERY
             && !self.info.ui.reduced_motion
             && self.frame.is_multiple_of(DUCK_ANIM_EVERY)
+            && crate::ui::welcome_duck_fits(self.transcript_area.get())
+            && self.first_transcript_row() < usize::from(crate::ui::WELCOME_DUCK_ROWS)
         {
             self.dirty = true;
         }
@@ -712,6 +723,20 @@ impl App {
             )));
         self.highlight_code(true);
         self.dirty = true;
+    }
+
+    fn first_transcript_row(&self) -> usize {
+        let (total, height) = self.view.get();
+        total
+            .saturating_sub(height)
+            .saturating_sub(self.scroll.get())
+    }
+
+    fn clear_transcript(&mut self) {
+        self.transcript.clear();
+        self.scroll.set(0);
+        self.view.set((0, 0));
+        self.selection = None;
     }
 
     fn note(&mut self, text: String) {

@@ -33,11 +33,8 @@ pub(super) fn assistant_lead(app: &App, is_head: bool) -> Vec<Span<'static>> {
 
 /// The transcript's rows, and for each the columns its lead (glyph and indent) takes,
 /// which copying a selection leaves out.
-pub(crate) fn transcript_rows_with_gutters(
-    app: &App,
-    width: usize,
-) -> (Vec<Line<'static>>, Vec<usize>) {
-    let pieces = transcript_pieces(app, width);
+pub(crate) fn transcript_rows_with_gutters(app: &App) -> (Vec<Line<'static>>, Vec<usize>) {
+    let pieces = transcript_pieces(app, app.transcript_area.get());
     let mut rows = Vec::new();
     let mut gutters = Vec::new();
     for piece in pieces {
@@ -273,7 +270,20 @@ pub(super) fn lead_rows(
 /// The transcript's entries rendered at `width`, served from `App`'s layout cache: only
 /// entries whose fingerprint changed are laid out again, so a streaming delta re-renders
 /// one message, not the whole transcript. Running tools render fresh every frame.
-pub(super) fn transcript_pieces(app: &App, width: usize) -> Vec<Piece> {
+fn transcript_pieces(app: &App, area: Rect) -> Vec<Piece> {
+    let width = usize::from(area.width.saturating_sub(1));
+    let len = app.transcript.len();
+    let mut pieces = Vec::with_capacity(len + 1);
+    // The welcome goes through the same viewport and selection as the conversation,
+    // but it isn't a session entry and its animation should not invalidate cached rows.
+    pieces.push(Piece {
+        rows: Arc::new(welcome(app, area, app.drawn_welcome_step.get())),
+        gutter: 0,
+        blank: false,
+    });
+    if len == 0 {
+        return pieces;
+    }
     let agents = agents_fingerprint(app);
     let highlights = app.highlights.version();
     let show_reasoning = match app.show_reasoning {
@@ -281,8 +291,6 @@ pub(super) fn transcript_pieces(app: &App, width: usize) -> Vec<Piece> {
         ShowReasoning::Collapsed => 1,
         ShowReasoning::Expanded => 2,
     };
-    let len = app.transcript.len();
-    let mut pieces = Vec::with_capacity(len);
     {
         let mut cache = app.transcript_cache.borrow_mut();
         if cache.width != width {
@@ -532,14 +540,14 @@ pub(super) fn agent_rows(
 
 pub(super) fn draw_transcript(f: &mut Frame<'_>, app: &App, area: Rect) {
     app.transcript_area.set(area);
-    if app.transcript.is_empty() {
-        f.render_widget(Paragraph::new(welcome(app, area)), area);
-        return;
-    }
-    // The last column is kept for the scrollbar. Rows come from the per-entry layout
-    // cache, and only the visible slice is cloned into the paragraph.
-    let width = usize::from(area.width.saturating_sub(1));
-    let pieces = transcript_pieces(app, width);
+    app.drawn_welcome_step.set(app.welcome_duck_step());
+    // The last column is kept for the scrollbar; only the visible rows are cloned.
+    let text = Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+    let width = usize::from(text.width);
+    let pieces = transcript_pieces(app, area);
     let height = usize::from(area.height);
     let total: usize = pieces
         .iter()
@@ -585,12 +593,8 @@ pub(super) fn draw_transcript(f: &mut Frame<'_>, app: &App, area: Rect) {
             r += 1;
         }
     }
-    f.render_widget(Paragraph::new(lines), area);
+    f.render_widget(Paragraph::new(lines), text);
     if let Some(sel) = app.selection.filter(|s| s.pane == Pane::Transcript) {
-        let text = Rect {
-            width: area.width.saturating_sub(1),
-            ..area
-        };
         crate::select::paint(f.buffer_mut(), text, start, &sel, |r| {
             widths.get(r).copied().unwrap_or(0)
         });
@@ -612,22 +616,36 @@ pub(super) fn draw_transcript(f: &mut Frame<'_>, app: &App, area: Rect) {
             &mut state,
         );
     }
-    if scroll > 0 {
-        // What is below, and the way back to it, on the bottom row.
-        let arrow = if app.info.ui.ascii { "v" } else { "↓" };
-        let hint = format!(" {arrow} {scroll} more lines · ctrl-end jumps to the latest ");
-        let w = u16::try_from(hint.width())
-            .unwrap_or(u16::MAX)
-            .min(area.width);
-        let at = Rect {
-            x: area.right().saturating_sub(w + 1),
-            y: area.bottom() - 1,
-            width: w,
-            height: 1,
-        };
-        f.render_widget(
-            Paragraph::new(Span::styled(hint, app.theme.pill(app.theme.accent))),
-            at,
-        );
+    if scroll == 0 || area.height == 0 {
+        return;
     }
+    let (arrow, sep) = if app.info.ui.ascii {
+        ("v", " - ")
+    } else {
+        ("↓", " · ")
+    };
+    let lines = if scroll == 1 { "line" } else { "lines" };
+    let full = format!(" {arrow} {scroll} more {lines}{sep}Ctrl-End jumps to the latest ");
+    let compact;
+    // Leave some transcript visible on the bottom row instead of filling it with the hint.
+    let hint: &str = if full.width() <= width * 2 / 3 {
+        &full
+    } else {
+        compact = format!(" {arrow} {scroll} {lines}{sep}Ctrl-End ");
+        if compact.width() <= width {
+            &compact
+        } else {
+            " Ctrl-End "
+        }
+    };
+    let w = hint.width();
+    if w > width {
+        return;
+    }
+    let w = w as u16;
+    let at = Rect::new(area.right() - 1 - w, area.bottom() - 1, w, 1);
+    f.render_widget(
+        Paragraph::new(Span::styled(hint, app.theme.pill(app.theme.accent))),
+        at,
+    );
 }

@@ -551,8 +551,7 @@ impl App {
             Event::SessionResumed { session, items } => {
                 self.sidebar_scroll.set(0);
                 if std::mem::take(&mut self.resuming) {
-                    self.transcript.clear();
-                    self.selection = None;
+                    self.clear_transcript();
                     self.agents.clear();
                     self.plan.clear();
                     self.plan_expanded = false;

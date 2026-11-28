@@ -288,7 +288,7 @@ impl App {
                 if self.turn_running {
                     return self.note("wait for the current turn to finish first".into());
                 }
-                self.transcript.clear();
+                self.clear_transcript();
                 self.sidebar_scroll.set(0);
                 self.agents.clear();
                 self.plan.clear();
