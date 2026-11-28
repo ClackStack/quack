@@ -19,7 +19,7 @@
 pub mod appinfo;
 pub mod coalesce;
 pub mod highlight;
-#[cfg(feature = "desktop")]
+#[cfg(feature = "desktop-dev")]
 pub mod path_env;
 pub mod recent;
 pub mod registry;

@@ -54,7 +54,9 @@ auth-chatgpt = ["proto-openai-responses", "quack-providers/auth-chatgpt"]
 lang-common = ["quack-context/lang-common", "quack-tools/lang-common"]
 tokenizers-hf = ["quack-providers/tokenizers"]
 keyring = ["quack-config/keyring"]
-desktop = [
+# Tauri shell without `tauri/custom-protocol`, so `tauri dev` (`task gui-dev`) serves the UI
+# from Vite (`devUrl` on localhost:5173) with HMR.
+desktop-dev = [
     "proto-openai-chat",
     "proto-openai-responses",
     "proto-anthropic",
@@ -72,11 +74,14 @@ desktop = [
     "dep:tauri-plugin-window-state",
     "dep:nix",
 ]
+# Standalone desktop binary: embeds `ui/build` via `tauri/custom-protocol` so `cargo build`,
+# `task run-gui`, and `install.sh --from-source` run without a Vite dev server.
+desktop = ["desktop-dev", "tauri/custom-protocol"]
 
 [[bin]]
 name = "quack-gui"
 path = "src/main.rs"
-required-features = ["desktop"]
+required-features = ["desktop-dev"]
 
 [lints]
 workspace = true

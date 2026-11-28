@@ -80,6 +80,18 @@
 		padding: 12px 14px;
 		display: grid;
 		gap: var(--sp-md);
+		animation: plate-rise 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+	}
+
+	@keyframes plate-rise {
+		from {
+			opacity: 0;
+			transform: translateY(10px) scale(0.992);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0) scale(1);
+		}
 	}
 
 	.q {
@@ -114,6 +126,9 @@
 		border-radius: var(--r-md);
 		background: var(--bg-panel);
 		cursor: pointer;
+		transition:
+			border-color 120ms ease-out,
+			background-color 120ms ease-out;
 	}
 
 	.option:hover {

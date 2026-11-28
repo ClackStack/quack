@@ -61,6 +61,8 @@
 		border-radius: var(--r-lg);
 		background: var(--bg-panel);
 		overflow: hidden;
+		animation: card-in 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+		transition: border-color 180ms ease-out;
 	}
 
 	.card.running {
@@ -87,16 +89,28 @@
 	}
 
 	.marker {
+		position: relative;
 		width: 8px;
 		height: 8px;
 		border-radius: 999px;
 		background: var(--rule);
 		flex: none;
+		transition: background-color 180ms ease-out;
 	}
 
 	.marker.running {
 		background: var(--duck);
 		animation: pulse 1.1s ease-out infinite alternate;
+	}
+
+	.marker.running::after {
+		content: '';
+		position: absolute;
+		inset: -1px;
+		border-radius: 999px;
+		border: 1.5px solid var(--duck);
+		pointer-events: none;
+		animation: tool-ripple 1.4s cubic-bezier(0.22, 1, 0.36, 1) infinite;
 	}
 
 	.marker.ok {
@@ -107,13 +121,45 @@
 		background: var(--fail);
 	}
 
+	@keyframes card-in {
+		from {
+			opacity: 0;
+			transform: translateY(4px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
 	@keyframes pulse {
 		from {
 			opacity: 1;
 		}
 		to {
-			opacity: 0.35;
+			opacity: 0.45;
 		}
+	}
+
+	@keyframes tool-ripple {
+		from {
+			transform: scale(1);
+			opacity: 0.65;
+		}
+		to {
+			transform: scale(2.35);
+			opacity: 0;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.marker.running::after {
+			display: none;
+		}
+	}
+
+	:global(:root[data-reduced-motion='true']) .marker.running::after {
+		display: none;
 	}
 
 	.summary {
@@ -147,6 +193,7 @@
 
 	.body {
 		border-top: 1px solid var(--rule-soft);
+		animation: card-in 140ms cubic-bezier(0.22, 1, 0.36, 1) both;
 	}
 
 	.diff,

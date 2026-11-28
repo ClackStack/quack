@@ -1316,6 +1316,18 @@
 		z-index: 40;
 		display: grid;
 		gap: 3px;
+		animation: popup-rise 140ms cubic-bezier(0.22, 1, 0.36, 1) both;
+	}
+
+	@keyframes popup-rise {
+		from {
+			opacity: 0;
+			transform: translateY(6px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
 	}
 
 	.popup-head {

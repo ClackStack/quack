@@ -1,6 +1,7 @@
 <script lang="ts">
 	import iconUrl from '#lib/assets/icon.png';
 	import JobsOverview from '#lib/components/JobsOverview.svelte';
+	import PlanRiver from '#lib/components/PlanRiver.svelte';
 	import {
 		compactCount as fmtTokens,
 		describeJob,
@@ -382,17 +383,13 @@
 				<span class={['count', { complete: plan.complete }]}>{plan.done}/{plan.total}</span>
 				<span class={['pct', { complete: plan.complete }]}>{plan.percent}%</span>
 			</h2>
-			<div
-				class="plan-track"
-				role="progressbar"
-				aria-label="Plan progress"
-				aria-valuenow={plan.done}
-				aria-valuemin={0}
-				aria-valuemax={plan.total}
-				aria-valuetext={`${plan.done} of ${plan.total} steps complete (${plan.percent}%)`}
-			>
-				<div class="plan-fill" style:--fill={plan.fraction}></div>
-			</div>
+			<PlanRiver
+				done={plan.done}
+				total={plan.total}
+				percent={plan.percent}
+				active={plan.steps.some((step) => step.state === '~')}
+				complete={plan.complete}
+			/>
 			<ol class="plan">
 				{#each plan.steps as item, i (`${i}:${item.text}`)}
 					<li class={{ done: item.state === 'x', doing: item.state === '~' }}>
@@ -1324,12 +1321,14 @@
 		.tab-dot.working,
 		.p-stat-dot.working,
 		.status-dot.busy,
-		.dot {
+		.dot,
+		.plan li.doing .mark {
 			animation: none;
 		}
 		.rail-tab,
 		.g-fill,
-		.plan-fill {
+		.plan li,
+		.plan .mark {
 			transition: none;
 		}
 	}
@@ -1816,23 +1815,6 @@
 	}
 
 	/* plan */
-	.plan-track {
-		position: relative;
-		height: 6px;
-		border: 1px solid rgba(219, 228, 233, 0.32);
-		border-radius: 999px;
-		background: rgba(8, 16, 24, 0.3);
-		overflow: hidden;
-	}
-
-	.plan-fill {
-		height: 100%;
-		width: calc(100% * var(--fill));
-		border-radius: 999px;
-		background: var(--cloth-ok);
-		transition: width 300ms ease-out;
-	}
-
 	.plan {
 		list-style: none;
 		margin: 2px 0 0;
@@ -1850,6 +1832,7 @@
 		font-size: 0.78125rem;
 		line-height: 1.35;
 		color: var(--cloth-mut);
+		transition: color 200ms ease-out;
 	}
 
 	.plan .mark {
@@ -1857,6 +1840,10 @@
 		height: 16px;
 		margin-top: 1px;
 		color: var(--cloth-dim);
+		transition:
+			background-color 220ms ease-out,
+			border-color 220ms ease-out,
+			color 220ms ease-out;
 	}
 
 	.p-text {
@@ -1874,6 +1861,7 @@
 		color: var(--duck);
 		border-color: var(--duck);
 		background: rgba(232, 178, 26, 0.14);
+		animation: pulse 1.35s ease-in-out infinite alternate;
 	}
 
 	.plan li.done {

@@ -105,9 +105,9 @@ tasks:
       - |
         export QUACK_DEFAULTS_DIR="${QUACK_DEFAULTS_DIR:-{{.DEFAULTS_DIR}}}"
         if [ "{{.PM}}" = "pnpm" ]; then
-          node "{{.TAURI_CLI}}" dev --features desktop {{if .CLI_ARGS}}-- -- {{.CLI_ARGS}}{{end}}
+          node "{{.TAURI_CLI}}" dev --features desktop-dev {{if .CLI_ARGS}}-- -- {{.CLI_ARGS}}{{end}}
         else
-          node "{{.TAURI_CLI}}" dev --features desktop --config '{"build":{"beforeDevCommand":"npm run dev"}}' {{if .CLI_ARGS}}-- -- {{.CLI_ARGS}}{{end}}
+          node "{{.TAURI_CLI}}" dev --features desktop-dev --config '{"build":{"beforeDevCommand":"npm run dev"}}' {{if .CLI_ARGS}}-- -- {{.CLI_ARGS}}{{end}}
         fi
 
   clippy:

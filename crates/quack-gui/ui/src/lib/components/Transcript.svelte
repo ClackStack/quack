@@ -1,7 +1,9 @@
 <script lang="ts">
+	import { transcriptActivity } from '#lib/duck';
 	import type { Session } from '#lib/session.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import ToolCard from './ToolCard.svelte';
+	import WelcomeDuck from './WelcomeDuck.svelte';
 
 	let { session }: { session: Session } = $props();
 
@@ -62,9 +64,22 @@
 		session.clearRewind();
 	}
 
+	const reducedMotion = $derived(Boolean(session.info?.ui.reduced_motion));
+	const working = $derived(session.streaming || session.turnPending);
+	const activity = $derived(transcriptActivity(session.items));
+
 	function onScroll() {
 		if (!scroller) return;
 		pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
+	}
+
+	function jumpToLatest() {
+		if (!scroller) return;
+		pinned = true;
+		scroller.scrollTo({
+			top: scroller.scrollHeight,
+			behavior: reducedMotion ? 'auto' : 'smooth'
+		});
 	}
 
 	$effect(() => {
@@ -83,22 +98,11 @@
 <div class="transcript" bind:this={scroller} onscroll={onScroll}>
 	{#if session.starting}
 		<div class="starting">
-			<pre aria-hidden="true">   __
-&lt;(o )___
- ( ._&gt; /
-  `---'
-~~~~~~~~~~</pre>
-			<p>starting the engine…</p>
+			<WelcomeDuck {reducedMotion} caption="starting the engine…" />
 		</div>
 	{:else if session.items.length === 0}
 		<div class="empty">
-			<pre aria-hidden="true">   __
-&lt;(o )___
- ( ._&gt; /
-  `---'
-~~~~~~~~~~
-
-ask quack to do something in this folder</pre>
+			<WelcomeDuck {reducedMotion} caption="ask quack to do something in this folder" />
 		</div>
 	{:else}
 		{#each session.items as item (item.id)}
@@ -254,11 +258,24 @@ ask quack to do something in this folder</pre>
 				</div>
 			{/if}
 		{/each}
-		{#if session.streaming && !session.approval}
-			<div class="status">
-				streaming<span class="cursor" aria-hidden="true"></span>
+		{#if working && !session.approval}
+			<div class="status" role="status" aria-live="polite">
+				<span class="activity-wave" aria-hidden="true">
+					<span></span>
+					<span></span>
+					<span></span>
+				</span>
+				<span class="activity-label">{activity}</span>
 				{#if session.speed}<span class="measure"> · first token {session.speed.ttftMs} ms{session.speed.tokensPerSec ? ` · ${session.speed.tokensPerSec.toFixed(0)} tok/s` : ''}</span>{/if}
 				<button class="btn stop" onclick={() => session.interrupt()}>Interrupt</button>
+			</div>
+		{/if}
+		{#if !pinned}
+			<div class="jump-wrap">
+				<button type="button" class="jump-latest" onclick={jumpToLatest}>
+					<span aria-hidden="true">↓</span>
+					<span>{working ? 'Jump to live output' : 'Jump to latest'}</span>
+				</button>
 			</div>
 		{/if}
 	{/if}
@@ -283,20 +300,6 @@ ask quack to do something in this folder</pre>
 		text-align: center;
 	}
 
-	.starting pre,
-	.empty pre {
-		display: inline-block;
-		text-align: left;
-		color: var(--sky-ink);
-		line-height: 1.25;
-		margin: 0;
-	}
-
-	.starting p {
-		margin: var(--sp-xs) 0 0;
-		color: var(--ink-3);
-	}
-
 	/* Your notes: the vermilion edge of a field entry. */
 	.user-row {
 		background: var(--user-row);
@@ -305,6 +308,7 @@ ask quack to do something in this folder</pre>
 		border-radius: var(--r-lg);
 		padding: 10px 14px;
 		max-width: 76ch;
+		animation: entry-in 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
 	}
 
 	.cap {
@@ -427,6 +431,7 @@ ask quack to do something in this folder</pre>
 	/* quack's notes: the blue-ink entries, serif like the guide's prose. */
 	.assistant {
 		max-width: 76ch;
+		animation: entry-in 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
 	}
 
 	.who {
@@ -515,6 +520,7 @@ ask quack to do something in this folder</pre>
 		border-radius: var(--r-md);
 		border: 1px solid var(--rule);
 		color: var(--ink-2);
+		animation: entry-in 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
 	}
 
 	.system.warning {
@@ -535,26 +541,40 @@ ask quack to do something in this folder</pre>
 		gap: 8px;
 		color: var(--ink-3);
 		font-size: 0.78125rem;
+		animation: entry-in 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+	}
+
+	.activity-wave {
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		height: 12px;
+	}
+
+	.activity-wave span {
+		width: 5px;
+		height: 5px;
+		border-radius: 50%;
+		background: var(--duck);
+		animation: ripple-dot 1.1s ease-in-out infinite;
+	}
+
+	.activity-wave span:nth-child(2) {
+		animation-delay: 140ms;
+	}
+
+	.activity-wave span:nth-child(3) {
+		animation-delay: 280ms;
+	}
+
+	.activity-label {
+		color: var(--ink-2);
+		font-weight: 500;
 	}
 
 	.measure {
 		font-family: var(--font-mono);
 		font-size: 0.71875rem;
-	}
-
-	.cursor {
-		display: inline-block;
-		width: 8px;
-		height: 1em;
-		vertical-align: text-bottom;
-		background: var(--duck);
-		animation: blink 900ms steps(1) infinite;
-	}
-
-	@keyframes blink {
-		50% {
-			opacity: 0;
-		}
 	}
 
 	.stop {
@@ -565,5 +585,88 @@ ask quack to do something in this folder</pre>
 
 	.stop:hover:not(:disabled) {
 		background: var(--fail-soft);
+	}
+
+	.jump-wrap {
+		position: sticky;
+		bottom: 0;
+		height: 0;
+		overflow: visible;
+		display: flex;
+		justify-content: flex-end;
+		align-items: flex-end;
+		pointer-events: none;
+		z-index: 5;
+	}
+
+	.jump-latest {
+		pointer-events: auto;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 5px 12px;
+		border-radius: 999px;
+		border: 1px solid var(--sky);
+		background: var(--bg-raised);
+		color: var(--sky-ink);
+		font-size: 0.75rem;
+		font-weight: 600;
+		box-shadow: var(--shadow-card);
+		animation: entry-in 150ms cubic-bezier(0.22, 1, 0.36, 1) both;
+		transition:
+			background-color 120ms ease-out,
+			border-color 120ms ease-out,
+			transform 120ms ease-out;
+	}
+
+	.jump-latest:hover {
+		background: var(--sky-soft);
+		border-color: var(--sky-ink);
+		transform: translateY(-1px);
+	}
+
+	@keyframes entry-in {
+		from {
+			opacity: 0;
+			transform: translateY(4px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	@keyframes ripple-dot {
+		0%,
+		80%,
+		100% {
+			opacity: 0.32;
+			transform: translateY(0) scale(0.85);
+		}
+		40% {
+			opacity: 1;
+			transform: translateY(-2.5px) scale(1);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.activity-wave span {
+			animation: none;
+			opacity: 0.9;
+		}
+		.activity-wave span:nth-child(2),
+		.activity-wave span:nth-child(3) {
+			opacity: 0.45;
+		}
+	}
+
+	:global(:root[data-reduced-motion='true']) .activity-wave span {
+		animation: none;
+		opacity: 0.9;
+	}
+
+	:global(:root[data-reduced-motion='true']) .activity-wave span:nth-child(2),
+	:global(:root[data-reduced-motion='true']) .activity-wave span:nth-child(3) {
+		opacity: 0.45;
 	}
 </style>

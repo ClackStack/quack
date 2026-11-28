@@ -209,16 +209,21 @@
 
 	.tail {
 		display: inline-block;
-		width: 9px;
+		width: 8px;
 		height: 1em;
 		vertical-align: text-bottom;
+		border-radius: 2px;
 		background: var(--duck);
-		animation: blink 900ms steps(1) infinite;
+		animation: cursor-breathe 1.05s ease-in-out infinite;
 	}
 
-	@keyframes blink {
+	@keyframes cursor-breathe {
+		0%,
+		100% {
+			opacity: 1;
+		}
 		50% {
-			opacity: 0;
+			opacity: 0.22;
 		}
 	}
 </style>

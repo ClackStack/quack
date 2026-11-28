@@ -297,6 +297,18 @@
 		padding: 18px 20px 14px;
 		position: relative;
 		box-shadow: var(--shadow-pop);
+		animation: plate-rise 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+	}
+
+	@keyframes plate-rise {
+		from {
+			opacity: 0;
+			transform: translateY(10px) scale(0.992);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0) scale(1);
+		}
 	}
 
 	/* The plate's inner ring, the way a guide book frames its figures. */
@@ -492,6 +504,17 @@
 		width: 14px;
 		height: 14px;
 		flex: none;
+		animation: wait-pulse 1.8s ease-in-out infinite;
+	}
+
+	@keyframes wait-pulse {
+		0%,
+		100% {
+			opacity: 1;
+		}
+		50% {
+			opacity: 0.45;
+		}
 	}
 
 	.risk {

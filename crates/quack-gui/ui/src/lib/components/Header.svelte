@@ -84,6 +84,7 @@
 			session.turnPending
 	);
 
+	const live = $derived(session.streaming || session.turnPending);
 	const fill = $derived.by(() => {
 		const c = session.context;
 		if (!c) return 0;
@@ -224,7 +225,7 @@
 
 <!-- The signature move: the website's water line, carrying data. It fills toward the
      session's budget; when pruning or compaction is near it turns duck yellow. -->
-<div class="waterline" aria-hidden="true">
+<div class={['waterline', { live }]} aria-hidden="true">
 	<div class="water" class:nearing style:--fill={fill}></div>
 </div>
 
@@ -432,8 +433,24 @@
 	}
 
 	.waterline {
+		position: relative;
 		height: 3px;
 		background: var(--rule-soft);
+		overflow: hidden;
+	}
+
+	.waterline.live::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		width: 28%;
+		background: linear-gradient(
+			90deg,
+			transparent 0%,
+			color-mix(in srgb, var(--duck) 78%, transparent) 50%,
+			transparent 100%
+		);
+		animation: water-current 1.8s ease-in-out infinite;
 	}
 
 	.water {
@@ -447,5 +464,26 @@
 
 	.water.nearing {
 		background: var(--duck);
+	}
+
+	@keyframes water-current {
+		from {
+			transform: translateX(-110%);
+		}
+		to {
+			transform: translateX(420%);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.waterline.live::after {
+			animation: none;
+			opacity: 0;
+		}
+	}
+
+	:global(:root[data-reduced-motion='true']) .waterline.live::after {
+		animation: none;
+		opacity: 0;
 	}
 </style>

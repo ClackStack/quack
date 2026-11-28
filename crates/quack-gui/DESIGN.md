@@ -299,7 +299,7 @@ Edges do the framing. The header base and composer head carry a 3px `double` rul
 - **Do** draw the pond surface with the two-ripple repeating-gradient pattern (1px ripples, 4px pitch) whenever pond water appears.
 - **Do** tint diff washes with `color-mix` over transparent (≈10%) rather than solid pastels, so paper texture and themes survive.
 - **Do** answer every focusable control with the 2px `--focus` outline at 1px offset.
-- **Do** honor `prefers-reduced-motion` — the global override collapses animation to 0.01ms.
+- **Do** honor `prefers-reduced-motion` and quack's `ui.reduced_motion` setting (`data-reduced-motion="true"`) — both collapse animation and transitions to 0.01ms and hold the welcome duck at rest.
 
 ### Don't:
 - **Don't** load fonts, images, or any asset from an external host; the webview is CSP `'self'` and the UI bundles everything (fonts under `ui/static/fonts/`, logo under `src/lib/assets/`).

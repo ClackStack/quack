@@ -17,7 +17,7 @@ cargo build -p quack-cli --locked --no-default-features --features proto-openai-
 cargo run -q -p quack-cli -- config schema --dir defaults/schemas   # after changing any config struct
 ```
 
-Desktop GUI (`quack-gui`) commands (Tauri is gated behind `--features desktop` and embeds `crates/quack-gui/ui/build`; Linux requires `libwebkit2gtk-4.1-dev` and `libgtk-3-dev`):
+Desktop GUI (`quack-gui`) commands (Tauri is gated behind `--features desktop`, which enables `tauri/custom-protocol` and embeds `crates/quack-gui/ui/build`; `task gui-dev` uses `--features desktop-dev` for Vite HMR; Linux requires `libwebkit2gtk-4.1-dev` and `libgtk-3-dev`):
 
 ```sh
 (cd crates/quack-gui/ui && pnpm install --frozen-lockfile && pnpm run build)

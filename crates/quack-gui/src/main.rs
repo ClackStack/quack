@@ -287,3 +287,14 @@ fn main() {
             }
         });
 }
+
+#[cfg(all(test, feature = "desktop"))]
+mod tests {
+    #[test]
+    fn desktop_feature_embeds_frontend_instead_of_dev_url() {
+        assert!(
+            !tauri::is_dev(),
+            "desktop builds must enable tauri/custom-protocol so standalone binaries serve ui/build instead of connecting to localhost:5173"
+        );
+    }
+}

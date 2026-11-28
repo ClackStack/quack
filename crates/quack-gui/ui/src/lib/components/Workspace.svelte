@@ -136,6 +136,19 @@
 		}
 	});
 
+	$effect(() => {
+		if (typeof document === 'undefined' || !document.documentElement) return;
+		const reduced = Boolean(session.info?.ui.reduced_motion);
+		if (reduced) {
+			document.documentElement.dataset.reducedMotion = 'true';
+		} else {
+			delete document.documentElement.dataset.reducedMotion;
+		}
+		return () => {
+			delete document.documentElement.dataset.reducedMotion;
+		};
+	});
+
 	function onWindowKeydown(event: KeyboardEvent) {
 		if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
 			if (session.trust) return;
@@ -481,6 +494,7 @@
 		padding: 10px 16px;
 		border-top: 1px solid var(--duck-line);
 		background: var(--duck-soft);
+		animation: bar-rise 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
 	}
 
 	.awaiting .plan-bar {
@@ -517,6 +531,18 @@
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
+		animation: bar-rise 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+	}
+
+	@keyframes bar-rise {
+		from {
+			opacity: 0;
+			transform: translateY(8px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
 	}
 
 	.step-head {

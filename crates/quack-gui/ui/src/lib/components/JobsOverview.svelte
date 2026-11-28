@@ -7,6 +7,7 @@
 		type JobSummary
 	} from '#lib/jobs';
 	import type { Session } from '#lib/session.svelte';
+	import PlanRiver from '#lib/components/PlanRiver.svelte';
 
 	type Filter = 'all' | JobCategory;
 
@@ -211,17 +212,14 @@
 										{summary.planDone}/{summary.planTotal} · {summary.planPct}%
 									</span>
 								</div>
-								<div
-									class="j-plan-track"
-									role="progressbar"
-									aria-label="Plan progress"
-									aria-valuenow={summary.planDone}
-									aria-valuemin={0}
-									aria-valuemax={summary.planTotal}
-									aria-valuetext={`${summary.planDone} of ${summary.planTotal} steps complete (${summary.planPct}%)`}
-								>
-									<div class="j-plan-fill" style:width={`${summary.planPct}%`}></div>
-								</div>
+								<PlanRiver
+									compact
+									done={summary.planDone}
+									total={summary.planTotal}
+									percent={summary.planPct}
+									active={summary.planCurrent !== null && summary.category === 'working'}
+									complete={planComplete}
+								/>
 								{#if summary.planCurrent && summary.detail !== `Step: ${summary.planCurrent}`}
 									<p class="j-plan-step" title={summary.planCurrent}>
 										<span class="j-plan-now" aria-hidden="true">▸</span>
@@ -701,20 +699,6 @@
 		color: var(--cloth-ok);
 	}
 
-	.j-plan-track {
-		height: 4px;
-		border-radius: 999px;
-		background: rgba(219, 228, 233, 0.16);
-		overflow: hidden;
-	}
-
-	.j-plan-fill {
-		height: 100%;
-		border-radius: 999px;
-		background: var(--cloth-ok);
-		transition: width 300ms ease-out;
-	}
-
 	.j-plan-step {
 		margin: 0;
 		display: flex;
@@ -844,8 +828,7 @@
 		.pill,
 		.j-card,
 		.x,
-		.act,
-		.j-plan-fill {
+		.act {
 			transition: none;
 		}
 	}

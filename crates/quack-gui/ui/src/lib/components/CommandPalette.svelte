@@ -299,6 +299,7 @@
 		justify-content: center;
 		align-items: flex-start;
 		padding: min(12vh, 88px) var(--sp-md) var(--sp-md);
+		animation: scrim-in 140ms ease-out both;
 	}
 
 	.palette {
@@ -312,6 +313,27 @@
 		box-shadow: var(--shadow-pop);
 		overflow: hidden;
 		outline: none;
+		animation: palette-in 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+	}
+
+	@keyframes scrim-in {
+		from {
+			opacity: 0;
+		}
+		to {
+			opacity: 1;
+		}
+	}
+
+	@keyframes palette-in {
+		from {
+			opacity: 0;
+			transform: translateY(-6px) scale(0.985);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0) scale(1);
+		}
 	}
 
 	.palette-head {

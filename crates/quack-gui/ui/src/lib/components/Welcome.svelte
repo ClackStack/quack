@@ -172,6 +172,9 @@
 		border: 1.5px solid rgba(255, 255, 255, 0.3);
 		pointer-events: none;
 		transform: translate(-50%, -50%);
+		transition:
+			transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
+			opacity 320ms ease-out;
 	}
 
 	.ripple-1 {
@@ -179,6 +182,7 @@
 		top: 62%;
 		width: 120px;
 		height: 48px;
+		animation: ripple-loop 3.8s ease-in-out infinite;
 	}
 
 	.ripple-2 {
@@ -187,6 +191,7 @@
 		width: 190px;
 		height: 76px;
 		border-color: rgba(255, 255, 255, 0.18);
+		animation: ripple-loop-outer 3.8s ease-in-out 240ms infinite;
 	}
 
 	:root[data-theme='dark'] .ripple-1 {
@@ -206,6 +211,80 @@
 		z-index: 1;
 		user-select: none;
 		filter: drop-shadow(0 2px 6px rgba(8, 106, 134, 0.35));
+		transform-origin: 32% 65%;
+		animation: welcome-paddle 3.8s ease-in-out infinite;
+		transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+	}
+
+	@keyframes welcome-paddle {
+		0%,
+		100% {
+			transform: translate3d(0, 0, 0) rotate(0deg);
+		}
+		14% {
+			transform: translate3d(0, -2.5px, 0) rotate(-0.8deg);
+		}
+		30% {
+			transform: translate3d(7px, -1px, 0) rotate(1.1deg);
+		}
+		40% {
+			transform: translate3d(8px, -3px, 0) rotate(-1.4deg);
+		}
+		52% {
+			transform: translate3d(5px, -0.5px, 0) rotate(0.7deg);
+		}
+		68% {
+			transform: translate3d(-1px, -1.5px, 0) rotate(-0.4deg);
+		}
+		80% {
+			transform: translate3d(0, 0, 0) rotate(0deg);
+		}
+	}
+
+	@keyframes ripple-loop {
+		0%,
+		100% {
+			transform: translate(-50%, -50%) scale(0.96);
+			opacity: 0.72;
+		}
+		38% {
+			transform: translate(-46%, -50%) scale(1.12);
+			opacity: 1;
+		}
+		76% {
+			transform: translate(-50%, -50%) scale(1);
+			opacity: 0.82;
+		}
+	}
+
+	@keyframes ripple-loop-outer {
+		0%,
+		100% {
+			transform: translate(-50%, -50%) scale(0.96);
+			opacity: 0.6;
+		}
+		44% {
+			transform: translate(-47%, -50%) scale(1.1);
+			opacity: 0.92;
+		}
+		80% {
+			transform: translate(-50%, -50%) scale(1);
+			opacity: 0.72;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.welcome-logo,
+		.ripple-1,
+		.ripple-2 {
+			animation: none;
+		}
+	}
+
+	:global(:root[data-reduced-motion='true']) .welcome-logo,
+	:global(:root[data-reduced-motion='true']) .ripple-1,
+	:global(:root[data-reduced-motion='true']) .ripple-2 {
+		animation: none;
 	}
 
 	:root[data-theme='dark'] .welcome-logo {
@@ -291,6 +370,7 @@
 		padding: 9px 14px;
 		text-align: left;
 		border-bottom: 1px solid var(--rule-soft);
+		transition: background-color 120ms ease-out;
 	}
 
 	li:last-child .recent {

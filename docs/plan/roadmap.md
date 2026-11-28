@@ -2,6 +2,11 @@
 
 Milestones are ordered by dependency and value. Each has **exit criteria** that must pass on **Linux, macOS and Windows** in CI before moving on. Dates are left out on purpose; scope is what's fixed.
 
+## Desktop polish & standalone build fix — 2026-11-28
+
+- Fixed `quack-gui` standalone builds (`--features desktop`, `task run-gui`, `install.sh --from-source`, `install.ps1 -FromSource`) to enable `tauri/custom-protocol` so compiled binaries embed `ui/build` instead of trying to reach Vite's `devUrl` (`localhost:5173`). Vite HMR dev mode (`task gui-dev`) uses `--features desktop-dev`.
+- Brought the TUI's duck and motion polish into `quack-gui`: duck-on-a-river plan progress (`PlanRiver`) in both the sidebar and Jobs overview cards (tracking completed steps without a timer and reaching the far bank at 100%), the 16-step looping welcome duck (`WelcomeDuck`) on starting/empty transcripts plus a gentle continuous pond paddle on the Welcome screen, TUI-matching live activity indicators (`thinking`, `writing`, `running <tool>`, `working`) with a floating jump-to-latest pill, smooth decision-plate rise paired with room dimming, tool-running pond ripples, live waterline shimmer, and full `[ui] reduced_motion` syncing alongside `prefers-reduced-motion`.
+
 ## TUI polish — 2026-11-28
 
 - Plan progress is shown as a duck on a blue river in the strip, expanded checklist, and roomy sidebar. The river grows with the pane, the duck moves right in proportion to completed steps without a timer, and the plan stays visible at 100% until cleared.
