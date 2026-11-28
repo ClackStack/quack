@@ -68,14 +68,20 @@ independently of the transcript.
 
 When the model creates a plan (`Event::Plan` / `todo`), a **Plan** section
 appears below Context with the completion count and percentage (`Plan · 1/3 (33%)`),
-a progress meter, and the steps (done, active, pending). Steps wrap onto up to
-two indented lines when the whole plan fits, or switch to one line per step and
-window around the active/next step (with `+N earlier` / `+N more`) when vertical
-space is tight. Completed plans remain visible at 100% until cleared or a new
-session starts. The plan can shrink to its heading and current step to leave
-room for the sections below it. When the plan fits in the sidebar, the one-line
-plan strip above the input steps aside (`/todo` still expands the full list
-there); on small terminals without a sidebar, the main-pane strip stays visible.
+a duck-and-river meter, and the steps (done, active, pending). Steps wrap onto
+up to two indented lines when the whole plan fits, or switch to one line per
+step and window around the active/next step (with `+N earlier` / `+N more`) when
+vertical space is tight. Completed plans remain visible at 100% until cleared
+or a new session starts. To leave room for sections below it, the plan can
+shrink to a heading with a plain meter and the current step. When the plan fits
+in the sidebar, the one-line plan strip above the input steps aside (`/todo`
+still expands the full list there); on small terminals without a sidebar, the
+main-pane strip stays visible.
+
+The strip and expanded checklist also use the river when there's room. On
+narrow terminals, the strip drops the river to keep the count and step readable.
+The duck's position follows the completed fraction, not a timer. The river
+works with ASCII and `NO_COLOR`, and behaves the same with reduced motion.
 
 The folder and branch move out of the header, context/speed move out of
 the status bar, and the one-line plan strip moves out of the main pane while the

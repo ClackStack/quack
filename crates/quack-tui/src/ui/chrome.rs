@@ -1,5 +1,7 @@
 //! Header, startup panel, input box, status bar, plan strip, and welcome screen.
 
+use crate::theme::PLAN_RIVER_WIDTH;
+
 use super::*;
 
 pub(super) fn draw_header(f: &mut Frame<'_>, app: &App, area: Rect, sidebar: bool) {
@@ -355,6 +357,8 @@ pub(super) fn plan_open(app: &App) -> bool {
 
 /// One row above the input: progress through the plan and the step in hand.
 pub(super) fn draw_plan(f: &mut Frame<'_>, app: &App, area: Rect) {
+    const MIN_STEP_ROOM: usize = 24;
+
     let t = &app.theme;
     let total = app.plan.len();
     let done = app
@@ -370,25 +374,22 @@ pub(super) fn draw_plan(f: &mut Frame<'_>, app: &App, area: Rect) {
         .map(|(s, text)| (*s, text.as_str()))
         .unwrap_or((PlanState::Pending, ""));
     let (mark, mark_style) = plan_mark(app, state);
-    let meter = crate::theme::meter(
-        done as f32 / total.max(1) as f32,
-        total.min(10),
-        app.info.ui.ascii,
-    );
-    let lead = vec![
-        Span::raw(" "),
-        Span::styled(" plan ", t.pill(t.ok)),
-        Span::raw(" "),
-        Span::styled(meter, t.ok),
-        Span::styled(format!(" {done}/{total}  "), t.dim),
-        Span::styled(format!("{mark} "), mark_style),
-    ];
-    let used: usize = lead.iter().map(|s| s.content.width()).sum();
-    let mut spans = lead;
-    spans.push(Span::raw(truncate(
-        step,
-        usize::from(area.width).saturating_sub(used + 1),
-    )));
+    let label = " plan ";
+    let count = format!(" {done}/{total}");
+    let mark = format!("  {mark} ");
+    let mut step_room = usize::from(area.width)
+        .saturating_sub(1 + label.width() + count.width() + mark.width() + 1);
+    let mut spans = vec![Span::raw(" "), Span::styled(label, t.pill(t.ok))];
+    if step_room >= 1 + PLAN_RIVER_WIDTH + MIN_STEP_ROOM {
+        spans.push(Span::raw(" "));
+        spans.extend(t.plan_river(&app.glyphs, done, total));
+        step_room -= 1 + PLAN_RIVER_WIDTH;
+    }
+    spans.push(Span::styled(count, t.dim));
+    if !step.is_empty() && step_room > 0 {
+        spans.push(Span::styled(mark, mark_style));
+        spans.push(Span::raw(truncate(step, step_room)));
+    }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 

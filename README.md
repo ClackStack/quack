@@ -212,7 +212,7 @@ configuration and migration from older modes.
 - **Sub-agents**: Delegate work to isolated sub-agents using the `task` tool:
   - `explore`: Read-only scout that searches the codebase and returns file paths and line ranges, keeping exploratory reads out of the primary context.
   - `general`: Executes focused, self-contained implementation tasks.
-- **Live checklist tracking**: Dynamic progress checklist displayed above the input box, expandable via `/todo`.
+- **Live checklist tracking**: See the current step and completed count above the input or in the sidebar. When there's room, a duck on a blue river marks progress. Expand the full checklist with `/todo`.
 
 ### Context & Sessions
 

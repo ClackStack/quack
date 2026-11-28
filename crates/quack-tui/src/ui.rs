@@ -1105,7 +1105,9 @@ mod tests {
         });
         let done = render(&app, 140, 24);
         assert!(
-            done.contains("Plan · 3/3 (100%)") && done.contains("✓ run the benchmarks"),
+            done.contains("Plan · 3/3 (100%)")
+                && done.contains("~~~~~_(•)>")
+                && done.contains("✓ run the benchmarks"),
             "{done}"
         );
 
@@ -1185,7 +1187,7 @@ mod tests {
         );
         insta::assert_snapshot!("sidebar_plan_windowed_140x24", windowed);
 
-        // ASCII mode and NO_COLOR use ASCII marks, separator and meter.
+        // ASCII mode and NO_COLOR use ASCII marks, separator and river.
         app.info.ui.ascii = true;
         app.glyphs = crate::theme::Glyphs::new(true);
         app.theme = crate::theme::Theme::resolve("dark", true);
@@ -1194,7 +1196,7 @@ mod tests {
             ascii.contains("Plan - 3/8 (37%)")
                 && ascii.contains("[~] step four active")
                 && ascii.contains("+3 earlier, +2 more")
-                && ascii.contains("############--------------------"),
+                && ascii.contains("~_(o)>...."),
             "{ascii}"
         );
 
@@ -1644,6 +1646,114 @@ mod tests {
         app.context = Some((70_000, 104_000));
         app.speed = Some(48.0);
         insta::assert_snapshot!(render(&app, 80, 24));
+    }
+
+    #[test]
+    fn plan_river_tracks_completed_steps_without_animating() {
+        let mut app = App::new(test_info());
+        started(&mut app);
+        app.transcript.push(Entry::User("fix the parser".into()));
+        app.on_engine(Event::Plan {
+            checklist: "[~] Inspect the parser\n[ ] Change the parser\n[ ] Run tests".into(),
+        });
+        let start = render(&app, 80, 24);
+        assert!(
+            start.contains("_(•)>····· 0/3  ▶ Inspect the parser"),
+            "{start}"
+        );
+
+        // Completing a later step moves the duck, even though the current step is unchanged.
+        app.on_engine(Event::Plan {
+            checklist: "[~] Inspect the parser\n[x] Change the parser\n[ ] Run tests".into(),
+        });
+        assert!(app.take_dirty(), "a checklist update must redraw");
+        let progress = render(&app, 80, 24);
+        assert!(
+            progress.contains("~_(•)>···· 1/3  ▶ Inspect the parser"),
+            "{progress}"
+        );
+
+        for _ in 0..120 {
+            app.on_tick();
+        }
+        assert!(
+            !app.take_dirty(),
+            "the river must not request redraws between updates"
+        );
+        assert_eq!(render(&app, 80, 24), progress);
+
+        app.on_engine(Event::Plan {
+            checklist: "[x] Inspect the parser\n[x] Change the parser\n[x] Run tests".into(),
+        });
+        assert!(!render(&app, 80, 24).contains("  plan  "));
+        app.execute("/todo");
+        let done = render(&app, 80, 24);
+        assert!(done.contains("~~~~~_(•)> 3/3"), "{done}");
+    }
+
+    #[test]
+    fn plan_river_yields_to_step_text_on_narrow_terminals() {
+        let mut app = App::new(test_info());
+        started(&mut app);
+        app.on_engine(Event::Plan {
+            checklist: "[ ] 修正 parser and run tests\n[x] Inspect tests".into(),
+        });
+        let narrow = render(&app, 42, 24);
+        assert!(
+            narrow.contains("plan  1/2  · 修正 parser and run tests"),
+            "{narrow}"
+        );
+        assert!(!narrow.contains(app.glyphs.assistant), "{narrow}");
+        let wide = render(&app, 80, 24);
+        assert!(
+            wide.contains("~~_(•)>··· 1/2  · 修正 parser and run tests"),
+            "{wide}"
+        );
+    }
+
+    #[test]
+    fn plan_river_respects_theme_ascii_and_reduced_motion() {
+        use crate::theme::{Glyphs, Theme};
+        use ratatui::style::Color;
+
+        let mut app = App::new(test_info());
+        app.on_engine(Event::Plan {
+            checklist: "[x] Inspect the parser\n[~] Change the parser\n[ ] Run tests".into(),
+        });
+        for (theme, ascii, no_color, reduced_motion, water, duck) in [
+            ("dark", false, false, false, Color::Cyan, Color::Yellow),
+            (
+                "light",
+                false,
+                false,
+                true,
+                Color::Blue,
+                Color::Rgb(160, 110, 0),
+            ),
+            ("dark", true, true, true, Color::Reset, Color::Reset),
+        ] {
+            app.info.ui.ascii = ascii;
+            app.info.ui.reduced_motion = reduced_motion;
+            app.glyphs = Glyphs::new(ascii);
+            app.theme = Theme::resolve(theme, no_color);
+            let mut terminal = Terminal::new(TestBackend::new(64, 1)).expect("terminal");
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    draw_plan(f, &app, area);
+                })
+                .expect("draw");
+            let buf = terminal.backend().buffer();
+            assert_eq!((buf[(8, 0)].symbol(), buf[(8, 0)].fg), ("~", water));
+            assert_eq!((buf[(9, 0)].symbol(), buf[(9, 0)].fg), ("_", duck));
+            let row = terminal.backend().to_string();
+            let expected = if ascii {
+                "~_(o)>.... 1/3  [~] Change the parser"
+            } else {
+                "~_(•)>···· 1/3  ▶ Change the parser"
+            };
+            assert!(row.contains(expected), "{row}");
+        }
     }
 
     #[test]

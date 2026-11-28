@@ -2,6 +2,10 @@
 
 Milestones are ordered by dependency and value. Each has **exit criteria** that must pass on **Linux, macOS and Windows** in CI before moving on. Dates are left out on purpose; scope is what's fixed.
 
+## TUI checklist polish — 2026-11-28
+
+- Plan progress is shown as a duck on a blue river in the strip, expanded checklist, and roomy sidebar. Its position follows completed steps, without a timer or replacing the exact count.
+
 ## Secret Shield warning context — 2026-11-28
 
 - Terminal, desktop, and ACP approvals show a readable source, scanned-text line, destination, and conditional impact for possible secrets. Matches stay masked; scan policy and approval behavior are unchanged.

@@ -382,10 +382,10 @@ fn draw_plan(
         .count();
     let percent = done * 100 / total.max(1);
     let count_style = if done == total { t.ok } else { t.dim };
-    let fraction = done as f32 / total.max(1) as f32;
 
     rows.push(Line::raw(""));
     if remaining == 3 {
+        let fraction = done as f32 / total.max(1) as f32;
         let compact = meter(fraction, total.min(8), ascii);
         rows.push(Line::from(vec![
             Span::styled("Plan", heading),
@@ -404,7 +404,8 @@ fn draw_plan(
         Span::styled(separator, t.dim),
         Span::styled(format!("{done}/{total} ({percent}%)"), count_style),
     ]));
-    rows.push(Line::styled(meter(fraction, width, ascii), t.ok));
+    let river = t.plan_river(&app.glyphs, done, total);
+    rows.push(Line::from(Vec::from(river)));
 
     let step_room = remaining - 3;
     let wrapped: Vec<Vec<String>> = app

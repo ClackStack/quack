@@ -2,6 +2,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Theme {
@@ -227,7 +228,28 @@ impl Theme {
             .map_or(self.warn, |c| Style::new().fg(Color::Rgb(c.0, c.1, c.2)));
         (body, beak)
     }
+
+    pub(crate) fn plan_river(
+        &self,
+        glyphs: &Glyphs,
+        done: usize,
+        total: usize,
+    ) -> [ratatui::text::Span<'static>; 3] {
+        use ratatui::text::Span;
+
+        let duck = glyphs.assistant;
+        let travel = PLAN_RIVER_WIDTH - duck.width();
+        // Round down so the duck doesn't reach the far bank before the plan is complete.
+        let wake = done * travel / total.max(1);
+        [
+            Span::styled("~".repeat(wake), self.accent),
+            Span::styled(duck, self.duck().0),
+            Span::styled(glyphs.pending.repeat(travel - wake), self.accent),
+        ]
+    }
 }
+
+pub(crate) const PLAN_RIVER_WIDTH: usize = 10;
 
 /// A small meter, e.g. `▰▰▰▱▱`, filled `frac` of `width` cells.
 pub(crate) fn meter(frac: f32, width: usize, ascii: bool) -> String {
